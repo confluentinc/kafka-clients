@@ -36,6 +36,8 @@ public sealed class PublicConsumerRebalanceListenerTests
 {
     private const string Topic = "rebalance-listener-topic";
 
+    private const string MutuallyExclusive = "Subscription to topics, partitions and pattern are mutually exclusive";
+
     private const string MockHandleUnsupported =
         "ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer directly.";
 
@@ -757,6 +759,52 @@ public sealed class PublicConsumerRebalanceListenerTests
             exception.Message);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task OnTheMocks_AListenerRefusedAfterAssign_IsTheOneTheNextRebalanceFires(bool asyncMock, bool asyncListener)
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        RecordingListener listener = new RecordingListener();
+        AsyncRecordingListener recordingAsync = new AsyncRecordingListener();
+        IllegalStateException refused;
+        IllegalArgumentException rebalanced;
+        if (asyncMock)
+        {
+            AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+            await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+            await TestTimeout.Run(() => consumer.Assign(new[] { tp0 }), s_deadline);
+            refused = await Assert.ThrowsAsync<IllegalStateException>(() => TestTimeout.Run(
+                () => asyncListener
+                    ? consumer.Subscribe(new[] { Topic }, recordingAsync)
+                    : consumer.Subscribe(new[] { Topic }, listener),
+                s_deadline));
+            rebalanced = await Assert.ThrowsAsync<IllegalArgumentException>(
+                () => TestTimeout.Run(() => consumer.Rebalance(new[] { tp1 }), s_deadline));
+        }
+        else
+        {
+            MockConsumer<byte[], byte[]> consumer = NewMock();
+            using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+            consumer.Assign(new[] { tp0 });
+            refused = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(new[] { Topic }, listener));
+            rebalanced = await Assert.ThrowsAsync<IllegalArgumentException>(() => TestTimeout.RunOffThisThread(
+                () =>
+                {
+                    consumer.Rebalance(new[] { tp1 });
+                    return Task.CompletedTask;
+                },
+                s_deadline));
+        }
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        Assert.Equal("Attempt to dynamically assign partitions while manual assignment in use", rebalanced.Message);
+        Assert.Equal(new[] { tp0 }, Assert.Single(asyncListener ? recordingAsync.Revoked : listener.Revoked));
+        Assert.Empty(asyncListener ? recordingAsync.Assigned : listener.Assigned);
+    }
+
     [Fact]
     public async Task AsyncMock_LosePartitions_ThrowsIfNotAssigned_WithTheJavaMessage()
     {
@@ -841,7 +889,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
-            () => consumer.Subscribe(null!, new RecordingListener()));
+            () => consumer.Subscribe((IReadOnlyCollection<string>)null!, new RecordingListener()));
 
         Assert.Equal("topics", exception.ParamName);
     }

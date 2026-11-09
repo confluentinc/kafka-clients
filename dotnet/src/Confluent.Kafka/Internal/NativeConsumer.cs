@@ -60,6 +60,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const string NullListenerMessage = "RebalanceListener cannot be null";
 
+    private const string NullSubscribePatternMessage = "Topic pattern to subscribe to cannot be null";
+
+    private const string NullMockPatternMessage = "Topic pattern cannot be null";
+
+    private const string EmptyMockPatternMessage = "Topic pattern cannot be empty";
+
+    private const string NullPatternTextMessage = "SubscriptionPattern.pattern must not be null.";
+
     private const string NullAssignPartitionsMessage = "Topic partitions collection to assign to cannot be null";
 
     private const string NullAssignTopicMessage = "Topic partitions to assign to cannot have null or empty topic";
@@ -105,8 +113,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly ConsumerCallbackReporter _reporter;
 
     // The registered listener's self_: replaced when a subscribe succeeds, kept across Unsubscribe and
-    // Assign, released after the consumer's destroy has returned.
+    // Assign, released after the consumer's destroy has returned. The core registers a subscribe's listener before
+    // it can refuse the subscribe, so a refused one becomes the registered one and the one it replaced is retained,
+    // both kept until a subscribe succeeds or the consumer's destroy has returned.
     private ListenerRegistration? _listenerRegistration;
+
+    private readonly List<ListenerRegistration> _retainedListenerRegistrations = new List<ListenerRegistration>();
+
+    private bool _listenerRegistrationsReleased;
 
     // The commit-callback registrations whose commit reported an error: the core may still fire them, so they are
     // released after the consumer's destroy has returned.
@@ -152,6 +166,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private delegate void NativePartitionsCall(SafeConsumerHandle consumer, IntPtr partitions, ref IntPtr outErr);
 
+    private delegate void NativeSubscribeWithListener(
+        SafeConsumerHandle consumer, IntPtr subscription, IntPtr listener, ref IntPtr outErr);
+
     internal SafeConsumerHandle Handle
     {
         get
@@ -161,7 +178,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal ListenerRegistration? CurrentListenerRegistration => _listenerRegistration;
+    internal ListenerRegistration? CurrentListenerRegistration => Volatile.Read(ref _listenerRegistration);
 
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
@@ -535,11 +552,44 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         RequireListener(listener);
         string[] topicArray = CheckAfterAcquire(() => SnapshotTopics(topics));
+        SubscribeWithListener(
+            arguments => arguments.StringList(topicArray), NativeMethods.ConsumerSubscribeWithTopicsListener, listener);
+    }
+
+    internal void Subscribe(SubscriptionPattern pattern)
+    {
+        string patternText = SnapshotPattern(pattern);
         RefuseInsideACallback();
         CallSync(arguments =>
         {
-            IntPtr list = arguments.StringList(topicArray);
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerSubscribeWithPattern(_handle, arguments.SubscriptionPattern(patternText), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            SettleListener(null, subscribed: true);
+        });
+    }
+
+    internal void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener listener)
+    {
+        RequireListener(listener);
+        string patternText = SnapshotPattern(pattern);
+        SubscribeWithListener(
+            arguments => arguments.SubscriptionPattern(patternText),
+            NativeMethods.ConsumerSubscribeWithPatternListener,
+            listener);
+    }
+
+    private void SubscribeWithListener(
+        Func<NativeCallArguments, IntPtr> subscription,
+        NativeSubscribeWithListener subscribe,
+        IConsumerRebalanceListener listener)
+    {
+        RefuseInsideACallback();
+        CallSync(arguments =>
+        {
+            IntPtr nativeSubscription = subscription(arguments);
             ListenerRegistration registration = ListenerRegistration.Root(listener, _reporter);
+            bool called = false;
             bool subscribed = false;
             try
             {
@@ -547,7 +597,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 try
                 {
                     IntPtr outErr = IntPtr.Zero;
-                    NativeMethods.ConsumerSubscribeWithTopicsListener(_handle, list, listenerHandle, ref outErr);
+                    subscribe(_handle, nativeSubscription, listenerHandle, ref outErr);
+                    called = true;
                     subscribed = outErr == IntPtr.Zero;
                     KafkaException.ThrowIfFfiFailed(ref outErr);
                 }
@@ -558,7 +609,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
             finally
             {
-                SettleListener(registration, subscribed);
+                if (called)
+                {
+                    SettleListener(registration, subscribed);
+                }
+                else
+                {
+                    registration.Release();
+                }
             }
         });
     }
@@ -587,13 +645,37 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void SettleListener(ListenerRegistration? registration, bool subscribed)
     {
-        if (subscribed)
+        if (!subscribed && registration is null)
         {
-            Interlocked.Exchange(ref _listenerRegistration, registration)?.Release();
+            return;
         }
-        else
+
+        lock (_retainedListenerRegistrations)
         {
-            registration?.Release();
+            if (_listenerRegistrationsReleased)
+            {
+                registration?.Release();
+                return;
+            }
+
+            ListenerRegistration? replaced = Interlocked.Exchange(ref _listenerRegistration, registration);
+            if (!subscribed)
+            {
+                if (replaced is not null)
+                {
+                    _retainedListenerRegistrations.Add(replaced);
+                }
+
+                return;
+            }
+
+            replaced?.Release();
+            foreach (ListenerRegistration retained in _retainedListenerRegistrations)
+            {
+                retained.Release();
+            }
+
+            _retainedListenerRegistrations.Clear();
         }
     }
 
@@ -634,6 +716,52 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return topicArray;
+    }
+
+    // KafkaConsumer refuses a null pattern after acquireAndEnsureOpen() and the group.id check, with Java's message,
+    // and the core refuses an empty one with Java's text. Java's MockConsumer refuses a null or empty pattern before
+    // ensureNotClosed(), with its own messages; the binding answers them before the use, because Close tears the
+    // native mock down. A null pattern text is Java's NullPointerException, at the same point. A NUL in the text, which
+    // the C string would cut, is refused next (AdminStrings), still after the group.id check.
+    private string SnapshotPattern(SubscriptionPattern pattern)
+    {
+        if (!IsMock)
+        {
+            return CheckAfterAcquire(() =>
+            {
+                if (pattern is null)
+                {
+                    throw GroupIdMissing
+                        ? GroupIdNotDefined()
+                        : new IllegalArgumentException(NullSubscribePatternMessage);
+                }
+
+                string text = pattern.Pattern() ?? throw (GroupIdMissing
+                    ? GroupIdNotDefined()
+                    : new ArgumentNullException(nameof(pattern), NullPatternTextMessage));
+                if (GroupIdMissing && text.IndexOf('\0') >= 0)
+                {
+                    throw GroupIdNotDefined();
+                }
+
+                AdminStrings.Validate(text, AdminStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
+                return text;
+            });
+        }
+
+        if (pattern is null)
+        {
+            throw new IllegalArgumentException(NullMockPatternMessage);
+        }
+
+        string patternText = pattern.Pattern() ?? throw new ArgumentNullException(nameof(pattern), NullPatternTextMessage);
+        AdminStrings.Validate(patternText, AdminStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
+        if (patternText.Length == 0)
+        {
+            throw new IllegalArgumentException(EmptyMockPatternMessage);
+        }
+
+        return CheckAfterAcquire(() => patternText);
     }
 
     internal void Unsubscribe()
@@ -1641,7 +1769,18 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             _callbackHandle?.Dispose();
         }
 
-        Interlocked.Exchange(ref _listenerRegistration, null)?.Release();
+        lock (_retainedListenerRegistrations)
+        {
+            Interlocked.Exchange(ref _listenerRegistration, null)?.Release();
+            foreach (ListenerRegistration retained in _retainedListenerRegistrations)
+            {
+                retained.Release();
+            }
+
+            _retainedListenerRegistrations.Clear();
+            _listenerRegistrationsReleased = true;
+        }
+
         lock (_parkedCommitCallbacks)
         {
             foreach (CommitCallbackRegistration registration in _parkedCommitCallbacks)
