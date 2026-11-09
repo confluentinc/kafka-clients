@@ -22,18 +22,21 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// A <see cref="MemoryManager{T}"/> over native memory from <see cref="Marshal.AllocHGlobal(int)"/>, filled with
 /// each byte's index; it counts its <see cref="Pin"/> and <see cref="Unpin"/> calls and frees the memory when
-/// disposed.
+/// disposed. Given an unpin failure, each <see cref="Unpin"/> counts and then throws an
+/// <see cref="InvalidOperationException"/> with that message.
 /// </summary>
 internal sealed unsafe class NativeMemoryManager : MemoryManager<byte>
 {
     private readonly int _length;
+    private readonly string? _unpinFailure;
     private IntPtr _pointer;
     private int _pins;
     private int _unpins;
 
-    internal NativeMemoryManager(int length)
+    internal NativeMemoryManager(int length, string? unpinFailure = null)
     {
         _length = length;
+        _unpinFailure = unpinFailure;
         _pointer = Marshal.AllocHGlobal(Math.Max(length, 1));
         byte* bytes = (byte*)_pointer;
         for (int i = 0; i < length; i++)
@@ -61,7 +64,14 @@ internal sealed unsafe class NativeMemoryManager : MemoryManager<byte>
         return new MemoryHandle((byte*)_pointer + elementIndex, default, this);
     }
 
-    public override void Unpin() => Interlocked.Increment(ref _unpins);
+    public override void Unpin()
+    {
+        Interlocked.Increment(ref _unpins);
+        if (_unpinFailure is not null)
+        {
+            throw new InvalidOperationException(_unpinFailure);
+        }
+    }
 
     protected override void Dispose(bool disposing)
     {

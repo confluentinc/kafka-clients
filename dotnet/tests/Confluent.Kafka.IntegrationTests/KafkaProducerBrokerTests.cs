@@ -465,10 +465,19 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         };
         KafkaConsumer<byte[], byte[]> consumer =
             new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
-        TopicPartition tp = new TopicPartition(topic, partition);
-        consumer.Assign(new[] { tp });
-        consumer.Seek(tp, fromOffset);
-        return consumer;
+        try
+        {
+            TopicPartition tp = new TopicPartition(topic, partition);
+            consumer.Assign(new[] { tp });
+            consumer.Seek(tp, fromOffset);
+            return consumer;
+        }
+        catch
+        {
+            // The caller's using takes the consumer only once this returns.
+            consumer.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Returns the memory it is given unchanged, <see langword="null"/> included.</summary>

@@ -13,6 +13,9 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -234,25 +237,11 @@ public sealed class ProducerSendPinLifetimeTests
     [Fact]
     public void AsyncSend_FailingAfterThePin_UnpinsEachBufferOnce()
     {
-        // The record is valid, so both buffers are pinned before the send reaches the P/Invoke,
-        // whose marshaller refuses the closed producer handle; the abandoned send must release
-        // each pin exactly once.
+        // The abandoned send must release each pin exactly once.
         using NativeMemoryManager key = new NativeMemoryManager(8);
         using NativeMemoryManager value = new NativeMemoryManager(32);
-        NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
-        SafeProducerHandle handle = producer.Handle;
-        DeliveryReporter reporter = (DeliveryReporter)typeof(NativeProducer)
-            .GetField("_reporter", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .GetValue(producer)!;
-        TestTimeout.Dispose(producer);
-        Assert.True(handle.IsClosed);
 
-        AsyncDeliveryState state = new AsyncDeliveryState(reporter, null, null, Topic, 0, CancellationToken.None);
-        SerializedProducerRecord record = new SerializedProducerRecord(
-            Topic, 0, null, (ReadOnlyMemory<byte>)key.Memory, (ReadOnlyMemory<byte>)value.Memory);
-        IntPtr outErr = IntPtr.Zero;
-
-        Assert.Throws<ObjectDisposedException>(() => state.Send(handle, in record, ref outErr));
+        IntPtr outErr = SendOnAClosedProducer(key, value);
 
         Assert.Equal(IntPtr.Zero, outErr);
         Assert.Equal(1, key.PinCount);
@@ -305,6 +294,127 @@ public sealed class ProducerSendPinLifetimeTests
         GC.WaitForPendingFinalizers();
         GC.Collect();
     }
+
+    [Fact]
+    public void Release_AnUnpinThatThrows_StillUnpinsTheOtherBuffer_OnceAndTracesTheFailure()
+    {
+        string marker = UnpinMarker();
+        using NativeMemoryManager key = new NativeMemoryManager(8, marker);
+        using NativeMemoryManager value = new NativeMemoryManager(32);
+        using UnpinFailureListener listener = new UnpinFailureListener(marker);
+        SendPins pins = default;
+        pins.Pin((ReadOnlyMemory<byte>)key.Memory, (ReadOnlyMemory<byte>)value.Memory, out _, out _);
+
+        pins.Release();
+        pins.Release();
+
+        Assert.Equal(1, key.UnpinCount);
+        Assert.Equal(1, value.UnpinCount);
+        string traced = Assert.Single(listener.Messages);
+        Assert.StartsWith(
+            "Exception while unpinning a key or value buffer: System.InvalidOperationException: " + marker, traced);
+    }
+
+    [Fact]
+    public async Task AsyncSend_AnUnpinThatThrowsAtAnInlineHandOver_CompletesTheFirstStage()
+    {
+        string keyMarker = UnpinMarker();
+        string valueMarker = UnpinMarker();
+        using NativeMemoryManager key = new NativeMemoryManager(8, keyMarker);
+        using NativeMemoryManager value = new NativeMemoryManager(32, valueMarker);
+        using UnpinFailureListener keyListener = new UnpinFailureListener(keyMarker);
+        using UnpinFailureListener valueListener = new UnpinFailureListener(valueMarker);
+        AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                MemorySerializer.Instance, MemorySerializer.Instance);
+        using (TestTimeout.Disposal(producer))
+        {
+            AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
+                () => producer.Send(MemoryRecord(Topic, key, value)).AsTask(), s_deadline);
+            await TestTimeout.Run(() => future.Get(), s_deadline);
+
+            Assert.Equal(1, producer.HistoryCount());
+            Assert.Equal(1, key.UnpinCount);
+            Assert.Equal(1, value.UnpinCount);
+            Assert.Single(keyListener.Messages);
+            Assert.Single(valueListener.Messages);
+        }
+    }
+
+    [Fact]
+    public async Task AsyncSend_AnUnpinThatThrowsAtADeferredHandOver_CompletesTheFirstStage()
+    {
+        string marker = UnpinMarker();
+        string topic = "pin-lifetime-unreachable-" + Guid.NewGuid().ToString("N");
+        using NativeMemoryManager key = new NativeMemoryManager(8, marker);
+        using NativeMemoryManager value = new NativeMemoryManager(32);
+        using UnpinFailureListener listener = new UnpinFailureListener(marker);
+        AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                new Dictionary<string, object?>
+                {
+                    ["bootstrap.servers"] = "localhost:1",
+                    ["max.block.ms"] = 1000,
+                },
+                MemorySerializer.Instance,
+                MemorySerializer.Instance);
+        try
+        {
+            ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(MemoryRecord(topic, key, value));
+            Assert.False(stage.IsCompleted, "the hand-over ran inside the call");
+
+            AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
+            KafkaException failure = await FutureAssert.ThrowsAnyAsync<KafkaException>(
+                () => TestTimeout.Run(() => future.Get(), s_deadline));
+            Assert.Equal(7, failure.Code);
+
+            Assert.Equal(1, key.UnpinCount);
+            Assert.Equal(1, value.UnpinCount);
+            Assert.Single(listener.Messages);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => producer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
+    [Fact]
+    public void AsyncSend_FailingAfterThePin_WithAnUnpinThatThrows_ThrowsTheSendsOwnError()
+    {
+        string marker = UnpinMarker();
+        using NativeMemoryManager key = new NativeMemoryManager(8, marker);
+        using NativeMemoryManager value = new NativeMemoryManager(32);
+        using UnpinFailureListener listener = new UnpinFailureListener(marker);
+
+        IntPtr outErr = SendOnAClosedProducer(key, value);
+
+        Assert.Equal(IntPtr.Zero, outErr);
+        Assert.Equal(1, key.UnpinCount);
+        Assert.Equal(1, value.UnpinCount);
+        Assert.Single(listener.Messages);
+    }
+
+    // The record is valid, so both buffers are pinned before the send reaches the P/Invoke, whose marshaller refuses
+    // the closed producer handle; the send must throw that error, not an unpin failure.
+    private static IntPtr SendOnAClosedProducer(NativeMemoryManager key, NativeMemoryManager value)
+    {
+        NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
+        SafeProducerHandle handle = producer.Handle;
+        DeliveryReporter reporter = (DeliveryReporter)typeof(NativeProducer)
+            .GetField("_reporter", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(producer)!;
+        TestTimeout.Dispose(producer);
+        Assert.True(handle.IsClosed);
+
+        AsyncDeliveryState state = new AsyncDeliveryState(reporter, null, null, Topic, 0, CancellationToken.None);
+        SerializedProducerRecord record = new SerializedProducerRecord(
+            Topic, 0, null, (ReadOnlyMemory<byte>)key.Memory, (ReadOnlyMemory<byte>)value.Memory);
+        IntPtr outErr = IntPtr.Zero;
+        Assert.Throws<ObjectDisposedException>(() => state.Send(handle, in record, ref outErr));
+        return outErr;
+    }
+
+    private static string UnpinMarker() => "unpin failed " + Guid.NewGuid().ToString("N");
 
     private static ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> MemoryRecord(
         string topic, NativeMemoryManager key, NativeMemoryManager value) =>
@@ -362,5 +472,38 @@ public sealed class ProducerSendPinLifetimeTests
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
         Array.Clear(sends, 0, sends.Length);
         return references;
+    }
+
+    // Records the traced lines that name its marker, so tests running in parallel do not see each other's warnings.
+    private sealed class UnpinFailureListener : TraceListener
+    {
+        private readonly string _marker;
+        private readonly ConcurrentQueue<string> _messages = new ConcurrentQueue<string>();
+
+        internal UnpinFailureListener(string marker)
+        {
+            _marker = marker;
+            Trace.Listeners.Add(this);
+        }
+
+        internal IReadOnlyCollection<string> Messages => _messages.ToArray();
+
+        public override void Write(string? message)
+        {
+        }
+
+        public override void WriteLine(string? message)
+        {
+            if (message is not null && message.Contains(_marker))
+            {
+                _messages.Enqueue(message);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Trace.Listeners.Remove(this);
+            base.Dispose(disposing);
+        }
     }
 }

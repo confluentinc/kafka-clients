@@ -35,7 +35,9 @@ public interface ISerializer<T>
     /// The producer reads the bytes where they are and copies them only into its record batch. It reads them until
     /// <c>Send</c> returns or throws, or, on an async producer, until <c>Send</c> throws or the <c>ValueTask</c> it returns
     /// has completed. Keep them unchanged until then. The key and the value are read after both serializers ran, so they
-    /// must not share a buffer that the second call overwrites.
+    /// must not share a buffer that the second call overwrites. If the memory's
+    /// <see cref="System.Buffers.MemoryManager{T}.Unpin"/> throws, the send's outcome is unchanged and the failure is
+    /// written to <see cref="System.Diagnostics.Trace"/> as a warning.
     /// </remarks>
     ReadOnlyMemory<byte>? Serialize(string topic, T data);
 }
