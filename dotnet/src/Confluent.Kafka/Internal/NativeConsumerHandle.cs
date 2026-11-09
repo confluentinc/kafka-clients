@@ -240,7 +240,7 @@ internal sealed class NativeConsumerHandle : IDisposable
         IntPtr outErr = IntPtr.Zero;
         IntPtr metadata = NativeMethods.ConsumerHandleGroupMetadata(_handle, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        return ConsumerGroupMetadataMarshal.CopyOutAndDestroy(metadata);
+        return ConsumerGroupMetadataMarshal.CopyOutAndKeep(metadata);
     }
 
     internal void CommitSync(long? timeoutMs)
@@ -268,7 +268,7 @@ internal sealed class NativeConsumerHandle : IDisposable
         }
     }
 
-    internal void CommitSync(NativeConsumer.CommitOffsetsSnapshot offsets, long? timeoutMs)
+    internal void CommitSync(OffsetsSnapshot offsets, long? timeoutMs)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr map = arguments.OffsetMap(offsets);
@@ -312,7 +312,7 @@ internal sealed class NativeConsumerHandle : IDisposable
             return outErr;
         });
 
-    internal void CommitAsync(NativeConsumer.CommitOffsetsSnapshot offsets, IOffsetCommitCallback? callback)
+    internal void CommitAsync(OffsetsSnapshot offsets, IOffsetCommitCallback? callback)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr map = arguments.OffsetMap(offsets);
@@ -334,7 +334,7 @@ internal sealed class NativeConsumerHandle : IDisposable
             return outErr;
         });
 
-    internal void CommitAsync(NativeConsumer.CommitOffsetsSnapshot offsets, IAsyncOffsetCommitCallback callback)
+    internal void CommitAsync(OffsetsSnapshot offsets, IAsyncOffsetCommitCallback callback)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr map = arguments.OffsetMap(offsets);
