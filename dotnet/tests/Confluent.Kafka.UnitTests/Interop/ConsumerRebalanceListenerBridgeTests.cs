@@ -14,12 +14,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -38,9 +40,15 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
     private const string MutuallyExclusive = "Subscription to topics, partitions and pattern are mutually exclusive";
 
+    private const string GroupIdNotDefined =
+        "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer "
+        + "configuration.";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
+
+    private static readonly TimeSpan s_settle = TimeSpan.FromSeconds(2);
 
     /// <summary>The listener method a theory drives.</summary>
     public enum Method
@@ -48,6 +56,14 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Revoked,
         Assigned,
         Lost,
+    }
+
+    /// <summary>The subscribe form a theory drives: sync, or async with a listener of either kind.</summary>
+    public enum Form
+    {
+        Sync,
+        Async,
+        AsyncWithAnAsyncListener,
     }
 
     [Fact]
@@ -540,6 +556,129 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.True(second.IsReleased);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnAKafkaConsumer_AnEmptySubscribe_KeepsTheRegistration(bool async)
+    {
+        NativeConsumer consumer = NewKafkaConsumer();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        await Subscribe(consumer, async ? Form.Async : Form.Sync, new[] { Topic }, new RecordingListener());
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+
+        await SubscribeListenerless(consumer, async, Array.Empty<string>());
+
+        Assert.Same(first, consumer.CurrentListenerRegistration);
+        Assert.False(first.IsReleased);
+    }
+
+    [Theory]
+    [InlineData(Form.Sync)]
+    [InlineData(Form.Async)]
+    [InlineData(Form.AsyncWithAnAsyncListener)]
+    public async Task OnAKafkaConsumer_AnEmptySubscribeWithAListener_ReleasesOnlyItsOwnRegistration(Form form)
+    {
+        NativeConsumer consumer = NewKafkaConsumer();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        await Subscribe(consumer, form, new[] { Topic }, NewListener(form));
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+
+        (WeakReference listener, Task subscribed) = SubscribeAnUnreferencedListener(consumer, form, Array.Empty<string>());
+        await TestTimeout.Run(() => subscribed, s_deadline);
+
+        Assert.Same(first, consumer.CurrentListenerRegistration);
+        Assert.False(first.IsReleased);
+        await AssertCollected(listener);
+    }
+
+    [Theory]
+    [InlineData(Form.Sync)]
+    [InlineData(Form.Async)]
+    [InlineData(Form.AsyncWithAnAsyncListener)]
+    public async Task OnAKafkaConsumer_AFailedEmptySubscribeWithAListener_ReleasesItsRegistration(Form form)
+    {
+        NativeConsumer consumer = NewKafkaConsumer(withGroupId: false);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+
+        (WeakReference listener, Task subscribed) = SubscribeAnUnreferencedListener(consumer, form, Array.Empty<string>());
+        InvalidGroupIdException refused = await Assert.ThrowsAsync<InvalidGroupIdException>(
+            () => TestTimeout.Run(() => subscribed, s_deadline));
+
+        Assert.Equal(GroupIdNotDefined, refused.Message);
+        Assert.Null(consumer.CurrentListenerRegistration);
+        await AssertCollected(listener);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnAKafkaConsumer_AnEmptySubscribeAfterARefusedSwitch_KeepsBothRegistrations_UntilDispose(bool async)
+    {
+        NativeConsumer consumer = NewKafkaConsumer();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        SubscriptionPattern pattern = new SubscriptionPattern("t.*");
+        if (async)
+        {
+            await TestTimeout.Run(() => consumer.SubscribeWithCallback(pattern, new RecordingListener()), s_deadline);
+        }
+        else
+        {
+            consumer.Subscribe(pattern, new RecordingListener());
+        }
+
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+        IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(
+            () => Subscribe(consumer, async ? Form.Async : Form.Sync, new[] { Topic }, new RecordingListener()));
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration second = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(first, second);
+
+        await SubscribeListenerless(consumer, async, Array.Empty<string>());
+
+        Assert.Same(second, consumer.CurrentListenerRegistration);
+        Assert.False(first.IsReleased);
+        Assert.False(second.IsReleased);
+
+        TestTimeout.Run(() => consumer.Dispose(), s_deadline);
+
+        Assert.True(first.IsReleased);
+        Assert.True(second.IsReleased);
+    }
+
+    [Theory]
+    [InlineData(Form.Sync)]
+    [InlineData(Form.Async)]
+    [InlineData(Form.AsyncWithAnAsyncListener)]
+    public async Task OnTheMocks_AnEmptySubscribeWithAListener_ReplacesTheRegistration(Form form)
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        object firstListener = NewListener(form);
+        await Subscribe(consumer, form, new[] { Topic }, firstListener);
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+        object thirdListener = NewListener(form);
+
+        await Subscribe(consumer, form, Array.Empty<string>(), thirdListener);
+
+        ListenerRegistration third = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(first, third);
+        Assert.True(first.IsReleased);
+        Assert.False(third.IsReleased);
+
+        TopicPartition[] assignment = { new TopicPartition(Topic, 0) };
+        if (form == Form.Sync)
+        {
+            TestTimeout.Run(() => consumer.Rebalance(assignment), s_deadline);
+        }
+        else
+        {
+            await TestTimeout.Run(() => consumer.RebalanceWithCallback(assignment), s_deadline);
+        }
+
+        Assert.Empty(AssignedTo(firstListener));
+        Assert.Equal(assignment, Assert.Single(AssignedTo(thirdListener)));
+    }
+
     [Fact]
     public void Unsubscribe_DoesNotReleaseTheRegistration()
     {
@@ -578,6 +717,88 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     private static ConsumerCallbackReporter Reporter() => new ConsumerCallbackReporter(IntPtr.Zero);
+
+    private static NativeConsumer NewKafkaConsumer(bool withGroupId = true)
+    {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "127.0.0.1:1",
+            ["group.protocol"] = "consumer",
+        };
+        if (withGroupId)
+        {
+            configs["group.id"] = "listener-bridge-group";
+        }
+
+        return NativeConsumer.Create(configs);
+    }
+
+    private static object NewListener(Form form) =>
+        form == Form.AsyncWithAnAsyncListener ? new AsyncRecordingListener() : new RecordingListener();
+
+    private static List<TopicPartition[]> AssignedTo(object listener) =>
+        listener is RecordingListener recording ? recording.Assigned : ((AsyncRecordingListener)listener).Assigned;
+
+    private static Task Subscribe(NativeConsumer consumer, Form form, IReadOnlyCollection<string> topics, object listener) =>
+        TestTimeout.Run(() => StartSubscribe(consumer, form, topics, listener), s_deadline);
+
+    private static Task StartSubscribe(NativeConsumer consumer, Form form, IReadOnlyCollection<string> topics, object listener)
+    {
+        switch (form)
+        {
+            case Form.Sync:
+                try
+                {
+                    consumer.Subscribe(topics, (IConsumerRebalanceListener)listener);
+                    return Task.CompletedTask;
+                }
+                catch (Exception exception)
+                {
+                    return Task.FromException(exception);
+                }
+
+            case Form.Async:
+                return consumer.SubscribeWithCallback(topics, (IConsumerRebalanceListener)listener);
+            default:
+                return consumer.SubscribeWithCallback(topics, (IAsyncConsumerRebalanceListener)listener);
+        }
+    }
+
+    private static Task SubscribeListenerless(NativeConsumer consumer, bool async, IReadOnlyCollection<string> topics)
+    {
+        if (async)
+        {
+            return TestTimeout.Run(() => consumer.SubscribeWithCallback(topics), s_deadline);
+        }
+
+        consumer.Subscribe(topics);
+        return Task.CompletedTask;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Listener, Task Subscribed) SubscribeAnUnreferencedListener(
+        NativeConsumer consumer,
+        Form form,
+        IReadOnlyCollection<string> topics)
+    {
+        object listener = NewListener(form);
+        return (new WeakReference(listener), StartSubscribe(consumer, form, topics, listener));
+    }
+
+    private static async Task AssertCollected(WeakReference listener)
+    {
+        Stopwatch watch = Stopwatch.StartNew();
+        do
+        {
+            await Task.Yield();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        while (listener.IsAlive && watch.Elapsed < s_settle);
+
+        Assert.False(listener.IsAlive, "the listener's registration was not released");
+    }
 
     private static Task<Exception?> InvokeOnAPendingTask(TaskCompletionSource<bool> outcome, Method method)
     {
@@ -664,6 +885,22 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
             Assigned.Add(partitions.ToArray());
+    }
+
+    /// <summary>Records the partitions an async listener is assigned.</summary>
+    private sealed class AsyncRecordingListener : IAsyncConsumerRebalanceListener
+    {
+        internal List<TopicPartition[]> Assigned { get; } = new List<TopicPartition[]>();
+
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            Assigned.Add(partitions.ToArray());
+            return Task.CompletedTask;
+        }
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>A listener whose every method throws the exception it is given.</summary>

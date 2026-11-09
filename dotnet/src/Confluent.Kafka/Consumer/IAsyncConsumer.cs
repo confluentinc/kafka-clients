@@ -110,8 +110,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// subscribes refused before it, a listener-less
     /// <see cref="Subscribe(IReadOnlyCollection{string}, CancellationToken)"/> included, as does disposing the
     /// consumer. <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's
-    /// <c>SubscriptionState.unsubscribe()</c> does. <see cref="IConsumerRebalanceListener"/> describes where the
-    /// listener runs, what throwing does, and what it may call on its own consumer.
+    /// <c>SubscriptionState.unsubscribe()</c> does. On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, a subscribe
+    /// to no topics is <see cref="Unsubscribe"/> and keeps it too. <see cref="IConsumerRebalanceListener"/> describes
+    /// where the listener runs, what throwing does, and what it may call on its own consumer.
     /// </remarks>
     /// <param name="topics">The topics to subscribe to.</param>
     /// <param name="callback">The rebalance listener to register.</param>
@@ -213,6 +214,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// subscribes refused before it, a listener-less <see cref="Subscribe(SubscriptionPattern, CancellationToken)"/>
     /// included, as does disposing the consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
+    /// keeps it too.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.
     /// </para>

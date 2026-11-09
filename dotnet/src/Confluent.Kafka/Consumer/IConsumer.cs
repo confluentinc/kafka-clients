@@ -93,6 +93,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// subscribes refused before it, a listener-less <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as
     /// does disposing the consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
+    /// keeps it too.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.
     /// </remarks>
@@ -158,6 +160,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// subscribes refused before it, a listener-less <see cref="Subscribe(SubscriptionPattern)"/> included, as does
     /// disposing the consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
+    /// keeps it too.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.
     /// </para>
