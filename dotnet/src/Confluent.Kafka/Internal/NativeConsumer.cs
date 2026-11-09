@@ -114,8 +114,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // The registered listener's self_: replaced when a subscribe succeeds, kept across Unsubscribe and
     // Assign, released after the consumer's destroy has returned. The core registers a subscribe's listener before
-    // it can refuse the subscribe, so a refused one becomes the registered one and the one it replaced is retained,
-    // both kept until a subscribe succeeds or the consumer's destroy has returned.
+    // most of its refusals, so a refused one becomes the registered one and the one it replaced is retained, both
+    // kept until a subscribe succeeds or the consumer's destroy has returned. One the core refuses before the
+    // registration, for an invalid argument, a missing group.id or concurrent use, is released at once.
     private ListenerRegistration? _listenerRegistration;
 
     private readonly List<ListenerRegistration> _retainedListenerRegistrations = new List<ListenerRegistration>();
@@ -179,6 +180,17 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     internal ListenerRegistration? CurrentListenerRegistration => Volatile.Read(ref _listenerRegistration);
+
+    internal int RetainedListenerRegistrationCount
+    {
+        get
+        {
+            lock (_retainedListenerRegistrations)
+            {
+                return _retainedListenerRegistrations.Count;
+            }
+        }
+    }
 
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
@@ -568,7 +580,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithPattern(_handle, arguments.SubscriptionPattern(patternText), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            SettleListener(null, subscribed: true, unsubscribes: false);
+            SettleListener(null, subscribed: true, notRegistered: false);
         });
     }
 
@@ -596,6 +608,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             ListenerRegistration registration = ListenerRegistration.Root(listener, _reporter);
             bool called = false;
             bool subscribed = false;
+            bool notRegistered = unsubscribes;
             try
             {
                 IntPtr listenerHandle = registration.NewHandle();
@@ -605,6 +618,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     subscribe(_handle, nativeSubscription, listenerHandle, ref outErr);
                     called = true;
                     subscribed = outErr == IntPtr.Zero;
+                    notRegistered |= KafkaException.RefusedBeforeRegistering(outErr);
                     KafkaException.ThrowIfFfiFailed(ref outErr);
                 }
                 finally
@@ -616,7 +630,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 if (called)
                 {
-                    SettleListener(registration, subscribed, unsubscribes);
+                    SettleListener(registration, subscribed, notRegistered);
                 }
                 else
                 {
@@ -648,9 +662,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    private void SettleListener(ListenerRegistration? registration, bool subscribed, bool unsubscribes)
+    private void SettleListener(ListenerRegistration? registration, bool subscribed, bool notRegistered)
     {
-        if (unsubscribes)
+        if (notRegistered)
         {
             registration?.Release();
             return;

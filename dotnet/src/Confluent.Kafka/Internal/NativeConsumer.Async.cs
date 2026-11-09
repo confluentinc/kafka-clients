@@ -109,7 +109,7 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) =>
                     NativeMethods.ConsumerSubscribeWithTopicsCb(
                         _handle, arguments.StringList(snapshot), ConsumerCompletion.Void, opaque),
-                failed => SettleListener(null, !failed, Unsubscribes(snapshot))),
+                error => SettleListener(null, error == IntPtr.Zero, Unsubscribes(snapshot))),
             AsyncOperation.Subscribe,
             cancellationToken);
     }
@@ -147,7 +147,7 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) =>
                     NativeMethods.ConsumerSubscribeWithPatternCb(
                         _handle, arguments.SubscriptionPattern(patternText), ConsumerCompletion.Void, opaque),
-                failed => SettleListener(null, !failed, unsubscribes: false)),
+                error => SettleListener(null, error == IntPtr.Zero, notRegistered: false)),
             AsyncOperation.Subscribe,
             cancellationToken);
     }
@@ -240,7 +240,10 @@ internal sealed partial class NativeConsumer
                         ListenerRegistration.DestroyHandle(listenerHandle);
                     }
                 },
-                failed => SettleListener(registration, !failed, unsubscribes));
+                error => SettleListener(
+                    registration,
+                    error == IntPtr.Zero,
+                    unsubscribes || KafkaException.RefusedBeforeRegistering(error)));
         }
         catch
         {
@@ -514,9 +517,9 @@ internal sealed partial class NativeConsumer
                         CommitCallbackRegistration.DestroyHandle(callbackHandle);
                     }
                 },
-                failed =>
+                error =>
                 {
-                    if (failed)
+                    if (error != IntPtr.Zero)
                     {
                         ParkCommitCallback(registration!);
                     }
@@ -1097,7 +1100,7 @@ internal sealed partial class NativeConsumer
         CancellationToken cancellationToken,
         Func<IntPtr, long, T> convert,
         Action<NativeCallArguments, IntPtr> submit,
-        Action<bool>? settle = null,
+        Action<IntPtr>? settle = null,
         UseKind kind = UseKind.Owned,
         bool refusesOtherThreads = false,
         bool atPoll = false)
@@ -1128,7 +1131,7 @@ internal sealed partial class NativeConsumer
     private static ConsumerCompletion<T> Start<T>(
         Func<IntPtr, long, T> convert,
         Action<NativeCallArguments, IntPtr> submit,
-        Action<bool>? settle)
+        Action<IntPtr>? settle)
     {
         ConsumerCompletion<T> completion = new ConsumerCompletion<T>(convert, settle)
         {
