@@ -94,6 +94,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
     // growth-free run among the attempts.
     private const int AbsoluteMeasurementAttempts = 8;
 
+    private const int MemoryMeasurementAttempts = 4;
+
     private readonly ITestOutputHelper _output;
 
     public PublicSyncProducerSendAllocationBudgetTests(ITestOutputHelper output)
@@ -176,6 +178,61 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             $"Per-send caller-thread allocation marginal {perSendMarginal} B exceeded the budget " +
             $"{PerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} sends) — " +
             "a value-sized managed copy or a Task-scoped pin would show here.");
+    }
+
+    [Fact]
+    public void Send_NativeMemoryValue_HasNoValueSizedCopy()
+    {
+        byte[] key = MakeBytes(16, 0xAB);
+        using NativeMemoryManager smallValue = new NativeMemoryManager(SmallValueSize);
+        using NativeMemoryManager largeValue = new NativeMemoryManager(LargeValueSize);
+
+        MockProducer<byte[], ReadOnlyMemory<byte>?> producer =
+            new MockProducer<byte[], ReadOnlyMemory<byte>?>(Serdes.ByteArray(), MemorySerializer.Instance);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        _ = MeasureMemorySends(producer, smallValue.Memory, key);
+
+        // Best of N over matched small/large pairs: a one-off allocation is noise, while a value-sized copy would add
+        // ~LargeValueSize bytes to every attempt.
+        long smallBytes = 0;
+        long largeBytes = 0;
+        long perSendMarginal = long.MaxValue;
+        for (int attempt = 0; attempt < MemoryMeasurementAttempts; attempt++)
+        {
+            long small = MeasureMemorySends(producer, smallValue.Memory, key);
+            long large = MeasureMemorySends(producer, largeValue.Memory, key);
+
+            long marginal = (large - small) / SendCount;
+            if (marginal < perSendMarginal)
+            {
+                perSendMarginal = marginal;
+                smallBytes = small;
+                largeBytes = large;
+            }
+        }
+
+        Assert.True(
+            perSendMarginal <= PerSendBudgetBytes,
+            $"Per-send caller-thread allocation marginal {perSendMarginal} B exceeded the budget " +
+            $"{PerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} sends) — " +
+            "a native-memory value must reach the send with no managed copy.");
+    }
+
+    private static long MeasureMemorySends(
+        MockProducer<byte[], ReadOnlyMemory<byte>?> producer, ReadOnlyMemory<byte> value, byte[] key)
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < SendCount; i++)
+        {
+            _ = producer.Send(new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value, key, partition: 0));
+        }
+
+        return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
     private static long MeasureSends(MockProducer<byte[], byte[]> producer, byte[] value, byte[] key)
