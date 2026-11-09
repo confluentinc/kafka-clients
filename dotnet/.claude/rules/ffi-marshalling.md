@@ -2241,9 +2241,9 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     listener-less `subscribe_*` changes nothing (row 431 (a)). A `subscribe_*` refused for
     an invalid argument (-3), a missing `group.id` (24) or concurrent use (-2) does not
     register its listener, as the core raises those three only before the registration:
-    free its own at once and change nothing else. Any other refused `subscribe_*` (-4, -5,
-    a bare `KafkaException`, any other id) keeps both until a `subscribe_*` succeeds or the
-    consumer is destroyed (row 437). The id is read by the error-table helper
+    free its own at once and change nothing else. Any other refused `subscribe_*` (-4, 7 for
+    a timeout, -1 for a bare `KafkaException`, any other id) keeps both until a `subscribe_*`
+    succeeds or the consumer is destroyed (row 437). The id is read by the error-table helper
     (`KafkaException.RefusedBeforeRegistering`) before the error is freed. Free a new one
     at once also when no `subscribe_*` call was made, and the current and every kept one
     after the consumer's destroy has returned. Keep it across `unsubscribe`:
