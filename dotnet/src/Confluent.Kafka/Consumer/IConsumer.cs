@@ -85,11 +85,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <summary>
     /// Subscribes to <paramref name="topics"/> with a rebalance listener (Java
     /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>). The listener fires on every later rebalance
-    /// until a subscribe that succeeds replaces it.
+    /// until another subscribe replaces it.
     /// </summary>
     /// <remarks>
-    /// A replacing subscribe releases the previous listener, a listener-less
-    /// <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as does disposing the consumer.
+    /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
+    /// refused subscribe's listener, or none. A subscribe that succeeds releases the previous listener and those of the
+    /// subscribes refused before it, a listener-less <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as
+    /// does disposing the consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.
@@ -143,7 +145,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <summary>
     /// Subscribes to the topics matching <paramref name="pattern"/> with a rebalance listener (Java
     /// <c>subscribe(SubscriptionPattern, ConsumerRebalanceListener)</c>). The listener fires on every later
-    /// rebalance until a subscribe that succeeds replaces it.
+    /// rebalance until another subscribe replaces it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -151,8 +153,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <see cref="Poll(TimeSpan)"/> fails with <see cref="InvalidRegularExpression"/>.
     /// </para>
     /// <para>
-    /// A replacing subscribe releases the previous listener, a listener-less
-    /// <see cref="Subscribe(SubscriptionPattern)"/> included, as does disposing the consumer.
+    /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
+    /// refused subscribe's listener, or none. A subscribe that succeeds releases the previous listener and those of the
+    /// subscribes refused before it, a listener-less <see cref="Subscribe(SubscriptionPattern)"/> included, as does
+    /// disposing the consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.

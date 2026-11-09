@@ -102,10 +102,12 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <summary>
     /// Subscribes to <paramref name="topics"/> with a rebalance listener (Java
     /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>). The listener fires on every later rebalance
-    /// until a subscribe that succeeds replaces it.
+    /// until another subscribe replaces it.
     /// </summary>
     /// <remarks>
-    /// A replacing subscribe releases the previous listener, a listener-less
+    /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
+    /// refused subscribe's listener, or none. A subscribe that succeeds releases the previous listener and those of the
+    /// subscribes refused before it, a listener-less
     /// <see cref="Subscribe(IReadOnlyCollection{string}, CancellationToken)"/> included, as does disposing the
     /// consumer. <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's
     /// <c>SubscriptionState.unsubscribe()</c> does. <see cref="IConsumerRebalanceListener"/> describes where the
@@ -136,7 +138,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <summary>
     /// Subscribes to <paramref name="topics"/> with an asynchronous rebalance listener (Java
     /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>). The listener fires on every later rebalance
-    /// until a subscribe that succeeds replaces it.
+    /// until another subscribe replaces it.
     /// </summary>
     /// <param name="topics">The topics to subscribe to.</param>
     /// <param name="callback">The rebalance listener to register.</param>
@@ -198,7 +200,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <summary>
     /// Subscribes to the topics matching <paramref name="pattern"/> with a rebalance listener (Java
     /// <c>subscribe(SubscriptionPattern, ConsumerRebalanceListener)</c>). The listener fires on every later
-    /// rebalance until a subscribe that succeeds replaces it.
+    /// rebalance until another subscribe replaces it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -206,8 +208,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
     /// </para>
     /// <para>
-    /// A replacing subscribe releases the previous listener, a listener-less
-    /// <see cref="Subscribe(SubscriptionPattern, CancellationToken)"/> included, as does disposing the consumer.
+    /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
+    /// refused subscribe's listener, or none. A subscribe that succeeds releases the previous listener and those of the
+    /// subscribes refused before it, a listener-less <see cref="Subscribe(SubscriptionPattern, CancellationToken)"/>
+    /// included, as does disposing the consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.
@@ -246,7 +250,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <summary>
     /// Subscribes to the topics matching <paramref name="pattern"/> with an asynchronous rebalance listener (Java
     /// <c>subscribe(SubscriptionPattern, ConsumerRebalanceListener)</c>). The listener fires on every later
-    /// rebalance until a subscribe that succeeds replaces it.
+    /// rebalance until another subscribe replaces it.
     /// </summary>
     /// <remarks>
     /// The broker evaluates the pattern with Google RE2/J; one that is not compatible is not refused here: a later
