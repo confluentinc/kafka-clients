@@ -36,9 +36,11 @@ public interface ISerializer<T>
     /// <c>Send</c> returns or throws, or, on an async producer, until <c>Send</c> throws or the <c>ValueTask</c> it returns
     /// has completed. Keep them unchanged until then. The key and the value are read after both serializers ran, so they
     /// must not share a buffer that the second call overwrites. A <see cref="System.Buffers.MemoryManager{T}"/> behind the
-    /// memory is called inside <c>Send</c>, so it must not call back into the producer. If its
-    /// <see cref="System.Buffers.MemoryManager{T}.Unpin"/> throws, the send's outcome is unchanged and the failure is
-    /// written to <see cref="System.Diagnostics.Trace"/> as a warning.
+    /// memory must not call back into the producer: its <c>GetSpan</c> and <c>Pin</c> run inside <c>Send</c>. On an async
+    /// producer its <see cref="System.Buffers.MemoryManager{T}.Unpin"/> runs inside <c>Send</c> too when the producer
+    /// takes or refuses the record at once, and otherwise later, on the producer's completion thread or on the thread that
+    /// closes the producer. If <c>Unpin</c> throws, the send's outcome is unchanged and the failure is written to
+    /// <see cref="System.Diagnostics.Trace"/> as a warning.
     /// </remarks>
     ReadOnlyMemory<byte>? Serialize(string topic, T data);
 }
