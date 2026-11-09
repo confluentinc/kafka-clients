@@ -375,7 +375,6 @@ missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransactionException
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#clientInstanceId(Duration)
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#closeException
-missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#closed()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitCount()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransaction()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransactionException
@@ -383,7 +382,6 @@ missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#disableTelemetry()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#fenceProducer()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushException
-missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushed()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#history()
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactionException
 missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactions()
@@ -438,7 +436,6 @@ missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.produ
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransactionException
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#clientInstanceId(Duration)
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#closeException
-missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#closed()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitCount()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransaction()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransactionException
@@ -446,7 +443,6 @@ missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.produ
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#disableTelemetry()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#fenceProducer()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushException
-missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushed()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#history()
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactionException
 missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactions()

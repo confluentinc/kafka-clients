@@ -400,6 +400,27 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return 0;
         });
 
+    // Close tears the native mock down, so once closed the answer is the managed state's, as Java's closed() still is.
+    internal bool MockClosed()
+    {
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            return true;
+        }
+
+        try
+        {
+            return CallMock((IntPtr mock, ref IntPtr outErr) => NativeMethods.MockProducerClosed(mock, ref outErr)) != 0;
+        }
+        catch (IllegalStateException) when (Volatile.Read(ref _closed) != 0)
+        {
+            return true;
+        }
+    }
+
+    internal bool MockFlushed() =>
+        CallMock((IntPtr mock, ref IntPtr outErr) => NativeMethods.MockProducerFlushed(mock, ref outErr)) != 0;
+
     internal Task CloseWithCallback(CancellationToken cancellationToken = default) =>
         CloseWithCallbackWithin(null, cancellationToken);
 
