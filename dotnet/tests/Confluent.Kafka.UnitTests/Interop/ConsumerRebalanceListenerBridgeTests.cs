@@ -482,10 +482,14 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     public void Dispose_AfterARefusedSubscribe_ReleasesEveryRegistration()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic }, new RecordingListener());
         ListenerRegistration first = consumer.CurrentListenerRegistration!;
-        Assert.Throws<IllegalStateException>(
+
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(
             () => consumer.Subscribe(new SubscriptionPattern("t.*"), new RecordingListener()));
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
         ListenerRegistration second = consumer.CurrentListenerRegistration!;
         Assert.NotSame(first, second);
 
