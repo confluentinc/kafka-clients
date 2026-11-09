@@ -123,6 +123,15 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     }
 
     [Fact]
+    public void PartitionInfo_ReplicaGetters_ReturnJavasNodeArrays()
+    {
+        foreach (string name in new[] { "Replicas", "InSyncReplicas", "OfflineReplicas" })
+        {
+            Assert.Equal(typeof(Node[]), typeof(PartitionInfo).GetMethod(name, Type.EmptyTypes)!.ReturnType);
+        }
+    }
+
+    [Fact]
     public void PartitionInfo_NullLeader_IsNull()
     {
         PartitionInfo info = new PartitionInfo(
@@ -140,8 +149,8 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
             "topic-x",
             2,
             leader: n0,
-            replicas: new List<Node> { n0, n1 },
-            inSyncReplicas: new List<Node> { n0 },
+            replicas: new[] { n0, n1 },
+            inSyncReplicas: new[] { n0 },
             offlineReplicas: Array.Empty<Node>());
 
         Assert.Equal(

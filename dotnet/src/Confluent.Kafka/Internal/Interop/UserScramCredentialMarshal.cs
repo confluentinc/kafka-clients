@@ -73,17 +73,45 @@ internal static unsafe class UserScramCredentialMarshal
     internal static void DestroyDeletion(IntPtr deletion) =>
         Destroy(deletion, NativeMethods.UserScramCredentialDeletionDestroy);
 
-    internal static IntPtr NewUpsertion(UserScramCredentialUpsertion upsertion)
+    internal static IntPtr NewUpsertion(UserScramCredentialUpsertion upsertion) =>
+        NewNativeUpsertion(upsertion.User(), upsertion.CredentialInfo(), upsertion.Password(), upsertion.Salt());
+
+    // Java's generateRandomSalt(), which the binding leaves to the core: the core's salt-generating
+    // constructor (kafka_admin_UserScramCredentialUpsertion_with_bytes) makes the salt, which is
+    // copied out before the native upsertion is destroyed.
+    internal static byte[] GenerateSalt(string user, ScramCredentialInfo credentialInfo, byte[] password)
     {
-        IntPtr mechanism = Mechanism(upsertion.CredentialInfo().Mechanism());
+        // A null argument is reported by the four-argument constructor the salt is passed to, in
+        // Java's order, so no salt is generated for it.
+        if (user is null || credentialInfo is null || password is null)
+        {
+            return Array.Empty<byte>();
+        }
+
+        IntPtr native = NewNativeUpsertion(user, credentialInfo, password, null);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            KafkaBytes salt = NativeMethods.UserScramCredentialUpsertionSalt(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return DelegationTokenMarshal.CopyBytes(salt);
+        }
+        finally
+        {
+            DestroyUpsertion(native);
+        }
+    }
+
+    private static IntPtr NewNativeUpsertion(
+        string userName, ScramCredentialInfo credentialInfo, byte[] password, byte[]? salt)
+    {
+        IntPtr mechanism = Mechanism(credentialInfo.Mechanism());
         IntPtr outErr = IntPtr.Zero;
-        IntPtr info = NativeMethods.ScramCredentialInfoNew(mechanism, upsertion.CredentialInfo().Iterations(), ref outErr);
+        IntPtr info = NativeMethods.ScramCredentialInfoNew(mechanism, credentialInfo.Iterations(), ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         try
         {
-            using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(upsertion.User());
-            byte[] password = upsertion.Password();
-            byte[]? salt = upsertion.Salt();
+            using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(userName);
             byte empty = 0;
             fixed (byte* passwordData = password)
             fixed (byte* saltData = salt)

@@ -272,7 +272,7 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
                 continue;
             }
 
-            if (records.Count == 0)
+            if (records.Count() == 0)
             {
                 continue;
             }

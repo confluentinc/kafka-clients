@@ -284,7 +284,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
                 continue;
             }
 
-            if (records.Count == 0)
+            if (records.Count() == 0)
             {
                 continue;
             }

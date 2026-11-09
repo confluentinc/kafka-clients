@@ -862,7 +862,7 @@ internal sealed class SoakClient : IDisposable
                 pollFailures = 0;
                 assignment = CheckAssignment(assignment);
 
-                if (records.Count > 0)
+                if (records.Count() > 0)
                 {
                     if (stalled)
                     {

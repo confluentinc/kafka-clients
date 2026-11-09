@@ -45,7 +45,7 @@ public sealed class AdminP7SubmitArgumentTests
     public void Upsertion_CarriesTheUserTheCredentialInfoAndThePasswordVerbatim(ScramMechanism mechanism) =>
         ReadUpsertion(
             new UserScramCredentialUpsertion(
-                "ålice", new ScramCredentialInfo(mechanism, 8192), new byte[] { 0x61, 0x00, 0x62 }, salt: null),
+                "ålice", new ScramCredentialInfo(mechanism, 8192), new byte[] { 0x61, 0x00, 0x62 }),
             native =>
             {
                 Assert.Equal("ålice", Utf8Marshal.PtrToString(ReadPointer(native, Native.UpsertionUser)));
@@ -56,8 +56,12 @@ public sealed class AdminP7SubmitArgumentTests
             });
 
     [Fact]
-    public void Upsertion_ANullSalt_IsGeneratedByTheCore() =>
-        ReadUpsertion(Upsert("u", salt: null), native => Assert.NotEmpty(ReadBytes(native, Native.UpsertionSalt)));
+    public void Upsertion_AGeneratedSalt_ComesFromTheCore_AndIsForwardedVerbatim()
+    {
+        UserScramCredentialUpsertion upsertion = Upsert("u");
+        Assert.NotEmpty(upsertion.Salt());
+        ReadUpsertion(upsertion, native => Assert.Equal(upsertion.Salt(), ReadBytes(native, Native.UpsertionSalt)));
+    }
 
     [Fact]
     public void Upsertion_AnEmptySalt_IsKeptEmpty() =>
@@ -428,16 +432,19 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     [Fact]
-    public void NodeId_Null_ThrowsAndLeavesTheFieldAsItWas()
+    public void NodeId_TakesJavasInt_AndAnUnsetIdIsNull()
     {
+        Assert.Equal(
+            typeof(int),
+            Assert.Single(typeof(DescribeFeaturesOptions).GetMethod(
+                nameof(DescribeFeaturesOptions.NodeId), new[] { typeof(int) })!.GetParameters()).ParameterType);
+
         DescribeFeaturesOptions options = new DescribeFeaturesOptions();
-        Assert.Equal("nodeId", Assert.Throws<ArgumentNullException>(() => options.NodeId(null)).ParamName);
         Assert.Null(options.NodeId());
         Assert.Empty(options.Setters.InOrder);
         Assert.Equal(-1, NodeIdOf(options));
 
         options.NodeId(3);
-        Assert.Throws<ArgumentNullException>(() => options.NodeId(null));
         Assert.Equal(3, options.NodeId());
         Assert.Equal(new[] { nameof(DescribeFeaturesOptions.NodeId) }, options.Setters.InOrder);
         Assert.Equal(3, NodeIdOf(options));
@@ -518,11 +525,11 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     private static UserScramCredentialUpsertion Upsert(string user, byte[]? password = null, byte[]? salt = null) =>
-        new UserScramCredentialUpsertion(
-            user,
-            new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
-            password ?? new byte[] { 1, 2, 3 },
-            salt);
+        salt is null
+            ? new UserScramCredentialUpsertion(
+                user, new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), password ?? new byte[] { 1, 2, 3 })
+            : new UserScramCredentialUpsertion(
+                user, new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), password ?? new byte[] { 1, 2, 3 }, salt);
 
     private static void ReadUpsertion(UserScramCredentialUpsertion upsertion, Action<IntPtr> read)
     {

@@ -127,7 +127,7 @@ public sealed class PublicSyncConsumerRoundTripTests
 
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
-        Assert.Equal(5, records.Count);
+        Assert.Equal(5, records.Count());
         Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset()).ToArray());
     }
 

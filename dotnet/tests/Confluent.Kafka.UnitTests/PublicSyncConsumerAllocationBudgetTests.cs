@@ -90,7 +90,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetAllocatedBytesForCurrentThread();
 
-        Assert.Equal(recordCount, records.Count);
+        Assert.Equal(recordCount, records.Count());
         return after - before;
     }
 

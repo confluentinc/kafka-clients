@@ -119,17 +119,19 @@ public sealed class AdminTransactionsSubmitArgumentTests
     }
 
     [Fact]
-    public void ANullBrokerId_Throws_AndLeavesTheFieldUnset()
+    public void BrokerId_TakesJavasInt_AndAnUnsetIdIsNull()
     {
-        DescribeProducersOptions unset = new DescribeProducersOptions();
+        Assert.Equal(
+            typeof(int),
+            Assert.Single(typeof(DescribeProducersOptions).GetMethod(
+                nameof(DescribeProducersOptions.BrokerId), new[] { typeof(int) })!.GetParameters()).ParameterType);
 
-        Assert.Equal("brokerId", Assert.Throws<ArgumentNullException>(() => unset.BrokerId(null)).ParamName);
+        DescribeProducersOptions unset = new DescribeProducersOptions();
         Assert.Null(unset.BrokerId());
         Assert.Empty(unset.Setters.InOrder);
         Assert.Equal((-1, -1), ReadBack(unset));
 
         DescribeProducersOptions set = new DescribeProducersOptions().BrokerId(3);
-        Assert.Throws<ArgumentNullException>(() => set.BrokerId(null));
         Assert.Equal(3, set.BrokerId());
         Assert.Equal(new[] { nameof(DescribeProducersOptions.BrokerId) }, set.Setters.InOrder);
         Assert.Equal((-1, 3), ReadBack(set));

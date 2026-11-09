@@ -47,7 +47,7 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         // other operation of this consumer is in flight while a step runs.
         await _script.ApplyPendingAsync(this).ConfigureAwait(false);
         ConsumerRecords<byte[], byte[]> records = await _inner.Poll(timeout, cancellationToken).ConfigureAwait(false);
-        if (records.Count == 0)
+        if (records.Count() == 0)
         {
             // The mock returns at once when it has nothing, where a real consumer waits out the
             // timeout: waiting here keeps an idle loop from spinning, without changing what any

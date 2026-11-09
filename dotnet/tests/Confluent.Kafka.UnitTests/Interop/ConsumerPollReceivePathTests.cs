@@ -130,7 +130,7 @@ public sealed class ConsumerPollReceivePathTests
 
         ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
 
-        Assert.Equal(5, records.Count);
+        Assert.Equal(5, records.Count());
         long[] offsets = records.Select(r => r.Offset()).ToArray();
         Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, offsets);
     }
