@@ -33,7 +33,43 @@ public sealed class PartitionInfo
     private readonly Node[] _inSyncReplicas;
     private readonly Node[] _offlineReplicas;
 
-    internal PartitionInfo(
+    /// <summary>
+    /// Creates the metadata of a partition with no offline replicas, Java's
+    /// <c>PartitionInfo(String, int, Node, Node[], Node[])</c>.
+    /// </summary>
+    /// <param name="topic">The topic name.</param>
+    /// <param name="partition">The partition id.</param>
+    /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
+    /// <param name="replicas">The partition's replicas.</param>
+    /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/>, <paramref name="replicas"/> or <paramref name="inSyncReplicas"/> is null.
+    /// </exception>
+    public PartitionInfo(
+        string topic,
+        int partition,
+        Node? leader,
+        Node[] replicas,
+        Node[] inSyncReplicas)
+        : this(topic, partition, leader, replicas, inSyncReplicas, Array.Empty<Node>())
+    {
+    }
+
+    /// <summary>
+    /// Creates the metadata of a partition, Java's <c>PartitionInfo(String, int, Node, Node[], Node[], Node[])</c>.
+    /// The arrays are kept as given, not copied, as Java keeps them.
+    /// </summary>
+    /// <param name="topic">The topic name.</param>
+    /// <param name="partition">The partition id.</param>
+    /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
+    /// <param name="replicas">The partition's replicas.</param>
+    /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
+    /// <param name="offlineReplicas">The replicas that are offline.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/>, <paramref name="replicas"/>, <paramref name="inSyncReplicas"/> or
+    /// <paramref name="offlineReplicas"/> is null.
+    /// </exception>
+    public PartitionInfo(
         string topic,
         int partition,
         Node? leader,
@@ -41,12 +77,12 @@ public sealed class PartitionInfo
         Node[] inSyncReplicas,
         Node[] offlineReplicas)
     {
-        _topic = topic;
+        _topic = topic ?? throw new ArgumentNullException(nameof(topic));
         _partition = partition;
         _leader = leader;
-        _replicas = replicas;
-        _inSyncReplicas = inSyncReplicas;
-        _offlineReplicas = offlineReplicas;
+        _replicas = replicas ?? throw new ArgumentNullException(nameof(replicas));
+        _inSyncReplicas = inSyncReplicas ?? throw new ArgumentNullException(nameof(inSyncReplicas));
+        _offlineReplicas = offlineReplicas ?? throw new ArgumentNullException(nameof(offlineReplicas));
     }
 
     /// <summary>The topic name.</summary>
