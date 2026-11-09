@@ -77,7 +77,7 @@ How the tool works:
 
 | Count | What |
 |---|---|
-| 1 | required by .NET: `ConsumerRecords.Count` implements `IReadOnlyCollection<T>.Count` |
+| 1 | required by .NET: `ConsumerRecords.Count` implements `IReadOnlyCollection<T>.Count` (since the review fixes, a method plus an explicit implementation) |
 | 416 | have a Java method counterpart. 84 of them also have a setter form; 15 change name |
 | 10 | have a Java `public static final` field counterpart, and are static properties today |
 | 2 | are .NET-only: `TopicMetadataAndConfig.HasMetadata` and `ClientQuotaFilterComponent.MatchType` |
@@ -136,8 +136,8 @@ tests, grpc-server, or soak, so no wire or JSON output changes silently.
     `AbstractOptions`, so each class returns itself);
   - `void` for `RemoveMembersFromConsumerGroupOptions.reason(String)` and
     `KafkaPrincipal.tokenAuthenticated(boolean)`.
-- `Setters.Ran` tracking (ledger 176) and `ArgumentNullException` for a null primitive (ledger 181)
-  stay as they are.
+- `Setters.Ran` tracking (ledger 176) stays as it is. A setter of a Java primitive takes the C#
+  primitive (amended after the PR 322 review, see "Review fixes"; ledger 181 amended).
 
 **L-3. A setter Java names differently keeps Java's name, and a setter Java lacks goes.**
 - `ListGroupsOptions`: `InGroupStates(..)`, `WithProtocolTypes(..)`, `WithTypes(..)`.
@@ -156,8 +156,9 @@ tests, grpc-server, or soak, so no wire or JSON output changes silently.
   - `MockAdminClient.DEFAULT_LOG_DIRS` and its `AsyncMockAdminClient` twin
 
 **L-5. A property remains only where .NET requires it.**
-- Today that is `ConsumerRecords.Count` (`IReadOnlyCollection<T>`), alongside the inherited
-  `Exception.Message`, `InnerException` and similar.
+- None is left besides the inherited `Exception.Message`, `InnerException` and similar:
+  `ConsumerRecords.Count()` is Java's method, and `IReadOnlyCollection<T>.Count` is implemented
+  explicitly (amended after the PR 322 review, see "Review fixes").
 - A reflection guard test fails on any other public property of a public type.
 - A rename C# forces is recorded with its reason.
 - The one such rename: `FeatureUpdate.upgradeType()` cannot sit beside the nested enum
@@ -329,6 +330,26 @@ Commit `642d500c1`.
 - Callers: the compiler found 1229 error lines. A text pass over `Serdes.X` not followed by `(` made 1312 rewrites in .cs, .csproj and README.md. Crefs became `Serdes.X()`. `dotnet/CLAUDE.md` and `design/current/STATUS.md` still use the old names; they are left for the Last stage.
 - Sweep, on net10.0, net8.0 and netstandard2.0: only `ConsumerRecords`2.Count` is left, kept because it implements `IReadOnlyCollection<T>.Count`. The guard test `PublicJavaMemberShapeTests` pins this.
 - Java 4.4 comparison: the 10 constants plus `USER_TYPE` and `DEFAULT_CLUSTER_ID` (consts) match. 7 `Serdes` methods match, 7 are not added, and there are 0 extras and 0 properties.
+
+## Review fixes (PR 322)
+
+The review of "P1 Java methods that .NET made properties" found five shapes, all already on
+`master`, where the method kept a .NET type or value Java does not have. The owner chose to follow
+Java 4.4 for each. No Rust or C change.
+- `NewTopic.NumPartitions()` and `ReplicationFactor()` return `int` and `short`, `-1` when unset,
+  as Java's `orElse(CreateTopicsRequest.NO_NUM_PARTITIONS)` and `NO_REPLICATION_FACTOR`. The fields
+  stay nullable, so `Equals` and `ToString` still tell unset from `-1`, as Java's `Optional`
+  fields do.
+- `UserScramCredentialUpsertion.Salt()` is never `null`. The three-argument constructors get a
+  random salt from the core (`kafka_admin_UserScramCredentialUpsertion_with_bytes`, then `_salt`),
+  as Java's call `generateRandomSalt()`; the binding generates none itself. The four-argument
+  constructor throws `ArgumentNullException` for a `null` salt, as Java's `requireNonNull`.
+- `DescribeFeaturesOptions.NodeId(int)` and `DescribeProducersOptions.BrokerId(int)` take Java's
+  `int`. The getters stay `int?`, Java's `OptionalInt` (ledger 181 amended).
+- `ConsumerRecords.Count()` is Java's `count()`, with an explicit `IReadOnlyCollection<T>.Count`.
+  No public property is left (ledger 368 amended).
+- `PartitionInfo.Replicas()`, `InSyncReplicas()` and `OfflineReplicas()` return `Node[]`, as
+  Java's (proposed ledger 370). The `NewTopic` getters' sentinel is proposed ledger 371.
 
 ## Known gaps (not in this phase)
 
