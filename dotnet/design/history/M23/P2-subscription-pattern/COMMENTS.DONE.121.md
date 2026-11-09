@@ -199,3 +199,24 @@ Notes for the comment-only commit (S4):
    (pre-registration failures retained, `NativeConsumer.cs:666`) is NOT ruled: do not change the failure path for it.
 
    Resolved in 53f6fef9 / 61c2ca32.
+
+## PR #326 Copilot comment B (thread PRRT_kwDOQjF7uc61MRDM, ledger row 437, Agreed: B1) — approved for the Actor
+
+1. **must-fix (leak) — a subscribe refused before the core holds its listener still retains it** —
+   `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs` `SettleListener` (~646-690) and the sync / async callers.
+   Since the row 431 fix every listener subscribe whose native call was made and failed retains its registration until
+   a later successful subscribe or the consumer's destruction, also when the core refused it before the listener reached
+   `SubscriptionState`: closed / bootstrap fatal (`async_kafka_consumer.rs` ~4823, ~4880), missing `group.id` (~4881,
+   ~4943), blank topic (~4889-4895), empty pattern (~4944-4946), concurrent use (FFI acquire,
+   `rust/src/ffi/consumer/mod.rs` ~326-333). Retries pile up; without `group.id` only `Dispose` frees them.
+   **Fix (row 437 B1):** for a listener-bearing subscribe whose native call was made and failed, classify by the FFI
+   error id: `LocalIllegalArgument`, `InvalidGroupId` or `LocalConcurrentModification` → release the new registration at
+   once and change nothing else (the previous one stays current, the retained list unchanged); every other failure keeps
+   row 431's rule (the new one becomes current, the replaced one is retained) — `LocalIllegalState` (mutually-exclusive
+   refusal, closed, a caught panic), `Timeout`, a bare `KafkaException`, a dropped completion sender, anything unknown.
+   Success, a never-made call and row 436's empty-topic case are unchanged (where A1 and B1 overlap the outcome is the
+   same). Verify first that each of the three ids is raised only before `register_rebalance_listener`, on the real
+   consumer and the mock, sync and `_cb`, and that nothing after registration returns one; if not, STOP and do not ship
+   B1. Use the binding's generated ids/constants, no hard-coded numbers where a constant exists.
+
+   Resolved in 65862879 / 840216d4.
