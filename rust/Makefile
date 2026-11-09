@@ -209,8 +209,8 @@ test-integration-grpc-c-native:
 # python arms -- so one target covers both dotnet gRPC images. To run only the
 # sync backend, add `--skip __grpc_dotnet_async`.
 #
-# FIVE TESTS ARE SKIPPED FOR .NET ONLY, on both .NET arms -- three producer
-# transaction tests and two consumer pattern-subscribe tests.
+# THREE TESTS ARE SKIPPED FOR .NET ONLY, on both .NET arms -- the three producer
+# transaction tests.
 #
 # The producer transaction tests.
 # `multilanguage_test!` emits one arm per backend for every test it wraps, so the
@@ -223,23 +223,12 @@ test-integration-grpc-c-native:
 # so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
 # yet (dotnet/CLAUDE.md §1).
 #
-# The consumer pattern-subscribe tests. test_ml_subscribe_pattern_and_consume and
-# test_ml_pattern_listener_logs_assigned_and_revoked
-# (tests/integration/multilanguage_consumer_test.rs) subscribe with a
-# SubscriptionPattern, which the .NET consumer does not have yet, so both
-# consumer servicers answer a pattern Subscribe with -31
-# (LOCAL_UNSUPPORTED_OPERATION) instead of subscribing to no topic.
-#
 # The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the two
 # dotnet targets below (test-integration-grpc-dotnet, which the root
 # test-integration-dotnet and its -ssl / -sasl-ssl variants reach through dotnet/'s
 # test-integration, and test-integration-grpc-dotnet-native), which only ever run
 # __grpc_dotnet*, so no other backend loses coverage: python / c / rust still run
-# all five.
-#
-# REMOVE the two pattern skips when pattern subscribe lands in the .NET binding
-# (ledger row 148: Subscribe(SubscriptionPattern), with and without a listener)
-# and both consumer servicers subscribe with it.
+# all three.
 #
 # REMOVE the three transaction skips when the
 # .NET producer reaches transaction parity with Python (the 10 transaction
@@ -248,14 +237,12 @@ test-integration-grpc-c-native:
 # producer servicers, whose SendOffsetsToTransaction must read the group metadata
 # by id from the GroupMetadataStore that the consumer servicers' GroupMetadata
 # RPC fills, as Python's does). Deleting them is the last step of that phase, not
-# a follow-up to it. With all five gone, remove DOTNET_GRPC_SKIPS (the definition
+# a follow-up to it. With all three gone, remove DOTNET_GRPC_SKIPS (the definition
 # below and its uses in test-integration-grpc-dotnet and
 # test-integration-grpc-dotnet-native).
 DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
 	--skip test_aborted_transaction_records_are_discarded \
-	--skip test_consume_transform_produce_with_offsets \
-	--skip test_ml_subscribe_pattern_and_consume \
-	--skip test_ml_pattern_listener_logs_assigned_and_revoked
+	--skip test_consume_transform_produce_with_offsets
 
 test-integration-grpc-dotnet:
 	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \

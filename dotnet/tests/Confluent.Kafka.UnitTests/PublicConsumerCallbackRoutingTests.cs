@@ -90,6 +90,8 @@ public sealed class PublicConsumerCallbackRoutingTests
 
     private static readonly string[] s_topics = { Topic };
 
+    private static readonly SubscriptionPattern s_pattern = new SubscriptionPattern(Topic + ".*");
+
     public static IEnumerable<object[]> Vehicles() => new[]
     {
         new object[] { "KafkaConsumer, a commit callback" },
@@ -633,7 +635,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     {
         foreach (string vehicle in new[] { "KafkaConsumer, a commit callback", "AsyncKafkaConsumer, a commit callback" })
         {
-            foreach (string call in new[] { "assign", "subscribe", "subscription", "unsubscribe", "poll", "close" })
+            foreach (string call in new[] { "assign", "subscribe", "subscribe_pattern", "subscription", "unsubscribe", "poll", "close" })
             {
                 yield return new object[] { vehicle, call };
             }
@@ -718,6 +720,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             {
                 "assign" => Call(() => sync.Assign(s_partitions)),
                 "subscribe" => Call(() => sync.Subscribe(s_topics)),
+                "subscribe_pattern" => Call(() => sync.Subscribe(s_pattern)),
                 "subscription" => Call(() => Format(sync.Subscription())),
                 "unsubscribe" => Call(sync.Unsubscribe),
                 "poll" => Call(() => sync.Poll(TimeSpan.Zero)),
@@ -730,6 +733,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         {
             "assign" => CallAsync(() => async.Assign(s_partitions)),
             "subscribe" => CallAsync(() => async.Subscribe(s_topics)),
+            "subscribe_pattern" => CallAsync(() => async.Subscribe(s_pattern)),
             "subscription" => Call(() => Format(async.Subscription())),
             "unsubscribe" => CallAsync(() => async.Unsubscribe()),
             "poll" => CallAsync(() => async.Poll(TimeSpan.Zero)),
@@ -841,6 +845,8 @@ public sealed class PublicConsumerCallbackRoutingTests
             "Poll(negative): throws IllegalArgumentException: Invalid negative timeout -1",
             "Subscribe: " + refused,
             "Subscribe(listener): " + refused,
+            "Subscribe(pattern): " + refused,
+            "Subscribe(pattern, listener): " + refused,
             "Unsubscribe: " + refused,
             "Assign: " + refused,
             "Commit(timeout): ok",
@@ -923,6 +929,8 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Poll(negative)", Call(() => consumer.Poll(s_negative)));
         Add("Subscribe", Call(() => consumer.Subscribe(s_topics)));
         Add("Subscribe(listener)", Call(() => consumer.Subscribe(s_topics, new SyncListener(() => { }))));
+        Add("Subscribe(pattern)", Call(() => consumer.Subscribe(s_pattern)));
+        Add("Subscribe(pattern, listener)", Call(() => consumer.Subscribe(s_pattern, new SyncListener(() => { }))));
         Add("Unsubscribe", Call(consumer.Unsubscribe));
         Add("Assign", Call(() => consumer.Assign(s_partitions)));
         Add("Commit(timeout)", Call(() => consumer.Commit(s_second)));
@@ -971,6 +979,8 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Poll(negative)", CallAsync(() => consumer.Poll(s_negative)));
         Add("Subscribe", CallAsync(() => consumer.Subscribe(s_topics)));
         Add("Subscribe(listener)", CallAsync(() => consumer.Subscribe(s_topics, new SyncListener(() => { }))));
+        Add("Subscribe(pattern)", CallAsync(() => consumer.Subscribe(s_pattern)));
+        Add("Subscribe(pattern, listener)", CallAsync(() => consumer.Subscribe(s_pattern, new SyncListener(() => { }))));
         Add("Unsubscribe", CallAsync(() => consumer.Unsubscribe()));
         Add("Assign", CallAsync(() => consumer.Assign(s_partitions)));
         Add("Commit(timeout)", CallAsync(() => consumer.Commit(s_second)));

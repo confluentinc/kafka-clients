@@ -80,6 +80,10 @@ public sealed class PublicConsumerCheckOrderTests
 
     private static readonly IAsyncConsumerRebalanceListener s_asyncListener = new NoOpAsyncListener();
 
+    private static readonly SubscriptionPattern s_nullPattern = new SubscriptionPattern(null!);
+
+    private static readonly SubscriptionPattern s_nulPattern = new SubscriptionPattern("pay\0ments-.*");
+
     public static IEnumerable<object[]> RealConsumers() => new[]
     {
         new object[] { "KafkaConsumer" },
@@ -271,9 +275,26 @@ public sealed class PublicConsumerCheckOrderTests
         object consumer = Create(kind, groupId: false);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
-        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe(null!), c => c.Subscribe(null!)));
+        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe((IReadOnlyCollection<string>)null!), c => c.Subscribe((IReadOnlyCollection<string>)null!)));
         AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe(new string[] { null! }), c => c.Subscribe(new string[] { null! })));
-        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe(null!, s_listener), c => c.Subscribe(null!, s_asyncListener)));
+        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe((IReadOnlyCollection<string>)null!, s_listener), c => c.Subscribe((IReadOnlyCollection<string>)null!, s_asyncListener)));
+    }
+
+    // Java's subscribeToRegex runs throwIfGroupIdNotDefined() before it checks the pattern.
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public void WithoutAGroupId_SubscribeToANullPattern_ReportsTheGroupIdFirst(string kind)
+    {
+        object consumer = Create(kind, groupId: false);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+
+        Dictionary<string, Exception?> seen = AsyncOnly(consumer, NullPatternCalls(consumer), NullAsyncPatternCalls());
+
+        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 9 : 6, seen.Count);
+        foreach (KeyValuePair<string, Exception?> call in seen)
+        {
+            AssertGroupIdNotDefined(call.Value);
+        }
     }
 
     [Theory]
@@ -433,6 +454,36 @@ public sealed class PublicConsumerCheckOrderTests
             Assert.True(
                 call.Value is IllegalStateException { Message: "This consumer has already been closed." },
                 call.Key + ": " + call.Value);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public void OnAClosedConsumer_ANullPattern_ReportsTheClosedConsumerFirst(string kind)
+    {
+        object consumer = Create(kind, groupId: true);
+        TestTimeout.Dispose((IDisposable)consumer);
+
+        Dictionary<string, Exception?> seen = AsyncOnly(consumer, NullPatternCalls(consumer), NullAsyncPatternCalls());
+
+        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 9 : 6, seen.Count);
+        foreach (KeyValuePair<string, Exception?> call in seen)
+        {
+            Assert.True(call.Value is IllegalStateException { Message: ClosedMessage }, call.Key + ": " + call.Value);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public async Task WhileAnotherThreadIsInside_ANullPattern_ReportsTheConcurrentAccess(string kind)
+    {
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+            AsyncOnly(consumer, NullPatternCalls(consumer), NullAsyncPatternCalls()));
+
+        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 9 : 6, seen.Count);
+        foreach (KeyValuePair<string, Exception?> call in seen)
+        {
+            AssertConcurrent(call.Key, call.Value);
         }
     }
 
@@ -691,8 +742,8 @@ public sealed class PublicConsumerCheckOrderTests
     private static Dictionary<string, Exception?> NullSubscribeAndAssignCalls(object consumer) =>
         Calls(consumer, new Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)>
         {
-            ["Subscribe(null)"] = (c => c.Subscribe(null!), c => c.Subscribe(null!)),
-            ["Subscribe(null, listener)"] = (c => c.Subscribe(null!, s_listener), c => c.Subscribe(null!, s_listener)),
+            ["Subscribe(null)"] = (c => c.Subscribe((IReadOnlyCollection<string>)null!), c => c.Subscribe((IReadOnlyCollection<string>)null!)),
+            ["Subscribe(null, listener)"] = (c => c.Subscribe((IReadOnlyCollection<string>)null!, s_listener), c => c.Subscribe((IReadOnlyCollection<string>)null!, s_listener)),
             ["Subscribe(empty topic)"] = (c => c.Subscribe(new[] { string.Empty }), c => c.Subscribe(new[] { string.Empty })),
             ["Assign(null)"] = (c => c.Assign(null!), c => c.Assign(null!)),
             ["Assign(null topic)"] = (
@@ -702,7 +753,31 @@ public sealed class PublicConsumerCheckOrderTests
     private static Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>> NullAsyncSubscribeCalls() =>
         new Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>>
         {
-            ["Subscribe(null, async listener)"] = c => c.Subscribe(null!, s_asyncListener),
+            ["Subscribe(null, async listener)"] = c => c.Subscribe((IReadOnlyCollection<string>)null!, s_asyncListener),
+        };
+
+    // Java's KafkaConsumer checks the pattern after acquireAndEnsureOpen() and the group.id check; the listener is
+    // checked before them, so these calls give a listener.
+    private static Dictionary<string, Exception?> NullPatternCalls(object consumer) =>
+        Calls(consumer, new Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)>
+        {
+            ["Subscribe(null pattern)"] = (c => c.Subscribe((SubscriptionPattern)null!), c => c.Subscribe((SubscriptionPattern)null!)),
+            ["Subscribe(null pattern, listener)"] = (
+                c => c.Subscribe((SubscriptionPattern)null!, s_listener), c => c.Subscribe((SubscriptionPattern)null!, s_listener)),
+            ["Subscribe(null text)"] = (c => c.Subscribe(s_nullPattern), c => c.Subscribe(s_nullPattern)),
+            ["Subscribe(null text, listener)"] = (
+                c => c.Subscribe(s_nullPattern, s_listener), c => c.Subscribe(s_nullPattern, s_listener)),
+            ["Subscribe(NUL text)"] = (c => c.Subscribe(s_nulPattern), c => c.Subscribe(s_nulPattern)),
+            ["Subscribe(NUL text, listener)"] = (
+                c => c.Subscribe(s_nulPattern, s_listener), c => c.Subscribe(s_nulPattern, s_listener)),
+        });
+
+    private static Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>> NullAsyncPatternCalls() =>
+        new Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>>
+        {
+            ["Subscribe(null pattern, async listener)"] = c => c.Subscribe((SubscriptionPattern)null!, s_asyncListener),
+            ["Subscribe(null text, async listener)"] = c => c.Subscribe(s_nullPattern, s_asyncListener),
+            ["Subscribe(NUL text, async listener)"] = c => c.Subscribe(s_nulPattern, s_asyncListener),
         };
 
     private static Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>> NullAsyncCallbackCalls() =>

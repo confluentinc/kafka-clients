@@ -79,6 +79,13 @@ internal sealed partial class NativeConsumer
     private delegate void NativeMockPartitionsCb(
         IntPtr mock, IntPtr partitions, NativeMethods.ConsumerVoidCallback cb, IntPtr opaque);
 
+    private delegate void NativeSubscribeWithListenerCb(
+        SafeConsumerHandle consumer,
+        IntPtr subscription,
+        IntPtr listener,
+        NativeMethods.ConsumerVoidCallback cb,
+        IntPtr opaque);
+
     // Only the operations Java's wakeup() interrupts are woken by a cancel: a wakeup any other operation leaves
     // unconsumed would fail the next wakeable call.
     internal static bool IsWakeable(AsyncOperation operation) =>
@@ -127,6 +134,44 @@ internal sealed partial class NativeConsumer
             topics, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
     }
 
+    internal Task SubscribeWithCallback(
+        SubscriptionPattern pattern,
+        CancellationToken cancellationToken = default)
+    {
+        string patternText = SnapshotPattern(pattern);
+        RefuseInsideACallback();
+        return Finish(
+            Submit(
+                cancellationToken,
+                s_void,
+                (arguments, opaque) =>
+                    NativeMethods.ConsumerSubscribeWithPatternCb(
+                        _handle, arguments.SubscriptionPattern(patternText), ConsumerCompletion.Void, opaque),
+                failed => SettleListener(null, !failed)),
+            AsyncOperation.Subscribe,
+            cancellationToken);
+    }
+
+    internal Task SubscribeWithCallback(
+        SubscriptionPattern pattern,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default)
+    {
+        RequireListener(listener);
+        return SubscribeWithRegistration(
+            pattern, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
+    }
+
+    internal Task SubscribeWithCallback(
+        SubscriptionPattern pattern,
+        IAsyncConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default)
+    {
+        RequireListener(listener);
+        return SubscribeWithRegistration(
+            pattern, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
+    }
+
     internal Task RebalanceWithCallback(IReadOnlyCollection<TopicPartition> newAssignment) =>
         RunMockPartitions(
             newAssignment, nameof(newAssignment), NativeMethods.MockConsumerRebalanceCb, AsyncOperation.Rebalance);
@@ -144,6 +189,32 @@ internal sealed partial class NativeConsumer
         CancellationToken cancellationToken)
     {
         string[] snapshot = CheckAfterAcquire(() => SnapshotTopics(topics));
+        return SubscribeWithRegistration(
+            arguments => arguments.StringList(snapshot),
+            NativeMethods.ConsumerSubscribeWithTopicsListenerCb,
+            root,
+            cancellationToken);
+    }
+
+    private Task SubscribeWithRegistration(
+        SubscriptionPattern pattern,
+        Func<ListenerRegistration> root,
+        CancellationToken cancellationToken)
+    {
+        string patternText = SnapshotPattern(pattern);
+        return SubscribeWithRegistration(
+            arguments => arguments.SubscriptionPattern(patternText),
+            NativeMethods.ConsumerSubscribeWithPatternListenerCb,
+            root,
+            cancellationToken);
+    }
+
+    private Task SubscribeWithRegistration(
+        Func<NativeCallArguments, IntPtr> subscription,
+        NativeSubscribeWithListenerCb subscribe,
+        Func<ListenerRegistration> root,
+        CancellationToken cancellationToken)
+    {
         RefuseInsideACallback();
         ListenerRegistration? registration = null;
         ConsumerCompletion<bool> completion;
@@ -154,13 +225,12 @@ internal sealed partial class NativeConsumer
                 s_void,
                 (arguments, opaque) =>
                 {
-                    IntPtr list = arguments.StringList(snapshot);
+                    IntPtr nativeSubscription = subscription(arguments);
                     registration = root();
                     IntPtr listenerHandle = registration.NewHandle();
                     try
                     {
-                        NativeMethods.ConsumerSubscribeWithTopicsListenerCb(
-                            _handle, list, listenerHandle, ConsumerCompletion.Void, opaque);
+                        subscribe(_handle, nativeSubscription, listenerHandle, ConsumerCompletion.Void, opaque);
                     }
                     finally
                     {

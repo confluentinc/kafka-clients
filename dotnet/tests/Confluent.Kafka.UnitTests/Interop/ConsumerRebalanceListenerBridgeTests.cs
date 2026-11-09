@@ -272,6 +272,35 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     [Fact]
+    public void ReplacingListenerlessPatternSubscribe_ReleasesTheRegistration()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Subscribe(new SubscriptionPattern("t.*"), new RecordingListener());
+        ListenerRegistration registration = consumer.CurrentListenerRegistration!;
+        Assert.False(registration.IsReleased);
+
+        consumer.Subscribe(new SubscriptionPattern("t.*"));
+
+        Assert.True(registration.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
+    }
+
+    [Fact]
+    public async Task ReplacingListenerlessAsyncPatternSubscribe_ReleasesTheRegistration()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await consumer.SubscribeWithCallback(new SubscriptionPattern("t.*"), new RecordingListener());
+        ListenerRegistration registration = consumer.CurrentListenerRegistration!;
+
+        await consumer.SubscribeWithCallback(new SubscriptionPattern("t.*"));
+
+        Assert.True(registration.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
+    }
+
+    [Fact]
     public void ReplacingListenerSubscribe_ReleasesTheOldRegistrationOnly()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();

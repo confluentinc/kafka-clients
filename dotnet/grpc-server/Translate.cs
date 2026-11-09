@@ -76,8 +76,6 @@ internal static class Translate
         return result;
     }
 
-    internal const string PatternSubscribeUnsupported = "pattern subscribe is not supported by the .NET binding yet";
-
     internal static TimeSpan? ConsumerTimeout(bool hasTimeoutMs, long timeoutMs) =>
         hasTimeoutMs ? TimeSpan.FromMilliseconds(timeoutMs) : null;
 
