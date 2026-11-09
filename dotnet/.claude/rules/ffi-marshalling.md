@@ -2528,9 +2528,10 @@ The C shapes (BH at `25a4d475`):
     setter (`TimeoutMs(int?)` beside the getter `TimeoutMs()`, ledger 366) records, in private
     state, that it ran; the managed starting value feeds only the getter. The RPC copies the C options during the call (BH,
     `kafka_admin_Admin_create_topics_with_options`), and the binding destroys them right after it.
-    A setter whose Java form takes a primitive (`DescribeFeaturesOptions.NodeId(int?)`,
-    `DescribeProducersOptions.BrokerId(int?)`) throws `ArgumentNullException` for `null`, as Python's
-    `TypeError`, and records nothing (ledger 181).
+    A setter whose Java form takes a primitive takes the C# primitive
+    (`DescribeFeaturesOptions.NodeId(int)`, `DescribeProducersOptions.BrokerId(int)`), so a `null`
+    does not compile, as it does not in Java; the getter of an `OptionalInt` is `int?` (ledger 181,
+    amended).
   - **Teardown** (decision 7): `dotnet/CLAUDE.md` §4 **Close/Dispose**. `Close()`, `Dispose` and
     `DisposeAsync` call `kafka_admin_Admin_close_cb`, which waits without a limit, as Java's
     `close()`. `Close(TimeSpan)` calls `kafka_admin_Admin_close_with_timeout_cb`. On
@@ -2583,8 +2584,8 @@ lag and no drain-thread guard (decision 8).
     delivery then issues one `get_cb` per inner future, and the futures the read returned are the
     ones the delivery completes.
   - An RPC whose Options had no setter run sends the core's defaults. A setter run twice sends its
-    last value. `DescribeFeatures` without `NodeId(int?)` run sends no node id.
-  - Calling `NodeId(null)` or `BrokerId(null)` throws and leaves the field unset.
+    last value. `DescribeFeatures` without `NodeId(int)` run sends no node id.
+  - `NodeId` and `BrokerId` take Java's `int`; unset, the getter reads `null` and no setter is recorded.
   - After every map future's delivery has run, the map is destroyed once; a map future's `IsDone()`
     before its delivery answers from the handle.
   - A client destroyed with pending futures settles each of them and releases every future
