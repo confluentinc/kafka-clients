@@ -67,8 +67,8 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
             IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(() => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>
                 {
-                    ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
-                    [name] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    ["metadata.version"] = new FeatureUpdate(1, UpgradeType.UPGRADE),
+                    [name] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 },
                 options: null));
 
@@ -91,8 +91,8 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         Dictionary<string, FeatureUpdate> updates =
             new Dictionary<string, FeatureUpdate>(ReferenceComparer.Instance)
             {
-                [first] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
-                [second] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.UPGRADE),
+                [first] = new FeatureUpdate(1, UpgradeType.UPGRADE),
+                [second] = new FeatureUpdate(2, UpgradeType.UPGRADE),
             };
         Assert.Equal(2, updates.Count);
 

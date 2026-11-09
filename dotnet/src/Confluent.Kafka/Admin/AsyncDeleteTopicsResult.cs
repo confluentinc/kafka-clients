@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Admin;
 /// by whichever identifier the request used.
 /// </summary>
 /// <remarks>
-/// Exactly one of <see cref="TopicIdValues"/> and <see cref="TopicNameValues"/> is non-null, as in
+/// Exactly one of <see cref="TopicIdValues()"/> and <see cref="TopicNameValues()"/> is non-null, as in
 /// Java; the other is <see langword="null"/>, not an empty dictionary.
 /// </remarks>
 /// <seealso cref="DeleteTopicsResult"/>
@@ -75,18 +75,20 @@ public sealed class AsyncDeleteTopicsResult
     /// One future per requested topic id, or <see langword="null"/> if the request used topic
     /// names — Java's <c>topicIdValues()</c>.
     /// </summary>
+    /// <returns>One future per requested topic id, or <see langword="null"/> if the request used topic
+    /// names.</returns>
     /// <remarks>
     /// A topic's future completes when the topic was deleted; a topic that failed faults only its
     /// own future.
     /// </remarks>
-    public IReadOnlyDictionary<Uuid, AsyncKafkaFuture>? TopicIdValues => _topicIdValues;
+    public IReadOnlyDictionary<Uuid, AsyncKafkaFuture>? TopicIdValues() => _topicIdValues;
 
     /// <summary>
     /// One future per requested topic name, or <see langword="null"/> if the request
     /// used topic <em>ids</em> — Java's <c>topicNameValues()</c>.
     /// </summary>
-    /// <inheritdoc cref="TopicIdValues" path="/remarks"/>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture>? TopicNameValues => _topicNameValues;
+    /// <inheritdoc cref="TopicIdValues()" path="/remarks"/>
+    public IReadOnlyDictionary<string, AsyncKafkaFuture>? TopicNameValues() => _topicNameValues;
 
     /// <summary>
     /// Completes when every topic has been deleted, and faults with the first failure if any

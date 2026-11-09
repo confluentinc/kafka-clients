@@ -45,7 +45,7 @@ internal static class PartitionInfoMarshal
             CopyOutNodes(info, NativeMethods.PartitionInfoOfflineReplicas));
     }
 
-    private static IReadOnlyList<Node> CopyOutNodes(IntPtr info, NodeListAccessor accessor)
+    private static Node[] CopyOutNodes(IntPtr info, NodeListAccessor accessor)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr list = accessor(info, ref outErr);
@@ -65,7 +65,7 @@ internal static class PartitionInfoMarshal
                 }
             }
 
-            return nodes;
+            return nodes.ToArray();
         }
         finally
         {

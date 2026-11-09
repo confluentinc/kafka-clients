@@ -22,26 +22,34 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 public sealed class OffsetAndTimestamp
 {
+    private readonly long _offset;
+    private readonly long _timestamp;
+    private readonly int? _leaderEpoch;
+
     internal OffsetAndTimestamp(long offset, long timestamp, int? leaderEpoch)
     {
-        Offset = offset;
-        Timestamp = timestamp;
-        LeaderEpoch = leaderEpoch;
+        _offset = offset;
+        _timestamp = timestamp;
+        _leaderEpoch = leaderEpoch;
     }
 
-    /// <summary>The offset of the first record at or after <see cref="Timestamp"/>.</summary>
-    public long Offset { get; }
+    /// <summary>The offset of the first record at or after <see cref="Timestamp()"/>.</summary>
+    /// <returns>The offset of the first record at or after <see cref="Timestamp()"/>.</returns>
+    public long Offset() => _offset;
 
     /// <summary>
     /// The timestamp the offset was resolved from, in milliseconds since the Unix epoch.
     /// </summary>
-    public long Timestamp { get; }
+    /// <returns>The timestamp the offset was resolved from, in milliseconds since the Unix epoch.</returns>
+    public long Timestamp() => _timestamp;
 
     /// <summary>
-    /// The leader epoch of the record at <see cref="Offset"/>, or <see langword="null"/>
+    /// The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/>
     /// when absent (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
     /// </summary>
-    public int? LeaderEpoch { get; }
+    /// <returns>The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when
+    /// absent.</returns>
+    public int? LeaderEpoch() => _leaderEpoch;
 
     /// <summary>
     /// Returns a debug string of the form
@@ -51,7 +59,7 @@ public sealed class OffsetAndTimestamp
         string.Format(
             CultureInfo.InvariantCulture,
             "OffsetAndTimestamp{{offset={0}, timestamp={1}, leaderEpoch={2}}}",
-            Offset,
-            Timestamp,
-            LeaderEpoch is null ? "null" : LeaderEpoch.Value.ToString(CultureInfo.InvariantCulture));
+            _offset,
+            _timestamp,
+            _leaderEpoch is null ? "null" : _leaderEpoch.Value.ToString(CultureInfo.InvariantCulture));
 }

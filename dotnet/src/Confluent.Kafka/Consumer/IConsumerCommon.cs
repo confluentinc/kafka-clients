@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Consumer;
 /// <see cref="IAsyncConsumer{TKey, TValue}"/>, so both flavors carry them with the same signatures.
 /// </summary>
 /// <remarks>
-/// The state reads are methods, not properties, as in Java: each crosses into the core, can throw, and returns a
+/// The state reads are methods, as in Java: each crosses into the core, can throw, and returns a
 /// new copy. A Java <c>Set</c> is returned as an <see cref="IReadOnlyCollection{T}"/>, since
 /// <c>IReadOnlySet</c> is not on netstandard2.0.
 /// </remarks>
@@ -107,7 +107,7 @@ public interface IConsumerCommon
     /// metrics()</c>), keyed by <see cref="MetricName"/>.
     /// </summary>
     /// <remarks>
-    /// Each <see cref="IMetric.Value"/> was measured once, by this call; the entries do not measure again. Keys
+    /// Each <see cref="IMetric.MetricValue()"/> was measured once, by this call; the entries do not measure again. Keys
     /// compare by name, group and tags, not description, so per-partition metrics that share a name are distinct
     /// keys. As Java's <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, another thread's call does not
     /// refuse it on <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/>; the

@@ -52,7 +52,8 @@ public sealed class AsyncAlterUserScramCredentialsResult
     internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>One future per requested user — Java's <c>values()</c>.</summary>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
+    /// <returns>One future per requested user.</returns>
+    public IReadOnlyDictionary<string, AsyncKafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every user's alteration has been applied, and faults with the first failure to complete if

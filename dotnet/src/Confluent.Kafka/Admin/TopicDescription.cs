@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="AuthorizedOperations"/> is <see langword="null"/> when the operations are not
+/// <see cref="AuthorizedOperations()"/> is <see langword="null"/> when the operations are not
 /// known (the broker was not asked, or did not answer), and empty when the broker answered that
 /// none is authorized, as Java's accessor.
 /// </para>
@@ -40,6 +40,9 @@ public sealed class TopicDescription
 {
     private readonly List<TopicPartitionInfo> _partitions;
     private readonly List<AclOperation>? _authorizedOperations;
+    private readonly string _name;
+    private readonly bool _isInternal;
+    private readonly Uuid _topicId;
 
     /// <summary>
     /// Creates a description with an empty authorized-operations set and
@@ -107,43 +110,49 @@ public sealed class TopicDescription
             throw new ArgumentNullException(nameof(partitions));
         }
 
-        Name = name ?? throw new ArgumentNullException(nameof(name));
-        IsInternal = isInternal;
+        _name = name ?? throw new ArgumentNullException(nameof(name));
+        _isInternal = isInternal;
         _partitions = new List<TopicPartitionInfo>(partitions);
 
         _authorizedOperations =
             authorizedOperations is null ? null : new List<AclOperation>(authorizedOperations);
-        TopicId = topicId;
+        _topicId = topicId;
     }
 
     /// <summary>The topic name — Java's <c>name()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The topic name.</returns>
+    public string Name() => _name;
 
     /// <summary>
     /// Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>) —
     /// Java's <c>isInternal()</c>.
     /// </summary>
-    public bool IsInternal { get; }
+    /// <returns>Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>).</returns>
+    public bool IsInternal() => _isInternal;
 
     /// <summary>The topic id — Java's <c>topicId()</c>.</summary>
-    public Uuid TopicId { get; }
+    /// <returns>The topic id.</returns>
+    public Uuid TopicId() => _topicId;
 
     /// <summary>
     /// One entry per partition, where the index is the partition id — Java's
     /// <c>partitions()</c>.
     /// </summary>
-    public IReadOnlyList<TopicPartitionInfo> Partitions => _partitions;
+    /// <returns>One entry per partition, where the index is the partition id.</returns>
+    public IReadOnlyList<TopicPartitionInfo> Partitions() => _partitions;
 
     /// <summary>
     /// The operations the caller is authorized to perform on this topic, or
     /// <see langword="null"/> when they are not known — Java's <c>authorizedOperations()</c>.
     /// An empty collection means they were reported and none is authorized.
     /// </summary>
+    /// <returns>The operations the caller is authorized to perform on this topic, or <see langword="null"/> when
+    /// they are not known.</returns>
     /// <remarks>
     /// A collection, where Java returns a <c>Set</c>: <c>IReadOnlySet&lt;T&gt;</c> post-dates
     /// netstandard2.0.
     /// </remarks>
-    public IReadOnlyCollection<AclOperation>? AuthorizedOperations => _authorizedOperations;
+    public IReadOnlyCollection<AclOperation>? AuthorizedOperations() => _authorizedOperations;
 
     /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
@@ -151,8 +160,8 @@ public sealed class TopicDescription
         string.Format(
             CultureInfo.InvariantCulture,
             "(name={0}, internal={1}, partitions={2}, authorizedOperations={3})",
-            Name,
-            IsInternal ? "true" : "false",
+            Name(),
+            IsInternal() ? "true" : "false",
             string.Join(",", _partitions.Select(static partition => partition.ToString())),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]");
 }

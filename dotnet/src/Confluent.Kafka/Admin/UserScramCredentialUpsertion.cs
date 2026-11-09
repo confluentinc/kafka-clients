@@ -24,23 +24,25 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A null <see cref="Salt"/> asks the core to generate a random salt, as Java's salt-generating
-/// constructors do; any other salt, a zero-length one included, is used verbatim. The binding
-/// generates no salt itself.
+/// The three-argument constructors generate a random salt, as Java's do; the binding asks the
+/// core for it (the core's salt-generating constructor) and generates none itself. An explicit
+/// salt, a zero-length one included, is used verbatim. <see cref="Salt()"/> is never
+/// <see langword="null"/>, as in Java.
 /// </para>
 /// <para>
-/// <see cref="Password"/> and <see cref="Salt"/> are secret material: neither is logged, traced or
+/// <see cref="Password()"/> and <see cref="Salt()"/> are secret material: neither is logged, traced or
 /// put in an exception message, and <c>ToString()</c> is not overridden, as in Java.
 /// </para>
 /// </remarks>
 public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
 {
     private readonly byte[] _password;
-    private readonly byte[]? _salt;
+    private readonly byte[] _salt;
+    private readonly ScramCredentialInfo _credentialInfo;
 
     /// <summary>
-    /// Creates an upsertion whose salt the core generates — Java's constructor taking the
-    /// password as a <c>String</c>.
+    /// Creates an upsertion with a random salt — Java's constructor taking the password as a
+    /// <c>String</c>.
     /// </summary>
     /// <param name="user">The user.</param>
     /// <param name="credentialInfo">The mechanism and iteration count.</param>
@@ -55,15 +57,15 @@ public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
     }
 
     /// <summary>
-    /// Creates an upsertion whose salt the core generates — Java's constructor taking the
-    /// password as a <c>byte[]</c>.
+    /// Creates an upsertion with a random salt — Java's constructor taking the password as a
+    /// <c>byte[]</c>.
     /// </summary>
     /// <param name="user">The user.</param>
     /// <param name="credentialInfo">The mechanism and iteration count.</param>
     /// <param name="password">The password bytes.</param>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     public UserScramCredentialUpsertion(string user, ScramCredentialInfo credentialInfo, byte[] password)
-        : this(user, credentialInfo, password, null)
+        : this(user, credentialInfo, password, UserScramCredentialMarshal.GenerateSalt(user, credentialInfo, password))
     {
     }
 
@@ -71,32 +73,29 @@ public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
     /// <param name="user">The user.</param>
     /// <param name="credentialInfo">The mechanism and iteration count.</param>
     /// <param name="password">The password bytes.</param>
-    /// <param name="salt">
-    /// The salt, used verbatim, a zero-length one included; <see langword="null"/> asks the core
-    /// to generate one.
-    /// </param>
+    /// <param name="salt">The salt, used verbatim, a zero-length one included.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="user"/>, <paramref name="credentialInfo"/> or <paramref name="password"/>
-    /// is null.
+    /// <paramref name="user"/>, <paramref name="credentialInfo"/>, <paramref name="password"/> or
+    /// <paramref name="salt"/> is null.
     /// </exception>
     public UserScramCredentialUpsertion(
-        string user, ScramCredentialInfo credentialInfo, byte[] password, byte[]? salt)
+        string user, ScramCredentialInfo credentialInfo, byte[] password, byte[] salt)
         : base(user)
     {
-        CredentialInfo = credentialInfo ?? throw new ArgumentNullException(nameof(credentialInfo));
+        _credentialInfo = credentialInfo ?? throw new ArgumentNullException(nameof(credentialInfo));
         _password = password ?? throw new ArgumentNullException(nameof(password));
-        _salt = salt;
+        _salt = salt ?? throw new ArgumentNullException(nameof(salt));
     }
 
     /// <summary>The mechanism and iteration count — Java's <c>credentialInfo()</c>.</summary>
-    public ScramCredentialInfo CredentialInfo { get; }
+    /// <returns>The mechanism and iteration count.</returns>
+    public ScramCredentialInfo CredentialInfo() => _credentialInfo;
 
-    /// <summary>
-    /// The explicit salt, or <see langword="null"/> to have the core generate one — Java's
-    /// <c>salt()</c>. Secret material: never log it.
-    /// </summary>
-    public byte[]? Salt => _salt;
+    /// <summary>The salt — Java's <c>salt()</c>. Secret material: never log it.</summary>
+    /// <returns>The salt.</returns>
+    public byte[] Salt() => _salt;
 
     /// <summary>The password bytes — Java's <c>password()</c>. Secret material: never log it.</summary>
-    public byte[] Password => _password;
+    /// <returns>The password bytes.</returns>
+    public byte[] Password() => _password;
 }

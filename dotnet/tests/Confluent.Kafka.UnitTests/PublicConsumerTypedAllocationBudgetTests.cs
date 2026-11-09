@@ -74,7 +74,7 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
         byte[] value = new byte[valueSize];
 
         MockConsumer<byte[], int> consumer =
-            new MockConsumer<byte[], int>(Serdes.ByteArray, valueDeserializer);
+            new MockConsumer<byte[], int>(Serdes.ByteArray(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
@@ -91,10 +91,10 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
         ConsumerRecords<byte[], int> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetAllocatedBytesForCurrentThread();
 
-        Assert.Equal(recordCount, records.Count);
+        Assert.Equal(recordCount, records.Count());
         foreach (ConsumerRecord<byte[], int> record in records)
         {
-            Assert.Equal(valueSize, record.Value);
+            Assert.Equal(valueSize, record.Value());
         }
 
         return after - before;

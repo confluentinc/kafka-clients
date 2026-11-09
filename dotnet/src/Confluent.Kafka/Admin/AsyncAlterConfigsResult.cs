@@ -51,7 +51,8 @@ public sealed class AsyncAlterConfigsResult
     /// <summary>
     /// One future per requested resource, keyed by resource — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture> Values => _values;
+    /// <returns>One future per requested resource, keyed by resource.</returns>
+    public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every resource has been altered, and faults with the first failure if

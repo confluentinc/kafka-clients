@@ -62,11 +62,11 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(
-            new[] { broker, topic }, new DescribeConfigsOptions { TimeoutMs = CallTimeoutMs });
+            new[] { broker, topic }, new DescribeConfigsOptions().TimeoutMs(CallTimeoutMs));
 
-        Assert.Equal(2, result.Values.Count);
-        await AssertTimedOut(result.Values[broker].Get(), "describeConfigs");
-        await AssertTimedOut(result.Values[topic].Get(), "describeConfigs");
+        Assert.Equal(2, result.Values().Count);
+        await AssertTimedOut(result.Values()[broker].Get(), "describeConfigs");
+        await AssertTimedOut(result.Values()[topic].Get(), "describeConfigs");
     }
 
     [Theory]
@@ -80,11 +80,11 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
-            Alterations(broker, topic), new AlterConfigsOptions { TimeoutMs = CallTimeoutMs });
+            Alterations(broker, topic), new AlterConfigsOptions().TimeoutMs(CallTimeoutMs));
 
-        Assert.Equal(2, result.Values.Count);
-        await AssertTimedOut(result.Values[broker].Get(), "incrementalAlterConfigs");
-        await AssertTimedOut(result.Values[topic].Get(), "incrementalAlterConfigs");
+        Assert.Equal(2, result.Values().Count);
+        await AssertTimedOut(result.Values()[broker].Get(), "incrementalAlterConfigs");
+        await AssertTimedOut(result.Values()[topic].Get(), "incrementalAlterConfigs");
     }
 
     [Fact]
@@ -97,8 +97,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
 
-        await AssertInvalidRequest(result.Values[broker].Get(), "Broker x not found.");
-        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
+        await AssertInvalidRequest(result.Values()[broker].Get(), "Broker x not found.");
+        await TestTimeout.Run(() => result.Values()[topic].Get(), s_deadline);
     }
 
     [Fact]
@@ -111,8 +111,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { brokerLogger, topic });
 
-        await AssertNotSupported(result.Values[brokerLogger].Get(), NotImplemented);
-        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
+        await AssertNotSupported(result.Values()[brokerLogger].Get(), NotImplemented);
+        await TestTimeout.Run(() => result.Values()[topic].Get(), s_deadline);
     }
 
     [Fact]
@@ -125,8 +125,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
 
-        await AssertInvalidRequest(result.Values[broker].Get(), "no such broker as x");
-        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
+        await AssertInvalidRequest(result.Values()[broker].Get(), "no such broker as x");
+        await TestTimeout.Run(() => result.Values()[topic].Get(), s_deadline);
     }
 
     [Fact]
@@ -139,8 +139,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(brokerLogger, topic));
 
-        await AssertNotSupported(result.Values[brokerLogger].Get(), string.Empty);
-        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
+        await AssertNotSupported(result.Values()[brokerLogger].Get(), string.Empty);
+        await TestTimeout.Run(() => result.Values()[topic].Get(), s_deadline);
     }
 
     private static async Task AssertTimedOut(Task outcome, string call)

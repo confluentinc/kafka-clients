@@ -127,7 +127,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DescribeClientQuotas(
-                ClientQuotaFilter.All(), new DescribeClientQuotasOptions { TimeoutMs = -1 })));
+                ClientQuotaFilter.All(), new DescribeClientQuotasOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -159,5 +159,5 @@ public sealed class PublicAdminDescribeClientQuotasTests
 
     [Fact]
     public void Options_DefaultToJavasDefaults() =>
-        Assert.Null(new DescribeClientQuotasOptions().TimeoutMs);
+        Assert.Null(new DescribeClientQuotasOptions().TimeoutMs());
 }

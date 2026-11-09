@@ -84,7 +84,7 @@ public sealed class PublicAdminMockAdminClientTests
         Assert.Equal(MockAdminClient.DEFAULT_CLUSTER_ID, sync.DescribeCluster().ClusterId().Get(s_deadline));
         sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(s_deadline);
         Assert.Equal(
-            MockAdminClient.DEFAULT_LOG_DIRS, sync.DescribeLogDirs(new[] { 0 }).Descriptions[0].Get(s_deadline).Keys);
+            MockAdminClient.DEFAULT_LOG_DIRS, sync.DescribeLogDirs(new[] { 0 }).Descriptions()[0].Get(s_deadline).Keys);
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
@@ -94,7 +94,7 @@ public sealed class PublicAdminMockAdminClientTests
         await TestTimeout.Run(() => async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(), s_deadline);
         Assert.Equal(
             AsyncMockAdminClient.DEFAULT_LOG_DIRS,
-            (await TestTimeout.Run(() => async.DescribeLogDirs(new[] { 0 }).Descriptions[0].Get(), s_deadline)).Keys);
+            (await TestTimeout.Run(() => async.DescribeLogDirs(new[] { 0 }).Descriptions()[0].Get(), s_deadline)).Keys);
     }
 
     [Fact]
@@ -185,13 +185,13 @@ public sealed class PublicAdminMockAdminClientTests
 
         MockAdminClient sync = MockAdminClient.Create().DefaultReplicationFactor(65538).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        Config syncConfig = sync.DescribeConfigs(new[] { broker }).Values[broker].Get(s_deadline);
-        Assert.Equal("2", syncConfig.Get("default.replication.factor")?.Value);
+        Config syncConfig = sync.DescribeConfigs(new[] { broker }).Values()[broker].Get(s_deadline);
+        Assert.Equal("2", syncConfig.Get("default.replication.factor")?.Value());
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().DefaultReplicationFactor(65538).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        Config asyncConfig = await TestTimeout.Run(() => async.DescribeConfigs(new[] { broker }).Values[broker].Get(), s_deadline);
-        Assert.Equal("2", asyncConfig.Get("default.replication.factor")?.Value);
+        Config asyncConfig = await TestTimeout.Run(() => async.DescribeConfigs(new[] { broker }).Values()[broker].Get(), s_deadline);
+        Assert.Equal("2", asyncConfig.Get("default.replication.factor")?.Value());
     }
 
     [Fact]
@@ -355,24 +355,24 @@ public sealed class PublicAdminMockAdminClientTests
         MockAdminClient sync = Admin();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         sync.AddTopic(false, "topic", partitions, new Dictionary<string, string>());
-        AssertElrRead(sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "topic" })).TopicNameValues!["topic"].Get(s_deadline));
+        AssertElrRead(sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "topic" })).TopicNameValues()!["topic"].Get(s_deadline));
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         async.AddTopic(false, "topic", partitions, new Dictionary<string, string>());
         AsyncKafkaFuture<TopicDescription> described =
-            async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "topic" })).TopicNameValues!["topic"];
+            async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "topic" })).TopicNameValues()!["topic"];
         AssertElrRead(await TestTimeout.Run(() => described.Get(), s_deadline));
 
         static void AssertElrRead(TopicDescription description)
         {
-            TopicPartitionInfo none = description.Partitions.Single(p => p.Partition == 0);
-            Assert.Null(none.Elr);
-            Assert.Null(none.LastKnownElr);
-            TopicPartitionInfo reported = description.Partitions.Single(p => p.Partition == 1);
-            AssertNode(Seeded(1), Assert.Single(reported.Elr!));
-            Assert.NotNull(reported.LastKnownElr);
-            Assert.Empty(reported.LastKnownElr!);
+            TopicPartitionInfo none = description.Partitions().Single(p => p.Partition() == 0);
+            Assert.Null(none.Elr());
+            Assert.Null(none.LastKnownElr());
+            TopicPartitionInfo reported = description.Partitions().Single(p => p.Partition() == 1);
+            AssertNode(Seeded(1), Assert.Single(reported.Elr()!));
+            Assert.NotNull(reported.LastKnownElr());
+            Assert.Empty(reported.LastKnownElr()!);
         }
     }
 
@@ -479,7 +479,7 @@ public sealed class PublicAdminMockAdminClientTests
         Assert.Equal(new[] { "t" }, sync.ListTopics().Names().Get(s_deadline));
         sync.MarkTopicForDeletion("t");
         KafkaFuture<TopicDescription> syncDescribed =
-            sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues!["t"];
+            sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues()!["t"];
         Assert.Equal(UnknownTopicOrPartitionCode, FutureAssert.Throws<UnknownTopicOrPartitionException>(() => syncDescribed.Get(s_deadline)).Code);
         Assert.Equal("No such topic as x", Assert.Throws<IllegalArgumentException>(() => sync.SetFetchesRemainingUntilVisible("x", 1)).Message);
 
@@ -491,7 +491,7 @@ public sealed class PublicAdminMockAdminClientTests
         Assert.Equal(new[] { "t" }, await TestTimeout.Run(() => async.ListTopics().Names().Get(), s_deadline));
         async.MarkTopicForDeletion("t");
         AsyncKafkaFuture<TopicDescription> asyncDescribed =
-            async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues!["t"];
+            async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues()!["t"];
         UnknownTopicOrPartitionException asyncFailure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => asyncDescribed.Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, asyncFailure.Code);
@@ -526,12 +526,12 @@ public sealed class PublicAdminMockAdminClientTests
 
         MockAdminClient sync = MockAdminClient.Create().Brokers(brokers).BrokerLogDirs(logDirs).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        KafkaFuture syncCreated = sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values["t"];
+        KafkaFuture syncCreated = sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values()["t"];
         Assert.Equal("Broker 0 has no log directories.", FutureAssert.Throws<IllegalArgumentException>(() => syncCreated.Get(s_deadline)).Message);
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Brokers(brokers).BrokerLogDirs(logDirs).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        AsyncKafkaFuture asyncCreated = async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values["t"];
+        AsyncKafkaFuture asyncCreated = async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values()["t"];
         IllegalArgumentException asyncFailure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<IllegalArgumentException>(() => asyncCreated.Get()), s_deadline);
         Assert.Equal("Broker 0 has no log directories.", asyncFailure.Message);
@@ -546,13 +546,13 @@ public sealed class PublicAdminMockAdminClientTests
         MockAdminClient sync = MockAdminClient.Create().BrokerLogDirs(logDirs).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(s_deadline);
-        sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/b" }).Values[replica].Get(s_deadline);
-        KafkaFuture syncOffline = sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values[replica];
+        sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/b" }).Values()[replica].Get(s_deadline);
+        KafkaFuture syncOffline = sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values()[replica];
         KafkaStorageException syncFailure = FutureAssert.Throws<KafkaStorageException>(() => syncOffline.Get(s_deadline));
         Assert.Equal(KafkaStorageErrorCode, syncFailure.Code);
         Assert.Equal("Log directory /c is offline", syncFailure.Message);
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo syncInfo =
-            sync.DescribeReplicaLogDirs(new[] { replica }).Values[replica].Get(s_deadline);
+            sync.DescribeReplicaLogDirs(new[] { replica }).Values()[replica].Get(s_deadline);
         Assert.Equal("/a", syncInfo.GetCurrentReplicaLogDir());
         Assert.Equal("/b", syncInfo.GetFutureReplicaLogDir());
 
@@ -560,16 +560,16 @@ public sealed class PublicAdminMockAdminClientTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await TestTimeout.Run(() => async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(), s_deadline);
         await TestTimeout.Run(
-            () => async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/b" }).Values[replica].Get(),
+            () => async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/b" }).Values()[replica].Get(),
             s_deadline);
         AsyncKafkaFuture asyncOffline =
-            async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values[replica];
+            async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values()[replica];
         KafkaStorageException asyncFailure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => asyncOffline.Get()), s_deadline);
         Assert.Equal(KafkaStorageErrorCode, asyncFailure.Code);
         Assert.Equal("Log directory /c is offline", asyncFailure.Message);
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo asyncInfo = await TestTimeout.Run(
-            () => async.DescribeReplicaLogDirs(new[] { replica }).Values[replica].Get(), s_deadline);
+            () => async.DescribeReplicaLogDirs(new[] { replica }).Values()[replica].Get(), s_deadline);
         Assert.Equal("/a", asyncInfo.GetCurrentReplicaLogDir());
         Assert.Equal("/b", asyncInfo.GetFutureReplicaLogDir());
     }
@@ -584,19 +584,19 @@ public sealed class PublicAdminMockAdminClientTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         sync.CreateTopics(new[] { new NewTopic("t", 1, 2) }).All().Get(s_deadline);
         DescribeLogDirsResult syncResult = sync.DescribeLogDirs(brokers);
-        LogDirDescription syncDescription = syncResult.Descriptions[0].Get(s_deadline)[DefaultLogDir];
-        Assert.Equal(new[] { partition }, syncDescription.ReplicaInfos.Keys);
-        Assert.Null(syncDescription.TotalBytes);
-        Assert.Empty(syncResult.Descriptions[2].Get(s_deadline));
+        LogDirDescription syncDescription = syncResult.Descriptions()[0].Get(s_deadline)[DefaultLogDir];
+        Assert.Equal(new[] { partition }, syncDescription.ReplicaInfos().Keys);
+        Assert.Null(syncDescription.TotalBytes());
+        Assert.Empty(syncResult.Descriptions()[2].Get(s_deadline));
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await TestTimeout.Run(() => async.CreateTopics(new[] { new NewTopic("t", 1, 2) }).All().Get(), s_deadline);
         AsyncDescribeLogDirsResult asyncResult = async.DescribeLogDirs(brokers);
-        LogDirDescription asyncDescription = (await TestTimeout.Run(() => asyncResult.Descriptions[0].Get(), s_deadline))[DefaultLogDir];
-        Assert.Equal(new[] { partition }, asyncDescription.ReplicaInfos.Keys);
-        Assert.Null(asyncDescription.TotalBytes);
-        Assert.Empty(await TestTimeout.Run(() => asyncResult.Descriptions[2].Get(), s_deadline));
+        LogDirDescription asyncDescription = (await TestTimeout.Run(() => asyncResult.Descriptions()[0].Get(), s_deadline))[DefaultLogDir];
+        Assert.Equal(new[] { partition }, asyncDescription.ReplicaInfos().Keys);
+        Assert.Null(asyncDescription.TotalBytes());
+        Assert.Empty(await TestTimeout.Run(() => asyncResult.Descriptions()[2].Get(), s_deadline));
     }
 
     private static MockAdminClient Admin() => MockAdminClient.Create().NumBrokers(3).Build();
@@ -620,6 +620,6 @@ public sealed class PublicAdminMockAdminClientTests
     private static void AssertNode(Node expected, Node? actual)
     {
         Assert.NotNull(actual);
-        Assert.Equal((expected.Id, expected.Host, expected.Port), (actual!.Id, actual.Host, actual.Port));
+        Assert.Equal((Id: expected.Id(), Host: expected.Host(), Port: expected.Port()), (Id: actual!.Id(), Host: actual.Host(), Port: actual.Port()));
     }
 }

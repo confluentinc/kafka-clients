@@ -107,13 +107,13 @@ internal sealed partial class NativeAdminClient
         {
             if (options is not null)
             {
-                if (options.Renewers is null)
+                if (options.Renewers() is null)
                 {
                     throw new ArgumentException(
                         "CreateDelegationTokenOptions.Renewers must not be null; use an empty list.", nameof(options));
                 }
 
-                foreach (KafkaPrincipal renewer in options.Renewers)
+                foreach (KafkaPrincipal renewer in options.Renewers())
                 {
                     if (renewer is null)
                     {
@@ -124,9 +124,9 @@ internal sealed partial class NativeAdminClient
                     ValidatePrincipal(renewer, nameof(options));
                 }
 
-                if (options.Owner is not null)
+                if (options.Owner() is { } owner)
                 {
-                    ValidatePrincipal(options.Owner, nameof(options));
+                    ValidatePrincipal(owner, nameof(options));
                 }
             }
 
@@ -196,9 +196,9 @@ internal sealed partial class NativeAdminClient
         EnterUse();
         try
         {
-            if (options?.Owners is not null)
+            if (options?.Owners() is { } owners)
             {
-                foreach (KafkaPrincipal owner in options.Owners)
+                foreach (KafkaPrincipal owner in owners)
                 {
                     if (owner is null)
                     {
@@ -270,8 +270,8 @@ internal sealed partial class NativeAdminClient
 
     private static void ValidatePrincipal(KafkaPrincipal principal, string paramName)
     {
-        AdminStrings.Validate(principal.PrincipalType, paramName);
-        AdminStrings.Validate(principal.Name, paramName);
+        AdminStrings.Validate(principal.GetPrincipalType(), paramName);
+        AdminStrings.Validate(principal.GetName(), paramName);
     }
 
     // A null MAC reaches the mock, whose future fails as Java's mock does; the client refuses it at the call.
@@ -290,15 +290,15 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(CreateDelegationTokenOptions.TimeoutMs):
                 NativeMethods.CreateDelegationTokenOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(CreateDelegationTokenOptions.Renewers):
-                SetPrincipals(native, options.Renewers, s_createDelegationTokenOptionsSetRenewers, ref outErr);
+                SetPrincipals(native, options.Renewers(), s_createDelegationTokenOptionsSetRenewers, ref outErr);
                 break;
             case nameof(CreateDelegationTokenOptions.Owner):
-                if (options.Owner is not null)
+                if (options.Owner() is { } ownerPrincipal)
                 {
-                    IntPtr owner = DelegationTokenMarshal.NewPrincipal(options.Owner);
+                    IntPtr owner = DelegationTokenMarshal.NewPrincipal(ownerPrincipal);
                     try
                     {
                         NativeMethods.CreateDelegationTokenOptionsSetOwner(native, owner, ref outErr);
@@ -311,7 +311,7 @@ internal sealed partial class NativeAdminClient
 
                 break;
             case nameof(CreateDelegationTokenOptions.MaxLifetimeMs):
-                NativeMethods.CreateDelegationTokenOptionsSetMaxLifetimeMs(native, options.MaxLifetimeMs, ref outErr);
+                NativeMethods.CreateDelegationTokenOptionsSetMaxLifetimeMs(native, options.MaxLifetimeMs(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("CreateDelegationTokenOptions has no C setter for " + setter + ".");
@@ -325,11 +325,11 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(RenewDelegationTokenOptions.TimeoutMs):
                 NativeMethods.RenewDelegationTokenOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(RenewDelegationTokenOptions.RenewTimePeriodMs):
                 NativeMethods.RenewDelegationTokenOptionsSetRenewTimePeriodMs(
-                    native, options.RenewTimePeriodMs, ref outErr);
+                    native, options.RenewTimePeriodMs(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("RenewDelegationTokenOptions has no C setter for " + setter + ".");
@@ -343,11 +343,11 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(ExpireDelegationTokenOptions.TimeoutMs):
                 NativeMethods.ExpireDelegationTokenOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(ExpireDelegationTokenOptions.ExpiryTimePeriodMs):
                 NativeMethods.ExpireDelegationTokenOptionsSetExpiryTimePeriodMs(
-                    native, options.ExpiryTimePeriodMs, ref outErr);
+                    native, options.ExpiryTimePeriodMs(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ExpireDelegationTokenOptions has no C setter for " + setter + ".");
@@ -361,17 +361,17 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeDelegationTokenOptions.TimeoutMs):
                 NativeMethods.DescribeDelegationTokenOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeDelegationTokenOptions.Owners):
-                if (options.Owners is null)
+                if (options.Owners() is not { } owners)
                 {
                     NativeMethods.DescribeDelegationTokenOptionsSetOwners(native, IntPtr.Zero, ref outErr);
                 }
                 else
                 {
                     SetPrincipals(
-                        native, options.Owners, s_describeDelegationTokenOptionsSetOwners, ref outErr);
+                        native, owners, s_describeDelegationTokenOptionsSetOwners, ref outErr);
                 }
 
                 break;

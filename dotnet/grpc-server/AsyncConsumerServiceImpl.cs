@@ -30,7 +30,7 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// The async twin of <see cref="ConsumerServiceImpl"/>: serves <c>ConsumerService</c> over
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and <see cref="AsyncMockConsumer{TKey, TValue}"/>
-/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>), the C# port of the consumer half of
+/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>), the C# port of the consumer half of
 /// Python's <c>grpc_server_async.py</c>. Handlers await the binding's tasks.
 /// </summary>
 internal sealed class AsyncConsumerServiceImpl
@@ -98,11 +98,11 @@ internal sealed class AsyncConsumerServiceImpl
             // An empty or all-blank config selects an AsyncMockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+                consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
             }
             else
             {
-                consumer = new AsyncKafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
+                consumer = new AsyncKafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
             }
         }
         catch (Exception ex)

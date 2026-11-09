@@ -85,13 +85,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
     [Fact]
     public void DescribeLogDirsResult_MatchesJavasTwoAccessors()
     {
-        PropertyInfo descriptions =
-            typeof(DescribeLogDirsResult).GetProperty(nameof(DescribeLogDirsResult.Descriptions))!;
+        MethodInfo descriptions = Getters.Get(typeof(DescribeLogDirsResult), nameof(DescribeLogDirsResult.Descriptions));
 
         Assert.Equal(
             typeof(IReadOnlyDictionary<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>>),
-            descriptions.PropertyType);
-        Assert.Null(descriptions.SetMethod);
+            descriptions.ReturnType);
 
         MethodInfo allDescriptions = typeof(DescribeLogDirsResult).GetMethod(
             nameof(DescribeLogDirsResult.AllDescriptions), Type.EmptyTypes)!;
@@ -102,33 +100,28 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Empty(typeof(DescribeLogDirsResult).GetConstructors());
 
         Assert.Equal(
-            new[] { nameof(DescribeLogDirsResult.AllDescriptions) },
+            new[] { nameof(DescribeLogDirsResult.AllDescriptions), nameof(DescribeLogDirsResult.Descriptions) },
             DeclaredPublicMethodNames(typeof(DescribeLogDirsResult)));
-        Assert.Equal(
-            new[] { nameof(DescribeLogDirsResult.Descriptions) },
-            PropertyNames(typeof(DescribeLogDirsResult)));
+        Assert.Empty(PropertyNames(typeof(DescribeLogDirsResult)));
     }
 
     [Fact]
     public void TheTwoReplicaResults_DifferExactlyAsJavasDo()
     {
-        PropertyInfo alterValues =
-            typeof(AlterReplicaLogDirsResult).GetProperty(nameof(AlterReplicaLogDirsResult.Values))!;
+        MethodInfo alterValues = Getters.Get(typeof(AlterReplicaLogDirsResult), nameof(AlterReplicaLogDirsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture>), alterValues.PropertyType);
-        Assert.Null(alterValues.SetMethod);
+        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture>), alterValues.ReturnType);
 
         MethodInfo alterAll =
             typeof(AlterReplicaLogDirsResult).GetMethod(nameof(AlterReplicaLogDirsResult.All), Type.EmptyTypes)!;
 
         Assert.Equal(typeof(KafkaFuture), alterAll.ReturnType);
 
-        PropertyInfo describeValues =
-            typeof(DescribeReplicaLogDirsResult).GetProperty(nameof(DescribeReplicaLogDirsResult.Values))!;
+        MethodInfo describeValues =
+            Getters.Get(typeof(DescribeReplicaLogDirsResult), nameof(DescribeReplicaLogDirsResult.Values));
         Assert.Equal(
             typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>),
-            describeValues.PropertyType);
-        Assert.Null(describeValues.SetMethod);
+            describeValues.ReturnType);
 
         MethodInfo describeAll = typeof(DescribeReplicaLogDirsResult).GetMethod(
             nameof(DescribeReplicaLogDirsResult.All), Type.EmptyTypes)!;
@@ -141,8 +134,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
         {
             Assert.Empty(type.GetConstructors());
 
-            Assert.Equal(new[] { "All" }, DeclaredPublicMethodNames(type));
-            Assert.Equal(new[] { "Values" }, PropertyNames(type));
+            Assert.Equal(new[] { "All", "Values" }, DeclaredPublicMethodNames(type));
+            Assert.Empty(PropertyNames(type));
         }
     }
 
@@ -181,7 +174,7 @@ public sealed class PublicAdminLogDirsShapeParityTests
     }
 
     [Fact]
-    public void TheBeanAccessorStyle_IsConfinedToReplicaLogDirInfo()
+    public void TheBeanAccessorStyle_IsConfinedToJavasOwnGetNames()
     {
         List<string> beanAccessors = new List<string>();
         foreach (Type type in typeof(IAdmin).Assembly.GetExportedTypes())
@@ -212,10 +205,14 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Equal(
             new[]
             {
+                "KafkaPrincipal.GetName",
+                "KafkaPrincipal.GetPrincipalType",
                 "ReplicaLogDirInfo.GetCurrentReplicaLogDir",
                 "ReplicaLogDirInfo.GetCurrentReplicaOffsetLag",
                 "ReplicaLogDirInfo.GetFutureReplicaLogDir",
                 "ReplicaLogDirInfo.GetFutureReplicaOffsetLag",
+                "Uuid.GetLeastSignificantBits",
+                "Uuid.GetMostSignificantBits",
             },
             beanAccessors.OrderBy(name => name, StringComparer.Ordinal));
     }
@@ -257,11 +254,14 @@ public sealed class PublicAdminLogDirsShapeParityTests
             .ToArray();
 
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.IsCordoned), StringComparison.Ordinal));
-        PropertyInfo? cordoned = typeof(LogDirDescription).GetProperty(
+        MethodInfo? cordoned = typeof(LogDirDescription).GetMethod(
             nameof(LogDirDescription.IsCordoned),
-            BindingFlags.Public | BindingFlags.Instance);
+            BindingFlags.Public | BindingFlags.Instance,
+            null,
+            Type.EmptyTypes,
+            null);
         Assert.NotNull(cordoned);
-        Assert.Equal(typeof(bool), cordoned!.PropertyType);
+        Assert.Equal(typeof(bool), cordoned!.ReturnType);
 
         // A control: the same walk finds the other members.
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.TotalBytes), StringComparison.Ordinal));
@@ -269,42 +269,42 @@ public sealed class PublicAdminLogDirsShapeParityTests
     }
 
     [Fact]
-    public void TheValueTypes_ExposeJavasAccessorsAsProperties()
+    public void TheValueTypes_ExposeJavasAccessorsAsMethods()
     {
         Assert.Equal(
             new[] { "BrokerId", "Partition", "Topic" },
-            PropertyNames(typeof(TopicPartitionReplica)));
-        Assert.Equal(typeof(string), typeof(TopicPartitionReplica).GetProperty("Topic")!.PropertyType);
-        Assert.Equal(typeof(int), typeof(TopicPartitionReplica).GetProperty("Partition")!.PropertyType);
-        Assert.Equal(typeof(int), typeof(TopicPartitionReplica).GetProperty("BrokerId")!.PropertyType);
+            Getters.NamesOf(typeof(TopicPartitionReplica)));
+        Assert.Equal(typeof(string), typeof(TopicPartitionReplica).GetMethod("Topic", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(int), typeof(TopicPartitionReplica).GetMethod("Partition", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(int), typeof(TopicPartitionReplica).GetMethod("BrokerId", Type.EmptyTypes)!.ReturnType);
 
-        Assert.Equal(new[] { "IsFuture", "OffsetLag", "Size" }, PropertyNames(typeof(ReplicaInfo)));
-        Assert.Equal(typeof(long), typeof(ReplicaInfo).GetProperty("Size")!.PropertyType);
-        Assert.Equal(typeof(long), typeof(ReplicaInfo).GetProperty("OffsetLag")!.PropertyType);
-        Assert.Equal(typeof(bool), typeof(ReplicaInfo).GetProperty("IsFuture")!.PropertyType);
+        Assert.Equal(new[] { "IsFuture", "OffsetLag", "Size" }, Getters.NamesOf(typeof(ReplicaInfo)));
+        Assert.Equal(typeof(long), typeof(ReplicaInfo).GetMethod("Size", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(long), typeof(ReplicaInfo).GetMethod("OffsetLag", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(bool), typeof(ReplicaInfo).GetMethod("IsFuture", Type.EmptyTypes)!.ReturnType);
 
         Assert.Equal(
             new[] { "Error", "IsCordoned", "ReplicaInfos", "TotalBytes", "UsableBytes" },
-            PropertyNames(typeof(LogDirDescription)));
+            Getters.NamesOf(typeof(LogDirDescription)));
 
-        Assert.Equal(typeof(bool), typeof(LogDirDescription).GetProperty("IsCordoned")!.PropertyType);
+        Assert.Equal(typeof(bool), typeof(LogDirDescription).GetMethod("IsCordoned", Type.EmptyTypes)!.ReturnType);
 
         // Java's OptionalLong maps to long?, the ABI's -1 becoming null: a plain long would erase the empty case.
-        Assert.Equal(typeof(long?), typeof(LogDirDescription).GetProperty("TotalBytes")!.PropertyType);
-        Assert.Equal(typeof(long?), typeof(LogDirDescription).GetProperty("UsableBytes")!.PropertyType);
+        Assert.Equal(typeof(long?), typeof(LogDirDescription).GetMethod("TotalBytes", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(long?), typeof(LogDirDescription).GetMethod("UsableBytes", Type.EmptyTypes)!.ReturnType);
 
-        Assert.Equal(typeof(ApiException), typeof(LogDirDescription).GetProperty("Error")!.PropertyType);
+        Assert.Equal(typeof(ApiException), typeof(LogDirDescription).GetMethod("Error", Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             NullableAnnotation.Annotated,
-            NullableAnnotation.Flag(typeof(LogDirDescription).GetProperty("Error")!));
+            NullableAnnotation.Flag(typeof(LogDirDescription).GetMethod("Error", Type.EmptyTypes)!));
 
         Assert.Equal(
             typeof(IReadOnlyDictionary<TopicPartition, ReplicaInfo>),
-            typeof(LogDirDescription).GetProperty("ReplicaInfos")!.PropertyType);
+            typeof(LogDirDescription).GetMethod("ReplicaInfos", Type.EmptyTypes)!.ReturnType);
 
         foreach (Type type in new[] { typeof(TopicPartitionReplica), typeof(ReplicaInfo), typeof(LogDirDescription) })
         {
-            Assert.All(type.GetProperties(), property => Assert.Null(property.SetMethod));
+            Assert.Empty(type.GetProperties());
         }
     }
 
@@ -332,14 +332,13 @@ public sealed class PublicAdminLogDirsShapeParityTests
                      typeof(DescribeReplicaLogDirsOptions),
                  })
         {
-            Assert.Equal(new[] { "TimeoutMs" }, PropertyNames(type));
+            SetterMethods.AssertGettersAndSetters(type, "TimeoutMs");
 
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
 
             // Java's default is the client default, which is null here, not 0.
-            Assert.Null((int?)timeout.GetValue(Activator.CreateInstance(type)));
+            Assert.Null((int?)Getters.Get(type, "TimeoutMs").Invoke(Activator.CreateInstance(type), null));
         }
     }
 

@@ -38,7 +38,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_SyncMock_IsEmpty()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         IReadOnlyDictionary<MetricName, IMetric> metrics = producer.Metrics();
         Assert.NotNull(metrics);
@@ -48,7 +48,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_AsyncMock_IsEmpty()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         Assert.Empty(producer.Metrics());
     }
@@ -57,7 +57,7 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_SyncRealProducer_IsPopulatedAndWellFormed()
     {
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         AssertPopulatedAndWellFormed(producer.Metrics());
@@ -67,7 +67,7 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_AsyncRealProducer_IsPopulatedAndWellFormed()
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         AssertPopulatedAndWellFormed(producer.Metrics());
@@ -79,7 +79,7 @@ public sealed class PublicProducerMetricsTests
         // Rebuild a real key with the same name, group and tags but another description: the dictionary keys on value
         // identity, which excludes the description.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyDictionary<MetricName, IMetric> metrics = producer.Metrics();
@@ -89,10 +89,10 @@ public sealed class PublicProducerMetricsTests
         {
             MetricName original = entry.Key;
             MetricName rebuilt = new MetricName(
-                original.Name,
-                original.Group,
-                original.Description + "-mutated",
-                RebuildTags(original.Tags));
+                original.Name(),
+                original.Group(),
+                original.Description() + "-mutated",
+                RebuildTags(original.Tags()));
 
             Assert.True(metrics.ContainsKey(rebuilt));
             Assert.Same(entry.Value, metrics[rebuilt]);
@@ -105,7 +105,7 @@ public sealed class PublicProducerMetricsTests
     {
         // Each call copies out a fresh map and destroys its native root, so both results stay readable.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyDictionary<MetricName, IMetric> first = producer.Metrics();
@@ -122,7 +122,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_SyncMockAfterDispose_ThrowsIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
@@ -131,7 +131,7 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_SyncRealAfterDispose_ThrowsIllegalState()
     {
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
@@ -139,7 +139,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public async Task Metrics_AsyncMockAfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
@@ -148,7 +148,7 @@ public sealed class PublicProducerMetricsTests
     public async Task Metrics_AsyncRealAfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
@@ -158,7 +158,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIProducer()
     {
-        MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IProducer<byte[], byte[]> producer = mock;
         Assert.Empty(producer.Metrics());
@@ -167,7 +167,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIAsyncProducer()
     {
-        AsyncMockProducer<byte[], byte[]> mock = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> mock = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncProducer<byte[], byte[]> producer = mock;
         Assert.Empty(producer.Metrics());
@@ -184,21 +184,21 @@ public sealed class PublicProducerMetricsTests
             IMetric metric = entry.Value;
 
             Assert.NotNull(name);
-            Assert.NotNull(name.Name);
-            Assert.NotNull(name.Group);
-            Assert.NotNull(name.Description);
-            Assert.NotNull(name.Tags);
+            Assert.NotNull(name.Name());
+            Assert.NotNull(name.Group());
+            Assert.NotNull(name.Description());
+            Assert.NotNull(name.Tags());
 
             Assert.NotNull(metric);
             // IMetric.Name must equal (by value identity) the dictionary key.
-            Assert.Equal(name, metric.Name);
+            Assert.Equal(name, metric.MetricName());
 
             // Value is a boxed CLR value whose runtime type IS the kind: one of the four.
-            object value = metric.Value;
+            object value = metric.MetricValue();
             Assert.NotNull(value);
             Assert.True(
                 value is double || value is string || value is long || value is int,
-                $"Unexpected metric value type {value.GetType()} for {name.Name}");
+                $"Unexpected metric value type {value.GetType()} for {name.Name()}");
         }
     }
 

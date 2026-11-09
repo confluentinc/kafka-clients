@@ -41,7 +41,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Close_OnMock_Succeeds()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         TestTimeout.Run(producer.Close, s_deadline);
     }
@@ -49,7 +49,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Dispose_WhenIdle_Returns()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -57,13 +57,13 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Close_AfterAutoCompleteSend_Returns()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(0L, metadata.Offset());
 
         TestTimeout.Run(producer.Close, s_deadline);
     }
@@ -71,7 +71,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Dispose_CalledTwice_IsSafe()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
         // The second call is a no-op: no double close or destroy.
@@ -81,7 +81,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Close_ThenDispose_IsSafe()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         // Close wins the latch; the following Dispose is a no-op.
         TestTimeout.Run(producer.Close, s_deadline);
@@ -91,7 +91,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public async Task ConcurrentDispose_IsSafe()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         // Many threads race Dispose: one wins the latch, the rest are no-ops.
         Task[] disposers = Enumerable
@@ -105,7 +105,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Ops_AfterClose_ThrowIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Teardown(producer, () => producer.Close());
 
         // Every operation throws IllegalStateException after teardown; the type only, as for the consumer.
@@ -123,8 +123,8 @@ public sealed class PublicSyncProducerTeardownTests
         // The real KafkaProducer with no broker tears down without hanging.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
-            Serdes.ByteArray,
-            Serdes.ByteArray);
+            Serdes.ByteArray(),
+            Serdes.ByteArray());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -136,18 +136,18 @@ public sealed class PublicSyncProducerTeardownTests
     public void SyncDispose_WithUncompletedManualSend_CompletesTheSend()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
         KafkaFuture<RecordMetadata> future =
             producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Assert.True(future.IsDone, "the uncompleted send was still pending when Dispose returned");
+        Assert.True(future.IsDone(), "the uncompleted send was still pending when Dispose returned");
         Assert.Equal(1, callback.Count);
         RecordMetadata metadata = future.Get(s_deadline);
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
         Thread.Sleep(200);
         Assert.Equal(1, callback.Count);
     }
@@ -156,7 +156,7 @@ public sealed class PublicSyncProducerTeardownTests
     public void SyncDispose_AfterClose_DoesNotFlush_AndDoesNotThrow()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
         KafkaFuture<RecordMetadata> future =
             producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
@@ -165,7 +165,7 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(producer.Dispose, s_deadline);
 
         Thread.Sleep(200);
-        Assert.False(future.IsDone, "Dispose after Close completed the send");
+        Assert.False(future.IsDone(), "Dispose after Close completed the send");
         Assert.Equal(0, callback.Count);
     }
 
@@ -175,7 +175,7 @@ public sealed class PublicSyncProducerTeardownTests
         // Java's MockProducer.close() only marks the mock closed: a send it never completed stays pending, so a
         // Get blocked on it ends only by its own timeout.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         KafkaFuture<RecordMetadata> future =
             producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
         Task<bool> timedOut = Task.Run(() =>
@@ -195,7 +195,7 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(producer.Close, s_deadline);
 
         Assert.True(await TestTimeout.Run(() => timedOut, s_deadline), "the blocked Get returned a result");
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
     }
 
     // Spins until the mock's history holds a record, i.e. the worker's send has landed and it is blocked in

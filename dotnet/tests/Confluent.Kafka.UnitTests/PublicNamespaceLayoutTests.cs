@@ -189,7 +189,6 @@ public sealed class PublicNamespaceLayoutTests
         ("ExpireDelegationTokenResult", "org.apache.kafka.clients.admin.ExpireDelegationTokenResult"),
         ("FeatureMetadata", "org.apache.kafka.clients.admin.FeatureMetadata"),
         ("FeatureUpdate", "org.apache.kafka.clients.admin.FeatureUpdate"),
-        ("FeatureUpdate+UpgradeType", "org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType"),
         ("FenceProducersOptions", "org.apache.kafka.clients.admin.FenceProducersOptions"),
         ("FenceProducersResult", "org.apache.kafka.clients.admin.FenceProducersResult"),
         ("FinalizedVersionRange", "org.apache.kafka.clients.admin.FinalizedVersionRange"),
@@ -253,7 +252,8 @@ public sealed class PublicNamespaceLayoutTests
         ("UnregisterControllerResult", "org.apache.kafka.clients.admin.UnregisterControllerResult"),
         ("UpdateFeaturesOptions", "org.apache.kafka.clients.admin.UpdateFeaturesOptions"),
         ("UpdateFeaturesResult", "org.apache.kafka.clients.admin.UpdateFeaturesResult"),
-        ("UpgradeTypes", "=FeatureUpdate"),
+        ("UpgradeType", "org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType"),
+        ("UpgradeTypes", "=UpgradeType"),
         ("UserScramCredentialAlteration", "org.apache.kafka.clients.admin.UserScramCredentialAlteration"),
         ("UserScramCredentialDeletion", "org.apache.kafka.clients.admin.UserScramCredentialDeletion"),
         ("UserScramCredentialUpsertion", "org.apache.kafka.clients.admin.UserScramCredentialUpsertion"),
@@ -346,7 +346,7 @@ public sealed class PublicNamespaceLayoutTests
 
     private static IReadOnlyCollection<string> JavaNestedTypesKeptTopLevel { get; } = new[]
     {
-        "GroupMembershipOperation", "ConfigResourceType", "AlterConfigOpType",
+        "GroupMembershipOperation", "ConfigResourceType", "AlterConfigOpType", "UpgradeType",
     };
 
     public static TheoryData<string, string> AllRows => ToTheoryData(JavaCounterparts);

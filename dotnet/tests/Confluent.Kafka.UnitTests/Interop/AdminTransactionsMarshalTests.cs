@@ -69,11 +69,11 @@ public sealed class AdminTransactionsMarshalTests
         DescribeProducersResult.PartitionProducerState copied =
             CopyOutBuiltProducers(new[] { first, second, third }, buildList: true);
 
-        Assert.Equal(new[] { first, second, third }, copied.ActiveProducers);
-        Assert.Null(copied.ActiveProducers[1].CoordinatorEpoch);
-        Assert.Null(copied.ActiveProducers[1].CurrentTransactionStartOffset);
-        Assert.Equal(0, copied.ActiveProducers[2].CoordinatorEpoch);
-        Assert.Equal(0L, copied.ActiveProducers[2].CurrentTransactionStartOffset);
+        Assert.Equal(new[] { first, second, third }, copied.ActiveProducers());
+        Assert.Null(copied.ActiveProducers()[1].CoordinatorEpoch());
+        Assert.Null(copied.ActiveProducers()[1].CurrentTransactionStartOffset());
+        Assert.Equal(0, copied.ActiveProducers()[2].CoordinatorEpoch());
+        Assert.Equal(0L, copied.ActiveProducers()[2].CurrentTransactionStartOffset());
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed class AdminTransactionsMarshalTests
         DescribeProducersResult.PartitionProducerState copied =
             CopyOutBuiltProducers(Array.Empty<ProducerState>(), buildList: true);
 
-        Assert.Empty(copied.ActiveProducers);
+        Assert.Empty(copied.ActiveProducers());
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public sealed class AdminTransactionsMarshalTests
     [Fact]
     public void CopyOut_ANullPointer_ReadsAsPythonReadsIt()
     {
-        Assert.Empty(PartitionProducerStateMarshal.CopyOut(IntPtr.Zero).ActiveProducers);
+        Assert.Empty(PartitionProducerStateMarshal.CopyOut(IntPtr.Zero).ActiveProducers());
         Assert.Null(TransactionDescriptionMarshal.CopyOut(IntPtr.Zero));
         Assert.Equal(
             "The admin result produced no producer state.",
@@ -121,15 +121,15 @@ public sealed class AdminTransactionsMarshalTests
             transactionStartTimeMs: 1_700_000_000_000L,
             partitions: new[] { new TopicPartition("txn-été", 1), new TopicPartition("alpha", 2), new TopicPartition("alpha", 0) });
 
-        Assert.Equal(7, copied.CoordinatorId);
-        Assert.Equal(TransactionState.ONGOING, copied.State);
-        Assert.Equal(1_234_567_890_123L, copied.ProducerId);
-        Assert.Equal(5, copied.ProducerEpoch);
-        Assert.Equal(60_000L, copied.TransactionTimeoutMs);
-        Assert.Equal(1_700_000_000_000L, copied.TransactionStartTimeMs);
+        Assert.Equal(7, copied.CoordinatorId());
+        Assert.Equal(TransactionState.ONGOING, copied.State());
+        Assert.Equal(1_234_567_890_123L, copied.ProducerId());
+        Assert.Equal(5, copied.ProducerEpoch());
+        Assert.Equal(60_000L, copied.TransactionTimeoutMs());
+        Assert.Equal(1_700_000_000_000L, copied.TransactionStartTimeMs());
         Assert.Equal(
             new[] { new TopicPartition("alpha", 0), new TopicPartition("alpha", 2), new TopicPartition("txn-été", 1) },
-            copied.TopicPartitions.ToArray());
+            copied.TopicPartitions().ToArray());
     }
 
     [Theory]
@@ -141,8 +141,8 @@ public sealed class AdminTransactionsMarshalTests
         TransactionDescription copied = CopyOutBuiltDescription(
             0, s_states["empty"].Singleton(), -1L, -1, 0L, nativeStartTimeMs, Array.Empty<TopicPartition>());
 
-        Assert.Equal(expected, copied.TransactionStartTimeMs);
-        Assert.Empty(copied.TopicPartitions);
+        Assert.Equal(expected, copied.TransactionStartTimeMs());
+        Assert.Empty(copied.TopicPartitions());
     }
 
     [Fact]
@@ -151,8 +151,8 @@ public sealed class AdminTransactionsMarshalTests
         TransactionDescription copied = CopyOutBuiltDescription(
             1, s_states["complete_commit"].Singleton(), 2L, 3, 4L, -1L, Array.Empty<TopicPartition>());
 
-        Assert.Empty(copied.TopicPartitions);
-        Assert.Null(copied.TransactionStartTimeMs);
+        Assert.Empty(copied.TopicPartitions());
+        Assert.Null(copied.TransactionStartTimeMs());
     }
 
     [Fact]
@@ -173,7 +173,7 @@ public sealed class AdminTransactionsMarshalTests
         Assert.Equal(expected, TransactionDescriptionMarshal.StateFrom(singleton()));
         Assert.Equal(
             expected,
-            CopyOutBuiltDescription(0, singleton(), 0L, 0, 0L, -1L, Array.Empty<TopicPartition>()).State);
+            CopyOutBuiltDescription(0, singleton(), 0L, 0, 0L, -1L, Array.Empty<TopicPartition>()).State());
     }
 
     [Fact]
@@ -209,12 +209,12 @@ public sealed class AdminTransactionsMarshalTests
                 foreach (ProducerState producer in producers)
                 {
                     elements.Add(Native.ProducerStateNew(
-                        producer.ProducerId,
-                        producer.ProducerEpoch,
-                        producer.LastSequence,
-                        producer.LastTimestamp,
-                        producer.CoordinatorEpoch ?? -1,
-                        producer.CurrentTransactionStartOffset ?? -1L,
+                        producer.ProducerId(),
+                        producer.ProducerEpoch(),
+                        producer.LastSequence(),
+                        producer.LastTimestamp(),
+                        producer.CoordinatorEpoch() ?? -1,
+                        producer.CurrentTransactionStartOffset() ?? -1L,
                         ref outErr));
                     KafkaException.ThrowIfFfiFailed(ref outErr);
                     NativeMethods.ListAdd(list, elements[elements.Count - 1], ref outErr);
@@ -260,9 +260,9 @@ public sealed class AdminTransactionsMarshalTests
                 KafkaException.ThrowIfFfiFailed(ref outErr);
                 foreach (TopicPartition partition in partitions)
                 {
-                    using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic))
+                    using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic()))
                     {
-                        elements.Add(NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition, ref outErr));
+                        elements.Add(NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition(), ref outErr));
                     }
 
                     KafkaException.ThrowIfFfiFailed(ref outErr);

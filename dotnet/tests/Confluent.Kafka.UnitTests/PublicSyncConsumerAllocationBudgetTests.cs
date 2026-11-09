@@ -73,7 +73,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
 
     private static long MeasurePoll(int recordCount, byte[] key, byte[] value)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
@@ -90,7 +90,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetAllocatedBytesForCurrentThread();
 
-        Assert.Equal(recordCount, records.Count);
+        Assert.Equal(recordCount, records.Count());
         return after - before;
     }
 

@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> but never publishes that
-/// pair: <see cref="FencedProducers"/> erases it and <see cref="ProducerId"/> /
+/// pair: <see cref="FencedProducers()"/> erases it and <see cref="ProducerId"/> /
 /// <see cref="EpochId"/> project one field each, so there is no public <c>ProducerIdAndEpoch</c>
 /// type here.
 /// </remarks>
@@ -50,20 +50,18 @@ public sealed class AsyncFenceProducersResult
     /// One payload-free future per requested transactional id — Java's
     /// <c>fencedProducers()</c>, whose values are <c>KafkaFuture&lt;Void&gt;</c>.
     /// </summary>
-    /// <remarks>Each access builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture> FencedProducers
+    /// <returns>One payload-free future per requested transactional id.</returns>
+    /// <remarks>Each call builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
+    public IReadOnlyDictionary<string, AsyncKafkaFuture> FencedProducers()
     {
-        get
+        Dictionary<string, AsyncKafkaFuture> fenced =
+            new Dictionary<string, AsyncKafkaFuture>(_futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
         {
-            Dictionary<string, AsyncKafkaFuture> fenced =
-                new Dictionary<string, AsyncKafkaFuture>(_futures.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
-            {
-                fenced.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
-            }
-
-            return fenced;
+            fenced.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
         }
+
+        return fenced;
     }
 
     /// <inheritdoc cref="FenceProducersResult.ProducerId"/>

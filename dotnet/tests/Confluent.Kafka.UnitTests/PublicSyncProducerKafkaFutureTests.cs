@@ -57,7 +57,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     {
         // One thread sends, completes and waits: this deadlocks if Send waited for delivery.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
         try
         {
@@ -76,9 +76,9 @@ public sealed class PublicSyncProducerKafkaFutureTests
                     Assert.Equal(1, callback.Count);
                     Assert.Same(metadata, callback.Metadata);
                     Assert.Null(callback.Exception);
-                    Assert.Equal(Topic, metadata.Topic);
-                    Assert.Equal(0, metadata.Partition);
-                    Assert.Equal(0L, metadata.Offset);
+                    Assert.Equal(Topic, metadata.Topic());
+                    Assert.Equal(0, metadata.Partition());
+                    Assert.Equal(0L, metadata.Offset());
                 },
                 s_deadline);
         }
@@ -91,7 +91,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     [Fact]
     public void Callback_Sync_RunsOnThePumpThread_NotTheCaller()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
@@ -117,7 +117,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
         const int Threads = 8;
         const int SendsPerThread = 50;
 
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ConcurrencyProbeCallback callback = new ConcurrencyProbeCallback();
         using Barrier start = new Barrier(Threads);
@@ -168,7 +168,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
             ["max.block.ms"] = "200",
         };
 
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
         try
         {
@@ -194,12 +194,12 @@ public sealed class PublicSyncProducerKafkaFutureTests
             Assert.Same(failure, callback.Exception);
             Assert.Equal(CompletionThreadName, callback.ThreadName);
             RecordMetadata placeholder = callback.Metadata ?? throw new XunitException("the callback saw null metadata");
-            Assert.Equal(ApiTopic, placeholder.Topic);
-            Assert.Equal(-1, placeholder.Partition);
-            Assert.Equal(-1L, placeholder.Offset);
-            Assert.False(placeholder.HasTimestamp);
-            Assert.Equal(-1, placeholder.SerializedKeySize);
-            Assert.Equal(-1, placeholder.SerializedValueSize);
+            Assert.Equal(ApiTopic, placeholder.Topic());
+            Assert.Equal(-1, placeholder.Partition());
+            Assert.Equal(-1L, placeholder.Offset());
+            Assert.False(placeholder.HasTimestamp());
+            Assert.Equal(-1, placeholder.SerializedKeySize());
+            Assert.Equal(-1, placeholder.SerializedValueSize());
         }
         finally
         {
@@ -210,7 +210,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     [Fact]
     public void SendInsideCallback_GetFromAnotherThread_Completes()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ReentrantSendCallback callback = new ReentrantSendCallback(() => producer.Send(Record()));
 
@@ -227,8 +227,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
                 // Waited on from this thread, not the completion thread, so it completes.
                 RecordMetadata second = reentrant.Get();
-                Assert.Equal(0L, first.Offset);
-                Assert.Equal(1L, second.Offset);
+                Assert.Equal(0L, first.Offset());
+                Assert.Equal(1L, second.Offset());
             },
             s_deadline);
     }
@@ -240,15 +240,15 @@ public sealed class PublicSyncProducerKafkaFutureTests
     public void Dispose_WithAPendingFuture_CompletesIt()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         KafkaFuture<RecordMetadata> future = producer.Send(Record(), callback);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Assert.True(future.IsDone);
-        Assert.Equal(0L, future.Get(s_deadline).Offset);
+        Assert.True(future.IsDone());
+        Assert.Equal(0L, future.Get(s_deadline).Offset());
         Assert.Equal(1, callback.Count);
     }
 
@@ -256,7 +256,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     public void Close_WithAPendingFuture_LeavesItPending()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         KafkaFuture<RecordMetadata> future = producer.Send(Record(), callback);
@@ -265,14 +265,14 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         FutureTimeoutException timedOut = Assert.Throws<FutureTimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(200)));
         Assert.Equal("Timeout after waiting for 200 ms.", timedOut.Message);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.Equal(0, callback.Count);
     }
 
     [Fact]
     public void SendAfterDispose_ThrowsIllegalState_AndStartsNoPump()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         TestTimeout.Run(producer.Dispose, s_deadline);
@@ -299,7 +299,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         for (int i = 0; i < Iterations; i++)
         {
-            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             using Barrier start = new Barrier(2);
             int skew = (i % 16) * 32;
             bool skewSender = i % 2 == 0;
@@ -371,7 +371,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     public async Task FireAndForget_DiscardedFutures_StillFireEveryCallback()
     {
         const int Sends = 200;
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         ConcurrencyProbeCallback callback = new ConcurrencyProbeCallback();
         try
         {
@@ -409,7 +409,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     private static ProducerRecord<byte[], byte[]> Record() =>
         new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0);
 
-    private static bool IsDone(KafkaFuture<RecordMetadata> future) => future.IsDone;
+    private static bool IsDone(KafkaFuture<RecordMetadata> future) => future.IsDone();
 
     private static void WaitAtStart(Barrier start)
     {

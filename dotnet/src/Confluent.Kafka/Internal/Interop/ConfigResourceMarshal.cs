@@ -38,10 +38,10 @@ internal static class ConfigResourceMarshal
 
     internal static IntPtr Build(ConfigResource resource)
     {
-        IntPtr type = NativeType(resource.Type);
+        IntPtr type = NativeType(resource.Type());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(resource.Name))
+        using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(resource.Name()))
         {
             native = NativeMethods.ConfigResourceNew(type, name.Pointer, ref outErr);
         }
