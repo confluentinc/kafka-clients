@@ -28,6 +28,9 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 internal sealed partial class NativeProducer
 {
+    // The core mock's flush error, for the flush the binding makes itself from a callback the core cannot see.
+    private Exception? _mockFlushError;
+
     private delegate void MockErrorSetter(IntPtr mock, IntPtr error, ref IntPtr outErr);
 
     private delegate sbyte MockFlagReader(IntPtr mock, ref IntPtr outErr);
@@ -35,8 +38,11 @@ internal sealed partial class NativeProducer
     internal void MockSetSendError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetSendError, exception);
 
-    internal void MockSetFlushError(Exception? exception) =>
+    internal void MockSetFlushError(Exception? exception)
+    {
         MockSetError(NativeMethods.MockProducerSetFlushError, exception);
+        Volatile.Write(ref _mockFlushError, exception);
+    }
 
     internal void MockSetPartitionsForError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetPartitionsForError, exception);
