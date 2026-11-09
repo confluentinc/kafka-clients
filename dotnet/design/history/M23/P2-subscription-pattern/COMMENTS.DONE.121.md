@@ -135,3 +135,45 @@ Notes for the comment-only commit (S4):
    it (a second `Dispose` is harmless, as `OnAKafkaConsumer_ARefusedSwitch` does) keeps the sibling shape.
 
    Resolved in 8c516ae1.
+
+2. **needs-ruling — the rulebook still says a failed subscribe frees the new listener** (the Actor's open point 1;
+   a real inconsistency, not a defect of the fix). `dotnet/.claude/rules/ffi-marshalling.md:2236-2238` reads
+   "free the old listener's `GCHandle` when a replacing `subscribe_*` succeeds, the new one when the `subscribe_*`
+   fails, and the current one after the consumer's destroy has returned." and `:2339-2342` (tests required) reads
+   "a replacing subscribe frees the old `self_`; a failed subscribe frees the new one; an `unsubscribe` frees
+   nothing; destroy frees the current one after it returns". Both contradict row 431 (a) and the code now pinned by
+   the rewritten tests. **Proposed** (`:2236-2238`): "free the old listener's `GCHandle`, and every one a failed
+   `subscribe_*` left, when a replacing `subscribe_*` succeeds. A `subscribe_*` that reported an error may already
+   have registered its listener (the core's `SubscriptionState` registers it before the subscription-type check, as
+   Java's), so the new one becomes the current one and the one it replaced is kept; a failed listener-less
+   `subscribe_*` changes nothing (row 431 (a)). Free a new one at once only when no `subscribe_*` call was made, and
+   the current and every kept one after the consumer's destroy has returned." **Proposed** (`:2339-2342`): "a
+   replacing subscribe frees the old `self_`; a refused subscribe frees neither, its listener is the one a mock's
+   next rebalance fires, and the next successful subscribe frees both; an `unsubscribe` frees nothing; destroy frees
+   the current and every kept one after it returns". (`:1135-1138`, `:1538`, `:1689` and `:2177` only point at
+   decision 23 and stay true.)
+
+   Resolved in 5c9066dc (ledger row 434).
+
+3. **needs-ruling — the public docs say a listener fires until a subscribe that *succeeds* replaces it** (the
+   Actor's open point 2; a real inconsistency, older than this fix: the topics wording is from `cd83931b`, the
+   pattern one from `ed21c093`). Current summary sentence, six overloads (`IConsumer.cs:87-88`, `:145-146`;
+   `IAsyncConsumer.cs:104-105`, `:138-139`, `:200-201`, `:248-249`): "The listener fires on every later rebalance
+   until a subscribe that succeeds replaces it."; current remark (`IConsumer.cs:91-92`, `:154-155`;
+   `IAsyncConsumer.cs:108-110`, `:209-210`): "A replacing subscribe releases the previous listener, a listener-less
+   … included, as does disposing the consumer." Facts: on `MockConsumer` / `AsyncMockConsumer` a refused subscribe
+   replaces the listener (with its own, or with none when listener-less), so the next `Rebalance` fires the refused
+   one, which the new `OnTheMocks_*` tests pin; that is Java's behaviour on both of Java's consumers
+   (`SubscriptionState.subscribe` registers before `setSubscriptionType`, and `ConsumerRebalanceListenerInvoker`
+   reads `subscriptions.rebalanceListener()`). On the .NET real consumers the core fires its app-side mirror, written
+   only on success, so after a refused switch with a listener the old one keeps firing, while after a refused
+   listener-less subscribe the core gates the revoked/lost events on `SubscriptionState`'s (now empty) listener and
+   still fires assigned from the mirror (`abstract_membership_manager.rs`
+   `enqueue_rebalance_callback_with_ack_through_application_events` vs `enqueue_partitions_assigned_event`): a core
+   divergence from Java, for the core owners, not this binding. **Proposed** summary: "The listener fires on every
+   later rebalance until another subscribe replaces it." **Proposed** remark: "A subscribe the consumer refuses can
+   replace it too: on the mocks, as in Java, the next rebalance fires the refused subscribe's listener, or none. A
+   subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
+   listener-less … included, as does disposing the consumer." (The `<see cref>` of each remark stays as it is.)
+
+   Resolved in b829a6ba (ledger row 434).
