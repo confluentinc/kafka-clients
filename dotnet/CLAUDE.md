@@ -128,7 +128,7 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   `upgradeType()` method, ledger 368).
 - **A .NET-only public type** lives in the namespace and folder of the Java-backed type it pairs
   with: an async peer with its sync type (`AsyncKafkaProducer`, `IAsyncProducer` and
-  `IAsyncDeliveryCallback` in `Producer/`; every `Async*Result`, `AsyncKafkaAdminClient`,
+  `IAsyncCallback` in `Producer/`; every `Async*Result`, `AsyncKafkaAdminClient`,
   `AsyncMockAdminClient` and `IAsyncAdmin` in `Admin/`; `AsyncKafkaFuture` in `Common/`), a base
   class carrying Java's default methods with its interface (`ConsumerRebalanceListenerBase`), the
   shared consumer surface with `IConsumer` (`IConsumerCommon`), the Rust-only `ConsumerHandle` with
@@ -257,7 +257,7 @@ public class KafkaException : Exception {        // Java's; the base of the gene
     internal int Code { get; }                   // the class's C id, -1 for a bare KafkaException; no IsRetriable:
 }                                                // the class is the category (`catch (RetriableException)`)
 
-public interface IDeliveryCallback {              // Java `Callback` (producer); M14/P1 — see §4
+public interface ICallback {              // Java `Callback` (producer); M14/P1 — see §4
     // SYNC `void`, like Java's onCompletion. `metadata` is NON-nullable (Java's user callback never
     // sees null — the -1 placeholder is substituted on failure); `exception` null == success.
     // `exception` is the class of the error's id (ffi §A5), or the same instance a user callback
@@ -265,7 +265,7 @@ public interface IDeliveryCallback {              // Java `Callback` (producer);
     void OnCompletion(RecordMetadata metadata, Exception? exception);
 }
 
-public interface IAsyncDeliveryCallback {          // Java `Callback`, async form (M19/P1)
+public interface IAsyncCallback {          // Java `Callback`, async form (M19/P1)
     // On IAsyncProducer only. Called on the pump thread; the pump does not wait for the Task.
     // Every later completion of the producer waits until this Task ends; the record's future completes then.
     Task OnCompletion(RecordMetadata metadata, Exception? exception);
@@ -280,10 +280,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     // is an ADDITIONAL parameter, not an alternative (M11/P8 D-6 shape: declared identically on both
     // producer interfaces, no shared base). Fires on the producer's completion thread, before the record's future completes (§4);
     // AsyncKafkaProducer runs it inside Send, on the caller's thread, for a serializer's ApiException (§3).
-    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback,
+    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, ICallback callback,
         CancellationToken cancellationToken = default);
     // Java has no async callback; Python's async producer takes an `async def` one (M19/P1).
-    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IAsyncDeliveryCallback callback,
+    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IAsyncCallback callback,
         CancellationToken cancellationToken = default);
     Task Flush(CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);
@@ -299,7 +299,7 @@ public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Futu
 // The sync `IProducer<TKey,TValue>` (sync mirror) is **shipped** (M11/P4), generic-only (M11/P5):
 // KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>) returns once the record is registered (the blocking `send_with_callback`; it blocks only while
 // the core waits for metadata or for buffer.memory, ≤ max.block.ms); future.Get() = Java send(record).get() (M11/P4.2);
-// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>, IDeliveryCallback) — Java's second send
+// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>, ICallback) — Java's second send
 // signature, the callback fired on the producer's completion thread (`confluent-kafka-producer-completion`) before Get() returns
 // (KafkaProducer: inside Send, on the caller's thread, for a serializer's ApiException, §3); void Flush() /
 // Close(); void Close(TimeSpan) (M19/P1); IReadOnlyList<PartitionInfo> PartitionsFor(string);
@@ -322,7 +322,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
         bool autoComplete = true);
     public bool CompleteNext();
-    public bool ErrorNext(Exception exception);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
+    public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
     public void Clear();
 }
@@ -430,9 +430,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     // blocking-in-Java / callback-at-ABI → async (§4); method names mirror Java — no `Async` suffix
     Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
-    Task Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener,   // Java subscribe(Collection, listener) — M9/P6
+    Task Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback,   // Java subscribe(Collection, callback) — M9/P6
         CancellationToken cancellationToken = default);
-    Task Subscribe(IReadOnlyCollection<string> topics, IAsyncConsumerRebalanceListener listener, CancellationToken cancellationToken = default);   // Java subscribe(Collection, listener), async listener — M19/P1
+    Task Subscribe(IReadOnlyCollection<string> topics, IAsyncConsumerRebalanceListener callback, CancellationToken cancellationToken = default);   // Java subscribe(Collection, callback), async listener — M19/P1
     Task Unsubscribe(CancellationToken cancellationToken = default);
     // Java commitSync / commitSync(Map) (+ Duration overloads) — blocks in Java → Task over commit_sync*_cb (§4 note)
     Task Commit(CancellationToken cancellationToken = default);
@@ -462,7 +462,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
         CancellationToken cancellationToken = default);
     // Java currentLag — blocks in Java → Task over current_lag_cb; empty → null (ledger 103). Not wakeable:
     //   a cancel sends no Wakeup(); the Task ends with OperationCanceledException once the lag call has ended
-    Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default);
+    Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);                        // Java close()
     Task Close(CloseOptions options, CancellationToken cancellationToken = default);  // Java close(CloseOptions), close_with_options_cb
 
@@ -483,8 +483,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null);
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
-    public Task Rebalance(IReadOnlyCollection<TopicPartition> partitions);       // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
-    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitions);  // lose_partitions_cb (ledger 48)
+    public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);    // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
+    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // lose_partitions_cb (ledger 48)
     public void SetPollException(KafkaException? exception);                     // Java setPollException (decision 15); null clears
 }
 
@@ -501,7 +501,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
 public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // Java `Consumer<K,V>` (synchronous)
     ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);      // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
-    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener); // M9/P6
+    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback); // M9/P6
     void Unsubscribe();
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
@@ -521,7 +521,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // J
         IOffsetCommitCallback? callback = null);                           // null callback = Java's commitAsync(Map, null)
     void Seek(TopicPartition partition, long offset);                      // Java seek(tp, long) — blocking form
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
-    long? CurrentLag(TopicPartition partition);                            // Java currentLag(tp) — blocking form; empty → null (ledger 103)
+    long? CurrentLag(TopicPartition topicPartition);                       // Java currentLag(tp) — blocking form; empty → null (ledger 103)
     // ---- query family (M5/P8b) — blocks; returns the owned result directly; each has a TimeSpan overload (decision 22) ----
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions);
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
@@ -551,8 +551,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    //
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null);   // deviation §7: takes deserializers (Java's mock doesn't)
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
-    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions);  // Java MockConsumer.rebalance — inherent (M9/P6)
-    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitions);  // Java MockConsumer.losePartitions — inherent
+    public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);  // Java MockConsumer.rebalance — inherent (M9/P6)
+    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent
     public void SetPollException(KafkaException? exception);                     // Java setPollException (decision 15); null clears
 }
 ```
@@ -669,7 +669,7 @@ its C# realization, and where the enforcing rule lives.
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `ConcurrentModificationException`, sync and async, with Java's `acquire()` message, from the binding's owner check and the core's -2 alike (decision 17). | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase` carry Java's `onPartitionsLost` default. Registered by the `Subscribe(topics, listener)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)` (`exception` is `Exception?`, the class of the error's id); passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**); on `IAsyncConsumer` also `IAsyncOffsetCommitCallback` — `Task OnComplete(offsets, exception)`, passed to two more `CommitAsync` overloads (M19/P1) | On `IConsumer` it runs inline on the caller's thread, inside the blocking call that delivers it (`Poll`, `Commit`, `Close`, …); on `IAsyncConsumer`, on the consumer's drain thread (`confluent-kafka-consumer-pump`) (decision 27). `offsets` is `null` on a failed commit (decision 22). An exception it throws, or the async form's faulted or cancelled `Task`, propagates out of the consumer call that delivered it (decision 12, ledger 47). See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
-| `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncDeliveryCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
+| `Callback` (producer, `send(record, Callback)`) | `ICallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
 | a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling, as a C# field: a `const` for a primitive or a string (`RecordMetadata.UNKNOWN_PARTITION`), a `static readonly` field otherwise (`Uuid.ZERO_UUID`, `Uuid.RESERVED`, `KafkaPrincipal.ANONYMOUS`, the filters' `ANY`, the mock admin clients' `DEFAULT_LOG_DIRS`), never a property; an enum member keeps the constant's name (`ResourceType.ANY`); numeric values unchanged. A .NET-only type with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`) the text the binding prints or sends is Java's, from an internal map, and the enum's own `ToString()` is a recorded deviation | ledger 285 |
@@ -749,8 +749,8 @@ delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
 **Java** client, per `dotnet/.claude/rules/bindings.md §2`.
 
 ⚠ **"delivery-report handlers" above is about ckd's shape, not about Java's
-`Callback` (M14/P1).** The shipped `IDeliveryCallback` +
-`Send(record, IDeliveryCallback)` is the **Java** signature
+`Callback` (M14/P1).** The shipped `ICallback` +
+`Send(record, ICallback)` is the **Java** signature
 (`Producer.java:86` — the callback is an additional parameter and the overload
 still returns the `Future`), so it is on the target side of this line, not the
 forbidden side. What stays out is ckd's *term of art*: a `DeliveryReport<K,V>`
@@ -1024,7 +1024,7 @@ next awaited call throws it, as Python does (ledger 52;
 
 ⚠ **§4 divergence — the delivery callback is SYNC (with an async form on `IAsyncProducer`,
 M19/P1), and the callback-taking `send` is kept ALONGSIDE the future (M14/P1; mechanism changed
-in M19/P1).** `IDeliveryCallback.OnCompletion` returns `void`, not `Task`, and both `IProducer`
+in M19/P1).** `ICallback.OnCompletion` returns `void`, not `Task`, and both `IProducer`
 and `IAsyncProducer` carry a **second** `Send` overload taking it, declared identically on each,
 with no shared base (the M11/P8 D-6 `Metrics()` precedent). Java's second `send` signature
 *still returns the `Future`* (`Producer.java:86`), so the callback is an **additional** parameter,
@@ -1077,7 +1077,7 @@ decision 10). The parts, each decided against the Java source:
   `commitAsync(Map, null)` — there is no second parameter that would make a
   null-accepting form non-redundant.
 
-**The async form (M19/P1, ledger 47).** `IAsyncProducer` also takes `IAsyncDeliveryCallback`,
+**The async form (M19/P1, ledger 47).** `IAsyncProducer` also takes `IAsyncCallback`,
 whose `OnCompletion` returns `Task`, as Python's async producer accepts an `async def`
 callback. Java has no async form, and `IProducer` takes the sync callback only. The pump calls
 it and does not wait for its `Task`. While its `Task` runs, every later completion of the

@@ -38,10 +38,10 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     private readonly long _leastSignificantBits;
 
     /// <summary>Initializes an id from its high and low 64 bits.</summary>
-    public Uuid(long mostSignificantBits, long leastSignificantBits)
+    public Uuid(long mostSigBits, long leastSigBits)
     {
-        _mostSignificantBits = mostSignificantBits;
-        _leastSignificantBits = leastSignificantBits;
+        _mostSignificantBits = mostSigBits;
+        _leastSignificantBits = leastSigBits;
     }
 
     /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>
@@ -78,30 +78,31 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
 
     /// <summary>
-    /// Parses the URL-safe base64 text form, padded or not: Java's <c>Uuid.fromString</c>. Throws
-    /// <see cref="ArgumentNullException"/> for <see langword="null"/>, and <see cref="ArgumentException"/> for
-    /// text longer than 24 characters, not valid URL-safe base64, or not decoding to 16 bytes.
+    /// Creates an id from the URL-safe base64 text form <see cref="ToString"/> writes, padded or not: Java's
+    /// <c>Uuid.fromString</c>. Throws <see cref="ArgumentNullException"/> for <see langword="null"/>, and
+    /// <see cref="ArgumentException"/> for text longer than 24 characters, not valid URL-safe base64, or not
+    /// decoding to 16 bytes.
     /// </summary>
-    public static Uuid Parse(string value)
+    public static Uuid FromString(string str)
     {
-        if (value is null)
+        if (str is null)
         {
-            throw new ArgumentNullException(nameof(value));
+            throw new ArgumentNullException(nameof(str));
         }
 
-        if (value.Length > MaxTextLength)
+        if (str.Length > MaxTextLength)
         {
             throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string with prefix `{0}` is too long to be decoded as a base64 UUID",
-                    value.Substring(0, MaxTextLength)));
+                    str.Substring(0, MaxTextLength)));
         }
 
         byte[] bytes;
         try
         {
-            bytes = DecodeUrlSafeBase64(value);
+            bytes = DecodeUrlSafeBase64(str);
         }
         catch (FormatException exception)
         {
@@ -109,7 +110,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string `{0}` is not a valid base64 UUID",
-                    value),
+                    str),
                 exception);
         }
 
@@ -119,44 +120,11 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string `{0}` decoded as {1} bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
-                    value,
+                    str,
                     bytes.Length));
         }
 
         return new Uuid(ReadBigEndianInt64(bytes, 0), ReadBigEndianInt64(bytes, 8));
-    }
-
-    /// <summary>
-    /// Parses as <see cref="Parse(string)"/> does, but returns <see langword="false"/>, with <see cref="ZERO_UUID"/>,
-    /// instead of throwing.
-    /// </summary>
-    public static bool TryParse(string? value, out Uuid result)
-    {
-        if (value is null || value.Length > MaxTextLength)
-        {
-            result = ZERO_UUID;
-            return false;
-        }
-
-        byte[] bytes;
-        try
-        {
-            bytes = DecodeUrlSafeBase64(value);
-        }
-        catch (FormatException)
-        {
-            result = ZERO_UUID;
-            return false;
-        }
-
-        if (bytes.Length != ByteCount)
-        {
-            result = ZERO_UUID;
-            return false;
-        }
-
-        result = new Uuid(ReadBigEndianInt64(bytes, 0), ReadBigEndianInt64(bytes, 8));
-        return true;
     }
 
     /// <inheritdoc/>
@@ -218,6 +186,30 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
         long value = GetMostSignificantBits() ^ GetLeastSignificantBits();
         return (int)(value ^ (value >> 32));
     }
+
+    /// <summary>Converts a list of ids to an array, Java's <c>Uuid.toArray(List)</c>.</summary>
+    /// <param name="list">The ids, or <see langword="null"/>.</param>
+    /// <returns>A new array of the ids in order, or <see langword="null"/> when <paramref name="list"/> is.</returns>
+    public static Uuid[]? ToArray(IReadOnlyList<Uuid>? list)
+    {
+        if (list is null)
+        {
+            return null;
+        }
+
+        Uuid[] array = new Uuid[list.Count];
+        for (int i = 0; i < array.Length; i++)
+        {
+            array[i] = list[i];
+        }
+
+        return array;
+    }
+
+    /// <summary>Converts an array of ids to a list, Java's <c>Uuid.toList(Uuid[])</c>.</summary>
+    /// <param name="array">The ids, or <see langword="null"/>.</param>
+    /// <returns>A new list of the ids in order, or <see langword="null"/> when <paramref name="array"/> is.</returns>
+    public static IReadOnlyList<Uuid>? ToList(Uuid[]? array) => array is null ? null : new List<Uuid>(array);
 
     internal static Uuid RandomUuid(Func<Uuid> unsafeRandomUuid)
     {

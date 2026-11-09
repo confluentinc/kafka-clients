@@ -7,9 +7,6 @@ Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.
 # Java's AlterConfigOp.OpType, until it is renamed OpType (rule 1).
 Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType
 
-# Java's Callback, until IDeliveryCallback and IAsyncDeliveryCallback are renamed ICallback and IAsyncCallback.
-Confluent.Kafka.Producer.IDeliveryCallback org.apache.kafka.clients.producer.Callback
-
 # Java's ConsumerRebalanceListener, until the two bases are renamed ConsumerRebalanceListener and
 # AsyncConsumerRebalanceListener.
 Confluent.Kafka.Consumer.ConsumerRebalanceListenerBase org.apache.kafka.clients.consumer.ConsumerRebalanceListener

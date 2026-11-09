@@ -146,4 +146,33 @@ public sealed class PublicConsumerOffsetValueTypeTests
             "OffsetAndTimestamp{offset=9, timestamp=123, leaderEpoch=null}",
             new OffsetAndTimestamp(9, 123L, null).ToString());
     }
+
+    [Fact]
+    public void OffsetAndTimestamp_TwoArgumentConstructor_HasNoLeaderEpoch()
+    {
+        OffsetAndTimestamp value = new OffsetAndTimestamp(9, 123L);
+
+        Assert.Equal(9, value.Offset());
+        Assert.Equal(123L, value.Timestamp());
+        Assert.Null(value.LeaderEpoch());
+        Assert.Equal(new OffsetAndTimestamp(9, 123L, null), value);
+    }
+
+    [Fact]
+    public void OffsetAndTimestamp_RefusesANegativeOffsetOrTimestamp_WithJavasMessage()
+    {
+        Assert.Equal(
+            "Invalid negative offset",
+            Assert.Throws<IllegalArgumentException>(() => new OffsetAndTimestamp(-1, 123L)).Message);
+        Assert.Equal(
+            "Invalid negative timestamp",
+            Assert.Throws<IllegalArgumentException>(() => new OffsetAndTimestamp(9, -1L, 5)).Message);
+        Assert.Equal(
+            "Invalid negative offset",
+            Assert.Throws<IllegalArgumentException>(() => new OffsetAndTimestamp(-1, -1L)).Message);
+
+        OffsetAndTimestamp zero = new OffsetAndTimestamp(0, 0L);
+        Assert.Equal(0, zero.Offset());
+        Assert.Equal(0L, zero.Timestamp());
+    }
 }

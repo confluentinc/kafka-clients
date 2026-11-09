@@ -308,7 +308,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>A sync delivery callback that flushes its own producer.</summary>
-    private sealed class Flushing : IDeliveryCallback
+    private sealed class Flushing : ICallback
     {
         private readonly Observation _seen;
         private readonly Action _observe;
@@ -338,7 +338,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>An async delivery callback that flushes its own producer, before its first <c>await</c> or after one.</summary>
-    private sealed class AsyncFlushing : IAsyncDeliveryCallback
+    private sealed class AsyncFlushing : IAsyncCallback
     {
         private readonly Observation _seen;
         private readonly Action _observe;
@@ -380,7 +380,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>An async delivery callback whose task runs until its gate opens.</summary>
-    private sealed class Blocker : IAsyncDeliveryCallback
+    private sealed class Blocker : IAsyncCallback
     {
         private readonly Task _gate;
         private readonly TaskCompletionSource<bool> _started = NewGate();
@@ -397,7 +397,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>The pending send's delivery callback: it counts its calls and logs that it ran.</summary>
-    private sealed class Recording : IDeliveryCallback
+    private sealed class Recording : ICallback
     {
         private readonly Observation _seen;
         private int _calls;

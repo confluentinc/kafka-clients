@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Producer;
 /// The async form of a producer's delivery callback: the record's future completes, and the producer's later
 /// completions are handled, only after the task <see cref="OnCompletion"/> returns has ended.
 /// </summary>
-public interface IAsyncDeliveryCallback
+public interface IAsyncCallback
 {
     /// <summary>
     /// Called on the producer's pump thread when the record's delivery completes, or, on
