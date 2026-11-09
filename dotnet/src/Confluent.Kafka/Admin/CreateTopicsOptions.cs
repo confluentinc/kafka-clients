@@ -22,8 +22,9 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A settable class rather than Java's fluent builder, since C# object initializers read as Java's chained setters
-/// do. Every default is Java's, so <c>options: null</c> behaves as a new instance.
+/// Built as in Java, by chaining setters: <c>new CreateTopicsOptions().TimeoutMs(5000).ValidateOnly(true)</c>.
+/// Each Java getter and setter of one name is a pair of overloads, the setter returning the options. Every
+/// default is Java's, so <c>options: null</c> behaves as a new instance.
 /// </para>
 /// </remarks>
 public sealed class CreateTopicsOptions
@@ -39,47 +40,64 @@ public sealed class CreateTopicsOptions
     /// unset so the client's <c>default.api.timeout.ms</c> applies — Java's
     /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
     /// </summary>
+    /// <returns>The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset so the
+    /// client's <c>default.api.timeout.ms</c> applies — Java's <c>AbstractOptions.timeoutMs()</c>, an
+    /// <c>Integer</c> that is likewise nullable.</returns>
     /// <remarks>
     /// A negative value is sent as 0, Java's <c>Math.max(0, timeoutMs)</c>: the call is
     /// already expired and fails through its result with the core's timeout error.
     /// <see langword="null"/> is how you ask for the default.
     /// </remarks>
-    public int? TimeoutMs
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <summary>
+    /// Set the timeout in milliseconds for this operation or <see langword="null"/> if the default api timeout
+    /// for the AdminClient should be used.
+    /// </summary>
+    /// <param name="timeoutMs">The timeout in milliseconds, or <see langword="null"/> for
+    /// <c>default.api.timeout.ms</c>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public CreateTopicsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// Validate the request without actually creating the topics — Java's
-    /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
+    /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool ValidateOnly
+    /// <returns>Validate the request without actually creating the topics — Java's <c>shouldValidateOnly()</c>. Defaults
+    /// to <see langword="false"/>, as Java's does.</returns>
+    public bool ShouldValidateOnly() => _validateOnly;
+
+    /// <summary>Set to <see langword="true"/> if the request should be validated without creating the topic.</summary>
+    /// <param name="validateOnly">Whether to validate without creating. Defaults to <see langword="false"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public CreateTopicsOptions ValidateOnly(bool validateOnly)
     {
-        get => _validateOnly;
-        set
-        {
-            _validateOnly = value;
-            Setters.Ran(nameof(ValidateOnly));
-        }
+        _validateOnly = validateOnly;
+        Setters.Ran(nameof(ValidateOnly));
+        return this;
     }
 
     /// <summary>
     /// Retry automatically when the broker reports a quota violation — Java's
-    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
+    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
     /// </summary>
-    public bool RetryOnQuotaViolation
+    /// <returns>Retry automatically when the broker reports a quota violation — Java's
+    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
+    public bool ShouldRetryOnQuotaViolation() => _retryOnQuotaViolation;
+
+    /// <summary>Set to <see langword="true"/> if quota violation should be automatically retried.</summary>
+    /// <param name="retryOnQuotaViolation">Whether to retry. Defaults to <see langword="true"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public CreateTopicsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {
-        get => _retryOnQuotaViolation;
-        set
-        {
-            _retryOnQuotaViolation = value;
-            Setters.Ran(nameof(RetryOnQuotaViolation));
-        }
+        _retryOnQuotaViolation = retryOnQuotaViolation;
+        Setters.Ran(nameof(RetryOnQuotaViolation));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

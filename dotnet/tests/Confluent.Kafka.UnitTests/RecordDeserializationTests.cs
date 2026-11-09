@@ -53,15 +53,15 @@ public sealed class RecordDeserializationTests
         consumer.AddRecord(Topic, 0, 1, key: Bytes("k"), value: null);
         consumer.AddRecord(Topic, 0, 2, key: null, value: null);
 
-        ConsumerRecord<string?, string?>[] records = consumer.Poll(s_pollTimeout).OrderBy(r => r.Offset).ToArray();
+        ConsumerRecord<string?, string?>[] records = consumer.Poll(s_pollTimeout).OrderBy(r => r.Offset()).ToArray();
 
         Assert.Equal(3, records.Length);
-        Assert.Null(records[0].Key);
-        Assert.Equal("v", records[0].Value);
-        Assert.Equal("k", records[1].Key);
-        Assert.Null(records[1].Value);
-        Assert.Null(records[2].Key);
-        Assert.Null(records[2].Value);
+        Assert.Null(records[0].Key());
+        Assert.Equal("v", records[0].Value());
+        Assert.Equal("k", records[1].Key());
+        Assert.Null(records[1].Value());
+        Assert.Null(records[2].Key());
+        Assert.Null(records[2].Value());
         Assert.Equal(new[] { "k" }, keys.Seen);
         Assert.Equal(new[] { "v" }, values.Seen);
     }
@@ -76,21 +76,21 @@ public sealed class RecordDeserializationTests
         consumer.AddRecord(Topic, 0, 1, key: null, value: Bytes("x"));
 
         ConsumerRecord<string?, string?> first = Assert.Single(consumer.Poll(s_pollTimeout));
-        Assert.Equal(0L, first.Offset);
-        Assert.Null(first.Value);
+        Assert.Equal(0L, first.Offset());
+        Assert.Null(first.Value());
         Assert.Equal(1L, consumer.Position(s_tp0));
 
         consumer.AddRecord(Topic, 0, 1, key: null, value: Bytes("x"));
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(Origin.VALUE, e.Origin);
-        Assert.Equal(s_tp0, e.TopicPartition);
-        Assert.Equal(1L, e.Offset);
-        Assert.Null(e.KeyBuffer);
-        Assert.Equal(Bytes("x"), e.ValueBuffer);
-        Assert.Equal(-1L, e.Timestamp);
-        Assert.Equal(TimestampType.NO_TIMESTAMP_TYPE, e.TimestampType);
-        Assert.Empty(e.Headers!);
+        Assert.Equal(Origin.VALUE, e.Origin());
+        Assert.Equal(s_tp0, e.TopicPartition());
+        Assert.Equal(1L, e.Offset());
+        Assert.Null(e.KeyBuffer());
+        Assert.Equal(Bytes("x"), e.ValueBuffer());
+        Assert.Equal(-1L, e.Timestamp());
+        Assert.Equal(TimestampType.NO_TIMESTAMP_TYPE, e.TimestampType());
+        Assert.Empty(e.Headers()!);
         Assert.Equal(
             "Error deserializing VALUE for partition deserialization-topic-0 at offset 1. If needed, please seek past "
                 + "the record to continue consumption.",
@@ -98,11 +98,11 @@ public sealed class RecordDeserializationTests
         Assert.Same(values.Thrown.Last(), e.InnerException);
         Assert.Equal(1L, consumer.Position(s_tp0));
 
-        consumer.Seek(s_tp0, e.Offset + 1);
+        consumer.Seek(s_tp0, e.Offset() + 1);
         consumer.AddRecord(Topic, 0, 2, key: null, value: Bytes("y"));
         ConsumerRecord<string?, string?> next = Assert.Single(consumer.Poll(s_pollTimeout));
-        Assert.Equal(2L, next.Offset);
-        Assert.Equal("y", next.Value);
+        Assert.Equal(2L, next.Offset());
+        Assert.Equal("y", next.Value());
     }
 
     [Fact]
@@ -115,9 +115,9 @@ public sealed class RecordDeserializationTests
 
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(Origin.KEY, e.Origin);
-        Assert.Equal(Bytes("k"), e.KeyBuffer);
-        Assert.Equal(Bytes("v"), e.ValueBuffer);
+        Assert.Equal(Origin.KEY, e.Origin());
+        Assert.Equal(Bytes("k"), e.KeyBuffer());
+        Assert.Equal(Bytes("v"), e.ValueBuffer());
         Assert.Equal(
             "Error deserializing KEY for partition deserialization-topic-0 at offset 4. If needed, please seek past "
                 + "the record to continue consumption.",
@@ -140,8 +140,8 @@ public sealed class RecordDeserializationTests
 
         ConsumerRecord<string?, string?>[] records = consumer.Poll(s_pollTimeout).ToArray();
 
-        Assert.Equal(new[] { 0L }, records.Where(r => r.Partition == 0).Select(r => r.Offset));
-        long[] partition1 = records.Where(r => r.Partition == 1).Select(r => r.Offset).ToArray();
+        Assert.Equal(new[] { 0L }, records.Where(r => r.Partition() == 0).Select(r => r.Offset()));
+        long[] partition1 = records.Where(r => r.Partition() == 1).Select(r => r.Offset()).ToArray();
         bool partition1Returned = partition1.Length > 0;
         if (partition1Returned)
         {
@@ -165,8 +165,8 @@ public sealed class RecordDeserializationTests
 
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Contains(e.TopicPartition, new[] { s_tp0, s_tp1 });
-        Assert.Equal(0L, e.Offset);
+        Assert.Contains(e.TopicPartition(), new[] { s_tp0, s_tp1 });
+        Assert.Equal(0L, e.Offset());
         Assert.Equal(0L, consumer.Position(s_tp0));
         Assert.Equal(0L, consumer.Position(s_tp1));
     }

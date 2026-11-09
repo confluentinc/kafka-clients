@@ -64,19 +64,19 @@ internal readonly struct SerializedProducerRecord
         bool wrapInvalidCast)
     {
         ReadOnlyMemory<byte>? keyBytes = wrapInvalidCast
-            ? SerializeField(keySerializer, record.Topic, record.Key, isKey: true)
-            : keySerializer.Serialize(record.Topic, record.Key!);
+            ? SerializeField(keySerializer, record.Topic(), record.Key(), isKey: true)
+            : keySerializer.Serialize(record.Topic(), record.Key()!);
         ReadOnlyMemory<byte>? valueBytes = wrapInvalidCast
-            ? SerializeField(valueSerializer, record.Topic, record.Value, isKey: false)
-            : valueSerializer.Serialize(record.Topic, record.Value!);
+            ? SerializeField(valueSerializer, record.Topic(), record.Value(), isKey: false)
+            : valueSerializer.Serialize(record.Topic(), record.Value()!);
 
         return new SerializedProducerRecord(
-            record.Topic,
-            record.Partition,
-            record.Timestamp,
+            record.Topic(),
+            record.Partition(),
+            record.Timestamp(),
             keyBytes,
             valueBytes,
-            record.Headers);
+            record.Headers());
     }
 
     private static ReadOnlyMemory<byte>? SerializeField<T>(ISerializer<T> serializer, string topic, T? data, bool isKey)

@@ -54,14 +54,14 @@ public sealed class PublicSyncConsumerPreconditionTests
 
         ConfigException key = Assert.Throws<ConfigException>(() => create(null, null));
         Assert.Equal("Missing required configuration \"key.deserializer\" which has no default value.", key.Message);
-        ConfigException value = Assert.Throws<ConfigException>(() => create(Serdes.ByteArray, null));
+        ConfigException value = Assert.Throws<ConfigException>(() => create(Serdes.ByteArray(), null));
         Assert.Equal("Missing required configuration \"value.deserializer\" which has no default value.", value.Message);
     }
 
     [Fact]
     public void Subscribe_NullTopics_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
         Assert.Equal("topics", ex.ParamName);
@@ -70,7 +70,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Subscribe_NullElementTopic_ThrowsArgumentException()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Subscribe(new string[] { null! }));
         Assert.Equal("topics", ex.ParamName);
@@ -85,7 +85,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData("seekToEnd")]
     public void PartitionOps_NullCollection_ThrowArgumentNull(string op)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => InvokePartitionOp(consumer, op, null!));
         Assert.Equal("partitions", ex.ParamName);
@@ -98,7 +98,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     public void PartitionOps_NullElementTopic_ThrowArgumentException(string op)
     {
         // default(TopicPartition) has a null Topic, as a TopicPartition built with a null topic does.
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => InvokePartitionOp(consumer, op, new[] { default(TopicPartition) }));
@@ -109,7 +109,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Commit_NullOffsets_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Commit(null!));
         Assert.Equal("offsets", ex.ParamName);
@@ -118,7 +118,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Commit_NullOffsetValue_ThrowsArgumentException()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
@@ -136,7 +136,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData("resume")]
     public void PauseAndResume_NullElementTopic_ThrowIllegalState(string op)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => InvokePartitionOp(consumer, op, new[] { new TopicPartition(null!, 3) }));
@@ -147,7 +147,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Position_NullTopic_ThrowsIllegalArgument()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => consumer.Position(default));
         Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
@@ -156,7 +156,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Poll_NegativeTimeout_ThrowsIllegalArgument()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => consumer.Poll(TimeSpan.FromMilliseconds(-1)));
@@ -166,7 +166,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Poll_NegativeTimeout_ThrownBeforeNativeCall_EvenWhenClosed()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
 
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
@@ -177,7 +177,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Subscribe_NullTopics_WhenClosed_ReportsTheClosedConsumerFirst()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
 
         IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(null!));
@@ -187,7 +187,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Position_UnassignedPartition_ThrowsArgumentException()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => consumer.Position(new TopicPartition("unassigned", 0)));
         Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
@@ -196,7 +196,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Seek_UnassignedPartition_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
@@ -206,7 +206,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Pause_UnassignedPartition_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Pause(new[] { new TopicPartition("unassigned", 0) }));

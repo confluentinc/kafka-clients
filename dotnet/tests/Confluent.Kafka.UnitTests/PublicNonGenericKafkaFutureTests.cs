@@ -47,8 +47,8 @@ public sealed class PublicNonGenericKafkaFutureTests
         {
             AssertDefaultThrows(BlockingCall.RunWait(() => viaDefault.Get()));
             AssertDefaultThrows(BlockingCall.RunWait(() => viaNew.Get()));
-            AssertDefaultThrows(BlockingCall.RunGet(() => viaDefault.IsDone));
-            AssertDefaultThrows(BlockingCall.RunGet(() => viaNew.IsDone));
+            AssertDefaultThrows(BlockingCall.RunGet(() => viaDefault.IsDone()));
+            AssertDefaultThrows(BlockingCall.RunGet(() => viaNew.IsDone()));
         }
 
         AssertDefaultThrows(BlockingCall.RunGet(() => default(KafkaFuture<RecordMetadata>).Get()));
@@ -102,15 +102,15 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
         KafkaFuture future = new KafkaFuture(completion);
 
-        Assert.False(future.IsDone);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
+        Assert.False(future.IsDone());
 
         Assert.True(outcome == "result"
             ? completion.Complete(true)
             : completion.CompleteWithError(new KafkaException("The operation failed.")));
 
-        Assert.True(future.IsDone);
-        Assert.True(future.IsDone);
+        Assert.True(future.IsDone());
+        Assert.True(future.IsDone());
     }
 
     [Fact]
@@ -194,8 +194,8 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture<RecordMetadata> typed = new KafkaFuture<RecordMetadata>(source);
         KafkaFuture erased = typed.Erase();
 
-        Assert.False(typed.IsDone);
-        Assert.False(erased.IsDone);
+        Assert.False(typed.IsDone());
+        Assert.False(erased.IsDone());
         BlockingCall waiting = BlockingCall.StartWait(() => erased.Get());
         waiting.AssertBlocked();
 
@@ -205,8 +205,8 @@ public sealed class PublicNonGenericKafkaFutureTests
                 new RecordMetadata(new TopicPartition("erasure-topic", 0), 1L, 0, 1_700_000_000_000L, -1, -1))
             : source.CompleteWithError(cause));
 
-        Assert.True(typed.IsDone);
-        Assert.True(erased.IsDone);
+        Assert.True(typed.IsDone());
+        Assert.True(erased.IsDone());
         object? observed = waiting.Join();
         if (outcome == "result")
         {
@@ -228,8 +228,8 @@ public sealed class PublicNonGenericKafkaFutureTests
         AssertDefaultThrows(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
         AssertDefaultThrows(BlockingCall.RunWait(() => future.Get(cancellation.Token)));
         AssertDefaultThrows(BlockingCall.RunWait(() => future.GetNow()));
-        AssertDefaultThrows(BlockingCall.RunGet(() => future.IsCancelled));
-        AssertDefaultThrows(BlockingCall.RunGet(() => future.IsCompletedExceptionally));
+        AssertDefaultThrows(BlockingCall.RunGet(() => future.IsCancelled()));
+        AssertDefaultThrows(BlockingCall.RunGet(() => future.IsCompletedExceptionally()));
         AssertDefaultThrows(BlockingCall.RunGet(() => future.Cancel(true)));
         AssertDefaultThrows(BlockingCall.RunGet(() => future.ThenApply(() => 1)));
         AssertDefaultThrows(BlockingCall.RunGet(() => future.WhenComplete(error => { })));
@@ -281,9 +281,9 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture completed = Assert.IsType<KafkaFuture>(completing.Join());
         KafkaFuture all = Assert.IsType<KafkaFuture>(BlockingCall.RunGet(() => KafkaFuture.AllOf(future)));
 
-        Assert.True(applied.IsDone);
-        Assert.True(completed.IsDone);
-        Assert.True(all.IsDone);
+        Assert.True(applied.IsDone());
+        Assert.True(completed.IsDone());
+        Assert.True(all.IsDone());
         Assert.Equal(completing.CallingThreadId, completedOn);
         if (outcome == "succeeded")
         {
@@ -318,14 +318,14 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture<int> applied = future.ThenApply(() => Interlocked.Increment(ref calls) + 41);
         Exception? seen = new InvalidOperationException("The action did not run.");
         KafkaFuture completed = future.WhenComplete(error => seen = error);
-        Assert.False(applied.IsDone);
-        Assert.False(completed.IsDone);
+        Assert.False(applied.IsDone());
+        Assert.False(completed.IsDone());
 
         Assert.True(impl.Complete(null));
         Assert.Equal(42, applied.GetNow(-1));
         Assert.Null(seen);
         completed.GetNow();
-        Assert.True(completed.IsDone);
+        Assert.True(completed.IsDone());
         Assert.Equal(1, calls);
 
         KafkaFutureImpl<object?> failing = new KafkaFutureImpl<object?>();
@@ -359,13 +359,13 @@ public sealed class PublicNonGenericKafkaFutureTests
         cancellation.Cancel();
         OperationCanceledException ended = Assert.IsType<OperationCanceledException>(waiting.Join());
         Assert.Equal(cancellation.Token, ended.CancellationToken);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.Equal("KafkaFuture{value=null,exception=null,done=false}", future.ToString());
 
         Assert.True(future.Cancel(true));
-        Assert.True(future.IsDone);
-        Assert.True(future.IsCancelled);
-        Assert.True(future.IsCompletedExceptionally);
+        Assert.True(future.IsDone());
+        Assert.True(future.IsCancelled());
+        Assert.True(future.IsCompletedExceptionally());
         Assert.True(future.Cancel(false));
         Exception cancelled = Assert.IsType<OperationCanceledException>(BlockingCall.RunWait(() => future.Get()));
         Assert.Same(cancelled, BlockingCall.RunWait(() => future.Get(TimeSpan.FromSeconds(1))));
@@ -378,7 +378,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => done.Get(TimeSpan.Zero)));
         Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => done.Get(cancellation.Token)));
         Assert.False(done.Cancel(true));
-        Assert.False(done.IsCancelled);
+        Assert.False(done.IsCancelled());
     }
 
     [Fact]
@@ -387,11 +387,11 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFutureImpl<int> number = new KafkaFutureImpl<int>();
         KafkaFutureImpl<string> text = new KafkaFutureImpl<string>();
         KafkaFuture mixed = KafkaFuture.AllOf(new KafkaFuture<int>(number), new KafkaFuture<string>(text));
-        Assert.False(mixed.IsDone);
+        Assert.False(mixed.IsDone());
         Assert.True(number.Complete(1));
-        Assert.False(mixed.IsDone);
+        Assert.False(mixed.IsDone());
         Assert.True(text.Complete("one"));
-        Assert.True(mixed.IsDone);
+        Assert.True(mixed.IsDone());
         Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => mixed.Get()));
 
         KafkaFutureImpl<int> first = new KafkaFutureImpl<int>();
@@ -400,18 +400,18 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture all = KafkaFuture.AllOf(oneType);
         KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(first.CompleteWithError(cause));
-        Assert.False(all.IsDone);
+        Assert.False(all.IsDone());
         Assert.True(second.Complete(2));
         Assert.Same(
             cause, FutureAssert.Cause<TopicExistsException>(Assert.IsAssignableFrom<Exception>(BlockingCall.RunWait(() => all.Get()))));
-        Assert.True(all.IsCompletedExceptionally);
-        Assert.False(all.IsCancelled);
+        Assert.True(all.IsCompletedExceptionally());
+        Assert.False(all.IsCancelled());
 
         KafkaFuture none = KafkaFuture.AllOf();
-        Assert.True(none.IsDone);
-        Assert.False(none.IsCompletedExceptionally);
+        Assert.True(none.IsDone());
+        Assert.False(none.IsCompletedExceptionally());
         Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => none.Get()));
-        Assert.True(KafkaFuture.AllOf<int>().IsDone);
+        Assert.True(KafkaFuture.AllOf<int>().IsDone());
 
         Assert.Equal("futures", Assert.Throws<ArgumentNullException>(() => KafkaFuture.AllOf((KafkaFuture[])null!)).ParamName);
         Assert.Equal(
@@ -441,9 +441,9 @@ public sealed class PublicNonGenericKafkaFutureTests
                 "System.Boolean Cancel(System.Boolean)",
                 "System.Boolean Equals(Confluent.Kafka.Common.KafkaFuture)",
                 "System.Boolean Equals(System.Object)",
-                "System.Boolean get_IsCancelled()",
-                "System.Boolean get_IsCompletedExceptionally()",
-                "System.Boolean get_IsDone()",
+                "System.Boolean IsCancelled()",
+                "System.Boolean IsCompletedExceptionally()",
+                "System.Boolean IsDone()",
                 "System.Int32 GetHashCode()",
                 "System.String ToString()",
                 "System.Void Get()",
@@ -496,15 +496,7 @@ public sealed class PublicNonGenericKafkaFutureTests
                 .ToArray());
 
         Assert.Empty(type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
-        PropertyInfo[] properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
-        Assert.Equal(
-            new[] { "IsCancelled", "IsCompletedExceptionally", "IsDone" },
-            properties.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
-        Assert.All(properties, property =>
-        {
-            Assert.Equal(typeof(bool), property.PropertyType);
-            Assert.False(property.CanWrite);
-        });
+        Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
         FieldInfo[] fields = type.GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.All(fields, field =>
         {

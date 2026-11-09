@@ -50,7 +50,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     {
         Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack((DescribeConfigsOptions?)null));
         Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new DescribeConfigsOptions()));
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new DescribeConfigsOptions { TimeoutMs = null }));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new DescribeConfigsOptions().TimeoutMs(null)));
     }
 
     [Theory]
@@ -59,7 +59,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [InlineData(-1, 0)]
     [InlineData(int.MinValue, 0)]
     public void DescribeConfigs_TimeoutMs_ReachesTheCOptions_NegativeAsZero(int timeoutMs, int expected) =>
-        Assert.Equal(expected, ReadBack(new DescribeConfigsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
+        Assert.Equal(expected, ReadBack(new DescribeConfigsOptions().TimeoutMs(timeoutMs)).TimeoutMs);
 
     [Theory]
     [InlineData(false, false)]
@@ -68,11 +68,9 @@ public sealed class AdminConfigsSubmitArgumentTests
     [InlineData(true, true)]
     public void DescribeConfigs_BothBools_ReachTheCOptionsIndependently(bool synonyms, bool documentation)
     {
-        (int _, sbyte includeSynonyms, sbyte includeDocumentation) = ReadBack(new DescribeConfigsOptions
-        {
-            IncludeSynonyms = synonyms,
-            IncludeDocumentation = documentation,
-        });
+        (int _, sbyte includeSynonyms, sbyte includeDocumentation) = ReadBack(new DescribeConfigsOptions()
+            .IncludeSynonyms(synonyms)
+            .IncludeDocumentation(documentation));
 
         Assert.Equal(synonyms ? 1 : 0, includeSynonyms);
         Assert.Equal(documentation ? 1 : 0, includeDocumentation);
@@ -81,15 +79,13 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public void DescribeConfigs_ASetterRunTwice_SendsItsLastValue()
     {
-        DescribeConfigsOptions options = new DescribeConfigsOptions
-        {
-            TimeoutMs = 10,
-            IncludeSynonyms = true,
-            IncludeDocumentation = false,
-        };
-        options.TimeoutMs = null;
-        options.IncludeSynonyms = false;
-        options.IncludeDocumentation = true;
+        DescribeConfigsOptions options = new DescribeConfigsOptions()
+            .TimeoutMs(10)
+            .IncludeSynonyms(true)
+            .IncludeDocumentation(false);
+        options.TimeoutMs(null);
+        options.IncludeSynonyms(false);
+        options.IncludeDocumentation(true);
 
         Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(options));
     }
@@ -99,7 +95,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     {
         Assert.Equal((-1, (sbyte)0), ReadBack((AlterConfigsOptions?)null));
         Assert.Equal((-1, (sbyte)0), ReadBack(new AlterConfigsOptions()));
-        Assert.Equal((-1, (sbyte)0), ReadBack(new AlterConfigsOptions { TimeoutMs = null }));
+        Assert.Equal((-1, (sbyte)0), ReadBack(new AlterConfigsOptions().TimeoutMs(null)));
     }
 
     [Theory]
@@ -108,7 +104,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [InlineData(-1, 0)]
     [InlineData(int.MinValue, 0)]
     public void IncrementalAlterConfigs_TimeoutMs_ReachesTheCOptions_NegativeAsZero(int timeoutMs, int expected) =>
-        Assert.Equal(expected, ReadBack(new AlterConfigsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
+        Assert.Equal(expected, ReadBack(new AlterConfigsOptions().TimeoutMs(timeoutMs)).TimeoutMs);
 
     [Theory]
     [InlineData(false)]
@@ -116,14 +112,14 @@ public sealed class AdminConfigsSubmitArgumentTests
     public void IncrementalAlterConfigs_ValidateOnly_ReachesTheCOptions(bool validateOnly) =>
         Assert.Equal(
             validateOnly ? 1 : 0,
-            ReadBack(new AlterConfigsOptions { ValidateOnly = validateOnly }).ValidateOnly);
+            ReadBack(new AlterConfigsOptions().ValidateOnly(validateOnly)).ValidateOnly);
 
     [Fact]
     public void IncrementalAlterConfigs_ASetterRunTwice_SendsItsLastValue()
     {
-        AlterConfigsOptions options = new AlterConfigsOptions { TimeoutMs = 10, ValidateOnly = true };
-        options.TimeoutMs = 30;
-        options.ValidateOnly = false;
+        AlterConfigsOptions options = new AlterConfigsOptions().TimeoutMs(10).ValidateOnly(true);
+        options.TimeoutMs(30);
+        options.ValidateOnly(false);
 
         Assert.Equal((30, (sbyte)0), ReadBack(options));
     }
@@ -190,14 +186,14 @@ public sealed class AdminConfigsSubmitArgumentTests
             new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET),
             new AlterConfigOp(new ConfigEntry("cleanup.policy", string.Empty), AlterConfigOpType.SET)));
         Config set = await Describe(admin, s_topicResource);
-        Assert.Equal("1000", set.Get("retention.ms")!.Value);
-        Assert.Equal(string.Empty, set.Get("cleanup.policy")!.Value);
+        Assert.Equal("1000", set.Get("retention.ms")!.Value());
+        Assert.Equal(string.Empty, set.Get("cleanup.policy")!.Value());
 
         await Alter(admin, Ops(
             s_topicResource, new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.DELETE)));
         Config deleted = await Describe(admin, s_topicResource);
         Assert.Null(deleted.Get("retention.ms"));
-        Assert.Equal(string.Empty, deleted.Get("cleanup.policy")!.Value);
+        Assert.Equal(string.Empty, deleted.Get("cleanup.policy")!.Value());
     }
 
     [Fact]
@@ -220,11 +216,11 @@ public sealed class AdminConfigsSubmitArgumentTests
             };
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, null));
 
-        Assert.Equal(new[] { s_topicResource }, result.Values.Keys);
+        Assert.Equal(new[] { s_topicResource }, result.Values().Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Config config = await Describe(admin, s_topicResource);
-        Assert.Equal("2", config.Get("retention.ms")!.Value);
-        Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
+        Assert.Equal("2", config.Get("retention.ms")!.Value());
+        Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
     }
 
     [Theory]
@@ -241,10 +237,10 @@ public sealed class AdminConfigsSubmitArgumentTests
             {
                 [s_topicResource] = Array.Empty<AlterConfigOp>(),
             },
-            new AlterConfigsOptions { ValidateOnly = validateOnly }));
+            new AlterConfigsOptions().ValidateOnly(validateOnly)));
 
-        await TestTimeout.Run(() => result.Values[s_topicResource].Get(), s_deadline);
-        Assert.Empty((await Describe(admin, s_topicResource)).Entries);
+        await TestTimeout.Run(() => result.Values()[s_topicResource].Get(), s_deadline);
+        Assert.Empty((await Describe(admin, s_topicResource)).Entries());
     }
 
     [Fact]
@@ -256,7 +252,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(), null));
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -277,10 +273,10 @@ public sealed class AdminConfigsSubmitArgumentTests
             },
             null));
 
-        Assert.Equal(3, result.Values.Count);
-        Assert.Contains(s_topicResource, result.Values.Keys);
-        Assert.Contains(new ConfigResource(ConfigResourceType.BROKER, "0"), result.Values.Keys);
-        Assert.Contains(new ConfigResource(ConfigResourceType.UNKNOWN, "x"), result.Values.Keys);
+        Assert.Equal(3, result.Values().Count);
+        Assert.Contains(s_topicResource, result.Values().Keys);
+        Assert.Contains(new ConfigResource(ConfigResourceType.BROKER, "0"), result.Values().Keys);
+        Assert.Contains(new ConfigResource(ConfigResourceType.UNKNOWN, "x"), result.Values().Keys);
     }
 
     private static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> Ops(
@@ -300,7 +296,7 @@ public sealed class AdminConfigsSubmitArgumentTests
 
     private static Task<Config> Describe(NativeAdminClient admin, ConfigResource resource) =>
         TestTimeout.Run(
-            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values[resource].Get(),
+            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values()[resource].Get(),
             s_deadline);
 
     private static (int TimeoutMs, sbyte IncludeSynonyms, sbyte IncludeDocumentation) ReadBack(

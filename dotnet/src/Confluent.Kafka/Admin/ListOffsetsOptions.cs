@@ -26,34 +26,47 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class ListOffsetsOptions
 {
+    private readonly IsolationLevel _isolationLevel;
+
     private int? _timeoutMs;
 
-    private IsolationLevel _isolationLevel = IsolationLevel.READ_UNCOMMITTED;
-
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <summary>
+    /// Options that read with <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>
+    /// isolation — Java's <c>ListOffsetsOptions()</c>.
+    /// </summary>
+    public ListOffsetsOptions()
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _isolationLevel = Common.IsolationLevel.READ_UNCOMMITTED;
+    }
+
+    /// <summary>
+    /// Options that read with the given isolation — Java's
+    /// <c>ListOffsetsOptions(IsolationLevel)</c>.
+    /// </summary>
+    /// <param name="isolationLevel">The read isolation the query observes.</param>
+    public ListOffsetsOptions(IsolationLevel isolationLevel)
+    {
+        _isolationLevel = isolationLevel;
+        Setters.Ran(nameof(IsolationLevel));
+    }
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public ListOffsetsOptions TimeoutMs(int? timeoutMs)
+    {
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// The read isolation the query observes — Java's <c>isolationLevel()</c>. Defaults to
     /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>, as Java's does.
     /// </summary>
-    public IsolationLevel IsolationLevel
-    {
-        get => _isolationLevel;
-        set
-        {
-            _isolationLevel = value;
-            Setters.Ran(nameof(IsolationLevel));
-        }
-    }
+    /// <returns>The read isolation the query observes.</returns>
+    public IsolationLevel IsolationLevel() => _isolationLevel;
 
     internal OptionSetters Setters { get; } = new OptionSetters();
 }

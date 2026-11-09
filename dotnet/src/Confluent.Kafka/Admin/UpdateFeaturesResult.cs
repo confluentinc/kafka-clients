@@ -46,7 +46,8 @@ public sealed class UpdateFeaturesResult
     /// <summary>
     /// One future per requested feature — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture> Values => _values;
+    /// <returns>One future per requested feature.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every feature's update has been applied, and fails with the first failure to complete if any

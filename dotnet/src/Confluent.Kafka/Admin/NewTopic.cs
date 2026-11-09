@@ -28,10 +28,10 @@ namespace Confluent.Kafka.Admin;
 /// Java; with an assignment no partition count or replication factor is sent.
 /// </para>
 /// <para>
-/// A <see langword="null"/> <see cref="NumPartitions"/> or <see cref="ReplicationFactor"/> is
-/// Java's <c>Optional.empty()</c> and <c>-1</c> is Java's <c>Optional.of(-1)</c>: both leave the
-/// broker default, and <see cref="Equals(object?)"/> and <see cref="ToString"/> tell them apart,
-/// as Java's do.
+/// An unset partition count or replication factor (Java's <c>Optional.empty()</c>) and <c>-1</c>
+/// (Java's <c>Optional.of(-1)</c>) both leave the broker default, and both read <c>-1</c> through
+/// <see cref="NumPartitions()"/> and <see cref="ReplicationFactor()"/>, as Java's getters do;
+/// only <see cref="Equals(object?)"/> and <see cref="ToString"/> tell them apart, as Java's do.
 /// </para>
 /// <para>
 /// Two recorded deviations: a value below <c>-1</c> throws, where Java sends it and the broker
@@ -42,6 +42,12 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class NewTopic
 {
+    private readonly string _name;
+    private readonly int? _numPartitions;
+    private readonly short? _replicationFactor;
+    private readonly IReadOnlyDictionary<int, IReadOnlyList<int>>? _replicasAssignments;
+    private IReadOnlyDictionary<string, string>? _configs;
+
     /// <summary>
     /// Initializes a topic with an explicit partition count and replication factor —
     /// Java's <c>NewTopic(String, int, short)</c>.
@@ -84,7 +90,7 @@ public sealed class NewTopic
     /// </exception>
     public NewTopic(string name, int? numPartitions, short? replicationFactor)
     {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
+        _name = name ?? throw new ArgumentNullException(nameof(name));
 
         if (numPartitions is < -1)
         {
@@ -102,8 +108,8 @@ public sealed class NewTopic
                 "Replication factor must be non-negative, or -1 (or null) for the broker default.");
         }
 
-        NumPartitions = numPartitions;
-        ReplicationFactor = replicationFactor;
+        _numPartitions = numPartitions;
+        _replicationFactor = replicationFactor;
     }
 
     /// <summary>
@@ -123,7 +129,7 @@ public sealed class NewTopic
     /// <exception cref="ArgumentOutOfRangeException">A partition index is negative.</exception>
     public NewTopic(string name, IReadOnlyDictionary<int, IReadOnlyList<int>> replicasAssignments)
     {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
+        _name = name ?? throw new ArgumentNullException(nameof(name));
         if (replicasAssignments is null)
         {
             throw new ArgumentNullException(nameof(replicasAssignments));
@@ -150,54 +156,65 @@ public sealed class NewTopic
             copy[entry.Key] = new List<int>(entry.Value);
         }
 
-        ReplicasAssignments = copy;
+        _replicasAssignments = copy;
     }
 
     /// <summary>The topic name (Java's <c>name()</c>).</summary>
-    public string Name { get; }
+    /// <returns>The topic name.</returns>
+    public string Name() => _name;
 
     /// <summary>
-    /// The number of partitions, or <see langword="null"/> for the broker default
-    /// (Java's <c>numPartitions()</c>). <c>-1</c> when the caller passed <c>-1</c>, which
-    /// also means the broker default and is kept apart from <see langword="null"/>, as in Java.
-    /// Always <see langword="null"/> when <see cref="ReplicasAssignments"/> is set.
+    /// The number of partitions, or <c>-1</c> for the broker default — Java's
+    /// <c>numPartitions()</c>: <c>-1</c> when it is unset or the caller passed <c>-1</c>, and
+    /// always when <see cref="ReplicasAssignments()"/> is set.
     /// </summary>
-    public int? NumPartitions { get; }
+    /// <returns>The number of partitions, or <c>-1</c> for the broker default.</returns>
+    public int NumPartitions() => _numPartitions ?? -1;
 
     /// <summary>
-    /// The replication factor, or <see langword="null"/> for the broker default
-    /// (Java's <c>replicationFactor()</c>). <c>-1</c> when the caller passed <c>-1</c>,
-    /// which also means the broker default. Always <see langword="null"/> when
-    /// <see cref="ReplicasAssignments"/> is set.
+    /// The replication factor, or <c>-1</c> for the broker default — Java's
+    /// <c>replicationFactor()</c>: <c>-1</c> when it is unset or the caller passed <c>-1</c>, and
+    /// always when <see cref="ReplicasAssignments()"/> is set.
     /// </summary>
-    public short? ReplicationFactor { get; }
+    /// <returns>The replication factor, or <c>-1</c> for the broker default.</returns>
+    public short ReplicationFactor() => _replicationFactor ?? -1;
 
     /// <summary>
     /// The explicit replica assignment, or <see langword="null"/> when the topic was
     /// described by partition count and replication factor instead (Java's
     /// <c>replicasAssignments()</c>).
     /// </summary>
-    public IReadOnlyDictionary<int, IReadOnlyList<int>>? ReplicasAssignments { get; }
+    /// <returns>The explicit replica assignment, or <see langword="null"/> when there is none.</returns>
+    public IReadOnlyDictionary<int, IReadOnlyList<int>>? ReplicasAssignments() => _replicasAssignments;
 
     /// <summary>
     /// The topic-level configuration to create the topic with, or
-    /// <see langword="null"/> for none. One C# property expresses both of Java's
-    /// members: reading it is <c>configs()</c>, assigning it is <c>configs(Map)</c>.
+    /// <see langword="null"/> for none — Java's <c>configs()</c>.
     /// </summary>
+    /// <returns>The topic-level configuration, or <see langword="null"/> for none.</returns>
     /// <remarks>
-    /// <para>
     /// The dictionary is held by reference, as Java holds its map, and takes part in
-    /// <see cref="Equals(object?)"/> and <see cref="GetHashCode"/>, so assigning this property or
-    /// mutating the dictionary changes the hash code, as in Java.
-    /// </para>
-    /// <para>
-    /// A <see langword="null"/> value is accepted here, but the core cannot send it, so
-    /// <c>CreateTopics</c> rejects the topic with <see cref="System.ArgumentException"/> before
-    /// anything is sent, as the Python client does. The annotation stays <c>string</c> so that a
-    /// <c>Dictionary&lt;string, string&gt;</c> can be assigned without a warning.
-    /// </para>
+    /// <see cref="Equals(object?)"/> and <see cref="GetHashCode"/>, so setting it or mutating the
+    /// dictionary changes the hash code, as in Java.
     /// </remarks>
-    public IReadOnlyDictionary<string, string>? Configs { get; set; }
+    public IReadOnlyDictionary<string, string>? Configs() => _configs;
+
+    /// <summary>
+    /// Sets the topic-level configuration to create the topic with — Java's <c>configs(Map)</c>.
+    /// </summary>
+    /// <param name="configs">The topic-level configuration, or <see langword="null"/> for none.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    /// <remarks>
+    /// A <see langword="null"/> value in the dictionary is accepted here, but the core cannot send
+    /// it, so <c>CreateTopics</c> rejects the topic with <see cref="System.ArgumentException"/>
+    /// before anything is sent, as the Python client does. The annotation stays <c>string</c> so
+    /// that a <c>Dictionary&lt;string, string&gt;</c> can be passed without a warning.
+    /// </remarks>
+    public NewTopic Configs(IReadOnlyDictionary<string, string>? configs)
+    {
+        _configs = configs;
+        return this;
+    }
 
     /// <summary>
     /// Value equality over all five fields — Java's <c>equals</c>: the name (ordinal), the
@@ -217,11 +234,11 @@ public sealed class NewTopic
         }
 
         return obj is NewTopic other
-            && string.Equals(Name, other.Name, StringComparison.Ordinal)
-            && NumPartitions == other.NumPartitions
-            && ReplicationFactor == other.ReplicationFactor
-            && AssignmentsEqual(ReplicasAssignments, other.ReplicasAssignments)
-            && ConfigsEqual(Configs, other.Configs);
+            && string.Equals(_name, other._name, StringComparison.Ordinal)
+            && _numPartitions == other._numPartitions
+            && _replicationFactor == other._replicationFactor
+            && AssignmentsEqual(_replicasAssignments, other._replicasAssignments)
+            && ConfigsEqual(_configs, other._configs);
     }
 
     /// <summary>
@@ -230,7 +247,7 @@ public sealed class NewTopic
     /// of per-entry hashes.
     /// </summary>
     /// <remarks>
-    /// It changes when <see cref="Configs"/> is reassigned or the dictionary behind it is
+    /// It changes when <see cref="Configs(IReadOnlyDictionary{string, string}?)"/> is called or the dictionary behind it is
     /// mutated, as Java's does.
     /// </remarks>
     /// <returns>The hash code.</returns>
@@ -239,12 +256,12 @@ public sealed class NewTopic
         unchecked
         {
             int hash = 1;
-            hash = (31 * hash) + StringComparer.Ordinal.GetHashCode(Name);
+            hash = (31 * hash) + StringComparer.Ordinal.GetHashCode(_name);
 
-            hash = (31 * hash) + NumPartitions.GetHashCode();
-            hash = (31 * hash) + ReplicationFactor.GetHashCode();
-            hash = (31 * hash) + AssignmentsHash(ReplicasAssignments);
-            hash = (31 * hash) + ConfigsHash(Configs);
+            hash = (31 * hash) + _numPartitions.GetHashCode();
+            hash = (31 * hash) + _replicationFactor.GetHashCode();
+            hash = (31 * hash) + AssignmentsHash(_replicasAssignments);
+            hash = (31 * hash) + ConfigsHash(_configs);
             return hash;
         }
     }
@@ -258,15 +275,15 @@ public sealed class NewTopic
     public override string ToString() =>
         string.Concat(
             "(name=",
-            Name,
+            _name,
             ", numPartitions=",
-            NumPartitions is null ? "default" : NumPartitions.Value.ToString(CultureInfo.InvariantCulture),
+            _numPartitions is null ? "default" : _numPartitions.Value.ToString(CultureInfo.InvariantCulture),
             ", replicationFactor=",
-            ReplicationFactor is null ? "default" : ReplicationFactor.Value.ToString(CultureInfo.InvariantCulture),
+            _replicationFactor is null ? "default" : _replicationFactor.Value.ToString(CultureInfo.InvariantCulture),
             ", replicasAssignments=",
-            RenderAssignments(ReplicasAssignments),
+            RenderAssignments(_replicasAssignments),
             ", configs=",
-            RenderConfigs(Configs),
+            RenderConfigs(_configs),
             ")");
 
     private static bool AssignmentsEqual(

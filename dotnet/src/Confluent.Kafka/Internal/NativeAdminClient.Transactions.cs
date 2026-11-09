@@ -196,10 +196,10 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeProducersOptions.TimeoutMs):
-                NativeMethods.DescribeProducersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeProducersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeProducersOptions.BrokerId):
-                NativeMethods.DescribeProducersOptionsSetBrokerId(native, options.BrokerId!.Value, ref outErr);
+                NativeMethods.DescribeProducersOptionsSetBrokerId(native, options.BrokerId()!.Value, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeProducersOptions has no C setter for " + setter + ".");
@@ -277,7 +277,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeTransactionsOptions.TimeoutMs):
-                NativeMethods.DescribeTransactionsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeTransactionsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeTransactionsOptions has no C setter for " + setter + ".");
@@ -328,14 +328,14 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(spec));
             }
 
-            if (spec.TopicPartition.Topic is null)
+            if (spec.TopicPartition().Topic() is null)
             {
                 throw new ArgumentException(
                     "The abort transaction spec must not carry a topic partition with a null topic.",
                     nameof(spec));
             }
 
-            AdminStrings.Validate(spec.TopicPartition.Topic, nameof(spec));
+            AdminStrings.Validate(spec.TopicPartition().Topic(), nameof(spec));
             IntPtr nativeSpec = NewAbortTransactionSpec(spec);
             try
             {
@@ -360,12 +360,12 @@ internal sealed partial class NativeAdminClient
 
     internal static IntPtr NewAbortTransactionSpec(AbortTransactionSpec spec)
     {
-        IntPtr partition = NewNativeTopicPartition(spec.TopicPartition);
+        IntPtr partition = NewNativeTopicPartition(spec.TopicPartition());
         try
         {
             IntPtr outErr = IntPtr.Zero;
             IntPtr native = NativeMethods.AbortTransactionSpecNew(
-                partition, spec.ProducerId, spec.ProducerEpoch, spec.CoordinatorEpoch, ref outErr);
+                partition, spec.ProducerId(), spec.ProducerEpoch(), spec.CoordinatorEpoch(), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return native;
         }
@@ -404,7 +404,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AbortTransactionOptions.TimeoutMs):
-                NativeMethods.AbortTransactionOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AbortTransactionOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AbortTransactionOptions has no C setter for " + setter + ".");
@@ -485,7 +485,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(FenceProducersOptions.TimeoutMs):
-                NativeMethods.FenceProducersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.FenceProducersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("FenceProducersOptions has no C setter for " + setter + ".");
@@ -574,7 +574,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(TerminateTransactionOptions.TimeoutMs):
                 NativeMethods.TerminateTransactionOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("TerminateTransactionOptions has no C setter for " + setter + ".");
@@ -587,7 +587,7 @@ internal sealed partial class NativeAdminClient
         EnterUse();
         try
         {
-            AdminStrings.Validate(options?.FilteredTransactionalIdPattern, nameof(options));
+            AdminStrings.Validate(options?.FilteredTransactionalIdPattern(), nameof(options));
             SafeAdminResultHandle result = CallWithOptions(
                 NewListTransactionsOptions(options),
                 s_destroyListTransactionsOptions,
@@ -618,24 +618,24 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListTransactionsOptions.TimeoutMs):
-                NativeMethods.ListTransactionsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListTransactionsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
-            case nameof(ListTransactionsOptions.FilteredStates):
+            case nameof(ListTransactionsOptions.FilterStates):
                 SetSingletonList(
                     native,
-                    options.FilteredStates,
+                    options.FilteredStates(),
                     s_transactionStateSingleton,
                     s_listTransactionsOptionsFilterStates,
                     ref outErr);
                 break;
-            case nameof(ListTransactionsOptions.FilteredProducerIds):
-                SetFilteredProducerIds(native, options.FilteredProducerIds, ref outErr);
+            case nameof(ListTransactionsOptions.FilterProducerIds):
+                SetFilteredProducerIds(native, options.FilteredProducerIds(), ref outErr);
                 break;
-            case nameof(ListTransactionsOptions.FilteredDuration):
-                NativeMethods.ListTransactionsOptionsFilterOnDuration(native, options.FilteredDuration, ref outErr);
+            case nameof(ListTransactionsOptions.FilterOnDuration):
+                NativeMethods.ListTransactionsOptionsFilterOnDuration(native, options.FilteredDuration(), ref outErr);
                 break;
-            case nameof(ListTransactionsOptions.FilteredTransactionalIdPattern):
-                SetFilteredTransactionalIdPattern(native, options.FilteredTransactionalIdPattern, ref outErr);
+            case nameof(ListTransactionsOptions.FilterOnTransactionalIdPattern):
+                SetFilteredTransactionalIdPattern(native, options.FilteredTransactionalIdPattern(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListTransactionsOptions has no C setter for " + setter + ".");

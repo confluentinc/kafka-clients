@@ -27,17 +27,17 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// Java's setter <c>topicPartitions(Collection)</c> and its getter <c>topicPartitions()</c> are
-/// the one property <see cref="TopicPartitions"/>, as on the options types.
+/// the two overloads of <c>TopicPartitions</c>, as on the options types.
 /// </para>
 /// <para>
 /// <see langword="null"/>, Java's unset field, lists every partition of the group; an empty
 /// collection lists none.
 /// </para>
 /// <para>
-/// The collection is copied on assignment, in order and with duplicates, where Java stores the
+/// The collection is copied when set, in order and with duplicates, where Java stores the
 /// reference, and <see cref="Equals(object)"/> compares it element by element in order, where
 /// Java defers to the collection's own <c>equals</c>: both recorded deviations, so that equality,
-/// the hash and the request stay those of the selection that was assigned.
+/// the hash and the request stay those of the selection that was set.
 /// </para>
 /// </remarks>
 public sealed class ListConsumerGroupOffsetsSpec
@@ -47,16 +47,31 @@ public sealed class ListConsumerGroupOffsetsSpec
     /// <summary>
     /// The partitions whose offsets are to be listed for the group, or
     /// <see langword="null"/> for every partition the group has committed offsets for —
-    /// Java's <c>topicPartitions()</c> and <c>topicPartitions(Collection)</c>.
+    /// Java's <c>topicPartitions()</c>.
     /// </summary>
+    /// <returns>
+    /// The partitions whose offsets are to be listed, or <see langword="null"/> for every
+    /// partition the group has committed offsets for.
+    /// </returns>
     /// <remarks>
     /// <see langword="null"/> and an empty collection are different requests. The value read
-    /// back is a copy of what was assigned, not the same instance.
+    /// back is a copy of what was set, not the same instance.
     /// </remarks>
-    public IReadOnlyCollection<TopicPartition>? TopicPartitions
+    public IReadOnlyCollection<TopicPartition>? TopicPartitions() => _topicPartitions;
+
+    /// <summary>
+    /// Sets the partitions whose offsets are to be listed — Java's
+    /// <c>topicPartitions(Collection)</c>.
+    /// </summary>
+    /// <param name="topicPartitions">
+    /// The partitions whose offsets are to be listed, or <see langword="null"/> for every
+    /// partition the group has committed offsets for.
+    /// </param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public ListConsumerGroupOffsetsSpec TopicPartitions(IReadOnlyCollection<TopicPartition>? topicPartitions)
     {
-        get => _topicPartitions;
-        set => _topicPartitions = value is null ? null : new List<TopicPartition>(value);
+        _topicPartitions = topicPartitions is null ? null : new List<TopicPartition>(topicPartitions);
+        return this;
     }
 
     /// <summary>

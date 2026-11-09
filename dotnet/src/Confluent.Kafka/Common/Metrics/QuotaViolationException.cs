@@ -27,34 +27,43 @@ namespace Confluent.Kafka.Common.Metrics;
 /// </summary>
 public class QuotaViolationException : global::Confluent.Kafka.Common.KafkaException
 {
+    private readonly KafkaMetric _metric;
+
+    private readonly double _value;
+
+    private readonly double _bound;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>QuotaViolationException(KafkaMetric metric, double value, double
     /// bound)</c>.
     /// </summary>
     public QuotaViolationException(KafkaMetric metric, double value, double bound)
-        : base("'" + JavaText.ValueOf((metric ?? throw new ArgumentNullException(nameof(metric))).Name) + "' violated quota. Actual: " + JavaText.ValueOf(value) + ", Threshold: " + JavaText.ValueOf(bound))
+        : base("'" + JavaText.ValueOf((metric ?? throw new ArgumentNullException(nameof(metric))).MetricName()) + "' violated quota. Actual: " + JavaText.ValueOf(value) + ", Threshold: " + JavaText.ValueOf(bound))
     {
-        Metric = metric;
-        Value = value;
-        Bound = bound;
+        _metric = metric;
+        _value = value;
+        _bound = bound;
     }
 
     internal QuotaViolationException(CoreError _, string? message, Exception? innerException, KafkaMetric metric, double value, double bound)
         : base(_, message, innerException)
     {
-        Metric = metric;
-        Value = value;
-        Bound = bound;
+        _metric = metric;
+        _value = value;
+        _bound = bound;
     }
 
     /// <summary>Java's <c>metric()</c>.</summary>
-    public KafkaMetric Metric { get; }
+    /// <returns>The metric.</returns>
+    public KafkaMetric Metric() => _metric;
 
     /// <summary>Java's <c>value()</c>.</summary>
-    public double Value { get; }
+    /// <returns>The value.</returns>
+    public double Value() => _value;
 
     /// <summary>Java's <c>bound()</c>.</summary>
-    public double Bound { get; }
+    /// <returns>The bound.</returns>
+    public double Bound() => _bound;
 
     internal override int FfiId => -26;
 

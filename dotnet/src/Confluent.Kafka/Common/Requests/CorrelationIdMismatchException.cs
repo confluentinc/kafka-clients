@@ -27,6 +27,10 @@ namespace Confluent.Kafka.Common.Requests;
 /// </summary>
 public class CorrelationIdMismatchException : global::Confluent.Kafka.IllegalStateException
 {
+    private readonly int _requestCorrelationId;
+
+    private readonly int _responseCorrelationId;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>CorrelationIdMismatchException(String message, int requestCorrelationId,
     /// int responseCorrelationId)</c>.
@@ -34,20 +38,22 @@ public class CorrelationIdMismatchException : global::Confluent.Kafka.IllegalSta
     public CorrelationIdMismatchException(string? message, int requestCorrelationId, int responseCorrelationId)
         : base(message)
     {
-        RequestCorrelationId = requestCorrelationId;
-        ResponseCorrelationId = responseCorrelationId;
+        _requestCorrelationId = requestCorrelationId;
+        _responseCorrelationId = responseCorrelationId;
     }
 
     internal CorrelationIdMismatchException(CoreError _, string? message, Exception? innerException, int requestCorrelationId, int responseCorrelationId)
         : base(_, message, innerException)
     {
-        RequestCorrelationId = requestCorrelationId;
-        ResponseCorrelationId = responseCorrelationId;
+        _requestCorrelationId = requestCorrelationId;
+        _responseCorrelationId = responseCorrelationId;
     }
 
     /// <summary>Java's <c>requestCorrelationId()</c>.</summary>
-    public int RequestCorrelationId { get; }
+    /// <returns>The request correlation id.</returns>
+    public int RequestCorrelationId() => _requestCorrelationId;
 
     /// <summary>Java's <c>responseCorrelationId()</c>.</summary>
-    public int ResponseCorrelationId { get; }
+    /// <returns>The response correlation id.</returns>
+    public int ResponseCorrelationId() => _responseCorrelationId;
 }

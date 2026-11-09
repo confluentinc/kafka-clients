@@ -53,14 +53,14 @@ public sealed class AdminP5ResultMarshalTests
 
         GroupListing[] listings = GroupDescriptionMarshal.CopyOutListings(list).ToArray();
 
-        Assert.Equal(new[] { "g-ø", "classic", "old" }, listings.Select(l => l.GroupId));
-        Assert.Equal(new GroupType?[] { GroupType.CONSUMER, GroupType.CLASSIC, null }, listings.Select(l => l.Type));
-        Assert.Equal(new[] { "consumer", string.Empty, "proto" }, listings.Select(l => l.Protocol));
+        Assert.Equal(new[] { "g-ø", "classic", "old" }, listings.Select(l => l.GroupId()));
+        Assert.Equal(new GroupType?[] { GroupType.CONSUMER, GroupType.CLASSIC, null }, listings.Select(l => l.Type()));
+        Assert.Equal(new[] { "consumer", string.Empty, "proto" }, listings.Select(l => l.Protocol()));
         Assert.Equal(
             new GroupState?[] { GroupState.STABLE, GroupState.EMPTY, null },
-            listings.Select(l => l.GroupState));
-        Assert.True(listings[1].IsSimpleConsumerGroup);
-        Assert.False(listings[0].IsSimpleConsumerGroup);
+            listings.Select(l => l.GroupState()));
+        Assert.True(listings[1].IsSimpleConsumerGroup());
+        Assert.False(listings[0].IsSimpleConsumerGroup());
     }
 
     [Fact]
@@ -98,7 +98,7 @@ public sealed class AdminP5ResultMarshalTests
         IntPtr list = c.List(c.Listing("g", GroupType.CONSUMER, "consumer", state));
 
         Assert.Equal(state, GroupMarshal.StateFrom(GroupMarshal.StateSingleton(state)));
-        Assert.Equal(state, Assert.Single(GroupDescriptionMarshal.CopyOutListings(list)).GroupState);
+        Assert.Equal(state, Assert.Single(GroupDescriptionMarshal.CopyOutListings(list)).GroupState());
     }
 
     [Theory]
@@ -109,7 +109,7 @@ public sealed class AdminP5ResultMarshalTests
         IntPtr list = c.List(c.Listing("g", type, "consumer", GroupState.STABLE));
 
         Assert.Equal(type, GroupMarshal.TypeFrom(GroupMarshal.TypeSingleton(type)));
-        Assert.Equal(type, Assert.Single(GroupDescriptionMarshal.CopyOutListings(list)).Type);
+        Assert.Equal(type, Assert.Single(GroupDescriptionMarshal.CopyOutListings(list)).Type());
     }
 
     [Fact]
@@ -147,18 +147,18 @@ public sealed class AdminP5ResultMarshalTests
 
         ConsumerGroupDescription copied = GroupDescriptionMarshal.CopyOutConsumerGroupDescription(description);
 
-        Assert.Equal("grüppe", copied.GroupId);
-        Assert.False(copied.IsSimpleConsumerGroup);
-        Assert.Equal("uniform", copied.PartitionAssignor);
-        Assert.Equal(GroupType.CONSUMER, copied.Type);
-        Assert.Equal(GroupState.STABLE, copied.GroupState);
-        Assert.Equal(7, copied.GroupEpoch);
-        Assert.Equal(9, copied.TargetAssignmentEpoch);
-        Node coordinator = Assert.IsType<Node>(copied.Coordinator);
-        Assert.Equal((3, "brøker", 9092, "r1"), (coordinator.Id, coordinator.Host, coordinator.Port, coordinator.Rack));
+        Assert.Equal("grüppe", copied.GroupId());
+        Assert.False(copied.IsSimpleConsumerGroup());
+        Assert.Equal("uniform", copied.PartitionAssignor());
+        Assert.Equal(GroupType.CONSUMER, copied.Type());
+        Assert.Equal(GroupState.STABLE, copied.GroupState());
+        Assert.Equal(7, copied.GroupEpoch());
+        Assert.Equal(9, copied.TargetAssignmentEpoch());
+        Node coordinator = Assert.IsType<Node>(copied.Coordinator());
+        Assert.Equal((3, "brøker", 9092, "r1"), (coordinator.Id(), coordinator.Host(), coordinator.Port(), coordinator.Rack()));
         Assert.Equal(
             new[] { AclOperation.DESCRIBE, AclOperation.READ },
-            Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(copied.AuthorizedOperations).OrderByDescending(o => o));
+            Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(copied.AuthorizedOperations()).OrderByDescending(o => o));
         Assert.Equal(
             new[]
             {
@@ -171,7 +171,7 @@ public sealed class AdminP5ResultMarshalTests
                 new MemberDescription(
                     "m-2", null, null, "client-2", "/10.0.0.2", new MemberAssignment(null), null, null, null),
             },
-            copied.Members);
+            copied.Members());
     }
 
     [Fact]
@@ -183,13 +183,13 @@ public sealed class AdminP5ResultMarshalTests
 
         ConsumerGroupDescription copied = GroupDescriptionMarshal.CopyOutConsumerGroupDescription(description);
 
-        Assert.True(copied.IsSimpleConsumerGroup);
-        Assert.Empty(copied.Members);
-        Assert.Equal(string.Empty, copied.PartitionAssignor);
-        Assert.Null(copied.Coordinator);
-        Assert.Null(copied.AuthorizedOperations);
-        Assert.Null(copied.GroupEpoch);
-        Assert.Null(copied.TargetAssignmentEpoch);
+        Assert.True(copied.IsSimpleConsumerGroup());
+        Assert.Empty(copied.Members());
+        Assert.Equal(string.Empty, copied.PartitionAssignor());
+        Assert.Null(copied.Coordinator());
+        Assert.Null(copied.AuthorizedOperations());
+        Assert.Null(copied.GroupEpoch());
+        Assert.Null(copied.TargetAssignmentEpoch());
     }
 
     [Fact]
@@ -203,16 +203,16 @@ public sealed class AdminP5ResultMarshalTests
 
         ConsumerGroupDescription copied = GroupDescriptionMarshal.CopyOutConsumerGroupDescription(description);
 
-        Assert.Equal(0, copied.GroupEpoch);
-        Assert.Equal(0, copied.TargetAssignmentEpoch);
-        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(copied.AuthorizedOperations));
-        MemberDescription only = Assert.Single(copied.Members);
-        Assert.Equal(string.Empty, only.GroupInstanceId);
-        Assert.Equal(string.Empty, only.RackId);
-        Assert.Equal(0, only.MemberEpoch);
-        Assert.False(only.Upgraded);
-        Assert.NotNull(only.TargetAssignment);
-        Assert.Empty(only.TargetAssignment!.TopicPartitions);
+        Assert.Equal(0, copied.GroupEpoch());
+        Assert.Equal(0, copied.TargetAssignmentEpoch());
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(copied.AuthorizedOperations()));
+        MemberDescription only = Assert.Single(copied.Members());
+        Assert.Equal(string.Empty, only.GroupInstanceId());
+        Assert.Equal(string.Empty, only.RackId());
+        Assert.Equal(0, only.MemberEpoch());
+        Assert.False(only.Upgraded());
+        Assert.NotNull(only.TargetAssignment());
+        Assert.Empty(only.TargetAssignment()!.TopicPartitions());
     }
 
     [Theory]
@@ -226,7 +226,7 @@ public sealed class AdminP5ResultMarshalTests
 
         ConsumerGroupDescription copied = GroupDescriptionMarshal.CopyOutConsumerGroupDescription(description);
 
-        Assert.Equal(operation, Assert.Single(copied.AuthorizedOperations!));
+        Assert.Equal(operation, Assert.Single(copied.AuthorizedOperations()!));
     }
 
     [Fact]
@@ -240,19 +240,19 @@ public sealed class AdminP5ResultMarshalTests
 
         ClassicGroupDescription copied = GroupDescriptionMarshal.CopyOutClassicGroupDescription(description);
 
-        Assert.Equal("klassisch-ø", copied.GroupId);
-        Assert.Equal("range", copied.Protocol);
-        Assert.Equal("consumer", copied.ProtocolData);
-        Assert.False(copied.IsSimpleConsumerGroup);
-        Assert.Equal(ClassicGroupState.PREPARING_REBALANCE, copied.State);
-        Node coordinator = Assert.IsType<Node>(copied.Coordinator);
-        Assert.Equal((1, "host", 9093, (string?)null), (coordinator.Id, coordinator.Host, coordinator.Port, coordinator.Rack));
-        Assert.Equal(AclOperation.DELETE, Assert.Single(copied.AuthorizedOperations!));
+        Assert.Equal("klassisch-ø", copied.GroupId());
+        Assert.Equal("range", copied.Protocol());
+        Assert.Equal("consumer", copied.ProtocolData());
+        Assert.False(copied.IsSimpleConsumerGroup());
+        Assert.Equal(ClassicGroupState.PREPARING_REBALANCE, copied.State());
+        Node coordinator = Assert.IsType<Node>(copied.Coordinator());
+        Assert.Equal((1, "host", 9093, (string?)null), (coordinator.Id(), coordinator.Host(), coordinator.Port(), coordinator.Rack()));
+        Assert.Equal(AclOperation.DELETE, Assert.Single(copied.AuthorizedOperations()!));
         Assert.Equal(
             new MemberDescription(
                 "m-1", "i-1", "rack-a", "client-1", "/10.0.0.1",
                 new MemberAssignment(new[] { new TopicPartition("t", 3) }), null, null, null),
-            Assert.Single(copied.Members));
+            Assert.Single(copied.Members()));
     }
 
     [Fact]
@@ -267,12 +267,12 @@ public sealed class AdminP5ResultMarshalTests
         ClassicGroupDescription absentCopy = GroupDescriptionMarshal.CopyOutClassicGroupDescription(absent);
         ClassicGroupDescription emptyCopy = GroupDescriptionMarshal.CopyOutClassicGroupDescription(empty);
 
-        Assert.True(absentCopy.IsSimpleConsumerGroup);
-        Assert.Equal(ClassicGroupState.EMPTY, absentCopy.State);
-        Assert.Empty(absentCopy.Members);
-        Assert.Null(absentCopy.Coordinator);
-        Assert.Null(absentCopy.AuthorizedOperations);
-        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(emptyCopy.AuthorizedOperations));
+        Assert.True(absentCopy.IsSimpleConsumerGroup());
+        Assert.Equal(ClassicGroupState.EMPTY, absentCopy.State());
+        Assert.Empty(absentCopy.Members());
+        Assert.Null(absentCopy.Coordinator());
+        Assert.Null(absentCopy.AuthorizedOperations());
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(emptyCopy.AuthorizedOperations()));
     }
 
     private static TheoryData<T> Values<T>()
@@ -619,17 +619,17 @@ public sealed class AdminP5ResultMarshalTests
         Assert.Equal(3, offsets.Count);
 
         OffsetAndMetadata committed = offsets[new TopicPartition("t", 0)]!;
-        Assert.Equal(42, committed.Offset);
-        Assert.Equal("m", committed.Metadata);
-        Assert.Equal(9, committed.LeaderEpoch);
+        Assert.Equal(42, committed.Offset());
+        Assert.Equal("m", committed.Metadata());
+        Assert.Equal(9, committed.LeaderEpoch());
 
         Assert.True(offsets.ContainsKey(new TopicPartition("t", 1)));
         Assert.Null(offsets[new TopicPartition("t", 1)]);
 
         OffsetAndMetadata zero = offsets[new TopicPartition("t", 2)]!;
-        Assert.Equal(0, zero.Offset);
-        Assert.Equal(string.Empty, zero.Metadata);
-        Assert.Null(zero.LeaderEpoch);
+        Assert.Equal(0, zero.Offset());
+        Assert.Equal(string.Empty, zero.Metadata());
+        Assert.Null(zero.LeaderEpoch());
     }
 
     [Fact]
@@ -642,8 +642,8 @@ public sealed class AdminP5ResultMarshalTests
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets = OffsetMapMarshal.CopyOutNullable(map);
 
-        Assert.Null(offsets[new TopicPartition("t", 0)]!.LeaderEpoch);
-        Assert.Equal(0, offsets[new TopicPartition("t", 1)]!.LeaderEpoch);
+        Assert.Null(offsets[new TopicPartition("t", 0)]!.LeaderEpoch());
+        Assert.Equal(0, offsets[new TopicPartition("t", 1)]!.LeaderEpoch());
     }
 
     [Fact]

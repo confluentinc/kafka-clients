@@ -106,7 +106,7 @@ public sealed class ConsumerServiceTests
         Assert.False(first.GroupMetadata.HasGroupInstanceId);
 
         ConsumerGroupMetadata stored = Assert.IsType<ConsumerGroupMetadata>(server.GroupMetadata.Get(first.GroupMetadataId));
-        Assert.Equal("dummy.group.id", stored.GroupId);
+        Assert.Equal("dummy.group.id", stored.GroupId());
         Assert.NotNull(server.GroupMetadata.Get(second.GroupMetadataId));
     }
 

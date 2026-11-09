@@ -141,15 +141,15 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeConfigsOptions.TimeoutMs):
-                NativeMethods.DescribeConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeConfigsOptions.IncludeSynonyms):
                 NativeMethods.DescribeConfigsOptionsSetIncludeSynonyms(
-                    native, options.IncludeSynonyms ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeSynonyms() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(DescribeConfigsOptions.IncludeDocumentation):
                 NativeMethods.DescribeConfigsOptionsSetIncludeDocumentation(
-                    native, options.IncludeDocumentation ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeDocumentation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeConfigsOptions has no C setter for " + setter + ".");
@@ -178,7 +178,7 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentException("The configs map must not contain a null resource.", nameof(configs));
                 }
 
-                AdminStrings.Validate(entry.Key.Name, nameof(configs));
+                AdminStrings.Validate(entry.Key.Name(), nameof(configs));
                 if (entry.Value is null)
                 {
                     throw new ArgumentException($"The operations for '{entry.Key}' must not be null.", nameof(configs));
@@ -199,8 +199,8 @@ internal sealed partial class NativeAdminClient
                             $"The operations for '{entry.Key}' must not contain a null element.", nameof(configs));
                     }
 
-                    AdminStrings.Validate(op.ConfigEntry.Name, nameof(configs));
-                    AdminStrings.Validate(op.ConfigEntry.Value, nameof(configs));
+                    AdminStrings.Validate(op.ConfigEntry().Name(), nameof(configs));
+                    AdminStrings.Validate(op.ConfigEntry().Value(), nameof(configs));
                     ops.Add(op);
                 }
             }
@@ -285,10 +285,10 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AlterConfigsOptions.TimeoutMs):
-                NativeMethods.AlterConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AlterConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterConfigsOptions.ValidateOnly):
-                NativeMethods.AlterConfigsOptionsSetValidateOnly(native, options.ValidateOnly ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.AlterConfigsOptionsSetValidateOnly(native, options.ShouldValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterConfigsOptions has no C setter for " + setter + ".");
@@ -351,7 +351,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListConfigResourcesOptions.TimeoutMs):
-                NativeMethods.ListConfigResourcesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListConfigResourcesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListConfigResourcesOptions has no C setter for " + setter + ".");
@@ -386,7 +386,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentException("The resources must not contain a null element.", parameterName);
             }
 
-            AdminStrings.Validate(resource.Name, parameterName);
+            AdminStrings.Validate(resource.Name(), parameterName);
             if (seen.Add(resource))
             {
                 keys.Add(resource);
@@ -420,12 +420,12 @@ internal sealed partial class NativeAdminClient
     internal static IntPtr NewAlterConfigOp(
         AlterConfigOp op, List<Utf8Marshal.PinnedUtf8String> pins, List<IntPtr> entries)
     {
-        Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(op.ConfigEntry.Name);
+        Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(op.ConfigEntry().Name());
         pins.Add(name);
         IntPtr value = IntPtr.Zero;
-        if (op.ConfigEntry.Value is not null)
+        if (op.ConfigEntry().Value() is { } configValue)
         {
-            Utf8Marshal.PinnedUtf8String pinnedValue = Utf8Marshal.Pin(op.ConfigEntry.Value);
+            Utf8Marshal.PinnedUtf8String pinnedValue = Utf8Marshal.Pin(configValue);
             pins.Add(pinnedValue);
             value = pinnedValue.Pointer;
         }
@@ -434,7 +434,7 @@ internal sealed partial class NativeAdminClient
         IntPtr entry = NativeMethods.ConfigEntryNew(name.Pointer, value, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         entries.Add(entry);
-        IntPtr opType = op.OpType switch
+        IntPtr opType = op.OpType() switch
         {
             AlterConfigOpType.DELETE => NativeMethods.AlterConfigOpTypeDelete(ref outErr),
             AlterConfigOpType.APPEND => NativeMethods.AlterConfigOpTypeAppend(ref outErr),

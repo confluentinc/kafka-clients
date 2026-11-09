@@ -18,7 +18,7 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.ByteArray"/>: byte arrays unchanged, as Java's <c>ByteArraySerializer</c> and
+/// The serde behind <see cref="Serdes.ByteArray()"/>: byte arrays unchanged, as Java's <c>ByteArraySerializer</c> and
 /// <c>ByteArrayDeserializer</c>; deserializing copies the span into a new array.
 /// </summary>
 internal sealed class ByteArraySerde : ISerde<byte[]>

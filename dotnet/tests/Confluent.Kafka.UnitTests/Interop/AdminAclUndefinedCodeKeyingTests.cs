@@ -42,17 +42,17 @@ public sealed class AdminAclUndefinedCodeKeyingTests
     public async Task CreateAcls_AnUndefinedCode_KeysByTheCallersBinding_ReadBackAsUnknown(Column column)
     {
         AclBinding binding = Binding(column, 99);
-        Assert.Equal(0, Code(column, binding.Pattern.ResourceType, binding.Pattern.PatternType, binding.Entry.Operation, binding.Entry.PermissionType));
+        Assert.Equal(0, Code(column, binding.Pattern().ResourceType(), binding.Pattern().PatternType(), binding.Entry().Operation(), binding.Entry().PermissionType()));
 
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { binding }, options: null));
 
-        AclBinding key = Assert.Single(result.Values).Key;
+        AclBinding key = Assert.Single(result.Values()).Key;
         Assert.Equal(binding, key);
-        Assert.Equal(0, Code(column, key.Pattern.ResourceType, key.Pattern.PatternType, key.Entry.Operation, key.Entry.PermissionType));
-        await AssertNotImplemented(result.Values[binding].Get());
+        Assert.Equal(0, Code(column, key.Pattern().ResourceType(), key.Pattern().PatternType(), key.Entry().Operation(), key.Entry().PermissionType()));
+        await AssertNotImplemented(result.Values()[binding].Get());
     }
 
     [Theory]
@@ -70,8 +70,8 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { first, second }, options: null));
 
-        Assert.Equal(first, Assert.Single(result.Values).Key);
-        await AssertNotImplemented(result.Values[second].Get());
+        Assert.Equal(first, Assert.Single(result.Values()).Key);
+        await AssertNotImplemented(result.Values()[second].Get());
     }
 
     [Theory]
@@ -82,17 +82,17 @@ public sealed class AdminAclUndefinedCodeKeyingTests
     public async Task DeleteAcls_AnUndefinedCode_KeysByTheCallersFilter_ReadBackAsUnknown(Column column)
     {
         AclBindingFilter filter = Filter(column, 99);
-        Assert.Equal(0, Code(column, filter.PatternFilter.ResourceType, filter.PatternFilter.PatternType, filter.EntryFilter.Operation, filter.EntryFilter.PermissionType));
+        Assert.Equal(0, Code(column, filter.PatternFilter().ResourceType(), filter.PatternFilter().PatternType(), filter.EntryFilter().Operation(), filter.EntryFilter().PermissionType()));
 
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { filter }, options: null));
 
-        AclBindingFilter key = Assert.Single(result.Values).Key;
+        AclBindingFilter key = Assert.Single(result.Values()).Key;
         Assert.Equal(filter, key);
-        Assert.Equal(0, Code(column, key.PatternFilter.ResourceType, key.PatternFilter.PatternType, key.EntryFilter.Operation, key.EntryFilter.PermissionType));
-        await AssertNotImplemented(result.Values[filter].Get());
+        Assert.Equal(0, Code(column, key.PatternFilter().ResourceType(), key.PatternFilter().PatternType(), key.EntryFilter().Operation(), key.EntryFilter().PermissionType()));
+        await AssertNotImplemented(result.Values()[filter].Get());
     }
 
     [Theory]
@@ -110,8 +110,8 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { first, second }, options: null));
 
-        Assert.Equal(first, Assert.Single(result.Values).Key);
-        await AssertNotImplemented(result.Values[second].Get());
+        Assert.Equal(first, Assert.Single(result.Values()).Key);
+        await AssertNotImplemented(result.Values()[second].Get());
     }
 
     public enum Column

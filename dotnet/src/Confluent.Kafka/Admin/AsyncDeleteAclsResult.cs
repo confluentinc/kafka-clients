@@ -27,8 +27,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// A filter that failed faults its own future. A matched ACL that could not be deleted is reported
-/// as a value, in <see cref="DeleteAclsResult.FilterResult.Exception"/>, inside a
-/// <see cref="DeleteAclsResult.FilterResults"/> whose future completed, so <c>Values[filter]</c>
+/// as a value, in <see cref="DeleteAclsResult.FilterResult.Exception()"/>, inside a
+/// <see cref="DeleteAclsResult.FilterResults"/> whose future completed, so <c>Values()[filter]</c>
 /// can succeed while <see cref="All"/> faults.
 /// </remarks>
 /// <seealso cref="DeleteAclsResult"/>
@@ -53,14 +53,15 @@ public sealed class AsyncDeleteAclsResult
     /// <summary>
     /// One future per requested filter, keyed by the filter — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> Values => _futures;
+    /// <returns>One future per requested filter, keyed by the filter.</returns>
+    public IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> Values() => _futures;
 
     /// <summary>
     /// Every ACL deleted across every filter — Java's <c>all()</c>.
     /// </summary>
     /// <returns>
     /// The deleted bindings. Faults if any <em>filter</em> failed (with the first failure to complete), or with
-    /// the first <see cref="DeleteAclsResult.FilterResult.Exception"/> encountered in filter order. Filters that
+    /// the first <see cref="DeleteAclsResult.FilterResult.Exception()"/> encountered in filter order. Filters that
     /// matched nothing are not an error — the result is then a
     /// successful empty collection.
     /// </returns>

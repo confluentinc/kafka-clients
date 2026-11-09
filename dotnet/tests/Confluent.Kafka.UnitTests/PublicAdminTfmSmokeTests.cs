@@ -43,9 +43,7 @@ public sealed class PublicAdminTfmSmokeTests
             AsyncCreateTopicsResult result = admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
-                {
-                    Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-                },
+                    .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" }),
             });
 
             await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -96,7 +94,7 @@ public sealed class PublicAdminTfmSmokeTests
                 await TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline);
             Assert.Equal(2, all.Count);
 
-            Uuid topicId = all[Identified].TopicId;
+            Uuid topicId = all[Identified].TopicId();
 
             await TestTimeout.Run(
                 () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Named })).All().Get(), s_deadline);

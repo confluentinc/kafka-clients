@@ -28,15 +28,15 @@ public sealed class AlterClientQuotasOptions
     private int? _timeoutMs;
     private bool _validateOnly;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public AlterClientQuotasOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -44,14 +44,18 @@ public sealed class AlterClientQuotasOptions
     /// <c>validateOnly()</c>, default
     /// <see langword="false"/>.
     /// </summary>
-    public bool ValidateOnly
+    /// <returns>Whether to validate the alterations without applying them — Java's <c>validateOnly()</c>, default
+    /// <see langword="false"/>.</returns>
+    public bool ValidateOnly() => _validateOnly;
+
+    /// <summary>Sets whether the request should be validated without altering the configs.</summary>
+    /// <param name="validateOnly">Whether to validate without altering. Defaults to <see langword="false"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public AlterClientQuotasOptions ValidateOnly(bool validateOnly)
     {
-        get => _validateOnly;
-        set
-        {
-            _validateOnly = value;
-            Setters.Ran(nameof(ValidateOnly));
-        }
+        _validateOnly = validateOnly;
+        Setters.Ran(nameof(ValidateOnly));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

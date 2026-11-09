@@ -22,28 +22,33 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class ScramCredentialInfo
 {
+    private readonly ScramMechanism _mechanism;
+    private readonly int _iterations;
+
     /// <summary>Creates a credential description — Java's constructor.</summary>
     /// <param name="mechanism">The mechanism.</param>
     /// <param name="iterations">The iteration count used when creating the credential.</param>
     public ScramCredentialInfo(ScramMechanism mechanism, int iterations)
     {
-        Mechanism = mechanism;
-        Iterations = iterations;
+        _mechanism = mechanism;
+        _iterations = iterations;
     }
 
     /// <summary>The mechanism — Java's <c>mechanism()</c>.</summary>
-    public ScramMechanism Mechanism { get; }
+    /// <returns>The mechanism.</returns>
+    public ScramMechanism Mechanism() => _mechanism;
 
     /// <summary>The iteration count — Java's <c>iterations()</c>.</summary>
-    public int Iterations { get; }
+    /// <returns>The iteration count.</returns>
+    public int Iterations() => _iterations;
 
     /// <summary>Value equality over both fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same credential.</returns>
     public override bool Equals(object? obj) =>
         obj is ScramCredentialInfo other
-        && Mechanism == other.Mechanism
-        && Iterations == other.Iterations;
+        && Mechanism() == other.Mechanism()
+        && Iterations() == other.Iterations();
 
     /// <summary>The hash of both fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -51,7 +56,7 @@ public sealed class ScramCredentialInfo
     {
         unchecked
         {
-            return (((int)Mechanism * 31) + 1) * 31 + Iterations;
+            return (((int)Mechanism() * 31) + 1) * 31 + Iterations();
         }
     }
 
@@ -63,6 +68,6 @@ public sealed class ScramCredentialInfo
         string.Format(
             CultureInfo.InvariantCulture,
             "ScramCredentialInfo{{mechanism={0}, iterations={1}}}",
-            Mechanism,
-            Iterations);
+            Mechanism(),
+            Iterations());
 }

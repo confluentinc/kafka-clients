@@ -26,13 +26,19 @@ namespace Confluent.Kafka.Common.Security.Token.Delegation;
 /// </summary>
 /// <remarks>
 /// A recorded deviation: <see cref="Equals(object)"/> and <see cref="GetHashCode"/> cover the same
-/// fields, <see cref="ExpiryTimestamp"/> included, where Java's <c>equals</c> leaves it out and its
+/// fields, <see cref="ExpiryTimestamp()"/> included, where Java's <c>equals</c> leaves it out and its
 /// <c>hashCode</c> does not. The type is immutable (Java has <c>setExpiryTimestamp</c>), and Java's
 /// <c>fromRecord</c> is not bound, as it duplicates the seven-argument constructor.
 /// </remarks>
 public sealed class TokenInformation
 {
     private readonly KafkaPrincipal[] _renewers;
+    private readonly string _tokenId;
+    private readonly KafkaPrincipal _owner;
+    private readonly KafkaPrincipal _tokenRequester;
+    private readonly long _issueTimestamp;
+    private readonly long _expiryTimestamp;
+    private readonly long _maxTimestamp;
 
     /// <summary>
     /// Creates token metadata whose requester is its owner — Java's six-argument constructor.
@@ -73,51 +79,61 @@ public sealed class TokenInformation
         long maxTimestamp,
         long expiryTimestamp)
     {
-        TokenId = tokenId ?? throw new ArgumentNullException(nameof(tokenId));
-        Owner = owner ?? throw new ArgumentNullException(nameof(owner));
-        TokenRequester = tokenRequester ?? throw new ArgumentNullException(nameof(tokenRequester));
+        _tokenId = tokenId ?? throw new ArgumentNullException(nameof(tokenId));
+        _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+        _tokenRequester = tokenRequester ?? throw new ArgumentNullException(nameof(tokenRequester));
         if (renewers is null)
         {
             throw new ArgumentNullException(nameof(renewers));
         }
 
         _renewers = renewers.ToArray();
-        IssueTimestamp = issueTimestamp;
-        MaxTimestamp = maxTimestamp;
-        ExpiryTimestamp = expiryTimestamp;
+        _issueTimestamp = issueTimestamp;
+        _maxTimestamp = maxTimestamp;
+        _expiryTimestamp = expiryTimestamp;
     }
 
     /// <summary>The token id — Java's <c>tokenId()</c>.</summary>
-    public string TokenId { get; }
+    /// <returns>The token id.</returns>
+    public string TokenId() => _tokenId;
 
     /// <summary>The token owner — Java's <c>owner()</c>.</summary>
-    public KafkaPrincipal Owner { get; }
+    /// <returns>The token owner.</returns>
+    public KafkaPrincipal Owner() => _owner;
 
     /// <summary>The requesting principal — Java's <c>tokenRequester()</c>.</summary>
-    public KafkaPrincipal TokenRequester { get; }
+    /// <returns>The requesting principal.</returns>
+    public KafkaPrincipal TokenRequester() => _tokenRequester;
 
     /// <summary>The principals allowed to renew — Java's <c>renewers()</c>.</summary>
-    public IReadOnlyList<KafkaPrincipal> Renewers => _renewers;
+    /// <returns>The principals allowed to renew.</returns>
+    public IReadOnlyList<KafkaPrincipal> Renewers() => _renewers;
 
     /// <summary>When the token was issued — Java's <c>issueTimestamp()</c>.</summary>
-    public long IssueTimestamp { get; }
+    /// <returns>When the token was issued.</returns>
+    public long IssueTimestamp() => _issueTimestamp;
 
     /// <summary>When the token expires — Java's <c>expiryTimestamp()</c>.</summary>
-    public long ExpiryTimestamp { get; }
+    /// <returns>When the token expires.</returns>
+    public long ExpiryTimestamp() => _expiryTimestamp;
 
     /// <summary>The token's maximum lifetime — Java's <c>maxTimestamp()</c>.</summary>
-    public long MaxTimestamp { get; }
+    /// <returns>The token's maximum lifetime.</returns>
+    public long MaxTimestamp() => _maxTimestamp;
 
-    /// <summary><see cref="Owner"/> rendered as a string — Java's <c>ownerAsString()</c>.</summary>
-    public string OwnerAsString => Owner.ToString();
+    /// <summary><see cref="Owner()"/> rendered as a string — Java's <c>ownerAsString()</c>.</summary>
+    /// <returns><see cref="Owner()"/> rendered as a string.</returns>
+    public string OwnerAsString() => Owner().ToString();
 
     /// <summary>
-    /// <see cref="TokenRequester"/> rendered as a string — Java's <c>tokenRequesterAsString()</c>.
+    /// <see cref="TokenRequester()"/> rendered as a string — Java's <c>tokenRequesterAsString()</c>.
     /// </summary>
-    public string TokenRequesterAsString => TokenRequester.ToString();
+    /// <returns><see cref="TokenRequester()"/> rendered as a string.</returns>
+    public string TokenRequesterAsString() => TokenRequester().ToString();
 
-    /// <summary><see cref="Renewers"/> rendered as strings — Java's <c>renewersAsString()</c>.</summary>
-    public IReadOnlyList<string> RenewersAsString =>
+    /// <summary><see cref="Renewers()"/> rendered as strings — Java's <c>renewersAsString()</c>.</summary>
+    /// <returns><see cref="Renewers()"/> rendered as strings.</returns>
+    public IReadOnlyList<string> RenewersAsString() =>
         Array.ConvertAll(_renewers, renewer => renewer.ToString());
 
     /// <summary>
@@ -127,24 +143,24 @@ public sealed class TokenInformation
     /// <param name="principal">The principal to test.</param>
     /// <returns>Whether the principal may act on the token.</returns>
     public bool OwnerOrRenewer(KafkaPrincipal principal) =>
-        Owner.Equals(principal)
-        || TokenRequester.Equals(principal)
+        Owner().Equals(principal)
+        || TokenRequester().Equals(principal)
         || Array.IndexOf(_renewers, principal) >= 0;
 
     /// <summary>
-    /// Value equality over every field, <see cref="ExpiryTimestamp"/> included, unlike Java's
+    /// Value equality over every field, <see cref="ExpiryTimestamp()"/> included, unlike Java's
     /// <c>equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same token.</returns>
     public override bool Equals(object? obj) =>
         obj is TokenInformation other
-        && string.Equals(TokenId, other.TokenId, StringComparison.Ordinal)
-        && Owner.Equals(other.Owner)
-        && TokenRequester.Equals(other.TokenRequester)
-        && IssueTimestamp == other.IssueTimestamp
-        && MaxTimestamp == other.MaxTimestamp
-        && ExpiryTimestamp == other.ExpiryTimestamp
+        && string.Equals(TokenId(), other.TokenId(), StringComparison.Ordinal)
+        && Owner().Equals(other.Owner())
+        && TokenRequester().Equals(other.TokenRequester())
+        && IssueTimestamp() == other.IssueTimestamp()
+        && MaxTimestamp() == other.MaxTimestamp()
+        && ExpiryTimestamp() == other.ExpiryTimestamp()
         && _renewers.SequenceEqual(other._renewers);
 
     /// <summary>The hash of the same field set — Java's <c>hashCode</c>.</summary>
@@ -154,12 +170,12 @@ public sealed class TokenInformation
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(TokenId);
-            hash = (hash * 31) + Owner.GetHashCode();
-            hash = (hash * 31) + TokenRequester.GetHashCode();
-            hash = (hash * 31) + IssueTimestamp.GetHashCode();
-            hash = (hash * 31) + MaxTimestamp.GetHashCode();
-            hash = (hash * 31) + ExpiryTimestamp.GetHashCode();
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(TokenId());
+            hash = (hash * 31) + Owner().GetHashCode();
+            hash = (hash * 31) + TokenRequester().GetHashCode();
+            hash = (hash * 31) + IssueTimestamp().GetHashCode();
+            hash = (hash * 31) + MaxTimestamp().GetHashCode();
+            hash = (hash * 31) + ExpiryTimestamp().GetHashCode();
             foreach (KafkaPrincipal renewer in _renewers)
             {
                 hash = (hash * 31) + renewer.GetHashCode();
@@ -176,11 +192,11 @@ public sealed class TokenInformation
             CultureInfo.InvariantCulture,
             "TokenInformation{{owner={0}, tokenRequester={1}, renewers=[{2}], issueTimestamp={3}, "
             + "maxTimestamp={4}, expiryTimestamp={5}, tokenId='{6}'}}",
-            Owner,
-            TokenRequester,
-            string.Join(", ", RenewersAsString),
-            IssueTimestamp,
-            MaxTimestamp,
-            ExpiryTimestamp,
-            TokenId);
+            Owner(),
+            TokenRequester(),
+            string.Join(", ", RenewersAsString()),
+            IssueTimestamp(),
+            MaxTimestamp(),
+            ExpiryTimestamp(),
+            TokenId());
 }

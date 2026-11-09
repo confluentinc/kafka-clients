@@ -40,13 +40,13 @@ public sealed class PublicAdminShapeParityTests
     [Fact]
     public void CreateTopicsResult_Values_ErasesTheMetadataLikeJava()
     {
-        PropertyInfo values = typeof(CreateTopicsResult).GetProperty(nameof(CreateTopicsResult.Values))!;
+        MethodInfo values = Getters.Get(typeof(CreateTopicsResult), nameof(CreateTopicsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.ReturnType);
 
-        PropertyInfo asyncValues = typeof(AsyncCreateTopicsResult).GetProperty(nameof(AsyncCreateTopicsResult.Values))!;
+        MethodInfo asyncValues = Getters.Get(typeof(AsyncCreateTopicsResult), nameof(AsyncCreateTopicsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>), asyncValues.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>), asyncValues.ReturnType);
     }
 
     [Fact]
@@ -73,10 +73,10 @@ public sealed class PublicAdminShapeParityTests
             new[] { typeof(Uuid), typeof(int), typeof(int), typeof(Config) })!;
         Assert.NotNull(metadataCtor);
 
-        // The request side is not widened: Java's NewTopic carries a short.
+        // The request side is not widened: Java's NewTopic.replicationFactor() returns a short.
         Assert.Equal(
-            typeof(short?),
-            typeof(NewTopic).GetProperty(nameof(NewTopic.ReplicationFactor))!.PropertyType);
+            typeof(short),
+            Getters.Get(typeof(NewTopic), nameof(NewTopic.ReplicationFactor)).ReturnType);
     }
 
     [Fact]
@@ -111,20 +111,20 @@ public sealed class PublicAdminShapeParityTests
     public void ConfigEntry_TheEightArgumentConstructor_DerivesIsDefault_AndHasValueEquality()
     {
         ConfigEntry defaulted = Full(ConfigEntry.ConfigSource.DEFAULT_CONFIG);
-        Assert.True(defaulted.IsDefault);
-        Assert.Equal(ConfigEntry.ConfigSource.DEFAULT_CONFIG, defaulted.Source);
-        Assert.Equal("k", defaulted.Name);
-        Assert.Equal("v", defaulted.Value);
-        Assert.True(defaulted.IsSensitive);
-        Assert.False(defaulted.IsReadOnly);
-        Assert.Empty(defaulted.Synonyms);
-        Assert.Equal(ConfigEntry.ConfigType.STRING, defaulted.Type);
-        Assert.Equal("doc", defaulted.Documentation);
+        Assert.True(defaulted.IsDefault());
+        Assert.Equal(ConfigEntry.ConfigSource.DEFAULT_CONFIG, defaulted.Source());
+        Assert.Equal("k", defaulted.Name());
+        Assert.Equal("v", defaulted.Value());
+        Assert.True(defaulted.IsSensitive());
+        Assert.False(defaulted.IsReadOnly());
+        Assert.Empty(defaulted.Synonyms());
+        Assert.Equal(ConfigEntry.ConfigType.STRING, defaulted.Type());
+        Assert.Equal("doc", defaulted.Documentation());
 
         foreach (ConfigEntry.ConfigSource source in
             (ConfigEntry.ConfigSource[])Enum.GetValues(typeof(ConfigEntry.ConfigSource)))
         {
-            Assert.Equal(source == ConfigEntry.ConfigSource.DEFAULT_CONFIG, Full(source).IsDefault);
+            Assert.Equal(source == ConfigEntry.ConfigSource.DEFAULT_CONFIG, Full(source).IsDefault());
         }
 
         ConfigEntry same = Full(ConfigEntry.ConfigSource.DEFAULT_CONFIG);
@@ -180,8 +180,8 @@ public sealed class PublicAdminShapeParityTests
         callers[0] = new ConfigEntry.ConfigSynonym("b", "2", ConfigEntry.ConfigSource.DEFAULT_CONFIG);
         callers.Add(null!);
 
-        Assert.Equal(new[] { synonym }, entry.Synonyms);
-        Assert.False(entry.Synonyms is ConfigEntry.ConfigSynonym[], "Synonyms must not expose the backing array");
+        Assert.Equal(new[] { synonym }, entry.Synonyms());
+        Assert.False(entry.Synonyms() is ConfigEntry.ConfigSynonym[], "Synonyms must not expose the backing array");
         Assert.Equal(twin, entry);
         Assert.Equal(hash, entry.GetHashCode());
         Assert.Equal(
@@ -234,7 +234,7 @@ public sealed class PublicAdminShapeParityTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic(Topic, 3, 2) });
 
-        Task creation = result.Values[Topic].Get();
+        Task creation = result.Values()[Topic].Get();
         await TestTimeout.Run(() => creation, s_deadline);
 
         int replicationFactor = 0;

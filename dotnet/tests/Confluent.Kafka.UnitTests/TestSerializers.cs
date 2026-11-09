@@ -83,7 +83,7 @@ internal sealed class ThrowingSerializer<T> : ISerializer<T>
 }
 
 /// <summary>
-/// Counts its calls over <see cref="Serdes.Int64"/>, and serializes <see langword="null"/> to <see langword="null"/>
+/// Counts its calls over <see cref="Serdes.Long()"/>, and serializes <see langword="null"/> to <see langword="null"/>
 /// bytes, so that a tombstone differs from a present <c>0</c>.
 /// </summary>
 internal sealed class NullableInt64Serializer : ISerializer<long?>
@@ -93,7 +93,7 @@ internal sealed class NullableInt64Serializer : ISerializer<long?>
     public ReadOnlyMemory<byte>? Serialize(string topic, long? data)
     {
         InvocationCount++;
-        return data is null ? null : Serdes.Int64.Serialize(topic, data.Value);
+        return data is null ? null : Serdes.Long().Serialize(topic, data.Value);
     }
 }
 

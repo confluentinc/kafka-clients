@@ -111,7 +111,7 @@ public sealed class ProducerSendPinLifetimeTests
         WeakReference[] valueRefs;
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using (TestTimeout.Disposal(producer))
         {
             valueRefs = await SendThrowawayBuffersAsync(producer, count: 64);

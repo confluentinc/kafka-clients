@@ -20,7 +20,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.String"/>: UTF-8 strings, as Java's <c>StringSerializer</c> and
+/// The serde behind <see cref="Serdes.String()"/>: UTF-8 strings, as Java's <c>StringSerializer</c> and
 /// <c>StringDeserializer</c>; an unpaired surrogate serializes as <c>'?'</c>, as Java's <c>getBytes(UTF_8)</c>.
 /// </summary>
 internal sealed class StringSerde : ISerde<string>

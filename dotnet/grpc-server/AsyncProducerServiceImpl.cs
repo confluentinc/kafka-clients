@@ -30,7 +30,7 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// The async twin of <see cref="ProducerServiceImpl"/>: serves <c>ProducerService</c> over
 /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> and <see cref="AsyncMockProducer{TKey, TValue}"/>
-/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>), the C# port of the producer half of
+/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>), the C# port of the producer half of
 /// Python's <c>grpc_server_async.py</c>. Handlers await the binding's tasks and take no per-id lock.
 /// </summary>
 internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerServiceBase, IDisposable
@@ -72,11 +72,11 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             // An empty or all-blank config selects an AsyncMockProducer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             }
             else
             {
-                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
+                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
             }
         }
         catch (Exception ex)

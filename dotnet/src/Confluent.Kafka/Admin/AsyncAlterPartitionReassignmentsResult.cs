@@ -50,7 +50,8 @@ public sealed class AsyncAlterPartitionReassignmentsResult
     /// <summary>
     /// One future per requested partition, keyed by partition — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture> Values => _values;
+    /// <returns>One future per requested partition, keyed by partition.</returns>
+    public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every reassignment was initiated, and faults with the first failure to

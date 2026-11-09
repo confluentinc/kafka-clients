@@ -72,7 +72,7 @@ public sealed class PublicAdminNegativeTimeoutTests
 
     private static Task<KafkaTimeoutException> Failure(IAsyncAdmin admin, int timeoutMs)
     {
-        AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions { TimeoutMs = timeoutMs });
+        AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions().TimeoutMs(timeoutMs));
         return TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => result.Names().Get()), s_deadline);
     }

@@ -19,7 +19,7 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Double"/>: the 8 big-endian bytes of Java's <c>Double.doubleToLongBits</c>
+/// The serde behind <see cref="Serdes.Double()"/>: the 8 big-endian bytes of Java's <c>Double.doubleToLongBits</c>
 /// (NaN canonicalized), as Java's <c>DoubleSerializer</c> and <c>DoubleDeserializer</c>.
 /// </summary>
 internal sealed class DoubleSerde : ISerde<double>

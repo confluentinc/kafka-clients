@@ -41,8 +41,8 @@ public sealed class PublicAclUndefinedCodeTests
         AccessControlEntry unknown = new AccessControlEntry(
             "User:alice", "*", AclOperation.UNKNOWN, AclPermissionType.ALLOW);
 
-        Assert.Equal(AclOperation.UNKNOWN, entry.Operation);
-        Assert.True(entry.IsUnknown);
+        Assert.Equal(AclOperation.UNKNOWN, entry.Operation());
+        Assert.True(entry.IsUnknown());
         Assert.Equal(unknown, entry);
         Assert.Equal(unknown.GetHashCode(), entry.GetHashCode());
     }
@@ -60,8 +60,8 @@ public sealed class PublicAclUndefinedCodeTests
         AccessControlEntry unknown = new AccessControlEntry(
             "User:alice", "*", AclOperation.READ, AclPermissionType.UNKNOWN);
 
-        Assert.Equal(AclPermissionType.UNKNOWN, entry.PermissionType);
-        Assert.True(entry.IsUnknown);
+        Assert.Equal(AclPermissionType.UNKNOWN, entry.PermissionType());
+        Assert.True(entry.IsUnknown());
         Assert.Equal(unknown, entry);
         Assert.Equal(unknown.GetHashCode(), entry.GetHashCode());
     }
@@ -79,8 +79,8 @@ public sealed class PublicAclUndefinedCodeTests
         AccessControlEntryFilter unknown = new AccessControlEntryFilter(
             null, null, AclOperation.UNKNOWN, AclPermissionType.ANY);
 
-        Assert.Equal(AclOperation.UNKNOWN, filter.Operation);
-        Assert.True(filter.IsUnknown);
+        Assert.Equal(AclOperation.UNKNOWN, filter.Operation());
+        Assert.True(filter.IsUnknown());
         Assert.Equal(unknown, filter);
         Assert.Equal(unknown.GetHashCode(), filter.GetHashCode());
     }
@@ -98,8 +98,8 @@ public sealed class PublicAclUndefinedCodeTests
         AccessControlEntryFilter unknown = new AccessControlEntryFilter(
             null, null, AclOperation.ANY, AclPermissionType.UNKNOWN);
 
-        Assert.Equal(AclPermissionType.UNKNOWN, filter.PermissionType);
-        Assert.True(filter.IsUnknown);
+        Assert.Equal(AclPermissionType.UNKNOWN, filter.PermissionType());
+        Assert.True(filter.IsUnknown());
         Assert.Equal(unknown, filter);
         Assert.Equal(unknown.GetHashCode(), filter.GetHashCode());
     }
@@ -115,8 +115,8 @@ public sealed class PublicAclUndefinedCodeTests
         ResourcePattern pattern = new ResourcePattern((ResourceType)code, "t", PatternType.LITERAL);
         ResourcePattern unknown = new ResourcePattern(ResourceType.UNKNOWN, "t", PatternType.LITERAL);
 
-        Assert.Equal(ResourceType.UNKNOWN, pattern.ResourceType);
-        Assert.True(pattern.IsUnknown);
+        Assert.Equal(ResourceType.UNKNOWN, pattern.ResourceType());
+        Assert.True(pattern.IsUnknown());
         Assert.Equal(unknown, pattern);
         Assert.Equal(unknown.GetHashCode(), pattern.GetHashCode());
     }
@@ -132,8 +132,8 @@ public sealed class PublicAclUndefinedCodeTests
         ResourcePattern pattern = new ResourcePattern(ResourceType.TOPIC, "t", (PatternType)code);
         ResourcePattern unknown = new ResourcePattern(ResourceType.TOPIC, "t", PatternType.UNKNOWN);
 
-        Assert.Equal(PatternType.UNKNOWN, pattern.PatternType);
-        Assert.True(pattern.IsUnknown);
+        Assert.Equal(PatternType.UNKNOWN, pattern.PatternType());
+        Assert.True(pattern.IsUnknown());
         Assert.Equal(unknown, pattern);
         Assert.Equal(unknown.GetHashCode(), pattern.GetHashCode());
     }
@@ -149,8 +149,8 @@ public sealed class PublicAclUndefinedCodeTests
         ResourcePatternFilter filter = new ResourcePatternFilter((ResourceType)code, null, PatternType.ANY);
         ResourcePatternFilter unknown = new ResourcePatternFilter(ResourceType.UNKNOWN, null, PatternType.ANY);
 
-        Assert.Equal(ResourceType.UNKNOWN, filter.ResourceType);
-        Assert.True(filter.IsUnknown);
+        Assert.Equal(ResourceType.UNKNOWN, filter.ResourceType());
+        Assert.True(filter.IsUnknown());
         Assert.Equal(unknown, filter);
         Assert.Equal(unknown.GetHashCode(), filter.GetHashCode());
     }
@@ -166,8 +166,8 @@ public sealed class PublicAclUndefinedCodeTests
         ResourcePatternFilter filter = new ResourcePatternFilter(ResourceType.ANY, null, (PatternType)code);
         ResourcePatternFilter unknown = new ResourcePatternFilter(ResourceType.ANY, null, PatternType.UNKNOWN);
 
-        Assert.Equal(PatternType.UNKNOWN, filter.PatternType);
-        Assert.True(filter.IsUnknown);
+        Assert.Equal(PatternType.UNKNOWN, filter.PatternType());
+        Assert.True(filter.IsUnknown());
         Assert.Equal(unknown, filter);
         Assert.Equal(unknown.GetHashCode(), filter.GetHashCode());
     }
@@ -176,12 +176,12 @@ public sealed class PublicAclUndefinedCodeTests
     public void TheSentinels_AreKept_AndStillRejectedWhereJavaRejectsThem()
     {
         ResourcePatternFilter match = new ResourcePatternFilter(ResourceType.ANY, null, PatternType.MATCH);
-        Assert.Equal(ResourceType.ANY, match.ResourceType);
-        Assert.Equal(PatternType.MATCH, match.PatternType);
+        Assert.Equal(ResourceType.ANY, match.ResourceType());
+        Assert.Equal(PatternType.MATCH, match.PatternType());
 
         AccessControlEntryFilter any = new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
-        Assert.Equal(AclOperation.ANY, any.Operation);
-        Assert.Equal(AclPermissionType.ANY, any.PermissionType);
+        Assert.Equal(AclOperation.ANY, any.Operation());
+        Assert.Equal(AclPermissionType.ANY, any.PermissionType());
 
         IllegalArgumentException operation = Assert.Throws<IllegalArgumentException>(
             () => new AccessControlEntry("User:alice", "*", AclOperation.ANY, AclPermissionType.ALLOW));

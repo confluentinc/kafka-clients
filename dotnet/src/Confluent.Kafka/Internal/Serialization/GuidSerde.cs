@@ -23,7 +23,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Guid"/>: a UUID as the UTF-8 bytes of its lowercase hyphenated string form, not
+/// The serde behind <see cref="Serdes.UUID()"/>: a UUID as the UTF-8 bytes of its lowercase hyphenated string form, not
 /// its 16 raw bytes, as Java's <c>UUIDSerializer</c> and <c>UUIDDeserializer</c>.
 /// </summary>
 internal sealed class GuidSerde : ISerde<System.Guid>

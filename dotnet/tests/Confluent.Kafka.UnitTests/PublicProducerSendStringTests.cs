@@ -114,13 +114,13 @@ public sealed class PublicProducerSendStringTests
         string message = field == TopicField ? TopicMessage : HeaderKeyMessage;
         Assert.Equal(new ArgumentException(message, "record").Message, rejected.Message);
 
-        Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
 
         if (subject.IsMock)
         {
             Assert.Equal(0, subject.HistoryCount());
             RecordMetadata? metadata = await subject.Deliver(Record(Topic, "h"));
-            Assert.Equal(0L, metadata!.Offset);
+            Assert.Equal(0L, metadata!.Offset());
             Assert.Equal(1, subject.HistoryCount());
         }
         else
@@ -160,10 +160,10 @@ public sealed class PublicProducerSendStringTests
 
         RecordMetadata? metadata = await subject.Deliver(record);
 
-        Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
         if (subject.IsMock)
         {
-            Assert.Equal(NonAsciiTopic, metadata!.Topic);
+            Assert.Equal(NonAsciiTopic, metadata!.Topic());
             Assert.Equal(1, subject.HistoryCount());
         }
     }
@@ -180,11 +180,11 @@ public sealed class PublicProducerSendStringTests
 
             RecordMetadata? metadata = await subject.Deliver(record);
 
-            Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+            Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
             if (subject.IsMock)
             {
                 // The topic the core holds, read back: the surrogate crossed as '?'.
-                Assert.Equal("t?u", metadata!.Topic);
+                Assert.Equal("t?u", metadata!.Topic());
                 Assert.Equal(1, subject.HistoryCount());
             }
         }
@@ -196,17 +196,17 @@ public sealed class PublicProducerSendStringTests
         {
             case Kafka:
                 return new SyncSubject(
-                    new KafkaProducer<string, string>(Unreachable(), Serdes.String, Serdes.String), historyCount: null);
+                    new KafkaProducer<string, string>(Unreachable(), Serdes.String(), Serdes.String()), historyCount: null);
             case AsyncKafka:
                 return new AsyncSubject(
-                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String, Serdes.String),
+                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String(), Serdes.String()),
                     historyCount: null);
             case Mock:
-                MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String, Serdes.String);
+                MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String(), Serdes.String());
                 return new SyncSubject(mock, mock.HistoryCount);
             case AsyncMock:
                 AsyncMockProducer<string, string> asyncMock =
-                    new AsyncMockProducer<string, string>(Serdes.String, Serdes.String);
+                    new AsyncMockProducer<string, string>(Serdes.String(), Serdes.String());
                 return new AsyncSubject(asyncMock, asyncMock.HistoryCount);
             default:
                 throw new ArgumentOutOfRangeException(nameof(producer), producer, null);

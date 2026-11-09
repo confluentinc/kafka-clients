@@ -24,27 +24,33 @@ namespace Confluent.Kafka.Common;
 public interface IMetric
 {
     /// <summary>The metric's name.</summary>
-    MetricName Name { get; }
+    /// <returns>The metric's name.</returns>
+    MetricName MetricName();
 
     /// <summary>
     /// The measured value: a boxed <see cref="double"/>, <see cref="string"/>, <see cref="long"/> or
     /// <see cref="int"/>, whose type is the metric's kind.
     /// </summary>
-    object Value { get; }
+    /// <returns>The measured value: a boxed <see cref="double"/>, <see cref="string"/>, <see cref="long"/> or
+    /// <see cref="int"/>, whose type is the metric's kind.</returns>
+    object MetricValue();
 }
 
 /// <summary>The <see cref="IMetric"/> a client's metric map holds: an immutable name and value.</summary>
 internal sealed class Metric : IMetric
 {
+    private readonly MetricName _metricName;
+    private readonly object _metricValue;
+
     internal Metric(MetricName name, object value)
     {
-        Name = name;
-        Value = value;
+        _metricName = name;
+        _metricValue = value;
     }
 
     /// <inheritdoc/>
-    public MetricName Name { get; }
+    public MetricName MetricName() => _metricName;
 
     /// <inheritdoc/>
-    public object Value { get; }
+    public object MetricValue() => _metricValue;
 }

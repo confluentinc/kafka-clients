@@ -102,6 +102,9 @@ internal static partial class NativeMethods
     internal static extern IntPtr UserScramCredentialUpsertionWithSalt(
         IntPtr user, IntPtr credentialInfo, KafkaBytes password, KafkaBytes salt, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialUpsertion_salt_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern KafkaBytes UserScramCredentialUpsertionSalt(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialUpsertion_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void UserScramCredentialUpsertionDestroy(IntPtr self, ref IntPtr outErr);
 

@@ -276,8 +276,8 @@ internal sealed class MockAdminClientBuilderCore
             throw new ArgumentNullException(parameterName);
         }
 
-        AdminStrings.Validate(node.Host, parameterName);
-        AdminStrings.Validate(node.Rack, parameterName);
+        AdminStrings.Validate(node.Host(), parameterName);
+        AdminStrings.Validate(node.Rack(), parameterName);
     }
 
     private static void ValidateKey(string key, string parameterName)

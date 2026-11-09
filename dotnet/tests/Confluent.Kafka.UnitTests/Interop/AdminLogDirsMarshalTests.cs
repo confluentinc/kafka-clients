@@ -56,19 +56,19 @@ public sealed class AdminLogDirsMarshalTests
             usableBytes: 0L,
             isCordoned: true);
 
-        Assert.Null(copied.Error);
-        Assert.Equal(1_099_511_627_776L, copied.TotalBytes);
-        Assert.Equal(0L, copied.UsableBytes);
-        Assert.True(copied.IsCordoned);
-        Assert.Equal(2, copied.ReplicaInfos.Count);
-        ReplicaInfo first = Assert.Contains(new TopicPartition(Topic, 0), copied.ReplicaInfos);
-        Assert.Equal(100L, first.Size);
-        Assert.Equal(3L, first.OffsetLag);
-        Assert.False(first.IsFuture);
-        ReplicaInfo second = Assert.Contains(new TopicPartition(Topic, 1), copied.ReplicaInfos);
-        Assert.Equal(7L, second.Size);
-        Assert.Equal(0L, second.OffsetLag);
-        Assert.True(second.IsFuture);
+        Assert.Null(copied.Error());
+        Assert.Equal(1_099_511_627_776L, copied.TotalBytes());
+        Assert.Equal(0L, copied.UsableBytes());
+        Assert.True(copied.IsCordoned());
+        Assert.Equal(2, copied.ReplicaInfos().Count);
+        ReplicaInfo first = Assert.Contains(new TopicPartition(Topic, 0), copied.ReplicaInfos());
+        Assert.Equal(100L, first.Size());
+        Assert.Equal(3L, first.OffsetLag());
+        Assert.False(first.IsFuture());
+        ReplicaInfo second = Assert.Contains(new TopicPartition(Topic, 1), copied.ReplicaInfos());
+        Assert.Equal(7L, second.Size());
+        Assert.Equal(0L, second.OffsetLag());
+        Assert.True(second.IsFuture());
     }
 
     [Theory]
@@ -81,10 +81,10 @@ public sealed class AdminLogDirsMarshalTests
         LogDirDescription copied = CopyOutBuilt(
             IntPtr.Zero, Array.Empty<(TopicPartition, long, long, bool)>(), nativeBytes, nativeBytes, isCordoned: false);
 
-        Assert.Equal(expected, copied.TotalBytes);
-        Assert.Equal(expected, copied.UsableBytes);
-        Assert.False(copied.IsCordoned);
-        Assert.Empty(copied.ReplicaInfos);
+        Assert.Equal(expected, copied.TotalBytes());
+        Assert.Equal(expected, copied.UsableBytes());
+        Assert.False(copied.IsCordoned());
+        Assert.Empty(copied.ReplicaInfos());
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public sealed class AdminLogDirsMarshalTests
         LogDirDescription copied = CopyOutBuilt(
             error, Array.Empty<(TopicPartition, long, long, bool)>(), -1L, -1L, isCordoned: false);
 
-        KafkaTimeoutException directoryError = Assert.IsType<KafkaTimeoutException>(copied.Error);
+        KafkaTimeoutException directoryError = Assert.IsType<KafkaTimeoutException>(copied.Error());
         Assert.Equal(KafkaTimeoutErrorCode, directoryError.Code);
         Assert.Equal("The log directory is offline.", directoryError.Message);
         Assert.Contains("The log directory is offline.", copied.ToString(), StringComparison.Ordinal);
@@ -155,16 +155,16 @@ public sealed class AdminLogDirsMarshalTests
         described.Result.Dispose();
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
-        Assert.Null(description.Error);
-        Assert.Null(description.TotalBytes);
-        Assert.Null(description.UsableBytes);
-        Assert.Equal(2, description.ReplicaInfos.Count);
+        Assert.Null(description.Error());
+        Assert.Null(description.TotalBytes());
+        Assert.Null(description.UsableBytes());
+        Assert.Equal(2, description.ReplicaInfos().Count);
         foreach (int partition in new[] { 0, 1 })
         {
-            ReplicaInfo replica = Assert.Contains(new TopicPartition(Topic, partition), description.ReplicaInfos);
-            Assert.Equal(0, replica.Size);
-            Assert.Equal(0, replica.OffsetLag);
-            Assert.False(replica.IsFuture);
+            ReplicaInfo replica = Assert.Contains(new TopicPartition(Topic, partition), description.ReplicaInfos());
+            Assert.Equal(0, replica.Size());
+            Assert.Equal(0, replica.OffsetLag());
+            Assert.False(replica.IsFuture());
         }
     }
 
@@ -266,9 +266,9 @@ public sealed class AdminLogDirsMarshalTests
         {
             foreach ((TopicPartition partition, long size, long offsetLag, bool isFuture) in replicas)
             {
-                using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic))
+                using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic()))
                 {
-                    keys.Add(NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition, ref outErr));
+                    keys.Add(NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition(), ref outErr));
                 }
 
                 KafkaException.ThrowIfFfiFailed(ref outErr);

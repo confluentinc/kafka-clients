@@ -40,8 +40,8 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
 
     public ChaosWorkloadServiceImpl()
         : this(
-            static config => new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray),
-            static config => new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray))
+            static config => new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray()),
+            static config => new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray()))
     {
     }
 
@@ -272,7 +272,7 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
                 continue;
             }
 
-            if (records.Count == 0)
+            if (records.Count() == 0)
             {
                 continue;
             }
