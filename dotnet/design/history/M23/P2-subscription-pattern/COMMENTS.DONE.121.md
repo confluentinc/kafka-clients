@@ -265,3 +265,24 @@ Notes for the comment-only commit (S4):
    bare `KafkaException`, any other id)".
 
    Resolved in e29207eb.
+
+## PR #326 Copilot comment C (thread PRRT_kwDOQjF7uc61VNW3, comment 4514883452, ledger row 441, Agreed: (A)) — approved for the Actor
+
+1. **must-fix (narrow) — two overlapping async subscribes can settle out of order and free the listener the core holds** —
+   `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.Async.cs` (~246, the subscribe settle) with the owner check in
+   `NativeConsumer.cs` (~2677-2702, which refuses or serializes only another thread). On `AsyncKafkaConsumer` /
+   `AsyncMockConsumer` a second Subscribe started on the same thread before the first settles passes .NET's check;
+   the core's `run_cb` (`rust/src/ffi/consumer/mod.rs` ~724-735) takes the busy flag, then `drop(guard)` before
+   `deliver(...)`, so the second can run and queue its completion first, and the FIFO pump settles in that order,
+   freeing the second's live listener. Pre-existing (async topics-listener forms at `3afba0a7`). **Fix (row 441 (A)):**
+   on the two async consumers, a Subscribe in any form (topics or pattern; with or without a listener; both async
+   listener kinds; the empty-topic form) started while another Subscribe on the same consumer has not yet settled
+   throws `ConcurrentModificationException` with the core's exact text (verify it; reuse the existing .NET constant)
+   before calling C, creating no registration. "Settled" = the first subscribe's settle has run
+   (`ConsumerCompletion.Complete`, before `SetOutcome`). Release the in-flight mark exactly once on every path (success,
+   every failure incl. the core's own CME, `Submit` throwing before or after the native call, cancellation,
+   Close/Dispose running pending callbacks); it must never stick. Subscribes only; sync consumers unchanged (confirm).
+   A .NET guard for the core's gap, to go when row 442 lands; no Rust change. Tests deterministic only (no sleeps): if
+   the first subscribe cannot be held unsettled by an existing hook, STOP and report.
+
+   Resolved in 4dc2c457 / bcff7deb.
