@@ -30,7 +30,8 @@ namespace Confluent.Kafka.UnitTests;
 /// <c>MockConsumerTest.testRe2JPatternSubscription</c> on both mocks, Java's
 /// <c>AsyncKafkaConsumerTest.testSubscribeToRe2JPatternValidation</c> and
 /// <c>testSubscribeToRe2JPatternThrowsIfNoGroupId</c> on both Kafka consumers over an unreachable broker, a null
-/// pattern text or one holding a NUL, the mocks' listener across a rebalance, a disposed consumer, and a closed mock.
+/// pattern text or one holding a NUL, the mocks' listener across a rebalance, a refused subscribe's included, a
+/// disposed consumer, and a closed mock.
 /// </summary>
 /// <remarks>
 /// Not translated: Java's <c>testSubscribeToRe2JPatternGeneratesEvent</c>, which needs a stubbed application event
@@ -209,6 +210,39 @@ public sealed class PublicConsumerPatternSubscribeTests
     }
 
     [Theory]
+    [InlineData("MockConsumer")]
+    [InlineData("AsyncMockConsumer")]
+    [InlineData("AsyncMockConsumer+async")]
+    public async Task OnTheMocks_APatternListener_RefusedAfterTopics_IsTheOneTheNextRebalanceFires(string kind)
+    {
+        object consumer = Create(kind.Split('+')[0], groupId: true);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        SubscriptionPattern pattern = new SubscriptionPattern(Topic + ".*");
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        RecordingListener first = new RecordingListener();
+        await TestTimeout.Run(() => SubscribeToTopics(consumer, first), s_deadline);
+        bool asyncListener = kind.EndsWith("+async", StringComparison.Ordinal);
+        RecordingListener listener = new RecordingListener();
+        RecordingAsyncListener recordingAsync = new RecordingAsyncListener();
+        IRecordingListener recording = asyncListener ? recordingAsync : listener;
+
+        IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(
+            () => TestTimeout.Run(
+                () => asyncListener
+                    ? ((IAsyncConsumer<byte[], byte[]>)consumer).Subscribe(pattern, recordingAsync)
+                    : Subscribe(consumer, pattern, listener),
+                s_deadline));
+        Assert.Equal(MutuallyExclusive, refused.Message);
+
+        await TestTimeout.RunOffThisThread(() => Rebalance(consumer, tp0, tp1), s_deadline);
+
+        Assert.Empty(first.Assigned);
+        Assert.Empty(recording.Revoked);
+        Assert.Equal(new[] { tp0, tp1 }, Assert.Single(recording.Assigned).OrderBy(tp => tp.Partition));
+    }
+
+    [Theory]
     [MemberData(nameof(AllConsumers))]
     public async Task AfterDispose_BothOverloads_ReportTheClosedConsumer(string kind)
     {
@@ -302,6 +336,17 @@ public sealed class PublicConsumerPatternSubscribeTests
         }
 
         return ((IAsyncConsumer<byte[], byte[]>)consumer).Subscribe(new[] { "topic1" });
+    }
+
+    private static Task SubscribeToTopics(object consumer, IConsumerRebalanceListener listener)
+    {
+        if (consumer is IConsumer<byte[], byte[]> sync)
+        {
+            sync.Subscribe(new[] { Topic }, listener);
+            return Task.CompletedTask;
+        }
+
+        return ((IAsyncConsumer<byte[], byte[]>)consumer).Subscribe(new[] { Topic }, listener);
     }
 
     private static Task Rebalance(object consumer, params TopicPartition[] newAssignment)

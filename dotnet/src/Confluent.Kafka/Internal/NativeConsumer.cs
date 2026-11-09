@@ -113,8 +113,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly ConsumerCallbackReporter _reporter;
 
     // The registered listener's self_: replaced when a subscribe succeeds, kept across Unsubscribe and
-    // Assign, released after the consumer's destroy has returned.
+    // Assign, released after the consumer's destroy has returned. The core registers a subscribe's listener before
+    // it can refuse the subscribe, so a refused one becomes the registered one and the one it replaced is retained,
+    // both kept until a subscribe succeeds or the consumer's destroy has returned.
     private ListenerRegistration? _listenerRegistration;
+
+    private readonly List<ListenerRegistration> _retainedListenerRegistrations = new List<ListenerRegistration>();
+
+    private bool _listenerRegistrationsReleased;
 
     // The commit-callback registrations whose commit reported an error: the core may still fire them, so they are
     // released after the consumer's destroy has returned.
@@ -172,7 +178,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal ListenerRegistration? CurrentListenerRegistration => _listenerRegistration;
+    internal ListenerRegistration? CurrentListenerRegistration => Volatile.Read(ref _listenerRegistration);
 
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
@@ -583,6 +589,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr nativeSubscription = subscription(arguments);
             ListenerRegistration registration = ListenerRegistration.Root(listener, _reporter);
+            bool called = false;
             bool subscribed = false;
             try
             {
@@ -591,6 +598,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 {
                     IntPtr outErr = IntPtr.Zero;
                     subscribe(_handle, nativeSubscription, listenerHandle, ref outErr);
+                    called = true;
                     subscribed = outErr == IntPtr.Zero;
                     KafkaException.ThrowIfFfiFailed(ref outErr);
                 }
@@ -601,7 +609,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
             finally
             {
-                SettleListener(registration, subscribed);
+                if (called)
+                {
+                    SettleListener(registration, subscribed);
+                }
+                else
+                {
+                    registration.Release();
+                }
             }
         });
     }
@@ -630,13 +645,37 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void SettleListener(ListenerRegistration? registration, bool subscribed)
     {
-        if (subscribed)
+        if (!subscribed && registration is null)
         {
-            Interlocked.Exchange(ref _listenerRegistration, registration)?.Release();
+            return;
         }
-        else
+
+        lock (_retainedListenerRegistrations)
         {
-            registration?.Release();
+            if (_listenerRegistrationsReleased)
+            {
+                registration?.Release();
+                return;
+            }
+
+            ListenerRegistration? replaced = Interlocked.Exchange(ref _listenerRegistration, registration);
+            if (!subscribed)
+            {
+                if (replaced is not null)
+                {
+                    _retainedListenerRegistrations.Add(replaced);
+                }
+
+                return;
+            }
+
+            replaced?.Release();
+            foreach (ListenerRegistration retained in _retainedListenerRegistrations)
+            {
+                retained.Release();
+            }
+
+            _retainedListenerRegistrations.Clear();
         }
     }
 
@@ -1730,7 +1769,18 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             _callbackHandle?.Dispose();
         }
 
-        Interlocked.Exchange(ref _listenerRegistration, null)?.Release();
+        lock (_retainedListenerRegistrations)
+        {
+            Interlocked.Exchange(ref _listenerRegistration, null)?.Release();
+            foreach (ListenerRegistration retained in _retainedListenerRegistrations)
+            {
+                retained.Release();
+            }
+
+            _retainedListenerRegistrations.Clear();
+            _listenerRegistrationsReleased = true;
+        }
+
         lock (_parkedCommitCallbacks)
         {
             foreach (CommitCallbackRegistration registration in _parkedCommitCallbacks)

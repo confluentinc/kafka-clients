@@ -36,6 +36,8 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 {
     private const string Topic = "listener-bridge-topic";
 
+    private const string MutuallyExclusive = "Subscription to topics, partitions and pattern are mutually exclusive";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
@@ -320,7 +322,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     [Fact]
-    public void FailedSubscribe_ReleasesTheNewRegistration_AndKeepsTheOld()
+    public void RefusedSubscribe_KeepsTheNewRegistrationAndTheOld_UntilASubscribeSucceeds()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -329,14 +331,25 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         consumer.Unsubscribe();
         consumer.Assign(new[] { new TopicPartition(Topic, 0) });
 
-        Assert.Throws<IllegalStateException>(() => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(
+            () => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
 
-        Assert.Same(kept, consumer.CurrentListenerRegistration);
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration refusedRegistration = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(kept, refusedRegistration);
         Assert.False(kept.IsReleased);
+        Assert.False(refusedRegistration.IsReleased);
+
+        consumer.Unsubscribe();
+        consumer.Subscribe(new[] { Topic }, new RecordingListener());
+
+        Assert.True(kept.IsReleased);
+        Assert.True(refusedRegistration.IsReleased);
+        Assert.False(consumer.CurrentListenerRegistration!.IsReleased);
     }
 
     [Fact]
-    public async Task FailedAsyncSubscribe_ReleasesTheNewRegistration_AndKeepsTheOld()
+    public async Task RefusedAsyncSubscribe_KeepsTheNewRegistrationAndTheOld_UntilASubscribeSucceeds()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
@@ -345,11 +358,182 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         await consumer.UnsubscribeWithCallback();
         await consumer.AssignWithCallback(new[] { new TopicPartition(Topic, 0) });
 
-        await Assert.ThrowsAsync<IllegalStateException>(
+        IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener()));
 
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration refusedRegistration = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(kept, refusedRegistration);
+        Assert.False(kept.IsReleased);
+        Assert.False(refusedRegistration.IsReleased);
+
+        await consumer.UnsubscribeWithCallback();
+        await consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener());
+
+        Assert.True(kept.IsReleased);
+        Assert.True(refusedRegistration.IsReleased);
+        Assert.False(consumer.CurrentListenerRegistration!.IsReleased);
+    }
+
+    [Fact]
+    public void RefusedPatternSwitch_KeepsBothRegistrations_AndTheNextRebalanceFiresTheNewListener()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        RecordingListener first = new RecordingListener();
+        consumer.Subscribe(new[] { Topic }, first);
+        ListenerRegistration firstRegistration = consumer.CurrentListenerRegistration!;
+        RecordingListener second = new RecordingListener();
+
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(
+            () => consumer.Subscribe(new SubscriptionPattern("t.*"), second));
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration secondRegistration = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(firstRegistration, secondRegistration);
+        Assert.False(firstRegistration.IsReleased);
+        Assert.False(secondRegistration.IsReleased);
+
+        TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline);
+
+        Assert.Empty(first.Assigned);
+        Assert.Equal(new[] { new TopicPartition(Topic, 0) }, Assert.Single(second.Assigned));
+
+        consumer.Subscribe(new[] { Topic });
+
+        Assert.True(firstRegistration.IsReleased);
+        Assert.True(secondRegistration.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
+    }
+
+    [Fact]
+    public async Task RefusedAsyncPatternSwitch_KeepsBothRegistrations_AndTheNextRebalanceFiresTheNewListener()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        RecordingListener first = new RecordingListener();
+        await consumer.SubscribeWithCallback(new[] { Topic }, first);
+        ListenerRegistration firstRegistration = consumer.CurrentListenerRegistration!;
+        RecordingListener second = new RecordingListener();
+
+        IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(
+            () => consumer.SubscribeWithCallback(new SubscriptionPattern("t.*"), second));
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration secondRegistration = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(firstRegistration, secondRegistration);
+        Assert.False(firstRegistration.IsReleased);
+        Assert.False(secondRegistration.IsReleased);
+
+        await TestTimeout.Run(
+            () => consumer.RebalanceWithCallback(new[] { new TopicPartition(Topic, 0) }), s_deadline);
+
+        Assert.Empty(first.Assigned);
+        Assert.Equal(new[] { new TopicPartition(Topic, 0) }, Assert.Single(second.Assigned));
+
+        await consumer.SubscribeWithCallback(new[] { Topic });
+
+        Assert.True(firstRegistration.IsReleased);
+        Assert.True(secondRegistration.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
+    }
+
+    [Fact]
+    public void FailedListenerlessSubscribe_ReleasesNothing()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Subscribe(new[] { Topic }, new RecordingListener());
+        ListenerRegistration kept = consumer.CurrentListenerRegistration!;
+
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(
+            () => consumer.Subscribe(new SubscriptionPattern("t.*")));
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
         Assert.Same(kept, consumer.CurrentListenerRegistration);
         Assert.False(kept.IsReleased);
+
+        consumer.Subscribe(new[] { Topic }, new RecordingListener());
+
+        Assert.True(kept.IsReleased);
+    }
+
+    [Fact]
+    public async Task FailedListenerlessAsyncSubscribe_ReleasesNothing()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener());
+        ListenerRegistration kept = consumer.CurrentListenerRegistration!;
+
+        IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(
+            () => consumer.SubscribeWithCallback(new SubscriptionPattern("t.*")));
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        Assert.Same(kept, consumer.CurrentListenerRegistration);
+        Assert.False(kept.IsReleased);
+
+        await consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener());
+
+        Assert.True(kept.IsReleased);
+    }
+
+    [Fact]
+    public void Dispose_AfterARefusedSubscribe_ReleasesEveryRegistration()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        consumer.Subscribe(new[] { Topic }, new RecordingListener());
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+        Assert.Throws<IllegalStateException>(
+            () => consumer.Subscribe(new SubscriptionPattern("t.*"), new RecordingListener()));
+        ListenerRegistration second = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(first, second);
+
+        TestTimeout.Run(() => consumer.Dispose(), s_deadline);
+
+        Assert.True(first.IsReleased);
+        Assert.True(second.IsReleased);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnAKafkaConsumer_ARefusedSwitch_KeepsBothRegistrations_UntilDispose(bool async)
+    {
+        NativeConsumer consumer = NativeConsumer.Create(new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "127.0.0.1:1",
+            ["group.protocol"] = "consumer",
+            ["group.id"] = "listener-bridge-group",
+        });
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        SubscriptionPattern pattern = new SubscriptionPattern("t.*");
+        if (async)
+        {
+            await TestTimeout.Run(() => consumer.SubscribeWithCallback(pattern, new RecordingListener()), s_deadline);
+        }
+        else
+        {
+            consumer.Subscribe(pattern, new RecordingListener());
+        }
+
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+
+        IllegalStateException refused = async
+            ? await Assert.ThrowsAsync<IllegalStateException>(() => TestTimeout.Run(
+                () => consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener()), s_deadline))
+            : Assert.Throws<IllegalStateException>(() => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
+
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration second = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(first, second);
+        Assert.False(first.IsReleased);
+        Assert.False(second.IsReleased);
+
+        TestTimeout.Run(() => consumer.Dispose(), s_deadline);
+
+        Assert.True(first.IsReleased);
+        Assert.True(second.IsReleased);
     }
 
     [Fact]
