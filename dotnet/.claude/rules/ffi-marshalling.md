@@ -2233,9 +2233,14 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
   - **Report exactly once per call**, on every path, including a method that throws
     before it returns a `Task` (the async listener, §B1). The async listener reports from
     its `Task`'s continuation, so the drain thread never waits on user code (decision 27).
-  - **`self_` lifetime** (decision 23): free the old listener's `GCHandle` when a
-    replacing `subscribe_*` succeeds, the new one when the `subscribe_*` fails, and the
-    current one after the consumer's destroy has returned. Keep it across `unsubscribe`:
+  - **`self_` lifetime** (decision 23): free the old listener's `GCHandle`, and every one
+    a failed `subscribe_*` left, when a replacing `subscribe_*` succeeds. A `subscribe_*`
+    that reported an error may already have registered its listener (the core's
+    `SubscriptionState` registers it before the subscription-type check, as Java's), so
+    the new one becomes the current one and the one it replaced is kept; a failed
+    listener-less `subscribe_*` changes nothing (row 431 (a)). Free a new one at once
+    only when no `subscribe_*` call was made, and the current and every kept one after
+    the consumer's destroy has returned. Keep it across `unsubscribe`:
     the header says `unsubscribe` releases the listener (BH:29392-29394 at `3f8a5bc6`), but
     Java's `unsubscribe()` leaves it registered (`SubscriptionState.java:347-355`), and
     Python keeps its context across it (`python/_confluentkafka.c:3870-3879`, `:3947-3954`
@@ -2337,9 +2342,10 @@ synchronous call.
     across call → `cb`) — and, for a registration, across the whole **live
     registration**, which is a much wider window.
   - **Listener:** the registration survives **N** fires (a churn loop); a replacing
-    subscribe frees the old `self_`; a failed subscribe frees the new one; an
-    `unsubscribe` frees nothing; destroy frees the current one after it returns; and
-    teardown with a live registration returns without hanging.
+    subscribe frees the old `self_`; a refused subscribe frees neither, its listener is
+    the one a mock's next rebalance fires, and the next successful subscribe frees both;
+    an `unsubscribe` frees nothing; destroy frees the current and every kept one after
+    it returns; and teardown with a live registration returns without hanging.
   - **Commit callback:** after `on_complete` reports, `self_` is freed once; after an
     initiation error it is kept until destroy, then freed once; a throwing callback's
     exception surfaces from the call that ran it; `CommitAsync(offsets)` with no callback
