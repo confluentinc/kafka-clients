@@ -200,7 +200,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         string marker = "async-callback-" + how + "-" + Guid.NewGuid().ToString("N");
         using TraceCapture trace = new TraceCapture(marker);
         string topic = Topic("async-callback-" + how);
-        IAsyncDeliveryCallback callback;
+        IAsyncCallback callback;
         AsyncProbe? probe = null;
         ThrowingAsyncCallback? throwing = null;
         if (how == Throwing)
@@ -240,7 +240,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
             await Within(producer.Flush());
             string line = Assert.Single(trace.Lines());
-            Assert.Contains("IAsyncDeliveryCallback", line);
+            Assert.Contains("IAsyncCallback", line);
         });
     }
 
@@ -508,7 +508,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         await WithProducer(producer =>
         {
             ArgumentNullException refused = Assert.Throws<ArgumentNullException>(
-                () => { _ = producer.Send(Record(Topic("async-null-callback")), (IAsyncDeliveryCallback)null!); });
+                () => { _ = producer.Send(Record(Topic("async-null-callback")), (IAsyncCallback)null!); });
             Assert.Equal("callback", refused.ParamName);
             return Task.CompletedTask;
         });
@@ -682,7 +682,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
     }
 
     /// <summary>An async delivery callback that runs a test's body and records its start, its end and its task.</summary>
-    private sealed class AsyncProbe : IAsyncDeliveryCallback
+    private sealed class AsyncProbe : IAsyncCallback
     {
         private readonly Func<Exception?, Task> _body;
         private readonly List<string>? _log;
@@ -753,7 +753,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
     }
 
     /// <summary>An async delivery callback whose <c>OnCompletion</c> throws instead of returning a task.</summary>
-    private sealed class ThrowingAsyncCallback : IAsyncDeliveryCallback
+    private sealed class ThrowingAsyncCallback : IAsyncCallback
     {
         private readonly string _marker;
         private int _calls;

@@ -106,7 +106,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
     /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>.
     /// </summary>
-    /// <param name="topicNames">The names of the topics to delete.</param>
+    /// <param name="topics">The names of the topics to delete.</param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
@@ -117,14 +117,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
     /// overloads and does not compile (CS0121); cast it to the parameter type meant.
     /// </remarks>
-    /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
+    /// <paramref name="topics"/> contains a null element, or a name containing a NUL
     /// character.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null);
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null);
 
     /// <summary>
     /// Describes topics — Java's

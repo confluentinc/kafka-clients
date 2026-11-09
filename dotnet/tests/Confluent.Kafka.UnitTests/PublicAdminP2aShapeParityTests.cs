@@ -200,7 +200,7 @@ public sealed class PublicAdminP2aShapeParityTests
             () => new TopicPartitionInfo(0, null, none, none, none, null!)).ParamName);
         Assert.Equal("replicas", Assert.Throws<ArgumentNullException>(
             () => new TopicPartitionInfo(0, null, null!, none, null!, null!)).ParamName);
-        Assert.Equal("inSyncReplicas", Assert.Throws<ArgumentNullException>(
+        Assert.Equal("isr", Assert.Throws<ArgumentNullException>(
             () => new TopicPartitionInfo(0, null, none, null!, null!, null!)).ParamName);
 
         TopicPartitionInfo six = new TopicPartitionInfo(0, null, none, none, none, none);

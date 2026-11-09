@@ -67,6 +67,35 @@ public sealed class AclBindingFilter
     /// <returns>Whether either half has an <c>UNKNOWN</c> component.</returns>
     public bool IsUnknown() => PatternFilter().IsUnknown() || EntryFilter().IsUnknown();
 
+    /// <summary>
+    /// Whether this filter matches at most one binding — Java's <c>matchesAtMostOne()</c>: both halves do.
+    /// </summary>
+    /// <returns>Whether both halves match at most one.</returns>
+    public bool MatchesAtMostOne() => _patternFilter.MatchesAtMostOne() && _entryFilter.MatchesAtMostOne();
+
+    /// <summary>
+    /// A description of the first component that keeps this filter from matching just one binding, the pattern
+    /// half first, or <see langword="null"/> when there is none — Java's <c>findIndefiniteField()</c>.
+    /// </summary>
+    /// <returns>Java's text for the indefinite component, or <see langword="null"/>.</returns>
+    public string? FindIndefiniteField() => _patternFilter.FindIndefiniteField() ?? _entryFilter.FindIndefiniteField();
+
+    /// <summary>
+    /// Whether this filter matches <paramref name="binding"/> — Java's <c>matches(AclBinding)</c>: both halves match.
+    /// </summary>
+    /// <param name="binding">The binding to test.</param>
+    /// <returns>Whether both halves match.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="binding"/> is null.</exception>
+    public bool Matches(AclBinding binding)
+    {
+        if (binding is null)
+        {
+            throw new ArgumentNullException(nameof(binding));
+        }
+
+        return _patternFilter.Matches(binding.Pattern()) && _entryFilter.Matches(binding.Entry());
+    }
+
     /// <summary>Value equality over both halves — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two are the same filter.</returns>

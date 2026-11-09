@@ -35,4 +35,11 @@ public sealed class KafkaMetric : IMetric
 
     /// <inheritdoc/>
     public object MetricValue() => _metricValue;
+
+    /// <summary>
+    /// A diagnostic rendering in Java's <c>toString()</c> form for a metric without a named value provider:
+    /// <c>KafkaMetric [metricName=…]</c>.
+    /// </summary>
+    /// <returns>The rendering.</returns>
+    public override string ToString() => "KafkaMetric [metricName=" + _metricName + "]";
 }

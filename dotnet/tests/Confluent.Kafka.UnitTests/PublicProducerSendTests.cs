@@ -560,7 +560,7 @@ public sealed class PublicProducerSendTests
     }
 
     /// <summary>A delivery callback that counts its calls.</summary>
-    private sealed class RecordingCallback : IDeliveryCallback
+    private sealed class RecordingCallback : ICallback
     {
         private int _count;
 

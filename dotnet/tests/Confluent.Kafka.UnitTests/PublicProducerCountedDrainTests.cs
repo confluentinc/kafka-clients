@@ -103,7 +103,7 @@ public sealed class PublicProducerCountedDrainTests
     }
 
     /// <summary>A delivery callback that signals it is running, then waits until it is released.</summary>
-    private sealed class Parking : IDeliveryCallback
+    private sealed class Parking : ICallback
     {
         private readonly ManualResetEventSlim _entered;
         private readonly ManualResetEventSlim _release;

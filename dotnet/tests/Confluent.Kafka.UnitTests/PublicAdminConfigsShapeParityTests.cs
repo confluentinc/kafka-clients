@@ -287,8 +287,8 @@ public sealed class PublicAdminConfigsShapeParityTests
         ArgumentOutOfRangeException thrown = Assert.Throws<ArgumentOutOfRangeException>(
             () => new AlterConfigOp(new ConfigEntry("k", "v"), undefined));
 
-        Assert.Equal("opType", thrown.ParamName);
-        Assert.StartsWith("opType must be a defined AlterConfigOpType member.", thrown.Message, StringComparison.Ordinal);
+        Assert.Equal("operationType", thrown.ParamName);
+        Assert.StartsWith("operationType must be a defined AlterConfigOpType member.", thrown.Message, StringComparison.Ordinal);
         Assert.Equal(undefined, thrown.ActualValue);
     }
 

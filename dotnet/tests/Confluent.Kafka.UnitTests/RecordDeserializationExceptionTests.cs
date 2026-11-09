@@ -75,7 +75,7 @@ public sealed class RecordDeserializationExceptionTests
             valueBuffer: null,
             headers: null,
             "m",
-            cause: null);
+            innerException: null);
 
         Assert.Null(e.Origin());
         Assert.Null(e.KeyBuffer());
@@ -130,7 +130,7 @@ public sealed class RecordDeserializationExceptionTests
             new[]
             {
                 "origin", "partition", "offset", "timestamp", "timestampType", "keyBuffer", "valueBuffer", "headers",
-                "message", "cause",
+                "message", "innerException",
             },
             constructor.GetParameters().Select(p => p.Name).ToArray());
     }
