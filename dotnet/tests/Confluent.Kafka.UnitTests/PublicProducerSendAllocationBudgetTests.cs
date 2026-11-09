@@ -135,6 +135,75 @@ public sealed class PublicProducerSendAllocationBudgetTests
             "stay a struct over the delivery task when a permit is free.");
     }
 
+    [Fact]
+    public async Task Send_NativeMemoryValue_PerRecordAllocation_HasNoValueSizedCopy()
+    {
+        byte[] key = MakeBytes(16, 0xAB);
+        using NativeMemoryManager smallValue = new NativeMemoryManager(SmallValueSize);
+        using NativeMemoryManager largeValue = new NativeMemoryManager(LargeValueSize);
+
+        AsyncMockProducer<byte[], ReadOnlyMemory<byte>?> producer =
+            new AsyncMockProducer<byte[], ReadOnlyMemory<byte>?>(Serdes.ByteArray(), MemorySerializer.Instance);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        for (int i = 0; i < 3; i++)
+        {
+            _ = FireAndMeasureMemory(producer, smallValue.Memory, key, out Task<RecordMetadata>[] warmup);
+            await AwaitAll(warmup);
+        }
+
+        long smallBytes = 0;
+        long largeBytes = 0;
+        long perSendMarginal = long.MaxValue;
+        for (int attempt = 0; attempt < MeasurementAttempts; attempt++)
+        {
+            long small = FireAndMeasureMemory(producer, smallValue.Memory, key, out Task<RecordMetadata>[] smallSends);
+            await AwaitAll(smallSends);
+
+            long large = FireAndMeasureMemory(producer, largeValue.Memory, key, out Task<RecordMetadata>[] largeSends);
+            await AwaitAll(largeSends);
+
+            long marginal = (large - small) / SendCount;
+            if (marginal < perSendMarginal)
+            {
+                perSendMarginal = marginal;
+                smallBytes = small;
+                largeBytes = large;
+            }
+        }
+
+        Assert.True(
+            perSendMarginal <= PerSendBudgetBytes,
+            $"Per-send caller-thread allocation marginal {perSendMarginal} B exceeded the budget " +
+            $"{PerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} sends) — " +
+            "a native-memory value must be pinned in place, never copied onto the heap.");
+    }
+
+    private static long FireAndMeasureMemory(
+        AsyncMockProducer<byte[], ReadOnlyMemory<byte>?> producer,
+        ReadOnlyMemory<byte> value,
+        byte[] key,
+        out Task<RecordMetadata>[] sends)
+    {
+        Task<RecordMetadata>[] tasks = new Task<RecordMetadata>[SendCount];
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < SendCount; i++)
+        {
+            tasks[i] = producer.Send(
+                new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value, key, partition: 0)).Delivery();
+        }
+
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        sends = tasks;
+        return after - before;
+    }
+
     private static long FireAndMeasure(AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, out Task<RecordMetadata>[] sends)
     {
         // Pre-allocate the task array OUTSIDE the measured window (its allocation is not per-send).
