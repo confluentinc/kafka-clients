@@ -2365,7 +2365,10 @@ synchronous call.
     every retry, and a table over every id the header lists classifies only -3, 24 and -2
     so; an `unsubscribe` frees nothing; on `KafkaConsumer` / `AsyncKafkaConsumer` a
     subscribe to no topics frees only its own; destroy frees the current and every kept
-    one after it returns; and teardown with a live registration returns without hanging.
+    one after it returns; teardown with a live registration returns without hanging; and
+    on `AsyncKafkaConsumer` / `AsyncMockConsumer` a subscribe started while another has not
+    settled is refused with -2's text before the call, with no registration, and the next
+    is accepted once the first has settled, whether it succeeded or failed (row 441).
   - **Commit callback:** after `on_complete` reports, `self_` is freed once; after an
     initiation error it is kept until destroy, then freed once; a throwing callback's
     exception surfaces from the call that ran it; `CommitAsync(offsets)` with no callback
