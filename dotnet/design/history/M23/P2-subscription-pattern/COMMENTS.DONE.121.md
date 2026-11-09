@@ -122,3 +122,16 @@ Notes for the comment-only commit (S4):
    subscription-type check (b), or any Rust/C/Python change (c).
 
    Resolved in 8e46cfb4.
+
+## Row 431 fix (8e46cfb4, bfda6a25)
+
+1. **minor — a refusal asserted by type only** —
+   `dotnet/tests/Confluent.Kafka.UnitTests/Interop/ConsumerRebalanceListenerBridgeTests.cs:487-488`
+   (`Dispose_AfterARefusedSubscribe_ReleasesEveryRegistration`): `Assert.Throws<IllegalStateException>(…)` drops the
+   exception, where every sibling asserts `MutuallyExclusive` (PLAN §7's lens, `definition-of-done.md` §3). **Fix:**
+   `IllegalStateException refused = Assert.Throws<IllegalStateException>(…); Assert.Equal(MutuallyExclusive,
+   refused.Message);`. While there, the test is the only new one without `using IDisposable consumerDisposal =
+   TestTimeout.Disposal(consumer);`, so a failing assertion before line 492 leaves the mock to its finalizer; adding
+   it (a second `Dispose` is harmless, as `OnAKafkaConsumer_ARefusedSwitch` does) keeps the sibling shape.
+
+   Resolved in 8c516ae1.
