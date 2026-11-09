@@ -220,3 +220,48 @@ Notes for the comment-only commit (S4):
    B1. Use the binding's generated ids/constants, no hard-coded numbers where a constant exists.
 
    Resolved in 65862879 / 840216d4.
+
+## Rows 436–437 (53f6fef9 … dfe502af)
+
+1. **minor — the listener's own summary still says a listener-less subscribe releases it** —
+   `dotnet/src/Confluent.Kafka/Consumer/IConsumerRebalanceListener.cs:52-54`: "A replacing subscribe, a listener-less
+   one included, releases it, as does disposing the consumer; `Unsubscribe()` and `Close()` keep it". Since A1, on
+   `KafkaConsumer` / `AsyncKafkaConsumer` a listener-less `Subscribe` to no topics keeps it
+   (`OnAKafkaConsumer_AnEmptySubscribe_KeepsTheRegistration`), and since row 431 a refused replacing subscribe releases
+   nothing; the four remarks A1 and B1 edited now say both, this paragraph says the opposite. The only other match of
+   the sweep (`git grep -i "replacing subscribe\|listener-less one included"` outside the history) is a test message.
+   **Fix:** "A listener is bound to a subscription and fires many times. A subscribe that succeeds, a listener-less one
+   included, releases it, as does disposing the consumer; `Unsubscribe()` and `Close()` keep it, as Java's
+   `SubscriptionState.unsubscribe()` does, and so does a subscribe to no topics on a `KafkaConsumer` or
+   `AsyncKafkaConsumer`, which is `Unsubscribe()`." (keeping the paragraph's `<c>` markup).
+
+   Resolved in cd89e490.
+
+2. **minor — A1's failure half is pinned only through B1's overlap** —
+   `dotnet/tests/Confluent.Kafka.UnitTests/Interop/ConsumerRebalanceListenerBridgeTests.cs:602`
+   (`OnAKafkaConsumer_AFailedEmptySubscribeWithAListener_ReleasesItsRegistration`) is the only failed empty-topic case,
+   and its id is 24, which B1 now releases on its own. The mutant that applies A1 only on success,
+   `NativeConsumer.cs:621` → `notRegistered = (unsubscribes && subscribed) || KafkaException.RefusedBeforeRegistering(outErr);`
+   and `NativeConsumer.Async.cs:246` → `(unsubscribes && error == IntPtr.Zero) || KafkaException.RefusedBeforeRegistering(error)`,
+   builds 0 W and passes all 1380 `~Consumer` tests (net10.0). Its effect is a retention, not a free (the empty path's
+   registration becomes current and the replaced one is kept), against the ruled "on success and failure alike".
+   **Fix:** a case whose empty-topic subscribe fails with another id. A bootstrap-resolution failure (-29) is
+   deterministic: a real consumer with `bootstrap.servers=unresolvable.invalid:9092`, `bootstrap.resolve.timeout.ms=1000`
+   and a `group.id`, subscribed to a topic and polled (`Poll(100 ms)` in a bounded loop, as Python's
+   `test_kafka_consumer.py` bootstrap test) until `BootstrapResolutionException`, then the empty-topic listener subscribe
+   in the three forms: `BootstrapResolutionException` with the core's message, `CurrentListenerRegistration` null,
+   `RetainedListenerRegistrationCount` 0, the listener collected. Probed (a subscribe loop instead of the poll loop):
+   3 / 3 green at HEAD in each of 3 runs (~1 s a case), 3 / 3 red under the mutant (`Assert.Null`: a registration
+   current). +3 cases per TFM.
+
+   Resolved in cd89e490.
+
+3. **minor — decision 23 gives -5 as a later refusal; the subscribe's timeout is 7** —
+   `dotnet/.claude/rules/ffi-marshalling.md:2244` "Any other refused `subscribe_*` (-4, -5, a bare `KafkaException`, any
+   other id)". -5 is `LOCAL_TIMEOUT` (Java's `java.util.concurrent.TimeoutException`), which nothing under
+   `rust/src/consumer` or `rust/src/ffi/consumer` raises; the subscribe's timeouts are `Error::timeout` →
+   `REQUEST_TIMED_OUT` = 7 (`rust/src/ffi/common.rs` `Error::Timeout(_) => kafka_common_Error_REQUEST_TIMED_OUT`, BH:222).
+   The rule's effect is right ("any other id" covers 7), the example is not. **Fix:** "(-4, 7 for a timeout, -1 for a
+   bare `KafkaException`, any other id)".
+
+   Resolved in e29207eb.
