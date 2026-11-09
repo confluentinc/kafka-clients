@@ -14,6 +14,8 @@
 
 using System;
 using System.Buffers;
+using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace Confluent.Kafka.Internal.Interop;
@@ -24,6 +26,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal unsafe struct SendPins
 {
+    private const string UnpinFailedMessage = "Exception while unpinning a key or value buffer: {0}";
+
     private static readonly IntPtr s_empty = Marshal.AllocHGlobal(1);
 
     private MemoryHandle _key;
@@ -54,14 +58,65 @@ internal unsafe struct SendPins
         }
     }
 
+    // Never throws: a user's MemoryManager<byte>.Unpin that throws is traced, and the other pin and the native block
+    // are still released, so the send's outcome is the producer's.
     internal void Release()
     {
-        _key.Dispose();
-        _value.Dispose();
+        Unpin(ref _key);
+        Unpin(ref _value);
         if (_bytes != IntPtr.Zero)
         {
             Marshal.FreeHGlobal(_bytes);
             _bytes = IntPtr.Zero;
+        }
+    }
+
+    private static void Unpin(ref MemoryHandle handle)
+    {
+        try
+        {
+            handle.Dispose();
+        }
+        catch (Exception exception)
+        {
+            TraceUnpinFailure(exception);
+        }
+        finally
+        {
+            handle = default;
+        }
+    }
+
+    private static void TraceUnpinFailure(Exception exception)
+    {
+        try
+        {
+            Trace.TraceWarning(string.Format(CultureInfo.InvariantCulture, UnpinFailedMessage, ExceptionText(exception)));
+        }
+        catch (Exception)
+        {
+            // A throwing TraceListener must not escape the hand-over.
+        }
+    }
+
+    // A ToString that throws falls back to the type's name and message, so the failure is still traced.
+    private static string ExceptionText(Exception exception)
+    {
+        try
+        {
+            return exception.ToString();
+        }
+        catch (Exception)
+        {
+            string type = exception.GetType().FullName ?? exception.GetType().Name;
+            try
+            {
+                return type + ": " + exception.Message;
+            }
+            catch (Exception)
+            {
+                return type;
+            }
         }
     }
 

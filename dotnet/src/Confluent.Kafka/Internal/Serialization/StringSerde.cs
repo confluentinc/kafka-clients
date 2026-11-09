@@ -25,8 +25,9 @@ namespace Confluent.Kafka.Internal.Serialization;
 /// </summary>
 internal sealed class StringSerde : ISerde<string>
 {
-    public byte[]? Serialize(string topic, string data) =>
-        data is null ? null : Utf8Marshal.QuestionMarkUtf8.GetBytes(data);
+    // The explicit null: a null array would convert to an empty value, not to null.
+    public ReadOnlyMemory<byte>? Serialize(string topic, string data) =>
+        data is null ? (ReadOnlyMemory<byte>?)null : Utf8Marshal.QuestionMarkUtf8.GetBytes(data);
 
     public string Deserialize(string topic, ReadOnlySpan<byte> data) =>
         Utf8Marshal.GetString(data);
