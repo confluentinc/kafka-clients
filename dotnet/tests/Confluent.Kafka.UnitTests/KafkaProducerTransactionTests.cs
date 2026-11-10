@@ -14,9 +14,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -54,6 +56,14 @@ public sealed class KafkaProducerTransactionTests
         "Current value is 6.";
 
     private const int ConfigExceptionCode = -10;
+
+    // Java's BootstrapResolutionException message (KIP-909), for a 3000 ms budget.
+    private const string BootstrapResolutionFailed =
+        "Failed to resolve bootstrap servers after 3000ms. Please check your bootstrap.servers configuration and DNS " +
+        "settings.";
+
+    // An RFC 6761 reserved .invalid name: DNS resolution fails.
+    private const string UnresolvableHost = "unresolvable.invalid:9092";
 
     [Fact]
     public void TestNullGroupMetadataInSendOffsets()
@@ -212,7 +222,7 @@ public sealed class KafkaProducerTransactionTests
     {
     }
 
-    [Fact(Skip = NeedsMockClient)]
+    [Fact(Skip = "covered by PublicProducerTransactionTests.TransactionCall_OnAClosedProducer_ThrowsTheClosedProducersIllegalState")]
     public void TestTransactionalMethodThrowsWhenSenderClosed()
     {
     }
@@ -222,9 +232,71 @@ public sealed class KafkaProducerTransactionTests
     {
     }
 
-    [Fact(Skip = NeedsMockClient)]
-    public void TestProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated()
+    // KIP-1319 makes sendOffsetsToTransaction wait for metadata, so it surfaces the bootstrap failure too.
+    [Theory]
+    [InlineData(UnreachableProducers.SyncFlavor)]
+    [InlineData(UnreachableProducers.AsyncFlavor)]
+    public async Task TestProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated(string flavor)
     {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = UnresolvableHost,
+            ["bootstrap.resolve.timeout.ms"] = "3000",
+            ["transactional.id"] = "test-tx-id",
+        };
+        Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
+        {
+            [new TopicPartition("test-topic", 0)] = new OffsetAndMetadata(0),
+        };
+
+        // Java mocks a ConsumerGroupMetadata whose groupId() is "test-group"; the binding takes a consumer's, which
+        // needs no broker before it joins.
+        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+            new Dictionary<string, object?>
+            {
+                ["bootstrap.servers"] = "localhost:1",
+                ["group.protocol"] = "consumer",
+                ["group.id"] = "test-group",
+            },
+            Serdes.ByteArray(),
+            Serdes.ByteArray());
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        ConsumerGroupMetadata groupMetadata = consumer.GroupMetadata();
+
+        // The second call guards against the bootstrap error being cleared after the first failure.
+        if (flavor == UnreachableProducers.SyncFlavor)
+        {
+            KafkaProducer<byte[], byte[]> producer =
+                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+            for (int call = 0; call < 2; call++)
+            {
+                BootstrapResolutionException? error = null;
+                TestTimeout.Run(
+                    () => error = Assert.Throws<BootstrapResolutionException>(
+                        () => producer.SendOffsetsToTransaction(offsets, groupMetadata)),
+                    UnreachableProducers.Deadline);
+                Assert.Equal(BootstrapResolutionFailed, error!.Message);
+            }
+
+            producer.Close(TimeSpan.Zero);
+        }
+        else
+        {
+            AsyncKafkaProducer<byte[], byte[]> producer =
+                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
+            for (int call = 0; call < 2; call++)
+            {
+                BootstrapResolutionException error = await Assert.ThrowsAsync<BootstrapResolutionException>(
+                    () => TestTimeout.Run(
+                        () => producer.SendOffsetsToTransaction(offsets, groupMetadata),
+                        UnreachableProducers.Deadline));
+                Assert.Equal(BootstrapResolutionFailed, error.Message);
+            }
+
+            await producer.Close(TimeSpan.Zero);
+        }
     }
 
     private static void AssertConfig(
