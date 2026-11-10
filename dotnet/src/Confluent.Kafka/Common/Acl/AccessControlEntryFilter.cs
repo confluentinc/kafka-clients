@@ -111,30 +111,30 @@ public sealed class AccessControlEntryFilter
     /// </summary>
     /// <param name="other">The access control entry to test.</param>
     /// <returns>Whether the filter matches the entry.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="other"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="other"/> is null and the filter reads it. A filter whose principal and host are null and whose
+    /// operation and permission type are <c>ANY</c>, such as <see cref="ANY"/>, never reads it and matches a null
+    /// entry, as Java's does.
+    /// </exception>
     public bool Matches(AccessControlEntry other)
     {
-        if (other is null)
-        {
-            throw new ArgumentNullException(nameof(other));
-        }
-
-        if (_principal is not null && !string.Equals(_principal, other.Principal(), StringComparison.Ordinal))
+        // The entry is read only where Java's matches reads it, so ANY.Matches(null) is true.
+        if (_principal is not null && !string.Equals(_principal, Given(other).Principal(), StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (_host is not null && !string.Equals(_host, other.Host(), StringComparison.Ordinal))
+        if (_host is not null && !string.Equals(_host, Given(other).Host(), StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (_operation != AclOperation.ANY && _operation != other.Operation())
+        if (_operation != AclOperation.ANY && _operation != Given(other).Operation())
         {
             return false;
         }
 
-        return _permissionType == AclPermissionType.ANY || _permissionType == other.PermissionType();
+        return _permissionType == AclPermissionType.ANY || _permissionType == Given(other).PermissionType();
     }
 
     /// <summary>
@@ -224,4 +224,7 @@ public sealed class AccessControlEntryFilter
             Host() ?? "<any>",
             Operation(),
             PermissionType());
+
+    private static AccessControlEntry Given(AccessControlEntry? other) =>
+        other ?? throw new ArgumentNullException(nameof(other));
 }

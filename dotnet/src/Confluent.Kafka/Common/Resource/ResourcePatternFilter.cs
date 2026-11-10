@@ -89,24 +89,25 @@ public sealed class ResourcePatternFilter
     /// </summary>
     /// <param name="pattern">The resource pattern to test.</param>
     /// <returns>Whether the filter matches the pattern.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="pattern"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="pattern"/> is null and the filter reads it. A filter whose resource type is
+    /// <see cref="ResourceType.ANY"/>, whose name is null and whose pattern type is <see cref="PatternType.ANY"/> or
+    /// <see cref="PatternType.MATCH"/>, such as <see cref="ANY"/>, never reads it and matches a null pattern, as
+    /// Java's does.
+    /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// The filter is a <see cref="PatternType.MATCH"/> filter with a name and the pattern's type is neither literal
     /// nor prefixed.
     /// </exception>
     public bool Matches(ResourcePattern pattern)
     {
-        if (pattern is null)
-        {
-            throw new ArgumentNullException(nameof(pattern));
-        }
-
-        if (_resourceType != Resource.ResourceType.ANY && _resourceType != pattern.ResourceType())
+        // The pattern is read only where Java's matches reads it, so ANY.Matches(null) is true.
+        if (_resourceType != Resource.ResourceType.ANY && _resourceType != Given(pattern).ResourceType())
         {
             return false;
         }
 
-        if (_patternType != Resource.PatternType.ANY && _patternType != Resource.PatternType.MATCH && _patternType != pattern.PatternType())
+        if (_patternType != Resource.PatternType.ANY && _patternType != Resource.PatternType.MATCH && _patternType != Given(pattern).PatternType())
         {
             return false;
         }
@@ -116,22 +117,23 @@ public sealed class ResourcePatternFilter
             return true;
         }
 
-        if (_patternType == Resource.PatternType.ANY || _patternType == pattern.PatternType())
+        ResourcePattern given = Given(pattern);
+        if (_patternType == Resource.PatternType.ANY || _patternType == given.PatternType())
         {
-            return string.Equals(_name, pattern.Name(), StringComparison.Ordinal);
+            return string.Equals(_name, given.Name(), StringComparison.Ordinal);
         }
 
-        switch (pattern.PatternType())
+        switch (given.PatternType())
         {
             case Resource.PatternType.LITERAL:
-                return string.Equals(_name, pattern.Name(), StringComparison.Ordinal)
-                    || string.Equals(pattern.Name(), ResourcePattern.WILDCARD_RESOURCE, StringComparison.Ordinal);
+                return string.Equals(_name, given.Name(), StringComparison.Ordinal)
+                    || string.Equals(given.Name(), ResourcePattern.WILDCARD_RESOURCE, StringComparison.Ordinal);
 
             case Resource.PatternType.PREFIXED:
-                return _name.StartsWith(pattern.Name(), StringComparison.Ordinal);
+                return _name.StartsWith(given.Name(), StringComparison.Ordinal);
 
             default:
-                throw new IllegalArgumentException("Unsupported PatternType: " + pattern.PatternType());
+                throw new IllegalArgumentException("Unsupported PatternType: " + given.PatternType());
         }
     }
 
@@ -215,4 +217,7 @@ public sealed class ResourcePatternFilter
             ResourceType(),
             Name() ?? "<any>",
             PatternType());
+
+    private static ResourcePattern Given(ResourcePattern? pattern) =>
+        pattern ?? throw new ArgumentNullException(nameof(pattern));
 }

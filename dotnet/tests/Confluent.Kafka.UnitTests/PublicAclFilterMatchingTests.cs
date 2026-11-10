@@ -254,10 +254,30 @@ public sealed class PublicAclFilterMatchingTests
     }
 
     [Fact]
-    public void Matches_RefusesANullArgument()
+    public void Matches_ANullArgument_IsRefusedOnlyWhereJavaReadsIt()
     {
-        Assert.Equal("pattern", Assert.Throws<ArgumentNullException>(() => ResourcePatternFilter.ANY.Matches(null!)).ParamName);
-        Assert.Equal("other", Assert.Throws<ArgumentNullException>(() => AccessControlEntryFilter.ANY.Matches(null!)).ParamName);
+        // The two ANY filters never read the argument, so a null one matches, as in Java.
+        Assert.True(ResourcePatternFilter.ANY.Matches(null!));
+        Assert.True(new ResourcePatternFilter(ResourceType.ANY, null, MATCH).Matches(null!));
+        Assert.True(AccessControlEntryFilter.ANY.Matches(null!));
+
+        // Each component that is not ANY reads it.
+        Assert.Equal("pattern", Assert.Throws<ArgumentNullException>(
+            () => new ResourcePatternFilter(TOPIC, null, PatternType.ANY).Matches(null!)).ParamName);
+        Assert.Equal("pattern", Assert.Throws<ArgumentNullException>(
+            () => new ResourcePatternFilter(ResourceType.ANY, null, LITERAL).Matches(null!)).ParamName);
+        Assert.Equal("pattern", Assert.Throws<ArgumentNullException>(
+            () => new ResourcePatternFilter(ResourceType.ANY, "t", PatternType.ANY).Matches(null!)).ParamName);
+        Assert.Equal("other", Assert.Throws<ArgumentNullException>(
+            () => Entry("User:alice", null, AclOperation.ANY, AclPermissionType.ANY).Matches(null!)).ParamName);
+        Assert.Equal("other", Assert.Throws<ArgumentNullException>(
+            () => Entry(null, "h", AclOperation.ANY, AclPermissionType.ANY).Matches(null!)).ParamName);
+        Assert.Equal("other", Assert.Throws<ArgumentNullException>(
+            () => Entry(null, null, AclOperation.READ, AclPermissionType.ANY).Matches(null!)).ParamName);
+        Assert.Equal("other", Assert.Throws<ArgumentNullException>(
+            () => Entry(null, null, AclOperation.ANY, AclPermissionType.ALLOW).Matches(null!)).ParamName);
+
+        // AclBindingFilter reads the binding first, as Java's binding.pattern() does.
         Assert.Equal("binding", Assert.Throws<ArgumentNullException>(() => AclBindingFilter.ANY.Matches(null!)).ParamName);
     }
 
