@@ -39,6 +39,13 @@ public sealed class PerfV3SmokeTests : IClassFixture<KafkaBrokerFixture>
 
     private static readonly bool s_skipCrossClock = OperatingSystem.IsMacOS();
 
+    // Producer settings the caller's environment must not carry into the smoke, so it runs the harness defaults.
+    private static readonly string[] s_producerDefaultKeys =
+    {
+        "ACKS", "AWAIT_ACCEPTED", "BATCH_SIZE", "BUFFER_MEMORY", "BUFFER_MEMORY_ALLOCATION_STRATEGY", "COMPRESSION_TYPE",
+        "METRICS_FILE", "NUM_MESSAGES", "RESULTS_FILE", "USE_DEFAULTS",
+    };
+
     private readonly KafkaBrokerFixture _broker;
     private readonly ITestOutputHelper _output;
 
@@ -82,10 +89,19 @@ public sealed class PerfV3SmokeTests : IClassFixture<KafkaBrokerFixture>
             ["CREATE_TOPIC"] = "False",
         };
 
-        (int exitCode, string stdout, string stderr) = await PerfV3Process.RunAsync(_output, env, removeKeys: Array.Empty<string>()).ConfigureAwait(false);
+        (int exitCode, string stdout, string stderr) =
+            await PerfV3Process.RunAsync(_output, env, removeKeys: s_producerDefaultKeys).ConfigureAwait(false);
         _output.WriteLine(stdout);
         _output.WriteLine(stderr);
         Assert.True(exitCode == 0, $"producer perf run failed (rc={exitCode}); see output above");
+
+        // The harness defaults, which the removed keys leave in force: the incremental buffer at the default 1 MiB
+        // batch with no compression, and an async run that waits for each send's acceptance.
+        Assert.Contains("Effective buffer.memory.allocation.strategy: incremental", stdout, StringComparison.Ordinal);
+        if (asyncMode)
+        {
+            Assert.Contains("AWAIT_ACCEPTED: True", stdout, StringComparison.Ordinal);
+        }
     }
 
     private async Task RunConsumerSmokeAsync(string topic, bool asyncMode)

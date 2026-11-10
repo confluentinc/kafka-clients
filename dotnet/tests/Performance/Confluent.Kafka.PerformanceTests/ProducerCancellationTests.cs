@@ -200,9 +200,9 @@ public sealed class ProducerCancellationTests
         public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value) =>
             new ValueTask<Task<PerfRecordMetadata>>(Task.FromResult(Next(topic)));
 
-        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks)
         {
-            callback.OnCompletion(sendStartMs, Next(topic), null);
+            callback.OnCompletion(sendStartTicks, Next(topic), null);
             return default;
         }
 
