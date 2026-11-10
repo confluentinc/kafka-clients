@@ -26,8 +26,9 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="Earliest"/> would collapse onto one number.
 /// </para>
 /// <para>
-/// The hierarchy is open, as Java's is: a bare <see cref="OffsetSpec"/>, or a subclass that is not one of the seven
-/// kinds here, is queried as <see cref="Latest"/>, as Java's admin client queries it.
+/// The base class is open, as Java's is: a bare <see cref="OffsetSpec"/>, or a subclass of it that is not one of the
+/// seven kinds here, is queried as <see cref="Latest"/>, as Java's admin client queries it. The seven kinds
+/// themselves are sealed.
 /// </para>
 /// </remarks>
 public class OffsetSpec
