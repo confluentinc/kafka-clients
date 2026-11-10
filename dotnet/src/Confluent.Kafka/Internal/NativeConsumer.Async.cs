@@ -363,7 +363,7 @@ internal sealed partial class NativeConsumer
         IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         if (RoutesToTheHandle)
         {
             return RouteAsync(cancellationToken, handle => handle.CommitAsync(snapshot, callback));
@@ -392,7 +392,7 @@ internal sealed partial class NativeConsumer
         IAsyncOffsetCommitCallback callback,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         CheckInAUse(() => RequireCallback(callback));
 
         if (RoutesToTheHandle)
@@ -408,7 +408,7 @@ internal sealed partial class NativeConsumer
 
     private Task SubmitCommitWithRegistration(
         Func<bool, CommitCallbackRegistration> root,
-        CommitOffsetsSnapshot? snapshot,
+        OffsetsSnapshot? snapshot,
         CancellationToken cancellationToken)
     {
         CommitCallbackRegistration? registration = null;
@@ -420,7 +420,7 @@ internal sealed partial class NativeConsumer
                 s_void,
                 (arguments, opaque) =>
                 {
-                    IntPtr map = snapshot is CommitOffsetsSnapshot offsets ? arguments.OffsetMap(offsets) : IntPtr.Zero;
+                    IntPtr map = snapshot is OffsetsSnapshot offsets ? arguments.OffsetMap(offsets) : IntPtr.Zero;
                     registration = root(snapshot?.Count == 0);
                     IntPtr callbackHandle = registration.NewHandle();
                     try
@@ -568,7 +568,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         return RoutesToTheHandle
             ? RouteAsync(cancellationToken, handle => handle.CommitSync(snapshot, timeoutMs: null))
             : SubmitCommitOffsets(snapshot, timeoutMs: null, cancellationToken);
@@ -579,7 +579,7 @@ internal sealed partial class NativeConsumer
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         long timeoutMs = CommitTimeoutMs(timeout);
         return RoutesToTheHandle
             ? RouteAsync(cancellationToken, handle => handle.CommitSync(snapshot, timeoutMs))
@@ -798,7 +798,7 @@ internal sealed partial class NativeConsumer
             cancellationToken);
 
     private Task SubmitCommitOffsets(
-        CommitOffsetsSnapshot snapshot,
+        OffsetsSnapshot snapshot,
         long? timeoutMs,
         CancellationToken cancellationToken) =>
         Finish(

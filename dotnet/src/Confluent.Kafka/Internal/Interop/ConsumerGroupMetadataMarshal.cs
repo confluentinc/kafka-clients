@@ -19,12 +19,15 @@ using Confluent.Kafka.Consumer;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies an owned <c>ConsumerGroupMetadata_t</c> into a <see cref="ConsumerGroupMetadata"/> and destroys it.
+/// Copies the fields of an owned <c>ConsumerGroupMetadata_t</c> into a <see cref="ConsumerGroupMetadata"/>, which keeps
+/// the handle for <c>SendOffsetsToTransaction</c>. The handle is owned by a
+/// <see cref="SafeConsumerGroupMetadataHandle"/> from the start, so a failed read frees it at once.
 /// </summary>
 internal static class ConsumerGroupMetadataMarshal
 {
-    internal static ConsumerGroupMetadata CopyOutAndDestroy(IntPtr metadata)
+    internal static ConsumerGroupMetadata CopyOutAndKeep(IntPtr metadata)
     {
+        SafeConsumerGroupMetadataHandle handle = new SafeConsumerGroupMetadataHandle(metadata);
         try
         {
             IntPtr outErr = IntPtr.Zero;
@@ -37,13 +40,12 @@ internal static class ConsumerGroupMetadataMarshal
             string? groupInstanceId = Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupInstanceId(metadata, ref outErr));
             KafkaException.ThrowIfFfiFailed(ref outErr);
 
-            return new ConsumerGroupMetadata(groupId, generationId, memberId, groupInstanceId);
+            return new ConsumerGroupMetadata(groupId, generationId, memberId, groupInstanceId, handle);
         }
-        finally
+        catch
         {
-            IntPtr outErr = IntPtr.Zero;
-            NativeMethods.ConsumerGroupMetadataDestroy(metadata, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            handle.Dispose();
+            throw;
         }
     }
 }
