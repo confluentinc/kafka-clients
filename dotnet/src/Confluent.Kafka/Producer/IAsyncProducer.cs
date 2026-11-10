@@ -141,20 +141,23 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="IProducer{TKey, TValue}.BeginTransaction"/> describes its errors.
     /// </summary>
     /// <remarks>
-    /// It is synchronous, as Java's, which never waits for the broker. The producer first hands over the records
-    /// already sent, so it can wait for them; from inside a delivery callback's synchronous part it times out after
-    /// <c>max.block.ms</c>, except on an <see cref="AsyncMockProducer{TKey, TValue}"/> (see
-    /// <see cref="InitTransactions"/>).
+    /// The producer first hands over the records already sent, so this call can wait, where Java's returns at once;
+    /// it is awaitable, as Python's <c>begin_transaction</c>. The token ends only the wait, as for
+    /// <see cref="InitTransactions"/>, whose remarks also give the outcomes of a call made again after a cancel, and
+    /// what a call from inside a delivery callback does.
     /// </remarks>
+    /// <param name="cancellationToken">Ends the wait, never the operation.</param>
+    /// <returns>A task that completes when the transaction has begun.</returns>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured,
     /// <see cref="InitTransactions"/> has not yet been invoked, or the producer is closed.</exception>
     /// <exception cref="ProducerFencedException">Another producer with the same <c>transactional.id</c> is
     /// active.</exception>
     /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
     /// producer.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
     /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
     /// error.</exception>
-    void BeginTransaction();
+    Task BeginTransaction(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends a list of specified offsets to the consumer group coordinator, and also marks those offsets as part of

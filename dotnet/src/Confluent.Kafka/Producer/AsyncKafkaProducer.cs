@@ -152,7 +152,8 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         _native.InitTransactionsWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public void BeginTransaction() => _native.BeginTransaction();
+    public Task BeginTransaction(CancellationToken cancellationToken = default) =>
+        _native.BeginTransactionWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task SendOffsetsToTransaction(

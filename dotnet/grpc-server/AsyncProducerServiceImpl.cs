@@ -211,11 +211,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         Transaction(request.ProducerId, producer => producer.InitTransactions());
 
     public override Task<Proto.StatusResponse> BeginTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
-        Transaction(request.ProducerId, producer =>
-        {
-            producer.BeginTransaction();
-            return Task.CompletedTask;
-        });
+        Transaction(request.ProducerId, producer => producer.BeginTransaction());
 
     public override async Task<Proto.StatusResponse> SendOffsetsToTransaction(
         Proto.SendOffsetsToTransactionRequest request, ServerCallContext context)

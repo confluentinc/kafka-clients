@@ -95,6 +95,14 @@ internal sealed partial class NativeProducer
             (ref IntPtr outErr) => NativeMethods.ProducerInitTransactions(_handle, ref outErr),
             cancellationToken);
 
+    internal Task BeginTransactionWithCallback(CancellationToken cancellationToken = default) =>
+        TransactionWithCallback(
+            BeginTransactionOperation,
+            waitsForReports: false,
+            opaque => NativeMethods.ProducerBeginTransactionCb(_handle, s_voidCompletion, opaque),
+            (ref IntPtr outErr) => NativeMethods.ProducerBeginTransaction(_handle, ref outErr),
+            cancellationToken);
+
     internal Task SendOffsetsToTransactionWithCallback(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
         ConsumerGroupMetadata? groupMetadata,
