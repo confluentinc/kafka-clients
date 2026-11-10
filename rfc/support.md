@@ -28,7 +28,7 @@ Derived clients include Confluent's librdkafka, Python, .NET, JavaScript and Go 
 | Release line | Clients | Core | Where the code lives |
 | --- | --- | --- | --- |
 | `4.x` | Rust, Python, .NET, JavaScript, C/C++ | Rust core | `confluentinc/kafka-clients`, mirrored to the per-language repositories (see [Repository structure](repository-structure.md)) |
-| `2.x` | Python, .NET, JavaScript, Go, and librdkafka for C/C++ | librdkafka | The existing repositories. Python, and .NET keep the librdkafka-based code on a `2.x` branch. |
+| `2.x` | Python, .NET, Go, and librdkafka for C/C++ | librdkafka | The existing repositories. Python, and .NET keep the librdkafka-based code on a `2.x` branch. |
 | `1.x` | JavaScript | librdkafka | The existing repository on a `1.x` branch. |
 
 ## New features go to 4.x
