@@ -19,7 +19,9 @@ namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
 /// Converts the bytes of a record key or value to a <typeparamref name="T"/>: Java's
-/// <c>Deserializer&lt;T&gt;</c>, without its headers overloads and its <c>configure</c> and <c>close</c>.
+/// <c>Deserializer&lt;T&gt;</c>, without its headers overloads and its <c>configure</c>. Java's <c>close</c> is
+/// <see cref="IDisposable"/>: a consumer disposes a deserializer it was given that implements it, and a mock
+/// consumer does not.
 /// </summary>
 /// <remarks>
 /// The bytes are a <see cref="ReadOnlySpan{T}"/> over the fetched batch, where Java passes a <c>byte[]</c>, so a

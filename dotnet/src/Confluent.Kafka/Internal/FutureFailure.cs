@@ -60,17 +60,23 @@ internal static class FutureFailure
 
         // As on the delivery path, the future fails once the callback's task has ended.
         KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
+        TaskCompletionSource<bool>? calling = null;
         Task task = pending is null
             ? asyncCallback.OnCompletion(placeholder, error)
-            : pending.Call(asyncCallback, placeholder, error);
+            : pending.Call(asyncCallback, placeholder, error, out calling);
         if (task is null || task.IsCompleted)
         {
             EndAsyncCallback(task, future, error);
+            calling?.TrySetResult(true);
         }
         else
         {
             Task ended = task.ContinueWith(
-                done => EndAsyncCallback(done, future, error),
+                done =>
+                {
+                    EndAsyncCallback(done, future, error);
+                    calling?.TrySetResult(true);
+                },
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -89,20 +95,35 @@ internal static class FutureFailure
     internal sealed class PendingCallbacks
     {
         private readonly HashSet<Task> _running = new HashSet<Task>();
-        private readonly AsyncLocal<bool> _inside = new AsyncLocal<bool>();
+        private readonly AsyncLocal<Calling?> _calling = new AsyncLocal<Calling?>();
 
-        internal Task Call(IAsyncCallback callback, RecordMetadata metadata, Exception exception)
+        /// <summary>Whether the caller runs inside one of these callbacks, after an <c>await</c> too.</summary>
+        internal bool Inside => _calling.Value is not null;
+
+        // Runs the callback's synchronous part inside it; ended is to be set once the callback has ended.
+        internal Task Call(
+            IAsyncCallback callback,
+            RecordMetadata metadata,
+            Exception exception,
+            out TaskCompletionSource<bool> ended)
         {
-            // A nested call restores the outer flag: this write changes the caller's context.
-            bool outer = _inside.Value;
-            _inside.Value = true;
+            // A nested call restores the outer one: this write changes the caller's context.
+            Calling? outer = _calling.Value;
+            Calling calling = new Calling(outer);
+            ended = calling.Ended;
+            _calling.Value = calling;
             try
             {
                 return callback.OnCompletion(metadata, exception);
             }
+            catch
+            {
+                calling.Ended.TrySetResult(true);
+                throw;
+            }
             finally
             {
-                _inside.Value = outer;
+                _calling.Value = outer;
             }
         }
 
@@ -126,10 +147,30 @@ internal static class FutureFailure
                 TaskScheduler.Default);
         }
 
+        /// <summary>
+        /// Every callback running now, the calling ones included even before their first <c>await</c>, ended when the
+        /// last of them ends; ended at once when there are none.
+        /// </summary>
+        internal Task All()
+        {
+            List<Task> running;
+            lock (_running)
+            {
+                running = new List<Task>(_running);
+            }
+
+            for (Calling? calling = _calling.Value; calling is not null; calling = calling.Outer)
+            {
+                running.Add(calling.Ended.Task);
+            }
+
+            return running.Count == 0 ? Task.CompletedTask : Task.WhenAll(running);
+        }
+
         /// <summary>The callbacks running now, ended when the last of them ends; ended at once when there are none.</summary>
         internal Task Snapshot()
         {
-            if (_inside.Value)
+            if (Inside)
             {
                 return Task.CompletedTask;
             }
@@ -174,6 +215,17 @@ internal static class FutureFailure
                     throw new OperationCanceledException(cancellationToken);
                 }
             }
+        }
+
+        /// <summary>One callback being run, set once it has ended, and the callback it runs inside of, if any.</summary>
+        private sealed class Calling
+        {
+            internal Calling(Calling? outer) => Outer = outer;
+
+            internal Calling? Outer { get; }
+
+            internal TaskCompletionSource<bool> Ended { get; } =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         }
     }
 
