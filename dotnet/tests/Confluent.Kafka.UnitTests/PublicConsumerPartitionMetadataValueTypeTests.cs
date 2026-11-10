@@ -202,17 +202,30 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     }
 
     [Fact]
-    public void PartitionInfo_PublicConstructors_RefuseNullTopicAndLists()
+    public void PartitionInfo_PublicConstructors_KeepANullTopicAndArrays_AsJavaDoes()
     {
-        Node[] none = Array.Empty<Node>();
+        PartitionInfo info = new PartitionInfo(null!, 0, null, null!, null!, null!);
 
-        Assert.Equal("topic", Assert.Throws<ArgumentNullException>(() => new PartitionInfo(null!, 0, null, none, none)).ParamName);
-        Assert.Equal("replicas", Assert.Throws<ArgumentNullException>(() => new PartitionInfo("t", 0, null, null!, none)).ParamName);
+        Assert.Null(info.Topic());
+        Assert.Null(info.Replicas());
+        Assert.Null(info.InSyncReplicas());
+        Assert.Null(info.OfflineReplicas());
+        Assert.Null(new PartitionInfo("t", 0, null, null!, null!).Replicas());
+
+        // Java's toString prints a null topic as null and a null array as [] (formatNodeIds).
         Assert.Equal(
-            "inSyncReplicas", Assert.Throws<ArgumentNullException>(() => new PartitionInfo("t", 0, null, none, null!)).ParamName);
-        Assert.Equal(
-            "offlineReplicas",
-            Assert.Throws<ArgumentNullException>(() => new PartitionInfo("t", 0, null, none, none, null!)).ParamName);
+            "Partition(topic = null, partition = 0, leader = none, replicas = [], isr = [], offlineReplicas = [])",
+            info.ToString());
+
+        // Java's equals and hashCode: Objects.equals, Objects.deepEquals and Arrays.hashCode, all null-safe.
+        PartitionInfo same = new PartitionInfo(null!, 0, null, null!, null!, null!);
+        Assert.Equal(same, info);
+        Assert.Equal(same.GetHashCode(), info.GetHashCode());
+
+        Node[] none = Array.Empty<Node>();
+        Assert.NotEqual(new PartitionInfo(null!, 0, null, none, null!, null!), info);
+        Assert.NotEqual(info, new PartitionInfo(null!, 0, null, none, null!, null!));
+        Assert.NotEqual(new PartitionInfo("t", 0, null, null!, null!, null!), info);
     }
 
     [Fact]

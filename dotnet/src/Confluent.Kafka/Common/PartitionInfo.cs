@@ -42,9 +42,6 @@ public sealed class PartitionInfo
     /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
     /// <param name="replicas">The partition's replicas.</param>
     /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="topic"/>, <paramref name="replicas"/> or <paramref name="inSyncReplicas"/> is null.
-    /// </exception>
     public PartitionInfo(
         string topic,
         int partition,
@@ -57,7 +54,8 @@ public sealed class PartitionInfo
 
     /// <summary>
     /// Creates the metadata of a partition, Java's <c>PartitionInfo(String, int, Node, Node[], Node[], Node[])</c>.
-    /// The arrays are kept as given, not copied, as Java keeps them.
+    /// The topic and the arrays are kept as given, not copied and a null one included, as Java keeps them;
+    /// <see cref="ToString"/> prints a null array as <c>[]</c>.
     /// </summary>
     /// <param name="topic">The topic name.</param>
     /// <param name="partition">The partition id.</param>
@@ -65,10 +63,6 @@ public sealed class PartitionInfo
     /// <param name="replicas">The partition's replicas.</param>
     /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
     /// <param name="offlineReplicas">The replicas that are offline.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="topic"/>, <paramref name="replicas"/>, <paramref name="inSyncReplicas"/> or
-    /// <paramref name="offlineReplicas"/> is null.
-    /// </exception>
     public PartitionInfo(
         string topic,
         int partition,
@@ -77,12 +71,12 @@ public sealed class PartitionInfo
         Node[] inSyncReplicas,
         Node[] offlineReplicas)
     {
-        _topic = topic ?? throw new ArgumentNullException(nameof(topic));
+        _topic = topic;
         _partition = partition;
         _leader = leader;
-        _replicas = replicas ?? throw new ArgumentNullException(nameof(replicas));
-        _inSyncReplicas = inSyncReplicas ?? throw new ArgumentNullException(nameof(inSyncReplicas));
-        _offlineReplicas = offlineReplicas ?? throw new ArgumentNullException(nameof(offlineReplicas));
+        _replicas = replicas;
+        _inSyncReplicas = inSyncReplicas;
+        _offlineReplicas = offlineReplicas;
     }
 
     /// <summary>The topic name.</summary>
@@ -121,9 +115,9 @@ public sealed class PartitionInfo
             && string.Equals(_topic, other._topic, StringComparison.Ordinal)
             && _partition == other._partition
             && Equals(_leader, other._leader)
-            && _replicas.SequenceEqual(other._replicas)
-            && _inSyncReplicas.SequenceEqual(other._inSyncReplicas)
-            && _offlineReplicas.SequenceEqual(other._offlineReplicas));
+            && NodesEqual(_replicas, other._replicas)
+            && NodesEqual(_inSyncReplicas, other._inSyncReplicas)
+            && NodesEqual(_offlineReplicas, other._offlineReplicas));
 
     /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -147,15 +141,25 @@ public sealed class PartitionInfo
         string.Format(
             CultureInfo.InvariantCulture,
             "Partition(topic = {0}, partition = {1}, leader = {2}, replicas = {3}, isr = {4}, offlineReplicas = {5})",
-            _topic,
+            _topic ?? "null",
             _partition,
             _leader is null ? "none" : _leader.Id().ToString(CultureInfo.InvariantCulture),
             FormatNodeIds(_replicas),
             FormatNodeIds(_inSyncReplicas),
             FormatNodeIds(_offlineReplicas));
 
-    private static int NodesHash(Node[] nodes)
+    // Java's Objects.deepEquals over two arrays: both null, or the same nodes in order.
+    private static bool NodesEqual(Node[]? left, Node[]? right) =>
+        ReferenceEquals(left, right) || (left is not null && right is not null && left.SequenceEqual(right));
+
+    // Java's Arrays.hashCode, 0 for a null array.
+    private static int NodesHash(Node[]? nodes)
     {
+        if (nodes is null)
+        {
+            return 0;
+        }
+
         int hash = 1;
         foreach (Node node in nodes)
         {
@@ -165,10 +169,10 @@ public sealed class PartitionInfo
         return hash;
     }
 
-    private static string FormatNodeIds(Node[] nodes)
+    private static string FormatNodeIds(Node[]? nodes)
     {
         StringBuilder builder = new StringBuilder("[");
-        for (int i = 0; i < nodes.Length; i++)
+        for (int i = 0; nodes is not null && i < nodes.Length; i++)
         {
             builder.Append(nodes[i].Id().ToString(CultureInfo.InvariantCulture));
             if (i < nodes.Length - 1)
