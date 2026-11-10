@@ -53,6 +53,8 @@ public sealed class PublicSerializerDisposalTests
 
     private const string DisposeAsyncHow = "DisposeAsync";
 
+    private const string FlushHow = "Flush";
+
     private const string UnresolvableBootstrap = "unresolvable.invalid:9092";
 
     private static readonly TimeSpan s_closeTimeout = TimeSpan.FromSeconds(5);
@@ -639,6 +641,68 @@ public sealed class PublicSerializerDisposalTests
         Assert.Equal(1, value.Disposals);
     }
 
+    [Theory]
+    [InlineData(CloseHow, false)]
+    [InlineData(CloseWithTimeoutHow, false)]
+    [InlineData(DisposeHow, false)]
+    [InlineData(DisposeAsyncHow, false)]
+    [InlineData(FlushHow, false)]
+    [InlineData(CloseHow, true)]
+    [InlineData(CloseWithTimeoutHow, true)]
+    [InlineData(DisposeHow, true)]
+    [InlineData(DisposeAsyncHow, true)]
+    [InlineData(FlushHow, true)]
+    public async Task AFailureFutureListenerThatClosesOrFlushesItsProducer_ReturnsAtOnce_AndTheSerializersWaitForIt(
+        string how,
+        bool onAThenApplyDependant)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        DisposableSerializer key = new DisposableSerializer("key", log);
+        ApiFailingSerializer value = new ApiFailingSerializer("value", log);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        HeldAsyncCallback held = new HeldAsyncCallback();
+        ProducerCallingListener listener = new ProducerCallingListener(producer, how, key, value);
+        try
+        {
+            AsyncKafkaFuture<RecordMetadata> future =
+                await producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), held);
+            Assert.True(held.Started.Wait(Deadline), "the failure callback never started");
+            if (onAThenApplyDependant)
+            {
+                _ = future.ThenApply(metadata => metadata).WhenComplete(listener.Run);
+            }
+            else
+            {
+                _ = future.WhenComplete(listener.Run);
+            }
+
+            held.Release();
+
+            Assert.True(listener.Ended.Wait(Deadline), "the failure future's listener never ended");
+            Assert.Null(listener.Failure);
+            Assert.True(listener.Returned, "a " + how + " from a failure future's listener did not return");
+            Assert.Equal(0, listener.DisposalsAtItsEnd);
+            if (how == FlushHow)
+            {
+                Assert.Equal(0, key.Disposals);
+                await DisposeBounded(producer);
+            }
+
+            Assert.True(SpinWait.SpinUntil(() => value.Disposals != 0, Deadline), "the serializers were never disposed");
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            Assert.Equal(new[] { "key", "value" }, log.ToArray());
+        }
+        finally
+        {
+            held.Release();
+            await DisposeBounded(producer);
+        }
+
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+    }
+
     private static object Producer(
         string flavor,
         IReadOnlyDictionary<string, object?> configs,
@@ -803,6 +867,71 @@ public sealed class PublicSerializerDisposalTests
         {
             Started.Set();
             return _release.Task;
+        }
+    }
+
+    /// <summary>
+    /// A <c>WhenComplete</c> action that closes, disposes or flushes its producer, waits a bounded time for the call,
+    /// and records whether it returned, what it threw and how many disposals had run when the action ended.
+    /// </summary>
+    private sealed class ProducerCallingListener
+    {
+        private readonly AsyncKafkaProducer<byte[], byte[]> _producer;
+        private readonly string _how;
+        private readonly DisposableSerializer _key;
+        private readonly ApiFailingSerializer _value;
+
+        internal ProducerCallingListener(
+            AsyncKafkaProducer<byte[], byte[]> producer,
+            string how,
+            DisposableSerializer key,
+            ApiFailingSerializer value)
+        {
+            _producer = producer;
+            _how = how;
+            _key = key;
+            _value = value;
+        }
+
+        internal ManualResetEventSlim Ended { get; } = new ManualResetEventSlim(false);
+
+        internal bool Returned { get; private set; }
+
+        internal Exception? Failure { get; private set; }
+
+        internal int DisposalsAtItsEnd { get; private set; } = -1;
+
+        internal void Run(RecordMetadata? metadata, Exception? exception)
+        {
+            try
+            {
+                Returned = Call().Wait(Deadline);
+            }
+            catch (Exception failure)
+            {
+                Failure = failure;
+            }
+
+            DisposalsAtItsEnd = _key.Disposals + _value.Disposals;
+            Ended.Set();
+        }
+
+        private Task Call()
+        {
+            switch (_how)
+            {
+                case CloseHow:
+                    return _producer.Close();
+                case CloseWithTimeoutHow:
+                    return _producer.Close(s_closeTimeout);
+                case DisposeHow:
+                    _producer.Dispose();
+                    return Task.CompletedTask;
+                case DisposeAsyncHow:
+                    return _producer.DisposeAsync().AsTask();
+                default:
+                    return _producer.Flush();
+            }
         }
     }
 

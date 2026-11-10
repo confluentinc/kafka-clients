@@ -60,23 +60,18 @@ internal static class FutureFailure
 
         // As on the delivery path, the future fails once the callback's task has ended.
         KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
-        TaskCompletionSource<bool>? calling = null;
+        PendingCallbacks.Calling? calling = null;
         Task task = pending is null
             ? asyncCallback.OnCompletion(placeholder, error)
             : pending.Call(asyncCallback, placeholder, error, out calling);
         if (task is null || task.IsCompleted)
         {
-            EndAsyncCallback(task, future, error);
-            calling?.TrySetResult(true);
+            EndAsyncCallback(task, future, error, pending, calling);
         }
         else
         {
             Task ended = task.ContinueWith(
-                done =>
-                {
-                    EndAsyncCallback(done, future, error);
-                    calling?.TrySetResult(true);
-                },
+                done => EndAsyncCallback(done, future, error, pending, calling),
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -100,17 +95,16 @@ internal static class FutureFailure
         /// <summary>Whether the caller runs inside one of these callbacks, after an <c>await</c> too.</summary>
         internal bool Inside => _calling.Value is not null;
 
-        // Runs the callback's synchronous part inside it; ended is to be set once the callback has ended.
+        // Runs the callback's synchronous part inside it; End is to be called with its frame once it has ended.
         internal Task Call(
             IAsyncCallback callback,
             RecordMetadata metadata,
             Exception exception,
-            out TaskCompletionSource<bool> ended)
+            out Calling calling)
         {
             // A nested call restores the outer one: this write changes the caller's context.
             Calling? outer = _calling.Value;
-            Calling calling = new Calling(outer);
-            ended = calling.Ended;
+            calling = new Calling(outer);
             _calling.Value = calling;
             try
             {
@@ -124,6 +118,24 @@ internal static class FutureFailure
             finally
             {
                 _calling.Value = outer;
+            }
+        }
+
+        // The record's future fails with the callback's frame pushed, so the future's listeners count as inside the
+        // callback, as a record future's listeners count as a callback: a close or flush there does not wait for
+        // itself. The callback counts as ended only after them.
+        internal void End(Calling calling, Task? task, KafkaFutureImpl<RecordMetadata> future, ApiException error)
+        {
+            Calling? outer = _calling.Value;
+            _calling.Value = calling;
+            try
+            {
+                EndAsyncCallback(task, future, error);
+            }
+            finally
+            {
+                _calling.Value = outer;
+                calling.Ended.TrySetResult(true);
             }
         }
 
@@ -218,7 +230,7 @@ internal static class FutureFailure
         }
 
         /// <summary>One callback being run, set once it has ended, and the callback it runs inside of, if any.</summary>
-        private sealed class Calling
+        internal sealed class Calling
         {
             internal Calling(Calling? outer) => Outer = outer;
 
@@ -238,6 +250,23 @@ internal static class FutureFailure
         KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
         future.CompleteWithError(error);
         return future;
+    }
+
+    private static void EndAsyncCallback(
+        Task? task,
+        KafkaFutureImpl<RecordMetadata> future,
+        ApiException error,
+        PendingCallbacks? pending,
+        PendingCallbacks.Calling? calling)
+    {
+        if (pending is null || calling is null)
+        {
+            EndAsyncCallback(task, future, error);
+        }
+        else
+        {
+            pending.End(calling, task, future, error);
+        }
     }
 
     private static void EndAsyncCallback(Task? task, KafkaFutureImpl<RecordMetadata> future, ApiException error)

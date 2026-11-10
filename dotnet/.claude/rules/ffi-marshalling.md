@@ -515,9 +515,10 @@ one `PartitionsFor` delivers is the reader's). Read the signature, not the prefi
     closing thread and never inside `__execute_callbacks`. The serializers the producer was
     given are then disposed on the same thread, or, while async callbacks of serializer failures
     still run, the one that closed the producer included, once the last of them ends; a close from
-    inside one of them returns without waiting for that (`dotnet/CLAUDE.md` §4 **Close/Dispose**,
-    step 6). A send still running on another thread when the close starts is not waited for: its
-    serializers, its sync callback, and its async callback's part before the send returns.
+    inside one of them, or from a listener of its record's future, returns without waiting for that
+    (`dotnet/CLAUDE.md` §4 **Close/Dispose**, step 6). A send still running on another thread when the
+    close starts is not waited for: its serializers, its sync callback, and its async callback's part
+    before the send returns.
     A `Close` called from a callback
     leaves the teardown to the `CompletionThread` after its drain. The destroy invalidates every
     view (BH:38787-38791), runs the callbacks still pending on its thread, and completes the

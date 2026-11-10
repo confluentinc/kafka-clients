@@ -1329,8 +1329,9 @@ The mocks carry Java's `MockProducer` transaction controls (§3 sketch), over th
    key then value, on the same thread (§4 **Serializers**), or, when a `Poll` is still deserializing, by the last such
    `Poll` after it ends (ledger 449); a producer whose async callbacks of serializer failures still run, the one
    that closed it included, disposes them once the last of those ends, and its close returns after that, unless it
-   is called from inside one of them. A send still running on another thread when the close starts is not waited
-   for: its serializers, its sync callback, and its async callback's part before the send returns.
+   is called from inside one of them or from a listener of its record's future. A send still running on another
+   thread when the close starts is not waited for: its serializers, its sync callback, and its async callback's part
+   before the send returns.
 
 The admin mocks' `Close` does nothing (decision 21); their `Dispose` runs these steps. The producer and
 consumer mocks never dispose their serializers or deserializers, as Java's and Python's mocks. A
