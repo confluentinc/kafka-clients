@@ -40,6 +40,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     private const string RecordNotBuilt = "The producer record could not be built.";
 
+    private const string ConstructionFailedMessage = "Failed to construct kafka producer";
+
     private const string MaxBlockMsConfig = "max.block.ms";
 
     private const long DefaultMaxBlockMs = 60000;
@@ -118,9 +120,22 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         SerdeDisposal? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
+        IntPtr classPointer;
         try
         {
-            IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
+            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
+        }
+        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+        {
+            // Java's constructor closes the serializers when a step inside its try fails, which the core reports
+            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
+            // and disposes nothing.
+            serdes?.DisposeOnce();
+            throw;
+        }
+
+        try
+        {
             IntPtr outErr = IntPtr.Zero;
             IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
             if (outErr != IntPtr.Zero)
@@ -136,8 +151,6 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
         catch
         {
-            // A producer the core could not build disposes the serializers it was given; the binding's own
-            // configuration check above disposes nothing.
             serdes?.DisposeOnce();
             throw;
         }

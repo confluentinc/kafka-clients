@@ -62,7 +62,8 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
     /// <remarks>
     /// Each serializer that is <see cref="IDisposable"/> is disposed once, key then value, when the producer is closed
-    /// or disposed, or when the core cannot build it, but not when this constructor throws
+    /// or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to construct kafka
+    /// producer", but not for a configuration the core refuses with another error, nor when this constructor throws
     /// <see cref="ArgumentNullException"/> or refuses a serializer, a value's type or a <c>null</c> with
     /// <see cref="ConfigException"/>. So a serializer shared with another client, or used after the close, sees it
     /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.

@@ -66,7 +66,9 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </exception>
     /// <remarks>
     /// Each deserializer that is <see cref="IDisposable"/> is disposed once, key then value, when the consumer is
-    /// closed or disposed, or when the core cannot build it, but not when this constructor throws
+    /// closed or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to
+    /// construct kafka consumer", but not for a configuration the core refuses with another error, nor when this
+    /// constructor throws
     /// <see cref="ArgumentNullException"/> or refuses a deserializer, a value's type or a <c>null</c> with
     /// <see cref="ConfigException"/>, nor by a close refused with <see cref="ConcurrentModificationException"/>, which
     /// leaves the consumer open. So a deserializer shared with another client, or used after the close, sees it

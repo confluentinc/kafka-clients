@@ -37,9 +37,9 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The deserializers a consumer was given: <see cref="KafkaConsumer{TKey, TValue}"/> and
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> dispose each one that is <see cref="IDisposable"/> once, key then
-/// value, after the destroy and on the thread that destroyed, and when the core cannot build the consumer; a close that
-/// is refused disposes nothing, and the mocks never dispose them. Translates Python's deserializer-close tests of
-/// <c>test_kafka_consumer.py</c>.
+/// value, after the destroy and on the thread that destroyed, and when the core fails to build the consumer with
+/// Java's wrapped error; a close that is refused disposes nothing, and the mocks never dispose them. Translates
+/// Python's deserializer-close tests of <c>test_kafka_consumer.py</c>.
 /// </summary>
 public sealed class PublicDeserializerDisposalTests
 {
@@ -161,7 +161,9 @@ public sealed class PublicDeserializerDisposalTests
     [InlineData(SyncFlavor, "group.protocol")]
     [InlineData(AsyncFlavor, "max.poll.records")]
     [InlineData(AsyncFlavor, "group.protocol")]
-    public void AConfigurationTheCoreRefuses_DisposesBothDeserializers_KeyThenValue(string flavor, string refused)
+    public async Task AConfigurationTheCoreRefusesBare_DisposesNothing_AndARetriedConstructionUsesTheDeserializers(
+        string flavor,
+        string refused)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableDeserializer key = new DisposableDeserializer("key", log);
@@ -184,6 +186,9 @@ public sealed class PublicDeserializerDisposalTests
             Assert.Equal("Invalid value many for configuration max.poll.records: Not a number of type INT", failure.Message);
         }
 
+        Assert.Empty(log);
+        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        _ = await CloseBy(consumer, DisposeHow);
         Assert.Equal(new[] { "key", "value" }, log.ToArray());
     }
 

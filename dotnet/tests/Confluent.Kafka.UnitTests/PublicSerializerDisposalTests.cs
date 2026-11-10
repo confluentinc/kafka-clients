@@ -37,9 +37,9 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The serializers a producer was given: <see cref="KafkaProducer{TKey, TValue}"/> and
 /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> dispose each one that is <see cref="IDisposable"/> once, key then
-/// value, after the destroy and on the thread that destroyed, and when the core cannot build the producer; the mocks
-/// never dispose them. Translates Java's <c>KafkaProducerTest.testSerializerClose</c> and Python's serializer-close
-/// tests of <c>test_kafka_producer.py</c> and <c>test_producer_family.py</c>.
+/// value, after the destroy and on the thread that destroyed, and when the core fails to build the producer with
+/// Java's wrapped error; the mocks never dispose them. Translates Java's <c>KafkaProducerTest.testSerializerClose</c>
+/// and Python's serializer-close tests of <c>test_kafka_producer.py</c> and <c>test_producer_family.py</c>.
 /// </summary>
 public sealed class PublicSerializerDisposalTests
 {
@@ -148,7 +148,8 @@ public sealed class PublicSerializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void AConfigurationTheCoreRefuses_DisposesBothSerializers_KeyThenValue(string flavor)
+    public async Task AConfigurationValueTheCoreCannotParse_DisposesNothing_AndARetriedConstructionUsesTheSerializers(
+        string flavor)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
@@ -159,6 +160,9 @@ public sealed class PublicSerializerDisposalTests
         ConfigException failure = Assert.Throws<ConfigException>(() => Producer(flavor, configs, key, value));
 
         Assert.Equal("Invalid value hello for configuration batch.size: Not a number of type INT", failure.Message);
+        Assert.Empty(log);
+        object producer = Producer(flavor, Unreachable(), key, value);
+        _ = await CloseBy(producer, DisposeHow);
         Assert.Equal(new[] { "key", "value" }, log.ToArray());
     }
 
