@@ -77,7 +77,8 @@ internal sealed class JavaApi
                     types[fields[1]].Members.Add(JavaMember.Parse(JavaMemberKind.Constructor, fields[1], false, fields[2]));
                     break;
                 case "method":
-                    types[fields[1]].Members.Add(JavaMember.Parse(JavaMemberKind.Method, fields[1], fields[2] == "static", fields[3]));
+                    types[fields[1]].Members.Add(
+                        JavaMember.Parse(JavaMemberKind.Method, fields[1], fields[2] == "static", fields[3], fields[2] == "default"));
                     break;
                 case "field":
                     types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Field, fields[1], fields[2]));
@@ -228,12 +229,20 @@ internal enum JavaMemberKind
 /// <summary>A public member of a Java type, with its parameters when it has any.</summary>
 internal sealed class JavaMember
 {
-    private JavaMember(JavaMemberKind kind, string declaringType, string name, bool isStatic, string[] parameterTypes, string[] parameterNames)
+    private JavaMember(
+        JavaMemberKind kind,
+        string declaringType,
+        string name,
+        bool isStatic,
+        bool isDefault,
+        string[] parameterTypes,
+        string[] parameterNames)
     {
         Kind = kind;
         DeclaringType = declaringType;
         Name = name;
         IsStatic = isStatic;
+        IsDefault = isDefault;
         ParameterTypes = parameterTypes;
         ParameterNames = parameterNames;
     }
@@ -246,6 +255,9 @@ internal sealed class JavaMember
 
     internal bool IsStatic { get; }
 
+    /// <summary>Whether it is a <c>default</c> method of an interface.</summary>
+    internal bool IsDefault { get; }
+
     internal string[] ParameterTypes { get; }
 
     /// <summary>The parameter names; <c>?</c> for one the source does not spell.</summary>
@@ -257,10 +269,10 @@ internal sealed class JavaMember
         : DeclaringType + "#" + Name;
 
     internal static JavaMember Named(JavaMemberKind kind, string declaringType, string name) =>
-        new JavaMember(kind, declaringType, name, true, Array.Empty<string>(), Array.Empty<string>());
+        new JavaMember(kind, declaringType, name, true, false, Array.Empty<string>(), Array.Empty<string>());
 
     /// <summary>Parses a signature as the list writes it: <c>name(Type a, Type b)</c>.</summary>
-    internal static JavaMember Parse(JavaMemberKind kind, string declaringType, bool isStatic, string signature)
+    internal static JavaMember Parse(JavaMemberKind kind, string declaringType, bool isStatic, string signature, bool isDefault = false)
     {
         int open = signature.IndexOf('(');
         string inside = signature.Substring(open + 1, signature.Length - open - 2);
@@ -274,6 +286,6 @@ internal sealed class JavaMember
             names[i] = parameters[i].Substring(space + 1);
         }
 
-        return new JavaMember(kind, declaringType, signature.Substring(0, open), isStatic, types, names);
+        return new JavaMember(kind, declaringType, signature.Substring(0, open), isStatic, isDefault, types, names);
     }
 }
