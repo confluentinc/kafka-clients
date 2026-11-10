@@ -32,7 +32,7 @@ namespace Confluent.Kafka.Internal;
 /// the calls in flight, and tears down in order: refuse new calls, close, join the completion thread, wait for the
 /// calls in flight, then destroy on the closing thread.
 /// </summary>
-internal sealed class NativeProducer : IDisposable, IAsyncDisposable
+internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 {
     internal const string CompletionThreadName = "confluent-kafka-producer-completion";
 
@@ -894,6 +894,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // waiting for the reports, which the core queues to run after the calling callback returns.
     private void CompletePending()
     {
+        Exception? flushError = Volatile.Read(ref _mockFlushError);
+        if (flushError is not null)
+        {
+            throw flushError;
+        }
+
         while (MockCompleteNext())
         {
         }
@@ -969,6 +975,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private Task CloseWithCallbackWithin(long? timeoutMs, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _mockCloseError) is Exception closeError)
+        {
+            return Task.FromException(closeError);
+        }
+
         if (!TryBeginClose())
         {
             return Task.CompletedTask;
@@ -985,6 +996,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     private void CloseWithin(long? timeoutMs)
     {
+        if (Volatile.Read(ref _mockCloseError) is Exception closeError)
+        {
+            throw closeError;
+        }
+
         if (!TryBeginClose())
         {
             return;

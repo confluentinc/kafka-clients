@@ -24,12 +24,17 @@
 // implementations. Configure via the same environment variables
 // (BOOTSTRAP_SERVERS, NUM_MESSAGES, LIMIT_RPS, KEY_SIZE, VALUE_SIZE,
 // BATCH_SIZE, MAX_REQUEST_SIZE, BUFFER_MEMORY, LINGER_MS, MAX_IN_FLIGHT,
-// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, USE_DEFAULTS, WARMUP_SECONDS,
+// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, ACKS, USE_DEFAULTS, WARMUP_SECONDS,
 // TEST_DURATION_SECONDS,
 // DO_VERIFY, P99_LIMIT_MS, TOPIC_NAME, SECURITY_PROTOCOL, SASL_MECHANISM,
 // SASL_USERNAME, SASL_PASSWORD, SSL_CA_LOCATION). P99_LIMIT_MS (ms) asserts a
 // per-message p99 latency budget when > 0 (0 = off); a breach makes the test
-// exit non-zero. Needs a reachable broker; opt-in (not run under ctest).
+// exit non-zero. A counted run (LIMIT_RPS / NUM_MESSAGES) also stops after
+// TEST_DURATION_SECONDS + 10 s of measured time, printing a `capped:` line
+// (not a failure). Persistent synchronous send rejections fail the run (see
+// send_rejections). A numeric variable that is not a whole number in its range,
+// or a librdkafka property it rejects, fails the run before it produces. Needs a
+// reachable broker; opt-in (not run under ctest).
 
 #include <confluent_kafka.h>
 #include <librdkafka/rdkafka.h>
@@ -39,6 +44,7 @@
 #include <time.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <errno.h>
 #include <sys/time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -79,11 +85,18 @@ static const char *SASL_USERNAME = NULL;
 static const char *SASL_PASSWORD = NULL;
 static const char *SSL_CA_LOCATION = NULL;
 static const char *ENABLE_IDEMPOTENCE = "false";
+// acks: all (default), -1, 1 or 0.
+static const char *ACKS = "all";
 static int BATCH_SIZE_KB = 1024;
 static int MAX_REQUEST_SIZE_KB = -1;
 static const char *MAX_IN_FLIGHT = "1000";
 static int BUFFER_MEMORY_MB = -1;
+// librdkafka's largest queue.buffering.max.kbytes, in MiB.
+#define MAX_BUFFER_MEMORY_MB (INT_MAX / 1024)
 static int PERF_DEBUG_TIMING = 0;
+// v2 producev flags: 0 (retried on QUEUE_FULL), or RD_KAFKA_MSG_F_BLOCK when
+// MSG_F_BLOCK is true / 1. Read once in main.
+static int V2_MSG_FLAGS = 0;
 static const char *COMPRESSION_TYPE = "none";
 static const char *LINGER_MS = "5";
 // When true, omit every performance-tuning knob and let the client run at its
@@ -96,8 +109,13 @@ int64_t batch_size_bytes;
 int64_t max_request_size_bytes;
 
 static long after_ns = 0;
+// Exact per-record latency statistics (CLOCK_MONOTONIC ns) over the records
+// that recorded a latency; avg/min/max come from these, never from the
+// histogram buckets, which only feed the percentiles.
 static long total_latency = 0;
 static long max_latency = 0;
+static long min_latency = LONG_MAX;
+static long latency_samples = 0;
 static long completed_messages = 0;
 static long first_message_time = 0;
 static long verified = 0;
@@ -113,6 +131,26 @@ static bool results_write_failed = false;
 // (verified != completed, or completed != NUM_MESSAGES unless the duration cap
 // interrupted the run). Fails the run.
 static bool run_failed = false;
+// Counted runs (NUM_MESSAGES > 0) stop at NUM_MESSAGES or after
+// TEST_DURATION_S + COUNTED_RUN_GRACE_S of measured time, whichever comes
+// first. Hitting the time cap is not a failure: the run prints a `capped:` line
+// and writes its real measured numbers, and the driver's report flags a client
+// that held less than 95% of the target rate.
+#define COUNTED_RUN_GRACE_S 10
+static bool run_capped = false;
+// Synchronous send rejections: the client refused a record before enqueueing it
+// (v2: an rd_kafka_producev error other than a retried QUEUE_FULL; v3: a
+// send_with_callback error). No delivery report follows, so the record is not
+// counted and the send loop retries it. A persistent rejection (e.g.
+// MSG_SIZE_TOO_LARGE for a VALUE_SIZE above message.max.bytes) would make that
+// retry spin at 100% CPU, so the rule is: MAX_CONSECUTIVE_SEND_REJECTIONS
+// rejections in a row, with no successful send in between, stop the send loop
+// and fail the run (the summary and results.json are still written). Isolated
+// rejections are logged but do not fail the run. Written only by the sending
+// thread.
+#define MAX_CONSECUTIVE_SEND_REJECTIONS 1000
+static long send_rejections = 0;
+static long last_rejection_log_ns = 0;
 // Latency histogram (ms resolution) for the p99 computation, mirroring the Rust
 // test. Written only by the single record-completed task and read after that
 // task is joined, so no locking is needed.
@@ -224,6 +262,45 @@ static long current_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
+}
+
+// The integer value of environment variable `name`. A value that is not a
+// whole number in [min, max] exits the run with an error rather than fall back
+// to a default (LIMIT_RPS=10k would otherwise run unlimited).
+static long parse_env_long(const char *name, const char *value, long min, long max) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || v < min || v > max) {
+        fprintf(stderr, "Invalid %s=%s: expected a whole number from %ld to %ld\n",
+                name, value, min, max);
+        exit(2);
+    }
+    return v;
+}
+
+// rd_kafka_conf_set, logging a failure (unknown property or invalid value).
+// Returns false on failure so the caller does not run with the default.
+static bool conf_set(rd_kafka_conf_t *conf, const char *name, const char *value) {
+    char errstr[512];
+    if (rd_kafka_conf_set(conf, name, value, errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "Invalid librdkafka configuration %s: %s\n", name, errstr);
+        return false;
+    }
+    return true;
+}
+
+// Logs a synchronous send rejection (see send_rejections), rate-limited to the
+// first one and then at most one line per second carrying the running total, so
+// a persistent rejection cannot flood stderr.
+static void log_send_rejection(const char *reason) {
+    send_rejections++;
+    long now = current_time_ns();
+    if (send_rejections == 1 || now - last_rejection_log_ns >= 1000000000L) {
+        fprintf(stderr, "Send rejected: %s (%ld rejection(s) so far)\n",
+                reason ? reason : "Unknown error", send_rejections);
+        last_rejection_log_ns = now;
+    }
 }
 
 static bool verify_record_metadata(const kafka_producer_RecordMetadata_t* metadata) {
@@ -365,26 +442,21 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_Bytes_t value = { message->value, (int32_t)VALUE_SIZE };
     kafka_producer_ProducerRecord_t *record =
         kafka_producer_ProducerRecord_with_key(TOPIC, KEY_SIZE > 0 ? &key : NULL, &value);
-    V3Future *f = NULL;
-    do {
-        error = NULL;
-        // After a failed send the callback may still fire once, if the record
-        // reached the accumulator, so a failed attempt's V3Future is leaked
-        // rather than reused or freed.
-        f = calloc(1, sizeof(V3Future));
-        atomic_init(&f->done_ns, 0);
-        kafka_producer_Callback_t *callback = kafka_producer_Callback_new(f, test_v3_dr);
-        // The send consumes the callback handle, whatever the outcome.
-        f->future = kafka_producer_Producer_send_with_callback(v3_producer_view, record, callback, &error);
-
-        if (error) {
-            const char* msg = kafka_common_Error_message(error);
-            fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
-            kafka_common_Error_destroy(error);
-        }
-    } while (error && !interrupted);
+    V3Future *f = calloc(1, sizeof(V3Future));
+    atomic_init(&f->done_ns, 0);
+    kafka_producer_Callback_t *callback = kafka_producer_Callback_new(f, test_v3_dr);
+    // The send consumes the callback handle, whatever the outcome.
+    f->future = kafka_producer_Producer_send_with_callback(v3_producer_view, record, callback, &error);
     kafka_producer_ProducerRecord_destroy(record);
+    // A synchronous failure (validation error or closed producer) is not
+    // transient: report it as a rejection and let the send loop apply its
+    // bounded-rejection rule rather than retrying here forever. The callback
+    // may still fire once, if the record reached the accumulator, so the
+    // V3Future is leaked rather than freed.
     if (error || f->future == NULL) {
+        log_send_rejection(error ? kafka_common_Error_message(error)
+                                 : "send_with_callback returned no future");
+        if (error) kafka_common_Error_destroy(error);
         return NULL;
     }
     return f;
@@ -515,12 +587,17 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
             // Wait a bit before retrying
             usleep(1000);
         }
+        // No RD_KAFKA_MSG_F_COPY: the payloads are the harness's pre-generated
+        // buffers, which outlive delivery, so librdkafka is not asked to copy
+        // them (the other clients copy the record into their buffer).
         err = rd_kafka_producev(
             rk, RD_KAFKA_V_TOPIC(TOPIC),
             RD_KAFKA_V_KEY(message->key, KEY_SIZE),
             RD_KAFKA_V_VALUE(message->value, VALUE_SIZE),
             RD_KAFKA_V_OPAQUE(future),
-            RD_KAFKA_V_MSGFLAGS((getenv("NO_MSG_F_BLOCK") != NULL ? 0 : RD_KAFKA_MSG_F_BLOCK)),
+            // Non-blocking, retried on QUEUE_FULL above, as the Python harness
+            // produces; MSG_F_BLOCK=1 blocks inside producev instead.
+            RD_KAFKA_V_MSGFLAGS(V2_MSG_FLAGS),
             RD_KAFKA_V_END);
     } while (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
     if (PERF_DEBUG_TIMING) {
@@ -532,6 +609,9 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
         }
     }
     if (err) {
+        // Never enqueued, so no delivery report will fire: report the rejection
+        // and let the send loop apply its bounded-rejection rule.
+        log_send_rejection(rd_kafka_err2str(err));
         free(future);
         return NULL;
     }
@@ -1046,7 +1126,6 @@ static bool queue_push(Queue* q, void* item) {
 }
 
 static bool queue_pop(Queue* q, void ** item, int timeout_ms) {
-    struct timespec ts;
     pthread_mutex_lock(&q->mutex);
     if (!q->closed && q->cnt > 0) {
         *item = q->items[q->head];
@@ -1061,23 +1140,19 @@ static bool queue_pop(Queue* q, void ** item, int timeout_ms) {
     }
 
     if (timeout_ms >= 0) {
-        struct timespec ts;
-        struct timeval now;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t limit = ts.tv_sec * 1000000000LL + ts.tv_nsec + timeout_ms * 1000000LL;
-        gettimeofday(&now,NULL);
-        ts.tv_sec = now.tv_sec + timeout_ms / 1000;
-        ts.tv_nsec = now.tv_usec * 1000 + (timeout_ms % 1000) * 1000000;
-        if (ts.tv_nsec >= 1000000000) {
-            ts.tv_sec++;
-            ts.tv_nsec -= 1000000000;
+        // Absolute deadline on the condvar's clock (CLOCK_REALTIME, the
+        // default), computed once so a spurious wakeup waits out the rest.
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += timeout_ms / 1000;
+        deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
         }
 
         while (queue_empty(q) && !q->closed) {
-            pthread_cond_timedwait(&q->not_empty, &q->mutex, &ts);
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
-            if (now >= limit)
+            if (pthread_cond_timedwait(&q->not_empty, &q->mutex, &deadline) == ETIMEDOUT)
                 break;
         }
     } else {
@@ -1213,7 +1288,11 @@ static void record_completed_calls(ProducedMessage* pm) {
     if (current_latency > max_latency) {
         max_latency = current_latency;
     }
+    if (current_latency < min_latency) {
+        min_latency = current_latency;
+    }
     total_latency += current_latency;
+    latency_samples++;
 
     long latency_ms = current_latency / 1000000L;
     if (latency_ms < 0) latency_ms = 0;
@@ -1322,7 +1401,7 @@ static void run_test() {
             kafka_Map_put(properties, (void*)"max.request.size", max_request_size_str);
             kafka_Map_put(properties, (void*)"compression.type", (void*)COMPRESSION_TYPE);
             kafka_Map_put(properties, (void*)"linger.ms", (void*)LINGER_MS);
-            kafka_Map_put(properties, (void*)"acks", (void*)"all");
+            kafka_Map_put(properties, (void*)"acks", (void*)ACKS);
             kafka_Map_put(properties, (void*)"enable.idempotence", (void*)ENABLE_IDEMPOTENCE);
             kafka_Map_put(properties, (void*)"max.in.flight.requests.per.connection", (void*)MAX_IN_FLIGHT);
         }
@@ -1354,35 +1433,38 @@ static void run_test() {
         int64_t num_messages_conf = NUM_MESSAGES > INT_MAX ? INT_MAX : NUM_MESSAGES;
 
         rd_kafka_conf_t* conf = rd_kafka_conf_new();
-        rd_kafka_conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS, NULL, 0);
+        bool conf_ok = conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS);
         if (sasl_enabled) {
-            rd_kafka_conf_set(conf, "security.protocol", SECURITY_PROTOCOL, NULL, 0);
-            rd_kafka_conf_set(conf, "sasl.mechanism", SASL_MECHANISM, NULL, 0);
-            rd_kafka_conf_set(conf, "sasl.username", SASL_USERNAME, NULL, 0);
-            rd_kafka_conf_set(conf, "sasl.password", SASL_PASSWORD, NULL, 0);
+            conf_ok = conf_set(conf, "security.protocol", SECURITY_PROTOCOL) && conf_ok;
+            conf_ok = conf_set(conf, "sasl.mechanism", SASL_MECHANISM) && conf_ok;
+            conf_ok = conf_set(conf, "sasl.username", SASL_USERNAME) && conf_ok;
+            conf_ok = conf_set(conf, "sasl.password", SASL_PASSWORD) && conf_ok;
         }
         if (SSL_CA_LOCATION) {
-            rd_kafka_conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION, NULL, 0);
+            conf_ok = conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION) && conf_ok;
         }
 
         if (!USE_DEFAULTS) {
-            if (NUM_MESSAGES > 0) {
+            if (BUFFER_MEMORY_MB > 0) {
+                // Bounded by bytes only, as the other clients' buffer.memory:
+                // lift librdkafka's message-count cap (100,000 by default).
+                conf_ok = conf_set(conf, "queue.buffering.max.messages", "2147483647") && conf_ok;
+                // KiB from the MiB setting directly, without a 32-bit byte count.
+                snprintf(buffer, sizeof(buffer), "%" PRId64, (int64_t)BUFFER_MEMORY_MB * 1024);
+                conf_ok = conf_set(conf, "queue.buffering.max.kbytes", buffer) && conf_ok;
+            } else if (NUM_MESSAGES > 0) {
                 snprintf(buffer, sizeof(buffer), "%" PRId64, num_messages_conf);
-                rd_kafka_conf_set(conf, "queue.buffering.max.messages", buffer, NULL, 0);
-            }
-            if (buffer_memory_bytes > 0) {
-                snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes / 1024);
-                rd_kafka_conf_set(conf, "queue.buffering.max.kbytes", buffer, NULL, 0);
+                conf_ok = conf_set(conf, "queue.buffering.max.messages", buffer) && conf_ok;
             }
             snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
-            rd_kafka_conf_set(conf, "batch.size", buffer, NULL, 0);
+            conf_ok = conf_set(conf, "batch.size", buffer) && conf_ok;
             snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
-            rd_kafka_conf_set(conf, "message.max.bytes", buffer, NULL, 0);
-            rd_kafka_conf_set(conf, "compression.type", COMPRESSION_TYPE, NULL, 0);
-            rd_kafka_conf_set(conf, "linger.ms", LINGER_MS, NULL, 0);
-            rd_kafka_conf_set(conf, "acks", "all", NULL, 0);
-            rd_kafka_conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE, NULL, 0);
-            rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
+            conf_ok = conf_set(conf, "message.max.bytes", buffer) && conf_ok;
+            conf_ok = conf_set(conf, "compression.type", COMPRESSION_TYPE) && conf_ok;
+            conf_ok = conf_set(conf, "linger.ms", LINGER_MS) && conf_ok;
+            conf_ok = conf_set(conf, "acks", ACKS) && conf_ok;
+            conf_ok = conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE) && conf_ok;
+            conf_ok = conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT) && conf_ok;
         }
 
         /* A/B debugging knobs: PARTITIONER (e.g. murmur2_random) and
@@ -1401,14 +1483,17 @@ static void run_test() {
                     r == RD_KAFKA_CONF_OK ? "OK" : errstr);
         }
         if (getenv("PERF_LRK_STATS") != NULL) {
-            rd_kafka_conf_set(conf, "statistics.interval.ms", "10000", NULL, 0);
+            conf_ok = conf_set(conf, "statistics.interval.ms", "10000") && conf_ok;
             rd_kafka_conf_set_stats_cb(conf, v2_stats_cb);
         }
         rd_kafka_conf_set_dr_msg_cb(conf, test_v2_dr);
 
-        producer = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        char errstr[512];
+        producer = conf_ok ? rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr)) : NULL;
         if (!producer) {
-            fprintf(stderr, "Failed to create librdkafka producer\n");
+            if (conf_ok) {
+                fprintf(stderr, "Failed to create librdkafka producer: %s\n", errstr);
+            }
             rd_kafka_conf_destroy(conf);
         } else {
             start_polling_rdkafka(producer);
@@ -1439,18 +1524,29 @@ static void run_test() {
         printf("Warming up for %d seconds ...\n", WARMUP_S);
         long warmup_end_time = current_time_ns() + (long)WARMUP_S * 1000000000L;
         int i = 0;
+        const char *warmup_failure = NULL;
         while (current_time_ns() < warmup_end_time) {
             Message* message = &messages[i % GENERATED_MESSAGE_COUNT];
             test_Future_t future = test_send(producer, message);
             long warmup_done_ns = 0;
-            if (future && !test_verify_future(future, &warmup_done_ns)) {
+            // The warmup fails on its first failed record, rejected or not
+            // verified: one send every 100 ms on an idle producer cannot be
+            // rejected for load, so a rejection here is one the measured run
+            // would hit too.
+            if (!future) {
+                warmup_failure = "a send was rejected (see above)";
+                warmup_succeeded = false;
+                break;
+            }
+            if (!test_verify_future(future, &warmup_done_ns)) {
+                warmup_failure = "message verification error";
                 warmup_succeeded = false;
                 break;
             }
             usleep(100000);
         }
         if (!warmup_succeeded) {
-            fprintf(stderr, "Warmup failed due to message verification error\n");
+            fprintf(stderr, "Warmup failed: %s\n", warmup_failure);
             run_failed = true;
             goto end;
         } else {
@@ -1469,6 +1565,13 @@ static void run_test() {
     metrics_set_measurement_start_ms(&metrics, current_ms);
     printf("Starting measured interval at %ld ms\n", current_ms);
 
+    // Duration bound, checked before every send attempt (rejected ones
+    // included): a counted run is capped at TEST_DURATION_S +
+    // COUNTED_RUN_GRACE_S of measured time, a time-based run ends at
+    // TEST_DURATION_S + 1 s.
+    long duration_cap_ns = (long)(TEST_DURATION_S + (NUM_MESSAGES > 0 ? COUNTED_RUN_GRACE_S : 1))
+        * 1000000000L;
+    long consecutive_rejections = 0;
     bool continue_sending;
     if (NUM_MESSAGES > 0) {
         continue_sending = messages_sent < NUM_MESSAGES;
@@ -1479,10 +1582,31 @@ static void run_test() {
         Message* message = &messages[messages_sent % GENERATED_MESSAGE_COUNT];
 
         long start_time = current_time_ns();
+        long duration = start_time - first_message_time;
+        if (duration >= duration_cap_ns) {
+            if (NUM_MESSAGES > 0) {
+                run_capped = true;
+            } else {
+                printf("Test duration reached, %ld seconds. Interrupting...\n", duration / 1000000000L);
+            }
+            interrupted = true;
+            break;
+        }
+
         test_Future_t future = test_send(producer, message);
         if (!future) {
+            // Rejected synchronously (already logged): retry the same record,
+            // unless the rejection is persistent (see send_rejections).
+            if (++consecutive_rejections >= MAX_CONSECUTIVE_SEND_REJECTIONS) {
+                fprintf(stderr,
+                    "%ld consecutive sends rejected with no successful send in between; "
+                    "stopping the run as failed\n", consecutive_rejections);
+                run_failed = true;
+                break;
+            }
             continue;
         }
+        consecutive_rejections = 0;
 
         ProducedMessage *pm = calloc(1, sizeof(ProducedMessage));
         pm->future = future;
@@ -1495,15 +1619,6 @@ static void run_test() {
                 sleep_until_rate_limit_met(messages_sent, limit_rpns);
                 next_checkpoint += checkpoint_interval;
             }
-        }
-        if (messages_sent % 10000 == 0) {
-                long duration = current_time_ns() - first_message_time;
-                long exceeded_seconds = NUM_MESSAGES > 0 ? 10 : 1;
-                if (duration > (long)((TEST_DURATION_S + exceeded_seconds) * 1000000000L)) {
-                    printf("Test duration reached, %ld seconds. Interrupting...\n", duration / 1000000000L);
-                    interrupted = true;
-                    break;
-                }
         }
 
         if (NUM_MESSAGES > 0) {
@@ -1525,16 +1640,16 @@ static void run_test() {
     // written so the run's numbers are not lost. Every queued future is
     // drained above, so a verified/completed mismatch is a real verification
     // or delivery failure and always fails. A short count is excused only when
-    // the duration cap in the send loop interrupted the run (that cap is also
-    // how a time-based run ends).
+    // the counted-run time cap stopped the run (reported by the `capped:` line
+    // below instead).
     if (verified != completed_messages) {
         fprintf(stderr, "Verified messages %ld does not match completed messages %ld\n",
             verified, completed_messages);
         run_failed = true;
-    } else if (NUM_MESSAGES > 0 && completed_messages != NUM_MESSAGES) {
+    } else if (NUM_MESSAGES > 0 && !run_capped && completed_messages != NUM_MESSAGES) {
         fprintf(stderr, "Completed messages %ld does not match produced messages %ld\n",
             completed_messages, NUM_MESSAGES);
-        if (!interrupted) run_failed = true;
+        run_failed = true;
     }
 
     metrics_set_measurement_end_ms(&metrics, after_ms);
@@ -1543,6 +1658,16 @@ static void run_test() {
     double average_cpu, average_rss;
     double message_rate = total_time_s > 0 ? completed_messages / total_time_s : 0.0;
     metrics_external_metrics_aggregations(&metrics, &average_cpu, &average_rss);
+
+    // The time cap stopped a counted run: report it (not a failure; see
+    // run_capped). The duration is the measured one written to results.json.
+    if (run_capped) {
+        printf("capped: sent %ld of %ld records in %.2f s (TEST_DURATION_SECONDS + %d s)\n",
+            messages_sent, NUM_MESSAGES, total_time_s, COUNTED_RUN_GRACE_S);
+    }
+    if (send_rejections > 0) {
+        fprintf(stderr, "Send rejections: %ld\n", send_rejections);
+    }
 
     printf("End time: %ld ms\n", after_ms);
     printf("Duration: %.2f ms\n", (double)total_time_ns / 1e6);
@@ -1565,9 +1690,15 @@ static void run_test() {
         message_rate);
     printf("Average rate MiB/s: %.2f MiB/s\n",
         total_time_s > 0 ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s : 0.0);
-    printf("Average latency: %.2f ms\n",
-        completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0);
-    printf("Max latency: %.2f ms\n", (double)max_latency / 1e6);
+    // Exact avg / min / max over the records that recorded a latency (never
+    // derived from the histogram buckets, which only feed the percentiles).
+    double avg_latency_ms = latency_samples > 0
+        ? (double)total_latency / latency_samples / 1e6
+        : 0.0;
+    double min_latency_ms = latency_samples > 0 ? (double)min_latency / 1e6 : 0.0;
+    double max_latency_ms = latency_samples > 0 ? (double)max_latency / 1e6 : 0.0;
+    printf("Average latency: %.2f ms\n", avg_latency_ms);
+    printf("Max latency: %.2f ms\n", max_latency_ms);
 
     long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
     printf("p99 latency: %ld ms\n", p99_ms);
@@ -1588,21 +1719,11 @@ static void run_test() {
     long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
     long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
     long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
-    long min_latency_ms = 0;
-    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
-        if (latency_hist[i] > 0) {
-            min_latency_ms = (long)i;
-            break;
-        }
-    }
     // Guard the ratios: a run that completed no messages (or measured no
     // time) must still write valid JSON, and nan / inf are not JSON numbers.
     double results_rate = total_time_s > 0 ? message_rate : 0.0;
     double results_mib_s = total_time_s > 0
         ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s
-        : 0.0;
-    double results_avg_latency_ms = completed_messages > 0
-        ? (double)total_latency / completed_messages / 1e6
         : 0.0;
     FILE *results_fp = fopen(RESULTS_FILE, "w");
     if (results_fp != NULL) {
@@ -1615,7 +1736,7 @@ static void run_test() {
             "  \"duration_s\": %.2f,\n"
             "  \"throughput_msg_s\": %.2f,\n"
             "  \"throughput_mib_s\": %.2f,\n"
-            "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "  \"latency_ms\": {\"min\": %.2f, \"avg\": %.2f, \"p50\": %ld, "
             "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
             "\"max\": %.2f},\n"
             "  \"cpu_avg_pct\": %.2f,\n"
@@ -1628,9 +1749,9 @@ static void run_test() {
             results_rate,
             results_mib_s,
             min_latency_ms,
-            results_avg_latency_ms,
+            avg_latency_ms,
             p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
-            (double)max_latency / 1e6,
+            max_latency_ms,
             average_cpu,
             average_rss / 1024.0);
         if (fclose(results_fp) != 0) {
@@ -1685,16 +1806,18 @@ end:
 static void recreate_topic(void) {
     char errstr[512];
     rd_kafka_conf_t *conf = rd_kafka_conf_new();
-    rd_kafka_conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS, NULL, 0);
-    if (SECURITY_PROTOCOL) rd_kafka_conf_set(conf, "security.protocol", SECURITY_PROTOCOL, NULL, 0);
-    if (SASL_MECHANISM) rd_kafka_conf_set(conf, "sasl.mechanism", SASL_MECHANISM, NULL, 0);
-    if (SASL_USERNAME) rd_kafka_conf_set(conf, "sasl.username", SASL_USERNAME, NULL, 0);
-    if (SASL_PASSWORD) rd_kafka_conf_set(conf, "sasl.password", SASL_PASSWORD, NULL, 0);
-    if (SSL_CA_LOCATION) rd_kafka_conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION, NULL, 0);
+    bool conf_ok = conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS);
+    if (SECURITY_PROTOCOL) conf_ok = conf_set(conf, "security.protocol", SECURITY_PROTOCOL) && conf_ok;
+    if (SASL_MECHANISM) conf_ok = conf_set(conf, "sasl.mechanism", SASL_MECHANISM) && conf_ok;
+    if (SASL_USERNAME) conf_ok = conf_set(conf, "sasl.username", SASL_USERNAME) && conf_ok;
+    if (SASL_PASSWORD) conf_ok = conf_set(conf, "sasl.password", SASL_PASSWORD) && conf_ok;
+    if (SSL_CA_LOCATION) conf_ok = conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION) && conf_ok;
 
-    rd_kafka_t *admin = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+    rd_kafka_t *admin = conf_ok ? rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr)) : NULL;
     if (!admin) {
-        fprintf(stderr, "recreate_topic: failed to create admin client: %s\n", errstr);
+        if (conf_ok) {
+            fprintf(stderr, "recreate_topic: failed to create admin client: %s\n", errstr);
+        }
         rd_kafka_conf_destroy(conf);  // not consumed on failure
         return;
     }
@@ -1797,16 +1920,16 @@ int main(int argc, char** argv) {
 
     const char* warmup_seconds_env = getenv("WARMUP_SECONDS");
     if (warmup_seconds_env != NULL) {
-        WARMUP_S = atoi(warmup_seconds_env);
+        WARMUP_S = (int)parse_env_long("WARMUP_SECONDS", warmup_seconds_env, 0, INT_MAX);
     }
     const char* test_duration_env = getenv("TEST_DURATION_SECONDS");
     if (test_duration_env != NULL) {
-        TEST_DURATION_S = atoi(test_duration_env);
+        TEST_DURATION_S = (int)parse_env_long("TEST_DURATION_SECONDS", test_duration_env, 0, INT_MAX);
     }
 
     const char* p99_limit_ms_env = getenv("P99_LIMIT_MS");
     if (p99_limit_ms_env != NULL) {
-        P99_LIMIT_MS = atol(p99_limit_ms_env);
+        P99_LIMIT_MS = parse_env_long("P99_LIMIT_MS", p99_limit_ms_env, 0, LONG_MAX);
     }
 
     const char* results_file_env = getenv("RESULTS_FILE");
@@ -1832,12 +1955,17 @@ int main(int argc, char** argv) {
     }
     const char *partitions_env = getenv("PARTITIONS");
     if (partitions_env != NULL) {
-        PARTITIONS = atoi(partitions_env);
+        PARTITIONS = (int)parse_env_long("PARTITIONS", partitions_env, -1, INT_MAX);
     }
 
     const char *enable_idempotence_env = getenv("ENABLE_IDEMPOTENCE");
     if (enable_idempotence_env != NULL && strcmp(enable_idempotence_env, "True") == 0) {
         ENABLE_IDEMPOTENCE = "true";
+    }
+
+    const char *acks_env = getenv("ACKS");
+    if (acks_env != NULL) {
+        ACKS = acks_env;
     }
 
     const char *max_in_flight_env = getenv("MAX_IN_FLIGHT");
@@ -1851,19 +1979,26 @@ int main(int argc, char** argv) {
     }
 
     PERF_DEBUG_TIMING = getenv("PERF_DEBUG_TIMING") != NULL && strcmp(getenv("PERF_DEBUG_TIMING"), "1") == 0;
+    const char *msg_f_block_env = getenv("MSG_F_BLOCK");
+    if (msg_f_block_env != NULL &&
+        (strcmp(msg_f_block_env, "1") == 0 || strcmp(msg_f_block_env, "True") == 0 ||
+         strcmp(msg_f_block_env, "true") == 0)) {
+        V2_MSG_FLAGS = RD_KAFKA_MSG_F_BLOCK;
+    }
     const char *buffer_memory_env = getenv("BUFFER_MEMORY");
     if (buffer_memory_env != NULL) {
-        BUFFER_MEMORY_MB = atoi(buffer_memory_env);
+        BUFFER_MEMORY_MB = (int)parse_env_long("BUFFER_MEMORY", buffer_memory_env, 1, MAX_BUFFER_MEMORY_MB);
     }
 
+    // KiB, kept to a byte count that fits 32 bits.
     const char *batch_size_env = getenv("BATCH_SIZE");
     if (batch_size_env != NULL) {
-        BATCH_SIZE_KB = atoi(batch_size_env);
+        BATCH_SIZE_KB = (int)parse_env_long("BATCH_SIZE", batch_size_env, 1, INT_MAX / 1024);
     }
 
     const char *max_request_size_env = getenv("MAX_REQUEST_SIZE");
     if (max_request_size_env != NULL) {
-        MAX_REQUEST_SIZE_KB = atoi(max_request_size_env);
+        MAX_REQUEST_SIZE_KB = (int)parse_env_long("MAX_REQUEST_SIZE", max_request_size_env, 1, INT_MAX / 1024);
     }
 
     const char *linger_ms_env = getenv("LINGER_MS");
@@ -1879,12 +2014,12 @@ int main(int argc, char** argv) {
 
     const char *key_size_env = getenv("KEY_SIZE");
     if (key_size_env != NULL) {
-        KEY_SIZE = atoi(key_size_env);
+        KEY_SIZE = parse_env_long("KEY_SIZE", key_size_env, 0, INT_MAX);
     }
 
     const char *value_size_env = getenv("VALUE_SIZE");
     if (value_size_env != NULL) {
-        VALUE_SIZE = atoi(value_size_env);
+        VALUE_SIZE = parse_env_long("VALUE_SIZE", value_size_env, 0, INT_MAX);
     }
 
     MESSAGE_SIZE = KEY_SIZE + VALUE_SIZE;
@@ -1899,26 +2034,17 @@ int main(int argc, char** argv) {
             printf("SASL authentication enabled\n");
     }
 
+    // In 64 bits, so every BUFFER_MEMORY passes through unchanged (librdkafka
+    // takes it in KiB, computed from BUFFER_MEMORY_MB where it is set).
+    buffer_memory_bytes = BUFFER_MEMORY_MB > 0 ? (int64_t)BUFFER_MEMORY_MB * 1024 * 1024 : BUFFER_MEMORY_MB;
     if (CLIENT_VERSION == 3) {
-        buffer_memory_bytes = BUFFER_MEMORY_MB > 0 ? BUFFER_MEMORY_MB * 1024L * 1024L : BUFFER_MEMORY_MB;
         batch_size_bytes = BATCH_SIZE_KB * 1024L;
         if (MAX_REQUEST_SIZE_KB > 0) {
             max_request_size_bytes = MAX_REQUEST_SIZE_KB * 1024L;
         } else {
             max_request_size_bytes = batch_size_bytes * 64L;
         }
-
-        if (buffer_memory_bytes > -1) {
-            if (buffer_memory_bytes > INT_MAX) {
-                buffer_memory_bytes = INT_MAX;
-            }
-            if (buffer_memory_bytes < 1000000) {
-                buffer_memory_bytes = 1000000;
-            }
-        }
     } else {
-        long max_bytes = BUFFER_MEMORY_MB > 0 ? BUFFER_MEMORY_MB * 1024L * 1024L : BUFFER_MEMORY_MB;
-        buffer_memory_bytes = max_bytes > INT_MAX ? INT_MAX : max_bytes;
         batch_size_bytes = BATCH_SIZE_KB < 1024 ? 1024 * 1024 : BATCH_SIZE_KB * 1024;
         if (MAX_REQUEST_SIZE_KB > 0) {
             max_request_size_bytes = MAX_REQUEST_SIZE_KB * 1024L;
@@ -1934,12 +2060,13 @@ int main(int argc, char** argv) {
     printf("Value size: %ld bytes\n", VALUE_SIZE);
     printf("Bootstrap servers: %s\n", BOOTSTRAP_SERVERS);
     printf("Enable idempotence: %s\n", ENABLE_IDEMPOTENCE);
+    printf("Acks: %s\n", ACKS);
     printf("Max in flight requests: %s\n", MAX_IN_FLIGHT);
     printf("Compression type: %s\n", COMPRESSION_TYPE);
     if (buffer_memory_bytes < 0)
          printf("Buffer memory: default\n");
     else
-        printf("Buffer memory: %ld MB\n", buffer_memory_bytes / (1024L * 1024L));
+        printf("Buffer memory: %" PRId64 " MB\n", buffer_memory_bytes / (1024L * 1024L));
     printf("Batch size: %" PRId64 " KB\n", batch_size_bytes / 1024);
     printf("Max request size: %" PRId64 " KB\n", max_request_size_bytes / 1024);
     printf("Linger ms: %s\n", LINGER_MS);
@@ -1960,19 +2087,14 @@ int main(int argc, char** argv) {
     }
     printf("Using topic name: %s\n", TOPIC);
 
-    // Optionally start from a clean topic (delete + re-create) before producing.
-    if (CREATE_TOPIC) {
-        recreate_topic();
-    }
-
     const char *num_messages_env = getenv("NUM_MESSAGES");
     if (num_messages_env != NULL) {
-        NUM_MESSAGES = atol(num_messages_env);
+        NUM_MESSAGES = parse_env_long("NUM_MESSAGES", num_messages_env, 0, LONG_MAX);
     }
 
     const char* limit_rps_env = getenv("LIMIT_RPS");
     if (limit_rps_env != NULL) {
-        LIMIT_RPS = atol(limit_rps_env);
+        LIMIT_RPS = parse_env_long("LIMIT_RPS", limit_rps_env, 0, INT_MAX);
         NUM_MESSAGES = LIMIT_RPS * TEST_DURATION_S; // Run for TEST_DURATION_S seconds
         printf("Producing %ld messages at %ld msg/s\n",
             NUM_MESSAGES, LIMIT_RPS);
@@ -1986,6 +2108,12 @@ int main(int argc, char** argv) {
     }
     TOTAL_SIZE = NUM_MESSAGES * MESSAGE_SIZE;
     TOTAL_SIZE_MB = TOTAL_SIZE / (1024.0 * 1024.0);
+
+    // Optionally start from a clean topic (delete + re-create) before producing;
+    // after every setting is read, so an invalid one changes nothing.
+    if (CREATE_TOPIC) {
+        recreate_topic();
+    }
 
     run_test();
 
