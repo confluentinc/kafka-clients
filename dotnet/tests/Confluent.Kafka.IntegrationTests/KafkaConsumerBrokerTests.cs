@@ -35,7 +35,8 @@ namespace Confluent.Kafka.IntegrationTests;
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> during a revocation, whose deferred teardown runs while the
 /// <c>Poll</c> that ran the listener may still deserialize the records it returns.
 /// </summary>
-public sealed class KafkaConsumerBrokerTests : IClassFixture<KafkaBrokerFixture>
+[Collection(BrokerCollection.Name)]
+public sealed class KafkaConsumerBrokerTests
 {
     private const int RecordCount = 2000;
 
