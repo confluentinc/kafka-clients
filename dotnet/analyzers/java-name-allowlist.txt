@@ -117,3 +117,20 @@ unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetInitTransactionException(
 unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetPartitionsForException(System.Exception)
 unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetSendException(System.Exception)
 unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetSendOffsetsToTransactionException(System.Exception)
+
+# Java's Admin defaults that only convert their arguments (topic names to a TopicCollection, a group id to a one-group
+# map, the partitions to an Optional, close() to close(Duration)) stay members of the admin interfaces: the clients are
+# their only implementers, and nobody overrides them ("Java default methods in the .NET client", option C). A default
+# Java adds later follows dotnet/CLAUDE.md §3 rule 10.
+default M:Confluent.Kafka.Admin.IAdmin.Close
+default M:Confluent.Kafka.Admin.IAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.DescribeTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DescribeTopicsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.ListConsumerGroupOffsets(System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.ListPartitionReassignments(Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition},Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.Close(System.Threading.CancellationToken)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DescribeTopicsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConsumerGroupOffsets(System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition},Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)

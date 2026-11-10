@@ -690,8 +690,17 @@ public sealed class JavaNameAnalyzerTests
             Name(0, "parameter M:Confluent.Kafka.Common.Config.ConfigException.#ctor(System.String,System.Object): names its "
                 + "parameters (key, value) where Java's ConfigException constructor names them (name, value)"));
 
+    private const string ScramMechanism =
+        "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
+        + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"
+        + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tSCRAM_SHA_256\n"
+        + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tmechanismName()\n"
+        + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tname()\n"
+        + "method\torg.apache.kafka.clients.admin.ScramMechanism\tstatic\tfromMechanismName(String mechanismName)\n"
+        + "method\torg.apache.kafka.clients.admin.ScramMechanism\tstatic\tfromType(byte type)\n";
+
     [Fact]
-    public Task AJavaEnumsMethods_SitInAStaticClassNamedAfterTheEnum() =>
+    public Task AJavaEnumsMethods_SitInExtensionBlocksOfAStaticClassNamedAfterTheEnumPlusMethods() =>
         Verifier.VerifyWithFilesAsync(
             """
             namespace Confluent.Kafka.Admin
@@ -702,28 +711,280 @@ public sealed class JavaNameAnalyzerTests
                     SCRAM_SHA_256,
                 }
 
-                public static class ScramMechanisms
+                public static class ScramMechanismMethods
+                {
+                    extension(ScramMechanism)
+                    {
+                        public static ScramMechanism FromType(byte type) => default;
+
+                        public static ScramMechanism {|#0:FromName|}(string name) => default;
+                    }
+
+                    extension(ScramMechanism mechanism)
+                    {
+                        public string MechanismName() => "";
+                    }
+                }
+            }
+            """,
+            Files(ScramMechanism),
+            Name(0, "unmatched M:Confluent.Kafka.Admin.ScramMechanismMethods.FromName(System.String): Java's ScramMechanism has no "
+                + "method of this name"),
+            Name(1, "missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String): "
+                + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)"));
+
+    [Fact]
+    public Task AJavaEnumsStaticMethod_OutsideAnExtensionBlock_IsReported_AndAnInstanceOneMayBeAThisMethod() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public enum ScramMechanism
+                {
+                    UNKNOWN,
+                    SCRAM_SHA_256,
+                }
+
+                public static class ScramMechanismMethods
+                {
+                    public static string MechanismName(this ScramMechanism mechanism) => "";
+
+                    public static ScramMechanism {|#0:FromType|}(byte type) => default;
+
+                    extension(ScramMechanism)
+                    {
+                        public static ScramMechanism FromMechanismName(string mechanismName) => default;
+                    }
+                }
+            }
+            """,
+            Files(ScramMechanism),
+            Name(0, "static M:Confluent.Kafka.Admin.ScramMechanismMethods.FromType(System.Byte): Java's ScramMechanism.fromType is "
+                + "static: it goes in an extension(ScramMechanism) block, so C# 14 calls it on the enum"));
+
+    [Fact]
+    public Task AStaticClassNamedAfterTheEnumPlusS_DoesNotHoldItsMethods() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public enum {|#1:ScramMechanism|}
+                {
+                    UNKNOWN,
+                    SCRAM_SHA_256,
+                }
+
+                public static class {|#0:ScramMechanisms|}
                 {
                     public static string MechanismName(this ScramMechanism mechanism) => "";
 
                     public static ScramMechanism FromType(byte type) => default;
 
-                    public static ScramMechanism {|#0:FromName|}(string name) => default;
+                    public static ScramMechanism FromMechanismName(string mechanismName) => default;
+                }
+            }
+            """,
+            Files(ScramMechanism),
+            Name(0, "unmatched T:Confluent.Kafka.Admin.ScramMechanisms: Java has no type of this name, so its members are not checked"),
+            Name(1, "missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String): "
+                + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)"),
+            Name(1, "missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromType(byte): "
+                + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#fromType(byte)"),
+            Name(1, "missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#mechanismName(): "
+                + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#mechanismName()"));
+
+    private const string RebalanceListener =
+        "type\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tinterface\t-\n"
+        + "method\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tinstance\tonPartitionsAssigned(Collection partitions)\n"
+        + "method\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tdefault\tonPartitionsLost(Collection partitions)\n"
+        + "method\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tinstance\tonPartitionsRevoked(Collection partitions)\n";
+
+    [Fact]
+    public Task AJavaInterfacesDefaultMethod_IsAnExtensionMethod_AndAnInterfaceThatExtendsTheMainOneReplacesIt() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Consumer
+            {
+                public interface IConsumerRebalanceListener
+                {
+                    void OnPartitionsRevoked(IReadOnlyCollection<string> partitions);
+
+                    void OnPartitionsAssigned(IReadOnlyCollection<string> partitions);
+                }
+
+                public interface IConsumerRebalanceListenerWithPartitionsLost : IConsumerRebalanceListener
+                {
+                    void OnPartitionsLost(IReadOnlyCollection<string> partitions);
+                }
+
+                public static class ConsumerRebalanceListenerExtensions
+                {
+                    public static void OnPartitionsLost(this IConsumerRebalanceListener listener, IReadOnlyCollection<string> partitions)
+                    {
+                        if (listener is IConsumerRebalanceListenerWithPartitionsLost withLost)
+                        {
+                            withLost.OnPartitionsLost(partitions);
+                        }
+                        else
+                        {
+                            listener.OnPartitionsRevoked(partitions);
+                        }
+                    }
+                }
+            }
+            """,
+            Files(RebalanceListener));
+
+    [Fact]
+    public Task AJavaDefaultMethodDeclaredOnTheInterface_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Consumer
+            {
+                public interface IConsumerRebalanceListener
+                {
+                    void OnPartitionsRevoked(IReadOnlyCollection<string> partitions);
+
+                    void OnPartitionsAssigned(IReadOnlyCollection<string> partitions);
+
+                    void {|#0:OnPartitionsLost|}(IReadOnlyCollection<string> partitions);
+                }
+            }
+            """,
+            Files(RebalanceListener),
+            Name(0, "default M:Confluent.Kafka.Consumer.IConsumerRebalanceListener.OnPartitionsLost(System.Collections.Generic."
+                + "IReadOnlyCollection{System.String}): Java's ConsumerRebalanceListener.onPartitionsLost is a default method: it is an "
+                + "extension method in ConsumerRebalanceListenerExtensions, and IConsumerRebalanceListenerWithPartitionsLost replaces it"));
+
+    [Fact]
+    public Task ADefaultMethodsExtensionMethod_WithNoInterfaceToReplaceIt_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Consumer
+            {
+                public interface {|#0:IConsumerRebalanceListener|}
+                {
+                    void OnPartitionsRevoked(IReadOnlyCollection<string> partitions);
+
+                    void OnPartitionsAssigned(IReadOnlyCollection<string> partitions);
+                }
+
+                public static class ConsumerRebalanceListenerExtensions
+                {
+                    public static void OnPartitionsLost(this IConsumerRebalanceListener listener, IReadOnlyCollection<string> partitions) =>
+                        listener.OnPartitionsRevoked(partitions);
+                }
+            }
+            """,
+            Files(RebalanceListener),
+            Name(0, "with T:Confluent.Kafka.Consumer.IConsumerRebalanceListener "
+                + "org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsLost(Collection): has no "
+                + "IConsumerRebalanceListenerWithPartitionsLost that extends it and declares Java's default "
+                + "ConsumerRebalanceListener.onPartitionsLost, so a user cannot replace it"));
+
+    [Fact]
+    public Task AnInterfaceThatReplacesADefaultMethod_DeclaresOnlyThatMethod_WithJavasParameters() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Consumer
+            {
+                public interface IConsumerRebalanceListener
+                {
+                    void OnPartitionsRevoked(IReadOnlyCollection<string> partitions);
+
+                    void OnPartitionsAssigned(IReadOnlyCollection<string> partitions);
+                }
+
+                public interface IConsumerRebalanceListenerWithPartitionsLost : IConsumerRebalanceListener
+                {
+                    void {|#0:OnPartitionsLost|}(IReadOnlyCollection<string> lost);
+
+                    void {|#1:Extra|}();
+                }
+
+                public static class ConsumerRebalanceListenerExtensions
+                {
+                    public static void OnPartitionsLost(this IConsumerRebalanceListener listener, IReadOnlyCollection<string> partitions) =>
+                        listener.OnPartitionsRevoked(partitions);
+                }
+            }
+            """,
+            Files(RebalanceListener),
+            Name(0, "parameter M:Confluent.Kafka.Consumer.IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(System.Collections."
+                + "Generic.IReadOnlyCollection{System.String}): names its parameters (lost) where Java's "
+                + "ConsumerRebalanceListener.onPartitionsLost names them (partitions)"),
+            Name(1, "unmatched M:Confluent.Kafka.Consumer.IConsumerRebalanceListenerWithPartitionsLost.Extra: "
+                + "IConsumerRebalanceListenerWithPartitionsLost declares only Java's default ConsumerRebalanceListener.onPartitionsLost"));
+
+    [Fact]
+    public Task AGenericJavaInterfacesDefaultMethod_IsAGenericExtensionMethod() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface ISerializer<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public interface ISerializerWithConfigure<T> : ISerializer<T>
+                {
+                    void Configure(IReadOnlyDictionary<string, object> configs, bool isKey);
+                }
+
+                public static class SerializerExtensions
+                {
+                    public static void Configure<T>(this ISerializer<T> serializer, IReadOnlyDictionary<string, object> configs, bool isKey)
+                    {
+                        if (serializer is ISerializerWithConfigure<T> withConfigure)
+                        {
+                            withConfigure.Configure(configs, isKey);
+                        }
+                    }
                 }
             }
             """,
             Files(
-                "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
-                + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"
-                + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tSCRAM_SHA_256\n"
-                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tmechanismName()\n"
-                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tname()\n"
-                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tstatic\tfromMechanismName(String mechanismName)\n"
-                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tstatic\tfromType(byte type)\n"),
-            Name(0, "unmatched M:Confluent.Kafka.Admin.ScramMechanisms.FromName(System.String): Java's ScramMechanism has no "
-                + "method of this name"),
-            Name(1, "missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String): "
-                + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)"));
+                "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tconfigure(Map configs, boolean isKey)\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"));
+
+    [Fact]
+    public Task AJavaInterfacesStaticMethod_SitsInAStaticClassWithTheInterfacesJavaName() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Admin
+            {
+                public interface IAdmin
+                {
+                    void Close(System.TimeSpan timeout);
+                }
+
+                public static class Admin
+                {
+                    extension(IAdmin)
+                    {
+                        public static IAdmin Create(IReadOnlyDictionary<string, object> conf) => throw new System.NotSupportedException();
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.Admin\tinterface\t-\n"
+                + "method\torg.apache.kafka.clients.admin.Admin\tinstance\tclose(Duration timeout)\n"
+                + "method\torg.apache.kafka.clients.admin.Admin\tstatic\tcreate(Map conf)\n"));
 
     [Fact]
     public Task TheCompanionClassesPropertiesFieldsAndEvents_AreCheckedAsTheEnums() =>
@@ -736,7 +997,7 @@ public sealed class JavaNameAnalyzerTests
                     UNKNOWN,
                 }
 
-                public static class ScramMechanisms
+                public static class ScramMechanismMethods
                 {
                     public static int {|#2:Limit|};
 
@@ -761,9 +1022,11 @@ public sealed class JavaNameAnalyzerTests
                 "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
                 + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"
                 + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tmechanismName()\n"),
-            Name(0, "unmatched P:Confluent.Kafka.Admin.ScramMechanisms.Extra: Java's ScramMechanism has no method or field of this name"),
-            Name(1, "unmatched E:Confluent.Kafka.Admin.ScramMechanisms.Changed: Java has no events"),
-            Name(2, "unmatched F:Confluent.Kafka.Admin.ScramMechanisms.Limit: Java's ScramMechanism has no field or constant of this name"));
+            Name(0, "unmatched P:Confluent.Kafka.Admin.ScramMechanismMethods.Extra: Java's ScramMechanism has no method or field of "
+                + "this name"),
+            Name(1, "unmatched E:Confluent.Kafka.Admin.ScramMechanismMethods.Changed: Java has no events"),
+            Name(2, "unmatched F:Confluent.Kafka.Admin.ScramMechanismMethods.Limit: Java's ScramMechanism has no field or constant of "
+                + "this name"));
 
     [Fact]
     public Task AJavaAbstractClassesConstructors_AreProtected_AndATypeNothingDerivesFromHasNone() =>

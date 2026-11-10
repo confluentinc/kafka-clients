@@ -119,9 +119,11 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   existing one, as Python does.
 - **One file per Java top-level class**, named after the C# type, with the class's Java nested types
   nested in it. A C# type that only completes a Java class sits in that class's file: the
-  non-generic `KafkaFuture` (Java's `KafkaFuture<Void>`) beside `KafkaFuture<T>`, and a static class
-  holding a Java enum's methods beside the enum (`GroupStateExtensions`, `ScramMechanisms`,
-  `UpgradeTypes`). A Java nested type leaves its outer class only where C# cannot keep Java's name
+  non-generic `KafkaFuture` (Java's `KafkaFuture<Void>`) beside `KafkaFuture<T>`, a static class
+  holding a Java enum's methods beside the enum (`<Enum>Methods`, §3 Java names rule 9; today's
+  `GroupStateExtensions`, `ScramMechanisms` and `UpgradeTypes` are baselined until renamed), and the
+  `<Interface>Extensions` class and `I<Interface>With<Method>` interfaces beside the interface whose Java
+  default methods they carry (§3 Java names rule 10). A Java nested type leaves its outer class only where C# cannot keep Java's name
   inside it (CS0102: a member of the outer type has that name), and then sits beside it, in the same
   namespace: `GroupMembershipOperation` (Java `CloseOptions.GroupMembershipOperation`, ledger 109),
   `ConfigResourceType` (Java `ConfigResource.Type`, M15/P3 D16), `AlterConfigOpType` (Java
@@ -130,8 +132,9 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
 - **A .NET-only public type** lives in the namespace and folder of the Java-backed type it pairs
   with: an async peer with its sync type (`AsyncKafkaProducer`, `IAsyncProducer` and
   `IAsyncCallback` in `Producer/`; every `Async*Result`, `AsyncKafkaAdminClient`,
-  `AsyncMockAdminClient` and `IAsyncAdmin` in `Admin/`; `AsyncKafkaFuture` in `Common/`), a base
-  class carrying Java's default methods with its interface (`ConsumerRebalanceListenerBase`), the
+  `AsyncMockAdminClient` and `IAsyncAdmin` in `Admin/`; `AsyncKafkaFuture` in `Common/`), the types
+  carrying Java's default methods with their interface (§3 Java names rule 10; today the base class
+  `ConsumerRebalanceListenerBase`), the
   shared consumer surface with `IConsumer` (`IConsumerCommon`), the Rust-only `ConsumerHandle` with
   the consumer (the core's `consumer::ConsumerHandle`), and a C#-only enum with the type that takes
   it (`ClientQuotaMatchType` with `ClientQuotaFilterComponent` in `Common/Quota/`). *(Python keeps an
@@ -674,7 +677,9 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   awaited/sent). Sync because a span can't cross an `await` and serde is CPU-bound — also
   Java-faithful (`Deserializer<T>` is sync).
 - **Headers overload deferred** (Java's `default T deserialize(String, Headers, byte[])`) —
-  addable later non-breakingly as a C# default-interface-method forwarding to the header-less form.
+  addable later non-breakingly by §3 Java names rule 10: an extension method forwarding to the
+  header-less form, and an interface that replaces it (its name, for an overloaded default, is not
+  decided yet).
 - **Async serde deferred** — a note only, no async interface; a Schema-Registry path *may* later
   want one (decided then). Java's SR serdes are themselves sync.
 - **`Serialize` returns `ReadOnlyMemory<byte>?`**, not Java's `byte[]` (M23/P1, ledger 400).
@@ -825,6 +830,24 @@ out of date). The rule:
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
    `Map` overload, and an overload taking a `java.util.regex.Pattern` is not translated. A Java abstract
    class's constructors are `protected`; a struct or sealed class has none.
+9. A Java enum's methods sit in a top-level static class named after the enum plus `Methods`, beside the enum
+   (`ScramMechanismMethods`), as C# 14 extension members. Java's static methods go in an
+   `extension(ScramMechanism)` block, so a C# 14 caller writes `ScramMechanism.FromMechanismName(…)` and an
+   older one `ScramMechanismMethods.FromMechanismName(…)`. Its instance methods go in an
+   `extension(ScramMechanism mechanism)` block or are `this` extension methods: `mechanism.MechanismName()` on
+   every C# version.
+10. A Java interface's `default` method is not declared on the .NET interface, which cannot hold a body on
+    netstandard2.0. It is an extension method in a top-level static class named after the interface without
+    its `I` plus `Extensions`, beside it (`ConsumerRebalanceListenerExtensions`). An interface
+    `I<Interface>With<Method>` (the method's name without a leading `On`) extends the interface and declares
+    only that method (`IConsumerRebalanceListenerWithPartitionsLost : IConsumerRebalanceListener`). The
+    extension method calls the object's own method when it implements that interface, and runs Java's default
+    otherwise; a user replaces the default by implementing that interface instead of the main one. Java's
+    `Admin` defaults that only convert their arguments stay members of `IAdmin` and `IAsyncAdmin`, whose
+    clients are their only implementers (allowlisted). A Java interface's static method goes in an
+    `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`, and on C#
+    14 `IAdmin.Create(…)`. How the extra interface of an overloaded default is named (the serializers'
+    headers overloads) is not decided yet.
 
 A difference is fixed or listed, in `analyzers/`: `java-name-allowlist.txt` (kept on purpose, each group
 under a comment saying why), `java-name-pairs.txt` (a renamed type and the Java type it translates, so its
@@ -1002,7 +1025,11 @@ completes. The sync consumer takes the sync listener only.
 Java's `onPartitionsLost` default (delegate to revoked) cannot live on an interface: C#
 default interface methods need .NET Standard 2.1, and the floor is netstandard2.0. It lives on
 the public abstract `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase`
-(`definition-of-done.md` §7 types that exist because of a Java behaviour). A listener calls
+(`definition-of-done.md` §7 types that exist because of a Java behaviour). §3 Java names rule 10
+replaces them: the default becomes an extension method in `ConsumerRebalanceListenerExtensions` and
+`AsyncConsumerRebalanceListenerExtensions`, which `IConsumerRebalanceListenerWithPartitionsLost` and
+`IAsyncConsumerRebalanceListenerWithPartitionsLost` replace; until then CKRDA0013 baselines
+`OnPartitionsLost` on the two interfaces. A listener calls
 back into its own consumer directly, and the consumer routes the call to `ConsumerHandle`
 (ledger 114; the §4 reentrancy row below).
 
