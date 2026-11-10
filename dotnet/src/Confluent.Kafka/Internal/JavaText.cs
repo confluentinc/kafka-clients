@@ -27,11 +27,17 @@ namespace Confluent.Kafka.Internal;
 /// <see cref="ToString(Exception)"/>, <c>Throwable.toString()</c>, so the messages built from them read as Java's;
 /// and <see cref="CoreText"/>, the text the core parses for a configuration value (exact digits, a
 /// <see langword="double"/> as <c>"G17"</c>; the core rounds), kept apart from the message text. All are in the
-/// invariant culture.
+/// invariant culture. <see cref="ToUpperRoot"/> upper-cases a name for an enum lookup as Java's
+/// <c>toUpperCase(Locale.ROOT)</c> does for the letters whose upper case is ASCII.
 /// </summary>
 internal static class JavaText
 {
     private const double Log10Of2 = 0.30102999566398120;
+
+    internal static readonly char[] s_asciiUpperSpecials =
+    {
+        '\u0131', '\u017F', '\u00DF', '\uFB00', '\uFB01', '\uFB02', '\uFB03', '\uFB04', '\uFB05', '\uFB06',
+    };
 
     internal static string CoreText(object value, ConfigType? keyType)
     {
@@ -128,6 +134,49 @@ internal static class JavaText
             ? Shortest(negative, fraction, -149, lowerGapHalved: false)
             : Shortest(negative, fraction | (1 << 23), biased - 150, lowerGapHalved: fraction == 0 && biased > 1);
     }
+
+    internal static string ToUpperRoot(string value)
+    {
+        int first = value.IndexOfAny(s_asciiUpperSpecials);
+        if (first < 0)
+        {
+            return value.ToUpperInvariant();
+        }
+
+        var expanded = new StringBuilder(value.Length + 4).Append(value, 0, first);
+        for (int i = first; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (AsciiUpperSpecial(c) is { } upper)
+            {
+                expanded.Append(upper);
+            }
+            else
+            {
+                expanded.Append(c);
+            }
+        }
+
+        return expanded.ToString().ToUpperInvariant();
+    }
+
+    // Java's toUpperCase(Locale.ROOT) maps these ten letters to ASCII. ToUpperInvariant keeps them, except U+017F,
+    // which it maps only under ICU, not in invariant globalization mode. Any other letter Java special-cases keeps
+    // ToUpperInvariant's mapping.
+    internal static string? AsciiUpperSpecial(char c) => c switch
+    {
+        '\u0131' => "I",
+        '\u017F' => "S",
+        '\u00DF' => "SS",
+        '\uFB00' => "FF",
+        '\uFB01' => "FI",
+        '\uFB02' => "FL",
+        '\uFB03' => "FFI",
+        '\uFB04' => "FFL",
+        '\uFB05' => "ST",
+        '\uFB06' => "ST",
+        _ => null,
+    };
 
     private static string? CollectionText(object value, Func<object?, string> element)
     {

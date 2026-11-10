@@ -21,6 +21,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
 using Confluent.Kafka.Producer;
 
@@ -38,6 +39,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     internal const string PumpThreadName = "confluent-kafka-producer-pump";
 
     private const string RecordNotBuilt = "The producer record could not be built.";
+
+    private const string ConstructionFailedMessage = "Failed to construct kafka producer";
 
     private const string MaxBlockMsConfig = "max.block.ms";
 
@@ -75,12 +78,19 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly long _maxBlockMs;
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
+    private readonly SerdeDisposal? _serdes;
+    private Task _serializersDisposed = Task.CompletedTask;
     private int _closed;
 
-    private NativeProducer(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
+    private NativeProducer(
+        SafeProducerHandle handle,
+        string completionThreadName,
+        long maxBlockMs,
+        SerdeDisposal? serdes)
     {
         _handle = handle;
         _maxBlockMs = maxBlockMs;
+        _serdes = serdes;
         _completion = new CompletionThread(completionThreadName, DrainOf(handle, _uses));
         _reporter = new DeliveryReporter(handle, _completion);
         handle.ReleaseAfterDestroy(AfterDestroy);
@@ -95,23 +105,55 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// A producer constructor's serializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null for
+    /// configuration <paramref name="key"/>: must be non-null.", which Java throws when the <paramref name="key"/>
+    /// config names no class; .NET config cannot name one.
+    /// </summary>
+    internal static T RequireSerializer<T>(T? serializer, string key)
+        where T : class =>
+        serializer ?? throw new ConfigException(key, null, "must be non-null.");
+
     internal static NativeProducer Create(
         IReadOnlyDictionary<string, object?> configs,
-        string completionThreadName = CompletionThreadName)
+        string completionThreadName = CompletionThreadName,
+        SerdeDisposal? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
-        IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
-        if (outErr != IntPtr.Zero)
+        IntPtr classPointer;
+        try
         {
-            IntPtr destroyErr = IntPtr.Zero;
-            NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
-            FreeError(ref destroyErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
+        }
+        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+        {
+            // Java's constructor closes the serializers when a step inside its try fails, which the core reports
+            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
+            // and disposes nothing.
+            serdes?.DisposeOnce();
+            throw;
         }
 
-        return Start(new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared));
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
+            if (outErr != IntPtr.Zero)
+            {
+                IntPtr destroyErr = IntPtr.Zero;
+                NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
+                FreeError(ref destroyErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return Start(
+                new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared), serdes);
+        }
+        catch
+        {
+            serdes?.DisposeOnce();
+            throw;
+        }
     }
 
     internal static NativeProducer CreateMock(
@@ -130,7 +172,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeMockProducerHandle(view, classPointer), completionThreadName, DefaultMaxBlockMs);
+        return Start(
+            new SafeMockProducerHandle(view, classPointer), completionThreadName, DefaultMaxBlockMs, serdes: null);
     }
 
     // The async callbacks of serializer failures, which run in managed code only, that Flush and Close wait for.
@@ -455,6 +498,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         _failureCallbacks.Wait();
+        WaitForTheSerializers();
     }
 
     public async ValueTask DisposeAsync()
@@ -481,6 +525,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         await _failureCallbacks.Snapshot().ConfigureAwait(false);
+        await Volatile.Read(ref _serializersDisposed).ConfigureAwait(false);
     }
 
     // A mock completes its pending sends before it closes, as Python's mock does on exit.
@@ -535,9 +580,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             ? maxBlockMs
             : DefaultMaxBlockMs;
 
-    private static NativeProducer Start(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
+    private static NativeProducer Start(
+        SafeProducerHandle handle,
+        string completionThreadName,
+        long maxBlockMs,
+        SerdeDisposal? serdes)
     {
-        NativeProducer producer = new NativeProducer(handle, completionThreadName, maxBlockMs);
+        NativeProducer producer = new NativeProducer(handle, completionThreadName, maxBlockMs, serdes);
         try
         {
             IntPtr outErr = IntPtr.Zero;
@@ -931,7 +980,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        return _failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None);
+        return ThenTheSerializersAsync(_failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None));
     }
 
     private void CloseWithin(long? timeoutMs)
@@ -954,6 +1003,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         finally
         {
             _failureCallbacks.Wait();
+            WaitForTheSerializers();
         }
     }
 
@@ -1058,6 +1108,44 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         _completion.ReleaseNotifyOpaque();
         _reporter.ReleaseKept();
+        Volatile.Write(ref _serializersDisposed, DisposeTheSerializersAfter(_failureCallbacks.Snapshot()));
+    }
+
+    // The serializers the producer was given are disposed after the destroy, on the thread that destroyed, unless an
+    // async callback of a serializer failure, which may still use them, is running: then once the last of those ends,
+    // as Python closes its serializers after its callbacks. A close returns only once they are disposed.
+    private Task DisposeTheSerializersAfter(Task failureCallbacks)
+    {
+        if (_serdes is not { } serdes)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (failureCallbacks.IsCompleted)
+        {
+            serdes.DisposeOnce();
+            return Task.CompletedTask;
+        }
+
+        return failureCallbacks.ContinueWith(
+            _ => serdes.DisposeOnce(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void WaitForTheSerializers() => Volatile.Read(ref _serializersDisposed).GetAwaiter().GetResult();
+
+    private async Task ThenTheSerializersAsync(Task closing)
+    {
+        try
+        {
+            await closing.ConfigureAwait(false);
+        }
+        finally
+        {
+            await Volatile.Read(ref _serializersDisposed).ConfigureAwait(false);
+        }
     }
 
     private void EnterUse()
