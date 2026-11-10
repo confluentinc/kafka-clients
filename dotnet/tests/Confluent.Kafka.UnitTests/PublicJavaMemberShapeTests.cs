@@ -20,6 +20,7 @@ using System.Reflection;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Record;
@@ -27,6 +28,7 @@ using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Producer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -166,11 +168,12 @@ public class PublicJavaMemberShapeTests
     }
 
     /// <summary>
-    /// Every public static field and const outside an enum, each the <c>public static final</c> field of the same
-    /// name on the Java class it translates (checked against Kafka 4.4), so a new one cannot take a .NET name. To
-    /// add one, check the Java class declares it <c>public static final</c>, declare it with Java's spelling, as a
-    /// <c>const</c> for a primitive or a string and a <c>static readonly</c> field otherwise, and add its full name
-    /// here in ordinal order.
+    /// Every public static field and const outside an enum and the generated config classes, each the
+    /// <c>public static final</c> field of the same name on the Java class it translates (checked against Kafka 4.4),
+    /// so a new one cannot take a .NET name. To add one, check the Java class declares it <c>public static final</c>,
+    /// declare it with Java's spelling, as a <c>const</c> for a primitive or a string that Java holds as a
+    /// compile-time constant and a <c>static readonly</c> field otherwise, and add its full name here in ordinal
+    /// order.
     /// </summary>
     private static readonly string[] s_javaConstants =
     {
@@ -180,6 +183,7 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Admin.MockAdminClient.DEFAULT_LOG_DIRS",
         "Confluent.Kafka.Common.Acl.AccessControlEntryFilter.ANY",
         "Confluent.Kafka.Common.Acl.AclBindingFilter.ANY",
+        "Confluent.Kafka.Common.Config.SslClientAuths.VALUES",
         "Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.INSTANCE",
         "Confluent.Kafka.Common.Errors.DisconnectException.INSTANCE",
         "Confluent.Kafka.Common.Quota.ClientQuotaEntity.CLIENT_ID",
@@ -197,11 +201,25 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Producer.RecordMetadata.UNKNOWN_PARTITION",
     };
 
+    // The generated config classes are checked against kafka/ by PublicConfigClassesTests, check-generated and
+    // CKRDA0013.
+    private static readonly HashSet<Type> s_generatedConfigClasses = new HashSet<Type>
+    {
+        typeof(ProducerConfig),
+        typeof(ConsumerConfig),
+        typeof(AdminClientConfig),
+        typeof(TopicConfig),
+        typeof(SaslConfigs),
+        typeof(SslConfigs),
+        typeof(SecurityConfig),
+        typeof(LogLevelConfig),
+    };
+
     [Fact]
     public void ThePublicStaticFields_AreExactlyJavasConstants_AllReadonly()
     {
         List<FieldInfo> fields = typeof(Serdes).Assembly.GetExportedTypes()
-            .Where(type => !type.IsEnum)
+            .Where(type => !type.IsEnum && !s_generatedConfigClasses.Contains(type))
             .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly))
             .ToList();
 

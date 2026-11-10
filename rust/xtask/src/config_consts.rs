@@ -22,6 +22,9 @@
 //! qualified names, enum constants, `.name()` / `.toString()` /
 //! `.toLowerCase(Locale.ROOT)`, `List.of` / `Set.of`, `Utils.enumOptions(X.class)`.
 //! Anything it cannot evaluate stops generation instead of being guessed.
+//!
+//! Each class is rendered as a Python module (`.py` and `.pyi`) and as a C#
+//! class (`.g.cs`) of the .NET binding.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -90,6 +93,8 @@ fn java_double(d: f64) -> Res<String> {
 #[derive(Clone, Debug)]
 pub struct Field {
     pub name: String,
+    /// The declared type, as written (`String`, `List<String>`).
+    pub ty: String,
     pub init: Option<String>,
     pub public: bool,
     pub static_final: bool,
@@ -132,11 +137,20 @@ pub struct Reader {
     root: PathBuf,
     units: BTreeMap<String, Unit>,
     classes: BTreeMap<String, JClass>,
+    /// Set while evaluating when the expression is not a compile-time
+    /// constant (JLS §15.29): a method call, `null`, an enum constant, or a
+    /// field that is not a constant variable.
+    not_constant: bool,
 }
 
 impl Reader {
     pub fn new(root: &Path) -> Self {
-        Reader { root: root.to_path_buf(), units: BTreeMap::new(), classes: BTreeMap::new() }
+        Reader {
+            root: root.to_path_buf(),
+            units: BTreeMap::new(),
+            classes: BTreeMap::new(),
+            not_constant: false,
+        }
     }
 
     /// The source file of a top-level class `fqn`, if it exists.
@@ -272,9 +286,14 @@ impl Reader {
                 .init
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("config constants: `{fqn}.{name}` has no initializer"))?;
-            return Ok(Some(self.eval_src(fqn, &init)?));
+            let v = self.eval_src(fqn, &init)?;
+            if !is_constant_type(&f.ty) {
+                self.not_constant = true;
+            }
+            return Ok(Some(v));
         }
         if c.is_enum && c.constants.iter().any(|k| k.name == name) {
+            self.not_constant = true;
             return Ok(Some(Value::Enum { class: fqn.to_string(), name: name.to_string() }));
         }
         let top = self.top_of(fqn);
@@ -316,7 +335,12 @@ impl Reader {
 
     fn eval(&mut self, fqn: &str, ast: &Ast, locals: &BTreeMap<String, Value>) -> Res<Value> {
         match ast {
-            Ast::Lit(v) => Ok(v.clone()),
+            Ast::Lit(v) => {
+                if *v == Value::Null {
+                    self.not_constant = true;
+                }
+                Ok(v.clone())
+            },
             Ast::Neg(a) => match self.eval(fqn, a, locals)? {
                 Value::Int(n) => Ok(Value::Int(-n)),
                 Value::Double(d) => Ok(Value::Double(-d)),
@@ -389,6 +413,7 @@ impl Reader {
                 }
             },
             Ast::Call(target, name, args) => {
+                self.not_constant = true;
                 let t = self.eval(fqn, target, locals)?;
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
@@ -811,8 +836,14 @@ fn member(head: &str, block: Option<&str>, simple: &str, fqn: &str, c: &mut JCla
         })
         .unwrap_or(mods.len());
     let has = |m: &str| mods[..ty_start].contains(&m);
-    c.fields
-        .push(Field { name, init, public: has("public"), static_final: has("static") && has("final") });
+    let ty = mods[ty_start..].join(" ");
+    c.fields.push(Field {
+        name,
+        ty,
+        init,
+        public: has("public"),
+        static_final: has("static") && has("final"),
+    });
     Ok(())
 }
 
@@ -863,10 +894,14 @@ fn tokenize(s: &str) -> Res<Vec<Tok>> {
                         Some(b'\\') => v.push('\\'),
                         other => anyhow::bail!("config constants: escape {other:?} in `{s}`"),
                     }
+                    i += 1;
                 } else {
-                    v.push(b[i] as char);
+                    // `"` and `\` are ASCII, so `i` is on a character boundary: take
+                    // the whole UTF-8 character, as Java reads its source.
+                    let ch = s[i..].chars().next().unwrap_or_default();
+                    v.push(ch);
+                    i += ch.len_utf8();
                 }
-                i += 1;
             }
             i += 1;
             out.push(Tok::Str(v));
@@ -895,7 +930,10 @@ fn tokenize(s: &str) -> Res<Vec<Tok>> {
             out.push(Tok::Punct(c as char));
             i += 1;
         } else {
-            anyhow::bail!("config constants: unsupported character `{}` in `{s}`", c as char);
+            anyhow::bail!(
+                "config constants: unsupported character `{}` in `{s}`",
+                s[i..].chars().next().unwrap_or_default()
+            );
         }
     }
     Ok(out)
@@ -1063,6 +1101,9 @@ struct Spec {
     java: &'static str,
     /// Its file under `python/`.
     file: &'static str,
+    /// Its C# file under `dotnet/`, and that file's namespace.
+    cs_file: &'static str,
+    cs_namespace: &'static str,
     kind: Kind,
     /// Java superclasses whose constants are inherited but not translated as
     /// classes: their constants are added to this class.
@@ -1075,48 +1116,64 @@ const SPECS: &[Spec] = &[
     Spec {
         java: "org.apache.kafka.clients.producer.ProducerConfig",
         file: "python/confluent_kafka/producer/producer_config.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Producer/ProducerConfig.g.cs",
+        cs_namespace: "Confluent.Kafka.Producer",
         kind: Kind::ConstantsOnly,
         flatten: &[ABSTRACT_CONFIG],
     },
     Spec {
         java: "org.apache.kafka.clients.consumer.ConsumerConfig",
         file: "python/confluent_kafka/consumer/consumer_config.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Consumer/ConsumerConfig.g.cs",
+        cs_namespace: "Confluent.Kafka.Consumer",
         kind: Kind::ConstantsOnly,
         flatten: &[ABSTRACT_CONFIG],
     },
     Spec {
         java: "org.apache.kafka.clients.admin.AdminClientConfig",
         file: "python/confluent_kafka/admin/admin_client_config.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Admin/AdminClientConfig.g.cs",
+        cs_namespace: "Confluent.Kafka.Admin",
         kind: Kind::ConstantsOnly,
         flatten: &[ABSTRACT_CONFIG],
     },
     Spec {
         java: "org.apache.kafka.common.config.TopicConfig",
         file: "python/confluent_kafka/common/config/topic_config.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Common/Config/TopicConfig.g.cs",
+        cs_namespace: "Confluent.Kafka.Common.Config",
         kind: Kind::Constructible,
         flatten: &[],
     },
     Spec {
         java: "org.apache.kafka.common.config.SaslConfigs",
         file: "python/confluent_kafka/common/config/sasl_configs.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Common/Config/SaslConfigs.g.cs",
+        cs_namespace: "Confluent.Kafka.Common.Config",
         kind: Kind::Constructible,
         flatten: &[],
     },
     Spec {
         java: "org.apache.kafka.common.config.SslConfigs",
         file: "python/confluent_kafka/common/config/ssl_configs.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Common/Config/SslConfigs.g.cs",
+        cs_namespace: "Confluent.Kafka.Common.Config",
         kind: Kind::Constructible,
         flatten: &[],
     },
     Spec {
         java: "org.apache.kafka.common.config.SecurityConfig",
         file: "python/confluent_kafka/common/config/security_config.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Common/Config/SecurityConfig.g.cs",
+        cs_namespace: "Confluent.Kafka.Common.Config",
         kind: Kind::Constructible,
         flatten: &[],
     },
     Spec {
         java: "org.apache.kafka.common.config.LogLevelConfig",
         file: "python/confluent_kafka/common/config/log_level_config.py",
+        cs_file: "dotnet/src/Confluent.Kafka/Common/Config/LogLevelConfig.g.cs",
+        cs_namespace: "Confluent.Kafka.Common.Config",
         kind: Kind::Constructible,
         flatten: &[],
     },
@@ -1196,24 +1253,188 @@ fn py_value(v: &Value) -> Res<(String, String)> {
     })
 }
 
-/// One class's constants, in declaration order: `(name, value)`; the
-/// deprecated ones left out.
-fn constants_of(reader: &mut Reader, fqn: &str, deprecated: &[String]) -> Res<Vec<(String, Value)>> {
+/// The declared types a translated constant may have.
+const CONSTANT_TYPES: &[&str] = &[
+    "String",
+    "int",
+    "long",
+    "short",
+    "double",
+    "boolean",
+    "List<String>",
+    "Set<String>",
+];
+
+/// Whether a field of declared type `ty` can be a constant variable (JLS
+/// §4.12.4: a primitive type or `String`).
+fn is_constant_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "String" | "int" | "long" | "short" | "byte" | "char" | "double" | "float" | "boolean"
+    )
+}
+
+/// One `public static final` field of a config class.
+#[derive(Clone, Debug, PartialEq)]
+struct Const {
+    name: String,
+    /// Its declared Java type, one of `CONSTANT_TYPES`.
+    ty: String,
+    value: Value,
+    /// Whether Java's field is a compile-time constant (JLS §15.29).
+    constant: bool,
+}
+
+/// One class's constants, in declaration order; the deprecated ones left out.
+/// A declared type outside `CONSTANT_TYPES` stops generation.
+fn constants_of(reader: &mut Reader, fqn: &str, deprecated: &[String]) -> Res<Vec<Const>> {
     let class = reader.class(fqn)?;
     let mut out = Vec::new();
     for f in class.fields.iter().filter(|f| f.public && f.static_final) {
         if deprecated.iter().any(|d| *d == format!("{fqn}#{}", f.name)) {
             continue;
         }
+        if !CONSTANT_TYPES.contains(&f.ty.as_str()) {
+            anyhow::bail!(
+                "config constants: `{fqn}.{}` is declared `{}`, a type with no translation (one of {})",
+                f.name,
+                f.ty,
+                CONSTANT_TYPES.join(", ")
+            );
+        }
         let init = f
             .init
             .clone()
             .ok_or_else(|| anyhow::anyhow!("config constants: `{fqn}.{}` has no initializer", f.name))?;
-        let v = reader
+        reader.not_constant = false;
+        let value = reader
             .eval_src(fqn, &init)
             .map_err(|e| anyhow::anyhow!("`{fqn}.{}`: {e}", f.name))?;
-        out.push((f.name.clone(), v));
+        let constant = is_constant_type(&f.ty) && !reader.not_constant;
+        out.push(Const { name: f.name.clone(), ty: f.ty.clone(), value, constant });
     }
+    Ok(out)
+}
+
+/// A C# string literal: printable ASCII as is, `"` and `\` escaped, a line
+/// feed, carriage return or tab as `\n` `\r` `\t`, and every other character
+/// as `\uXXXX` (a UTF-16 surrogate pair above the BMP), so the
+/// generated file is ASCII.
+fn cs_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ' '..='~' => out.push(c),
+            c => {
+                let mut units = [0u16; 2];
+                for u in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{u:04X}"));
+                }
+            },
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A C# `double` literal that reads back exactly `d`: the shortest
+/// round-trip form, with a `.` or an exponent.
+fn cs_double(d: f64) -> Res<String> {
+    if !d.is_finite() {
+        anyhow::bail!("config constants: double {d} has no C# literal");
+    }
+    let s = format!("{d:?}");
+    Ok(if s.contains(['.', 'e', 'E']) { s } else { s + ".0" })
+}
+
+/// A constant's C# type and value expression.
+fn cs_value(c: &Const) -> Res<(String, String)> {
+    let bad = || anyhow::anyhow!("config constants: `{}` is `{}` but its value is {:?}", c.name, c.ty, c.value);
+    let range = |n: i64, lo: i64, hi: i64| if (lo..=hi).contains(&n) { Ok(n) } else { Err(bad()) };
+    let strings = |items: &[Value]| -> Res<String> {
+        let mut parts = Vec::new();
+        for i in items {
+            let Value::Str(s) = i else { return Err(bad()) };
+            parts.push(cs_str(s));
+        }
+        Ok(if parts.is_empty() {
+            // Qualified, so a file needs no `using System;` for this one branch.
+            "new ReadOnlyCollection<string>(System.Array.Empty<string>())".to_string()
+        } else {
+            format!("new ReadOnlyCollection<string>(new[] {{ {} }})", parts.join(", "))
+        })
+    };
+    Ok(match (c.ty.as_str(), &c.value) {
+        ("String", Value::Str(s)) => ("string".into(), cs_str(s)),
+        ("String", Value::Null) if !c.constant => ("string?".into(), "null".into()),
+        ("int", Value::Int(n)) => ("int".into(), range(*n, i32::MIN.into(), i32::MAX.into())?.to_string()),
+        ("short", Value::Int(n)) => ("short".into(), range(*n, i16::MIN.into(), i16::MAX.into())?.to_string()),
+        ("long", Value::Int(n)) => ("long".into(), format!("{n}L")),
+        ("double", Value::Double(d)) => ("double".into(), cs_double(*d)?),
+        ("double", Value::Int(n)) => ("double".into(), cs_double(*n as f64)?),
+        ("boolean", Value::Bool(b)) => ("bool".into(), b.to_string()),
+        ("List<String>", Value::List(items)) => ("IReadOnlyList<string>".into(), strings(items)?),
+        ("Set<String>", Value::Set(items)) => ("IReadOnlyCollection<string>".into(), strings(items)?),
+        _ => return Err(bad()),
+    })
+}
+
+/// The C# license header, as `Internal/ConfigTypes.g.cs`'s.
+const CS_LICENSE: &str = "// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the \"License\");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an \"AS IS\" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+";
+
+/// One config class as C#: a `public const` for each of Java's compile-time
+/// constants, a `static readonly` field for each other field; the client
+/// classes with a private constructor, the others with Java's implicit
+/// public one.
+fn render_cs(spec: &Spec, consts: &[Const]) -> Res<String> {
+    let name = simple(spec.java);
+    let collections = consts.iter().any(|c| c.ty.contains('<'));
+    let mut out = format!(
+        "{CS_LICENSE}\n// <auto-generated>\n// GENERATED by `cargo xtask generate-error-codes` from Java's {} -- DO NOT EDIT.\n\
+         // </auto-generated>\n\n#nullable enable\n\n",
+        spec.java
+    );
+    if collections {
+        out.push_str("using System.Collections.Generic;\nusing System.Collections.ObjectModel;\n\n");
+    }
+    out.push_str(&format!(
+        "namespace {};\n\n/// <summary>Java's <c>{}</c>: its <c>public static final</c> fields.</summary>\npublic class {name}\n{{\n",
+        spec.cs_namespace, spec.java
+    ));
+    let mut members = Vec::new();
+    for c in consts {
+        let (ty, val) = cs_value(c)?;
+        let doc = format!("    /// <summary>Java's <c>{name}.{}</c>.</summary>\n", c.name);
+        members.push(if c.constant {
+            format!("{doc}    public const {ty} {} = {val};\n", c.name)
+        } else {
+            format!("{doc}    public static readonly {ty} {} = {val};\n", c.name)
+        });
+    }
+    if spec.kind == Kind::ConstantsOnly {
+        members.push(format!("    private {name}()\n    {{\n    }}\n"));
+    }
+    out.push_str(&members.join("\n"));
+    out.push_str("}\n");
     Ok(out)
 }
 
@@ -1242,7 +1463,8 @@ fn wrap(text: &str, width: usize, indent: &str) -> String {
     lines.join("\n")
 }
 
-/// The generated config-class modules: `(path, content)`, `.py` and `.pyi` each.
+/// The generated config classes: `(path, content)`, a `.py`, a `.pyi` and a
+/// `.g.cs` each.
 pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let deprecated: Vec<String> = fs::read_to_string(repo_root.join(DEPRECATED_LIST))
         .map_err(|e| anyhow::anyhow!("{DEPRECATED_LIST}: {e}"))?
@@ -1257,9 +1479,9 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
         let class = reader.class(spec.java)?;
         let mut consts = constants_of(&mut reader, spec.java, &deprecated)?;
         for parent in spec.flatten {
-            for (n, v) in constants_of(&mut reader, parent, &deprecated)? {
-                if !consts.iter().any(|(m, _)| *m == n) {
-                    consts.push((n, v));
+            for c in constants_of(&mut reader, parent, &deprecated)? {
+                if !consts.iter().any(|m| m.name == c.name) {
+                    consts.push(c);
                 }
             }
         }
@@ -1320,7 +1542,7 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
         if !consts.is_empty() {
             py.push('\n');
         }
-        for (n, v) in &consts {
+        for Const { name: n, value: v, .. } in &consts {
             let (val, ty) = py_value(v)?;
             py.push_str(&format!("    {n}: Final = {val}\n"));
             pyi.push_str(&format!("    {n}: Final[{ty}]\n"));
@@ -1338,6 +1560,7 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
         let path = repo_root.join(spec.file);
         out.push((path.with_extension("pyi"), pyi));
         out.push((path, py));
+        out.push((repo_root.join(spec.cs_file), render_cs(spec, &consts)?));
     }
     Ok(out)
 }
@@ -1431,5 +1654,261 @@ mod tests {
         assert!(producer.1.contains("    CONFIG_PROVIDERS_CONFIG: Final = \"config.providers\""));
         let topic = outputs.iter().find(|(p, _)| p.ends_with("topic_config.py")).unwrap();
         assert!(!topic.1.contains("MESSAGE_DOWNCONVERSION_ENABLE_CONFIG"));
+    }
+
+    const CS_FILES: &[&str] = &[
+        "dotnet/src/Confluent.Kafka/Producer/ProducerConfig.g.cs",
+        "dotnet/src/Confluent.Kafka/Consumer/ConsumerConfig.g.cs",
+        "dotnet/src/Confluent.Kafka/Admin/AdminClientConfig.g.cs",
+        "dotnet/src/Confluent.Kafka/Common/Config/TopicConfig.g.cs",
+        "dotnet/src/Confluent.Kafka/Common/Config/SaslConfigs.g.cs",
+        "dotnet/src/Confluent.Kafka/Common/Config/SslConfigs.g.cs",
+        "dotnet/src/Confluent.Kafka/Common/Config/SecurityConfig.g.cs",
+        "dotnet/src/Confluent.Kafka/Common/Config/LogLevelConfig.g.cs",
+    ];
+
+    #[test]
+    fn test_cs_outputs_are_generated_and_checked() {
+        let root = repo_root();
+        let outputs = outputs(&root).unwrap();
+        for (file, spec) in CS_FILES.iter().zip(SPECS) {
+            let (_, content) = outputs
+                .iter()
+                .find(|(p, _)| *p == root.join(file))
+                .unwrap_or_else(|| panic!("outputs() does not list {file}"));
+            let name = simple(spec.java);
+            assert!(content.contains("// <auto-generated>\n"), "{file}");
+            assert!(content.contains(&format!("namespace {};\n", spec.cs_namespace)), "{file}");
+            assert!(content.contains(&format!(
+                "/// <summary>Java's <c>{}</c>: its <c>public static final</c> fields.</summary>\npublic class {name}\n{{\n",
+                spec.java
+            )));
+            let private_ctor = format!("    private {name}()\n    {{\n    }}\n");
+            assert_eq!(content.contains(&private_ctor), spec.kind == Kind::ConstantsOnly, "{file}");
+            assert!(content.is_ascii(), "{file}");
+            let on_disk = fs::read_to_string(root.join(file)).unwrap();
+            assert!(on_disk == *content, "{file} is stale: run `cargo xtask generate-error-codes`");
+        }
+        let stale = crate::config_types::check_up_to_date(&root).unwrap();
+        assert!(stale.is_empty(), "stale: {stale:?}");
+    }
+
+    #[test]
+    fn test_cs_constant_counts() {
+        // A tripwire for a Kafka upgrade: the eight classes' fields, and which
+        // are not compile-time constants in Java (so a C# `static readonly` field, not a const).
+        let root = repo_root();
+        let outputs = outputs(&root).unwrap();
+        let want: &[(usize, usize)] = &[(62, 0), (67, 5), (38, 1), (72, 0), (119, 0), (43, 4), (2, 0), (6, 1)];
+        let mut total = 0;
+        let mut readonly = Vec::new();
+        for ((file, spec), (consts, props)) in CS_FILES.iter().zip(SPECS).zip(want) {
+            let content = &outputs.iter().find(|(p, _)| *p == root.join(file)).unwrap().1;
+            let c = content.matches("\n    public const ").count();
+            let p: Vec<_> = content
+                .lines()
+                .filter_map(|l| l.strip_prefix("    public static readonly "))
+                .map(|l| format!("{}.{}", simple(spec.java), l.split_whitespace().nth(1).unwrap()))
+                .collect();
+            assert_eq!((c, p.len()), (*consts, *props), "{file}");
+            assert!(!content.contains("{ get; }"), "{file} declares a property");
+            assert_eq!(content.matches("    /// <summary>Java's <c>").count(), c + p.len(), "{file}");
+            total += c + p.len();
+            readonly.extend(p);
+        }
+        assert_eq!(total, 420);
+        assert_eq!(
+            readonly,
+            [
+                "ConsumerConfig.ASSIGN_FROM_SUBSCRIBED_ASSIGNORS",
+                "ConsumerConfig.DEFAULT_GROUP_PROTOCOL",
+                "ConsumerConfig.DEFAULT_GROUP_REMOTE_ASSIGNOR",
+                "ConsumerConfig.DEFAULT_ISOLATION_LEVEL",
+                "ConsumerConfig.DEFAULT_SHARE_ACQUIRE_MODE",
+                "AdminClientConfig.DEFAULT_METADATA_RECOVERY_STRATEGY",
+                "SslConfigs.DEFAULT_SSL_KEYMANGER_ALGORITHM",
+                "SslConfigs.DEFAULT_SSL_TRUSTMANAGER_ALGORITHM",
+                "SslConfigs.RECONFIGURABLE_CONFIGS",
+                "SslConfigs.NON_RECONFIGURABLE_CONFIGS",
+                "LogLevelConfig.VALID_LOG_LEVELS",
+            ]
+        );
+        let consumer = &outputs.iter().find(|(p, _)| *p == root.join(CS_FILES[1])).unwrap().1;
+        assert!(consumer.contains("    public static readonly string? DEFAULT_GROUP_REMOTE_ASSIGNOR = null;\n"));
+        assert!(consumer.contains(
+            "    public static readonly IReadOnlyList<string> ASSIGN_FROM_SUBSCRIBED_ASSIGNORS = \
+             new ReadOnlyCollection<string>(new[] { \"range\", \"roundrobin\", \"sticky\", \"cooperative-sticky\" });\n"
+        ));
+        let sasl = &outputs.iter().find(|(p, _)| *p == root.join(CS_FILES[4])).unwrap().1;
+        assert!(sasl.contains("    public const short DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS = 60;\n"));
+        assert!(sasl.contains("    public const double DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR = 0.8;\n"));
+        assert!(sasl.contains("    public const long DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS = 100L;\n"));
+    }
+
+    /// A fake Java source tree holding `org.example.Fake` with `body`.
+    fn fake_root(name: &str, body: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("xtask-config-consts-{name}-{}", std::process::id()));
+        let dir = root.join(JAVA_ROOT).join("org/example");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Fake.java"),
+            format!("package org.example;\n\npublic class Fake {{\n{body}\n}}\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("Kind.java"),
+            "package org.example;\n\npublic enum Kind {\n    A(\"a\");\n    public final String id;\n    \
+             Kind(String id) {\n        this.id = id;\n    }\n}\n",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn test_unsupported_declared_type_stops_generation() {
+        let root = fake_root("type", "    public static final Map<String, String> M = null;");
+        let err = constants_of(&mut Reader::new(&root), "org.example.Fake", &[])
+            .unwrap_err()
+            .to_string();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            err,
+            "config constants: `org.example.Fake.M` is declared `Map<String, String>`, a type with no translation \
+             (one of String, int, long, short, double, boolean, List<String>, Set<String>)"
+        );
+    }
+
+    #[test]
+    fn test_compile_time_constants_follow_java() {
+        let root = fake_root(
+            "constant",
+            "    public static final String A = \"a\";\n\
+             public static final String B = A + \"b\" + 1;\n\
+             public static final short S = (short) 60;\n\
+             public static final long L = 5 * 1000L;\n\
+             public static final String N = null;\n\
+             public static final String E = Kind.A.id;\n\
+             public static final String F = Kind.A.name();\n\
+             public static final String G = B + E;\n\
+             public static final List<String> X = List.of(A);\n\
+             public static final int I = Integer.MAX_VALUE;",
+        );
+        let got = constants_of(&mut Reader::new(&root), "org.example.Fake", &[]);
+        let _ = fs::remove_dir_all(&root);
+        let flags: Vec<_> = got.unwrap().into_iter().map(|c| (c.name, c.constant)).collect();
+        let want = [
+            ("A", true),
+            ("B", true),
+            ("S", true),
+            ("L", true),
+            ("N", false),
+            ("E", false),
+            ("F", false),
+            ("G", false),
+            ("X", false),
+            ("I", true),
+        ];
+        assert_eq!(flags, want.map(|(n, c)| (n.to_string(), c)));
+    }
+
+    #[test]
+    fn test_cs_string_literals() {
+        assert_eq!(cs_str("plain <code>x</code>"), "\"plain <code>x</code>\"");
+        assert_eq!(cs_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(cs_str("l1\nl2\r\tx"), "\"l1\\nl2\\r\\tx\"");
+        assert_eq!(cs_str("\u{0}\u{1f}\u{7f}"), "\"\\u0000\\u001F\\u007F\"");
+        assert_eq!(cs_str("caf\u{e9} \u{2014}"), "\"caf\\u00E9 \\u2014\"");
+        assert_eq!(cs_str("\u{1F600}"), "\"\\uD83D\\uDE00\"");
+    }
+
+    #[test]
+    fn test_non_ascii_literal_evaluates_to_itself() {
+        let root = fake_root(
+            "non-ascii",
+            "    public static final String X = \"caf\u{e9} \u{2014} x\";\n\
+             public static final String Y = X + \"\u{1F600}\";",
+        );
+        let got = constants_of(&mut Reader::new(&root), "org.example.Fake", &[]);
+        let _ = fs::remove_dir_all(&root);
+        let values: Vec<_> = got.unwrap().into_iter().map(|c| (c.name, c.value)).collect();
+        assert_eq!(
+            values,
+            [
+                ("X".to_string(), Value::Str("caf\u{e9} \u{2014} x".into())),
+                ("Y".to_string(), Value::Str("caf\u{e9} \u{2014} x\u{1F600}".into())),
+            ]
+        );
+        let Value::Str(y) = &values[1].1 else { unreachable!() };
+        assert_eq!(cs_str(y), "\"caf\\u00E9 \\u2014 x\\uD83D\\uDE00\"");
+        assert_eq!(py_str(y), "\"caf\u{e9} \u{2014} x\u{1F600}\"");
+    }
+
+    #[test]
+    fn test_cs_imports_only_the_namespaces_it_uses() {
+        let spec = Spec {
+            java: "org.example.Fake",
+            file: "fake.py",
+            cs_file: "Fake.g.cs",
+            cs_namespace: "Confluent.Kafka.Example",
+            kind: Kind::Constructible,
+            flatten: &[],
+        };
+        let c = |ty: &str, value| Const { name: "X".into(), ty: ty.into(), value, constant: false };
+        let full = render_cs(&spec, &[c("List<String>", Value::List(vec![Value::Str("a".into())]))]).unwrap();
+        assert!(!full.contains("using System;"), "{full}");
+        assert!(full.contains(
+            "using System.Collections.Generic;\nusing System.Collections.ObjectModel;\n\nnamespace Confluent.Kafka.Example;"
+        ));
+        assert!(full.contains(
+            "    public static readonly IReadOnlyList<string> X = new ReadOnlyCollection<string>(new[] { \"a\" });\n"
+        ));
+        let empty = render_cs(&spec, &[c("Set<String>", Value::Set(vec![]))]).unwrap();
+        assert!(!empty.contains("using System;"), "{empty}");
+        assert!(empty.contains(
+            "    public static readonly IReadOnlyCollection<string> X = \
+             new ReadOnlyCollection<string>(System.Array.Empty<string>());\n"
+        ));
+        let none = render_cs(&spec, &[c("int", Value::Int(1))]).unwrap();
+        assert!(!none.contains("using "), "{none}");
+    }
+
+    #[test]
+    fn test_cs_double_literals() {
+        for (d, want) in [
+            (0.2, "0.2"),
+            (0.8, "0.8"),
+            (0.05, "0.05"),
+            (1.0, "1.0"),
+            (-3.0, "-3.0"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (1e-5, "1e-5"),
+            (1e300, "1e300"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+        ] {
+            let s = cs_double(d).unwrap();
+            assert_eq!(s, want);
+            assert_eq!(s.parse::<f64>().unwrap().to_bits(), d.to_bits(), "{s}");
+            assert!(s.contains(['.', 'e']), "{s} would be an integer literal in C#");
+        }
+        assert!(cs_double(f64::NAN).is_err());
+        assert!(cs_double(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_cs_value_checks_the_declared_range() {
+        let c = |ty: &str, value| Const { name: "X".into(), ty: ty.into(), value, constant: true };
+        assert_eq!(
+            cs_value(&c("short", Value::Int(32767))).unwrap(),
+            ("short".into(), "32767".into())
+        );
+        assert!(cs_value(&c("short", Value::Int(32768))).is_err());
+        assert!(cs_value(&c("int", Value::Int(i64::from(i32::MAX) + 1))).is_err());
+        assert_eq!(cs_value(&c("long", Value::Int(-1))).unwrap(), ("long".into(), "-1L".into()));
+        assert_eq!(
+            cs_value(&c("boolean", Value::Bool(true))).unwrap(),
+            ("bool".into(), "true".into())
+        );
+        assert!(cs_value(&c("String", Value::Null)).is_err());
+        assert!(cs_value(&c("Set<String>", Value::Set(vec![Value::Int(1)]))).is_err());
     }
 }
