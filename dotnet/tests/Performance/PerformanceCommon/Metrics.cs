@@ -59,10 +59,14 @@ public sealed class Metrics : IDisposable
     private readonly TextWriter _fd;
     private readonly object _writeLock = new object();
     private readonly int _latencyTopBucket;
+    private readonly bool _transactional;
 
     private Bucket _latency;
     private Bucket _bytes = new Bucket();
     private Bucket _messages = new Bucket();
+    private Bucket _transactions = new Bucket();
+    private Bucket _commitLatency = new Bucket(withHistogram: true);
+    private Bucket _abortLatency = new Bucket(withHistogram: true);
 
     private long _windowStartMs;
     private long _measurementStartMs = UnsetMs;
@@ -83,15 +87,16 @@ public sealed class Metrics : IDisposable
     {
     }
 
-    private Metrics(int latencyTopBucket)
-        : this(new StreamWriter(PerfEnv.GetString("METRICS_FILE", "metrics.jsonl"), append: false), latencyTopBucket)
+    private Metrics(int latencyTopBucket, bool transactional = false)
+        : this(new StreamWriter(PerfEnv.GetString("METRICS_FILE", "metrics.jsonl"), append: false), latencyTopBucket, transactional)
     {
     }
 
-    internal Metrics(TextWriter writer, int latencyTopBucket = LatencyHistogram.ProducerTopBucket)
+    internal Metrics(TextWriter writer, int latencyTopBucket = LatencyHistogram.ProducerTopBucket, bool transactional = false)
     {
         _fd = writer;
         _latencyTopBucket = latencyTopBucket;
+        _transactional = transactional;
         _latency = new Bucket(withHistogram: true, latencyTopBucket);
         _windowStartMs = NowMs();
     }
@@ -102,6 +107,12 @@ public sealed class Metrics : IDisposable
     /// </summary>
     public static Metrics ForConsumer() => new Metrics(LatencyHistogram.ConsumerMaxLatencyMs);
 
+    /// <summary>
+    /// The transactional producer's metrics: each line also carries the window's transactions and its commit and
+    /// abort latencies, as Python's transactional <c>Metrics</c>.
+    /// </summary>
+    public static Metrics ForTransactional() => new Metrics(LatencyHistogram.ProducerTopBucket, transactional: true);
+
     public static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     public void AddLatency(double latencyMs) => Volatile.Read(ref _latency).AddMeasurement(latencyMs);
@@ -109,6 +120,12 @@ public sealed class Metrics : IDisposable
     public void AddBytes(double count) => Volatile.Read(ref _bytes).AddMeasurement(count);
 
     public void AddMessages(double count) => Volatile.Read(ref _messages).AddMeasurement(count);
+
+    public void AddTransaction() => Volatile.Read(ref _transactions).AddMeasurement(1);
+
+    public void AddCommitLatency(double latencyMs) => Volatile.Read(ref _commitLatency).AddMeasurement(latencyMs);
+
+    public void AddAbortLatency(double latencyMs) => Volatile.Read(ref _abortLatency).AddMeasurement(latencyMs);
 
     public void ResetCpuBaseline() => _cpuSampler.ResetBaseline();
 
@@ -206,6 +223,9 @@ public sealed class Metrics : IDisposable
         Bucket latency = Interlocked.Exchange(ref _latency, new Bucket(withHistogram: true, _latencyTopBucket));
         Bucket bytes = Interlocked.Exchange(ref _bytes, new Bucket());
         Bucket messages = Interlocked.Exchange(ref _messages, new Bucket());
+        Bucket transactions = Interlocked.Exchange(ref _transactions, new Bucket());
+        Bucket commitLatency = Interlocked.Exchange(ref _commitLatency, new Bucket(withHistogram: true));
+        Bucket abortLatency = Interlocked.Exchange(ref _abortLatency, new Bucket(withHistogram: true));
 
         _rss.AddMeasurement(_memorySampler.Sample());
         _cpu.AddMeasurement(_cpuSampler.Sample());
@@ -215,11 +235,24 @@ public sealed class Metrics : IDisposable
         BucketRollover latencyRoll = latency.Rollover();
         BucketRollover bytesRoll = bytes.Rollover();
         BucketRollover messagesRoll = messages.Rollover();
+        BucketRollover transactionsRoll = transactions.Rollover();
+        BucketRollover commitLatencyRoll = commitLatency.Rollover();
+        BucketRollover abortLatencyRoll = abortLatency.Rollover();
 
         cpuAverage = cpuRoll.Average;
         rssAverage = rssRoll.Average;
 
-        return BuildLine(rssRoll, cpuRoll, latencyRoll, bytesRoll, messagesRoll, windowStart, _windowStartMs);
+        return BuildLine(
+            rssRoll,
+            cpuRoll,
+            latencyRoll,
+            bytesRoll,
+            messagesRoll,
+            transactionsRoll,
+            commitLatencyRoll,
+            abortLatencyRoll,
+            windowStart,
+            _windowStartMs);
     }
 
     private string BuildLine(
@@ -228,6 +261,9 @@ public sealed class Metrics : IDisposable
         BucketRollover latency,
         BucketRollover bytes,
         BucketRollover messages,
+        BucketRollover transactions,
+        BucketRollover commitLatency,
+        BucketRollover abortLatency,
         long windowStartMs,
         long windowEndMs)
     {
@@ -242,6 +278,14 @@ public sealed class Metrics : IDisposable
         AppendStringField(sb, "window_end_ms", PerfFormat.Num(windowEndMs));
         AppendStringField(sb, "measurement_start_ms", FormatMeasurementBound(Volatile.Read(ref _measurementStartMs)));
         AppendStringField(sb, "measurement_end_ms", FormatMeasurementBound(Volatile.Read(ref _measurementEndMs)));
+        if (_transactional)
+        {
+            // After the base fields, as Python's transactional rollover appends them to the base line.
+            AppendBucket(sb, "transactions", transactions, first: false);
+            AppendLatencyBucket(sb, "commit_latency", commitLatency);
+            AppendLatencyBucket(sb, "abort_latency", abortLatency);
+        }
+
         sb.Append('}');
         return sb.ToString();
     }

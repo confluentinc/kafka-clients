@@ -19,8 +19,8 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Performance.V2;
 
 /// <summary>
-/// The v2 (ckd) perf executable: <c>MODE</c> selects the producer or the consumer benchmark, or the version report, and
-/// the exit code carries the verdict the launcher gates on.
+/// The v2 (ckd) perf executable: <c>MODE</c> selects the producer, consumer or transactional benchmark, or the version
+/// report, and the exit code carries the verdict the launcher gates on.
 /// </summary>
 internal static class Program
 {
@@ -47,11 +47,13 @@ internal static class Program
                     return await ProducerMain.Run().ConfigureAwait(false);
                 case "consumer":
                     return await ConsumerMain.Run().ConfigureAwait(false);
+                case "transactional":
+                    return await TransactionalMain.Run().ConfigureAwait(false);
                 case "version":
                     PrintVersion();
                     return 0;
                 default:
-                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer', 'consumer' or 'version')");
+                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer', 'consumer', 'transactional' or 'version')");
                     return UsageExitCode;
             }
         }
