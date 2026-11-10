@@ -249,15 +249,15 @@ test-grpc-server-dotnet: build-dotnet
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(GRPC_SERVER_TESTS)
 
 # ---------------------------------------------------------------------------
-# Performance suite (M13/P1). Kept OUT of the solution (like grpc-server), so
+# Performance suite. Kept OUT of the solution (like grpc-server), so
 # `test-dotnet`/`verify-dotnet` never drag it into the functional gate — the
 # p99 budgets must not fail under the unit suite's contention. Invoked by path.
 #
-# Slice 1 shipped the v3 exe (PerfV3, our binding) + the client-agnostic
-# PerformanceCommon + the CRC-32 self-check. Slice 2 adds the v2 exe (PerfV2/ckd
-# baseline) and the Docker in-suite smoke (test-integration-perf-dotnet).
-# CLIENT_VERSION now selects the exe: 3 (default) = PerfV3, 2 = PerfV2. PerfV2 and
-# PerfV3 are never in one sln (PLAN §1.1.1 — the same-assembly collision); each is
+# It holds the v3 exe (PerfV3, our binding), the v2 exe (PerfV2, the
+# confluent-kafka-dotnet baseline), the client-agnostic PerformanceCommon, the
+# CRC-32 self-check and the Docker in-suite smoke (test-integration-perf-dotnet).
+# CLIENT_VERSION selects the exe: 3 (default) = PerfV3, 2 = PerfV2. PerfV2 and
+# PerfV3 are never in one sln (both are the `Confluent.Kafka` assembly); each is
 # built/run by path.
 # ---------------------------------------------------------------------------
 PERF_DIR := $(REPO_ROOT)/dotnet/tests/Performance
@@ -279,7 +279,7 @@ CLIENT_VERSION ?= 3
 # client, so this target builds PerfV3 first, as the Docker target does. (The Docker
 # in-suite smoke is the separate test-integration-perf-dotnet target below.)
 #
-# The --filter is what makes that true (M13/P3 item F, D-6 Option 1).
+# The --filter is what makes that true.
 # Confluent.Kafka.PerformanceTests holds BOTH the Docker-free tests and the four
 # Docker-backed broker smokes, so an unfiltered `dotnet test` here started a Kafka
 # container — and, since this target did not build the PerfV3 exe the smokes launch,
@@ -299,7 +299,7 @@ perf-unit-test-dotnet: build-dotnet
 # Env-driven producer/consumer benchmarks (manual; need a reachable broker via
 # BOOTSTRAP_SERVERS). CLIENT_VERSION selects the exe: 3 (default) = PerfV3 (our
 # binding), 2 = PerfV2 (ckd baseline). The v3 exe P/Invokes our native, so it does
-# the two-stage native build first (CLAUDE.md §7.1); the v2/ckd exe needs no native
+# the two-stage native build first; the v2/ckd exe needs no native
 # (ckd carries its own librdkafka). Configure the run via the shared env-var
 # contract (TOPIC_NAME, VALUE_SIZE, LIMIT_RPS, ASYNC, P99_LIMIT_MS, ...).
 #
@@ -323,7 +323,7 @@ consumer-perf-test-dotnet:
 	  *) echo "consumer-perf-test-dotnet: CLIENT_VERSION=$(CLIENT_VERSION) unsupported (2=PerfV2/ckd, 3=PerfV3/our binding)" >&2; exit 1 ;; \
 	esac
 
-# In-suite v3 perf smoke (xUnit + Testcontainers). v3-ONLY gate (D10 — PerfV2 is
+# In-suite v3 perf smoke (xUnit + Testcontainers). v3-ONLY gate (PerfV2 is
 # manual-comparison only, never in this smoke). Two-stage native build first, then
 # build the PerfV3 exe for BOTH TFMs (the smoke subprocess-launches PerfV3 by path,
 # reusing the running test's config+TFM), then run the smoke on net10.0 ONLY. The
@@ -332,7 +332,7 @@ consumer-perf-test-dotnet:
 # (PerfV3.csproj still builds for all TFMs). Wired into verify-dotnet (mirroring
 # verify-python's perf stage).
 #
-# PERF_REQUIRE_DOCKER=True (M13/P3 item E) makes a missing/broken Docker or a
+# PERF_REQUIRE_DOCKER=True makes a missing/broken Docker or a
 # broker that will not start a FAILURE here, not a skip: this target is what
 # verify-dotnet reaches, so a green tick from it has to mean the budget was
 # actually measured. A bare `dotnet test` (no Makefile) leaves it unset, and a
