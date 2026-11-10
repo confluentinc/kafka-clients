@@ -49,9 +49,10 @@ namespace Confluent.Kafka.Consumer;
 /// the listener, as a Java listener's does.
 /// </para>
 /// <para>
-/// A listener is bound to a subscription and fires many times. A replacing subscribe, a listener-less one
-/// included, releases it, as does disposing the consumer; <c>Unsubscribe()</c> and <c>Close()</c> keep it, as
-/// Java's <c>SubscriptionState.unsubscribe()</c> does.
+/// A listener is bound to a subscription and fires many times. A subscribe that succeeds, a listener-less one
+/// included, releases it, as does closing or disposing the consumer (closing once its callbacks have run);
+/// <c>Unsubscribe()</c> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does, and so does a subscribe to no
+/// topics on a <c>KafkaConsumer</c> or <c>AsyncKafkaConsumer</c>, which is <c>Unsubscribe()</c>.
 /// </para>
 /// <para>
 /// Java's <c>onPartitionsLost</c> defaults to <c>onPartitionsRevoked</c>. A C# default interface method needs
