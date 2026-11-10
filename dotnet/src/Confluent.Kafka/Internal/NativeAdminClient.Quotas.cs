@@ -70,10 +70,10 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(filter));
             }
 
-            foreach (ClientQuotaFilterComponent component in filter.Components)
+            foreach (ClientQuotaFilterComponent component in filter.Components())
             {
-                AdminStrings.Validate(component.EntityType, nameof(filter));
-                AdminStrings.Validate(component.MatchName, nameof(filter));
+                AdminStrings.Validate(component.EntityType(), nameof(filter));
+                AdminStrings.Validate(component.Match(), nameof(filter));
             }
 
             IntPtr native = IntPtr.Zero;
@@ -121,7 +121,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeClientQuotasOptions.TimeoutMs):
                 NativeMethods.DescribeClientQuotasOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeClientQuotasOptions has no C setter for " + setter + ".");
@@ -200,11 +200,11 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(AlterClientQuotasOptions.TimeoutMs):
                 NativeMethods.AlterClientQuotasOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterClientQuotasOptions.ValidateOnly):
                 NativeMethods.AlterClientQuotasOptionsSetValidateOnly(
-                    native, (sbyte)(options.ValidateOnly ? 1 : 0), ref outErr);
+                    native, (sbyte)(options.ValidateOnly() ? 1 : 0), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterClientQuotasOptions has no C setter for " + setter + ".");
@@ -224,15 +224,15 @@ internal sealed partial class NativeAdminClient
                     "The client quota alterations must not contain a null element.", parameterName);
             }
 
-            foreach (KeyValuePair<string, string?> part in alteration.Entity.Entries)
+            foreach (KeyValuePair<string, string?> part in alteration.Entity().Entries())
             {
                 AdminStrings.Validate(part.Key, parameterName);
                 AdminStrings.Validate(part.Value, parameterName);
             }
 
-            foreach (ClientQuotaAlteration.Op op in alteration.Ops)
+            foreach (ClientQuotaAlteration.Op op in alteration.Ops())
             {
-                AdminStrings.Validate(op.Key, parameterName);
+                AdminStrings.Validate(op.Key(), parameterName);
             }
 
             alterations.Add(alteration);

@@ -129,7 +129,7 @@ public sealed class SerdeDisposalTests
     {
         AsyncOnlySerde asyncOnly = new AsyncOnlySerde();
 
-        SerdeDisposal.DisposeIfDisposable(Serdes.String);
+        SerdeDisposal.DisposeIfDisposable(Serdes.String());
         SerdeDisposal.DisposeIfDisposable(asyncOnly);
 
         Assert.Equal(0, asyncOnly.Disposals);
@@ -172,7 +172,7 @@ public sealed class SerdeDisposalTests
 
         internal int Disposals { get; private set; }
 
-        public byte[]? Serialize(string topic, string data) => null;
+        public ReadOnlyMemory<byte>? Serialize(string topic, string data) => null;
 
         public void Dispose()
         {
@@ -200,7 +200,7 @@ public sealed class SerdeDisposalTests
 
         internal Exception? Thrown { get; private set; }
 
-        public byte[]? Serialize(string topic, string data) => null;
+        public ReadOnlyMemory<byte>? Serialize(string topic, string data) => null;
 
         public void Dispose()
         {
@@ -286,7 +286,7 @@ public sealed class SerdeDisposalTests
     {
         internal int Disposals { get; private set; }
 
-        public byte[]? Serialize(string topic, string data) => null;
+        public ReadOnlyMemory<byte>? Serialize(string topic, string data) => null;
 
         public ValueTask DisposeAsync()
         {

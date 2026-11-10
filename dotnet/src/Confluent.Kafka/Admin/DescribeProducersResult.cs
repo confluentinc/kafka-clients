@@ -127,7 +127,8 @@ public sealed class DescribeProducersResult
         /// The active producers, in the order the broker reported them — Java's
         /// <c>activeProducers()</c>.
         /// </summary>
-        public IReadOnlyList<ProducerState> ActiveProducers => _activeProducers;
+        /// <returns>The active producers, in the order the broker reported them.</returns>
+        public IReadOnlyList<ProducerState> ActiveProducers() => _activeProducers;
 
         /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
         /// <returns>The rendering.</returns>

@@ -47,11 +47,11 @@ public sealed class PublicAdminDeleteAclsTests
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("keyed-by-value") });
 
         AclBindingFilter lookup = Filter("keyed-by-value");
-        Assert.NotSame(lookup, Assert.Single(result.Values).Key);
-        Assert.True(result.Values.ContainsKey(lookup));
+        Assert.NotSame(lookup, Assert.Single(result.Values()).Key);
+        Assert.True(result.Values().ContainsKey(lookup));
 
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -71,14 +71,14 @@ public sealed class PublicAdminDeleteAclsTests
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { wildcard, literalEmpty });
 
-        Assert.Equal(2, result.Values.Count);
-        Assert.True(result.Values.ContainsKey(wildcard));
-        Assert.True(result.Values.ContainsKey(literalEmpty));
+        Assert.Equal(2, result.Values().Count);
+        Assert.True(result.Values().ContainsKey(wildcard));
+        Assert.True(result.Values().ContainsKey(literalEmpty));
 
-        foreach (AclBindingFilter key in result.Values.Keys)
+        foreach (AclBindingFilter key in result.Values().Keys)
         {
-            Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Principal);
-            Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Host);
+            Assert.Equal(key.PatternFilter().Name(), key.EntryFilter().Principal());
+            Assert.Equal(key.PatternFilter().Name(), key.EntryFilter().Host());
         }
 
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
@@ -101,15 +101,15 @@ public sealed class PublicAdminDeleteAclsTests
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { alpha, beta });
 
-        Assert.Equal(2, result.Values.Count);
-        Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
-        Assert.Contains(alpha, result.Values.Keys);
-        Assert.Contains(beta, result.Values.Keys);
+        Assert.Equal(2, result.Values().Count);
+        Assert.NotSame(result.Values()[alpha].Get(), result.Values()[beta].Get());
+        Assert.Contains(alpha, result.Values().Keys);
+        Assert.Contains(beta, result.Values().Keys);
 
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[alpha].Get(), s_deadline));
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[beta].Get(), s_deadline));
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class PublicAdminDeleteAclsTests
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { first, Filter("solo-second") });
 
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
@@ -137,7 +137,7 @@ public sealed class PublicAdminDeleteAclsTests
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(Array.Empty<AclBindingFilter>());
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
@@ -149,7 +149,7 @@ public sealed class PublicAdminDeleteAclsTests
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("dup"), Filter("dup") });
 
-        Assert.Single(result.Values);
+        Assert.Single(result.Values());
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
@@ -162,7 +162,7 @@ public sealed class PublicAdminDeleteAclsTests
         AclBindingFilter filter = Filter("tópico-café-日本");
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { filter });
 
-        Assert.Equal("tópico-café-日本", Assert.Single(result.Values).Key.PatternFilter.Name);
+        Assert.Equal("tópico-café-日本", Assert.Single(result.Values()).Key.PatternFilter().Name());
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
@@ -185,7 +185,7 @@ public sealed class PublicAdminDeleteAclsTests
         // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DeleteAcls(
-                new[] { Filter("t") }, new DeleteAclsOptions { TimeoutMs = -1 })));
+                new[] { Filter("t") }, new DeleteAclsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -198,18 +198,19 @@ public sealed class PublicAdminDeleteAclsTests
     }
 
     [Fact]
-    public void Options_DefaultToJavasDefaults() => Assert.Null(new DeleteAclsOptions().TimeoutMs);
+    public void Options_DefaultToJavasDefaults() => Assert.Null(new DeleteAclsOptions().TimeoutMs());
 
     [Fact]
     public void G4_5_FilterResult_ExposesException_NotError()
     {
         const BindingFlags Public = BindingFlags.Public | BindingFlags.Instance;
-        PropertyInfo? exception = typeof(DeleteAclsResult.FilterResult).GetProperty("Exception", Public);
+        MethodInfo? exception = typeof(DeleteAclsResult.FilterResult).GetMethod("Exception", Public, null, Type.EmptyTypes, null);
         Assert.NotNull(exception);
-        Assert.Equal(typeof(ApiException), exception!.PropertyType);
+        Assert.Equal(typeof(ApiException), exception!.ReturnType);
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(exception));
 
-        Assert.Null(typeof(DeleteAclsResult.FilterResult).GetProperty("Error", Public | BindingFlags.NonPublic));
+        Assert.Null(typeof(DeleteAclsResult.FilterResult).GetMethod("Error", Public | BindingFlags.NonPublic));
+        Assert.Empty(typeof(DeleteAclsResult.FilterResult).GetProperties(Public | BindingFlags.NonPublic));
     }
 
     private static AclBindingFilter Filter(string name) =>

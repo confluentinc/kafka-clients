@@ -428,10 +428,10 @@ public sealed class PublicConsumerCloseFromACallbackTests
     }
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static void Close(MockConsumer<byte[], byte[]> consumer, bool withOptions)
     {

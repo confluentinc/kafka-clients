@@ -39,7 +39,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public async Task CompleteNext_ResolvesPendingSend()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
@@ -49,15 +49,15 @@ public sealed class PublicSyncProducerMockControlTests
 
         RecordMetadata metadata = null!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
     }
 
     [Fact]
     public void CompleteNext_NoPending_ReturnsFalse()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // No pending send: false, as Java's MockProducer.completeNext() returns.
@@ -67,7 +67,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public async Task ErrorNext_FaultsPendingSend()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
@@ -84,7 +84,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void ErrorNext_NoPending_ReturnsFalse()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Assert.False(producer.ErrorNext(new Common.Errors.CorruptRecordException("nope")));
@@ -93,7 +93,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void HistoryCount_IncrementsPerSend()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Assert.Equal(0, producer.HistoryCount());
@@ -113,7 +113,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void Clear_ResetsHistory()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TestTimeout.Run(
@@ -128,7 +128,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void Helpers_AfterDispose_ThrowIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => producer.CompleteNext());

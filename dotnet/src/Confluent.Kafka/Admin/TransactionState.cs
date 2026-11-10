@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// The wire value is Java's <c>toString()</c> spelling (<c>"PrepareAbort"</c>, …), not
-/// <c>name()</c>, in both directions: <see cref="ListTransactionsOptions.FilteredStates"/> writes
+/// <c>name()</c>, in both directions: <see cref="ListTransactionsOptions.FilteredStates()"/> writes
 /// it.
 /// </para>
 /// <para>

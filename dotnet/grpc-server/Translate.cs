@@ -59,8 +59,8 @@ internal static class Translate
     internal static Proto.CallbackLogPartition CallbackLogPartitionToProto(TopicPartition partition) =>
         new Proto.CallbackLogPartition
         {
-            Topic = partition.Topic,
-            Partition = partition.Partition,
+            Topic = partition.Topic(),
+            Partition = partition.Partition(),
         };
 
     internal static Dictionary<TopicPartition, OffsetAndMetadata> ProtoOffsetsToDictionary(
@@ -85,14 +85,14 @@ internal static class Translate
     {
         Proto.ConsumerGroupMetadata proto = new Proto.ConsumerGroupMetadata
         {
-            GroupId = groupMetadata.GroupId,
-            GenerationId = groupMetadata.GenerationId,
-            MemberId = groupMetadata.MemberId,
+            GroupId = groupMetadata.GroupId(),
+            GenerationId = groupMetadata.GenerationId(),
+            MemberId = groupMetadata.MemberId(),
         };
 
-        if (groupMetadata.GroupInstanceId is not null)
+        if (groupMetadata.GroupInstanceId() is not null)
         {
-            proto.GroupInstanceId = groupMetadata.GroupInstanceId;
+            proto.GroupInstanceId = groupMetadata.GroupInstanceId();
         }
 
         return proto;
@@ -211,18 +211,18 @@ internal static class Translate
 
     internal static Proto.TopicPartition TpToProto(TopicPartition partition) => new Proto.TopicPartition
     {
-        Topic = partition.Topic,
-        Partition = partition.Partition,
+        Topic = partition.Topic(),
+        Partition = partition.Partition(),
     };
 
     internal static Proto.OffsetAndMetadata OamToProto(OffsetAndMetadata oam)
     {
         Proto.OffsetAndMetadata proto = new Proto.OffsetAndMetadata
         {
-            Offset = oam.Offset,
-            Metadata = oam.Metadata ?? string.Empty,
+            Offset = oam.Offset(),
+            Metadata = oam.Metadata() ?? string.Empty,
         };
-        if (oam.LeaderEpoch is int leaderEpoch)
+        if (oam.LeaderEpoch() is int leaderEpoch)
         {
             proto.LeaderEpoch = leaderEpoch;
         }
@@ -234,10 +234,10 @@ internal static class Translate
     {
         Proto.OffsetAndTimestamp proto = new Proto.OffsetAndTimestamp
         {
-            Offset = oat.Offset,
-            Timestamp = oat.Timestamp,
+            Offset = oat.Offset(),
+            Timestamp = oat.Timestamp(),
         };
-        if (oat.LeaderEpoch is int leaderEpoch)
+        if (oat.LeaderEpoch() is int leaderEpoch)
         {
             proto.LeaderEpoch = leaderEpoch;
         }
@@ -249,14 +249,14 @@ internal static class Translate
     {
         Proto.Node proto = new Proto.Node
         {
-            Id = node.Id,
-            Host = node.Host,
-            Port = node.Port,
-            IsFenced = node.IsFenced,
+            Id = node.Id(),
+            Host = node.Host(),
+            Port = node.Port(),
+            IsFenced = node.IsFenced(),
         };
-        if (node.Rack is not null)
+        if (node.Rack() is not null)
         {
-            proto.Rack = node.Rack;
+            proto.Rack = node.Rack();
         }
 
         return proto;
@@ -266,25 +266,25 @@ internal static class Translate
     {
         Proto.PartitionInfo proto = new Proto.PartitionInfo
         {
-            Topic = info.Topic,
-            Partition = info.Partition,
+            Topic = info.Topic(),
+            Partition = info.Partition(),
         };
-        if (info.Leader is not null)
+        if (info.Leader() is { } leader)
         {
-            proto.Leader = NodeToProto(info.Leader);
+            proto.Leader = NodeToProto(leader);
         }
 
-        foreach (Node node in info.Replicas)
+        foreach (Node node in info.Replicas())
         {
             proto.Replicas.Add(NodeToProto(node));
         }
 
-        foreach (Node node in info.InSyncReplicas)
+        foreach (Node node in info.InSyncReplicas())
         {
             proto.InSyncReplicas.Add(NodeToProto(node));
         }
 
-        foreach (Node node in info.OfflineReplicas)
+        foreach (Node node in info.OfflineReplicas())
         {
             proto.OfflineReplicas.Add(NodeToProto(node));
         }
@@ -296,34 +296,34 @@ internal static class Translate
     {
         Proto.ConsumerRecord proto = new Proto.ConsumerRecord
         {
-            Topic = record.Topic,
-            Partition = record.Partition,
-            Offset = record.Offset,
-            Timestamp = record.Timestamp,
-            TimestampType = (int)record.TimestampType,
+            Topic = record.Topic(),
+            Partition = record.Partition(),
+            Offset = record.Offset(),
+            Timestamp = record.Timestamp(),
+            TimestampType = (int)record.TimestampType(),
         };
 
-        if (record.Key is not null)
+        if (record.Key() is not null)
         {
-            proto.Key = ByteString.CopyFrom(record.Key);
+            proto.Key = ByteString.CopyFrom(record.Key());
         }
 
-        if (record.Value is not null)
+        if (record.Value() is not null)
         {
-            proto.Value = ByteString.CopyFrom(record.Value);
+            proto.Value = ByteString.CopyFrom(record.Value());
         }
 
-        if (record.LeaderEpoch is int le)
+        if (record.LeaderEpoch() is int le)
         {
             proto.LeaderEpoch = le;
         }
 
-        foreach (Header header in record.Headers)
+        foreach (Header header in record.Headers())
         {
             proto.Headers.Add(new Proto.Header
             {
-                Key = header.Key,
-                Value = ByteString.CopyFrom(header.Value ?? Array.Empty<byte>()),
+                Key = header.Key(),
+                Value = ByteString.CopyFrom(header.Value() ?? Array.Empty<byte>()),
             });
         }
 
@@ -355,29 +355,29 @@ internal static class Translate
 
     internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata
     {
-        Offset = metadata.Offset,
-        Timestamp = metadata.Timestamp,
-        SerializedKeySize = metadata.SerializedKeySize,
-        SerializedValueSize = metadata.SerializedValueSize,
-        Topic = metadata.Topic,
-        Partition = metadata.Partition,
+        Offset = metadata.Offset(),
+        Timestamp = metadata.Timestamp(),
+        SerializedKeySize = metadata.SerializedKeySize(),
+        SerializedValueSize = metadata.SerializedValueSize(),
+        Topic = metadata.Topic(),
+        Partition = metadata.Partition(),
     };
 
     internal static Proto.Metric MetricToProto(MetricName name, IMetric metric)
     {
         Proto.Metric proto = new Proto.Metric
         {
-            Name = name.Name,
-            Group = name.Group,
-            Description = name.Description,
+            Name = name.Name(),
+            Group = name.Group(),
+            Description = name.Description(),
         };
 
-        foreach (KeyValuePair<string, string> tag in name.Tags)
+        foreach (KeyValuePair<string, string> tag in name.Tags())
         {
             proto.Tags.Add(tag.Key, tag.Value);
         }
 
-        switch (metric.Value)
+        switch (metric.MetricValue())
         {
             case double doubleValue:
                 proto.DoubleValue = doubleValue;
@@ -393,7 +393,7 @@ internal static class Translate
                 break;
             default:
                 throw new InvalidOperationException(
-                    $"unexpected metric value type '{metric.Value?.GetType().FullName ?? "null"}' for metric '{name.Name}'");
+                    $"unexpected metric value type '{metric.MetricValue()?.GetType().FullName ?? "null"}' for metric '{name.Name()}'");
         }
 
         return proto;

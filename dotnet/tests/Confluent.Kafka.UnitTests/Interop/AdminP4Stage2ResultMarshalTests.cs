@@ -54,9 +54,9 @@ public sealed class AdminP4Stage2ResultMarshalTests
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        Assert.Equal(offset, copied.Offset);
-        Assert.Equal(timestamp, copied.Timestamp);
-        Assert.Equal(expected, copied.LeaderEpoch);
+        Assert.Equal(offset, copied.Offset());
+        Assert.Equal(timestamp, copied.Timestamp());
+        Assert.Equal(expected, copied.LeaderEpoch());
     }
 
     [Fact]
@@ -77,9 +77,9 @@ public sealed class AdminP4Stage2ResultMarshalTests
 
         Assert.Equal(new[] { latest, timestamp }, listed.Futures.Keys);
         ListOffsetsResult.ListOffsetsResultInfo info = listed.Futures[latest].Get(s_deadline);
-        Assert.Equal(-1L, info.Offset);
-        Assert.Equal(-1L, info.Timestamp);
-        Assert.Null(info.LeaderEpoch);
+        Assert.Equal(-1L, info.Offset());
+        Assert.Equal(-1L, info.Timestamp());
+        Assert.Null(info.LeaderEpoch());
 
         UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => listed.Futures[timestamp].Get(s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
@@ -109,13 +109,13 @@ public sealed class AdminP4Stage2ResultMarshalTests
 
         PartitionReassignment reassignment = Assert.Single(reassignments).Value;
         Assert.Equal(partition, Assert.Single(reassignments).Key);
-        Assert.NotEmpty(reassignment.Replicas);
-        Assert.All(reassignment.AddingReplicas, broker => Assert.DoesNotContain(broker, reassignment.Replicas));
-        Assert.All(reassignment.RemovingReplicas, broker => Assert.Contains(broker, reassignment.Replicas));
+        Assert.NotEmpty(reassignment.Replicas());
+        Assert.All(reassignment.AddingReplicas(), broker => Assert.DoesNotContain(broker, reassignment.Replicas()));
+        Assert.All(reassignment.RemovingReplicas(), broker => Assert.Contains(broker, reassignment.Replicas()));
 
         // The three lists are read through different accessors, so a copy-paste that pointed
         // two of them at the same accessor would make them equal. They are not.
-        Assert.NotEqual(reassignment.Replicas, reassignment.AddingReplicas);
+        Assert.NotEqual(reassignment.Replicas(), reassignment.AddingReplicas());
     }
 
     private static TopicPartition SeedTopic(

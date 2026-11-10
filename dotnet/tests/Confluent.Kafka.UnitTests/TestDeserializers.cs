@@ -84,7 +84,7 @@ internal sealed class SpanLengthDeserializer : IDeserializer<int>
 }
 
 /// <summary>
-/// Counts its calls over <see cref="Serdes.Int64"/>, so that a tombstone, <see langword="null"/>, differs from a
+/// Counts its calls over <see cref="Serdes.Long()"/>, so that a tombstone, <see langword="null"/>, differs from a
 /// present <c>0</c>.
 /// </summary>
 internal sealed class NullableInt64Deserializer : IDeserializer<long?>
@@ -94,6 +94,6 @@ internal sealed class NullableInt64Deserializer : IDeserializer<long?>
     public long? Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         InvocationCount++;
-        return Serdes.Int64.Deserialize(topic, data);
+        return Serdes.Long().Deserialize(topic, data);
     }
 }

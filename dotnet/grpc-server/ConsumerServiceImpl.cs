@@ -29,7 +29,7 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Serves <c>ConsumerService</c> over the sync <see cref="KafkaConsumer{TKey, TValue}"/> and
-/// <see cref="MockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>),
+/// <see cref="MockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>),
 /// the C# port of the consumer half of Python's <c>grpc_server.py</c>.
 /// </summary>
 internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServiceBase, IDisposable
@@ -75,11 +75,11 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             // An empty or all-blank config selects a MockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
             }
             else
             {
-                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
+                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
             }
         }
         catch (Exception ex)

@@ -67,9 +67,9 @@ public sealed class PublicProducerDeliveryCallbackTests
             Assert.Single(await SettledCompletions(callback, expected: 1));
 
         Assert.Null(completion.Exception);
-        Assert.Equal(Topic, completion.Metadata.Topic);
-        Assert.Equal(2, completion.Metadata.Partition);
-        Assert.Equal(0L, completion.Metadata.Offset);
+        Assert.Equal(Topic, completion.Metadata.Topic());
+        Assert.Equal(2, completion.Metadata.Partition());
+        Assert.Equal(0L, completion.Metadata.Offset());
 
         // The callback and the caller get the same instance: one completion drives both.
         Assert.Same(returned, completion.Metadata);
@@ -92,7 +92,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
-        Assert.Equal(NonAscii, completion.Metadata.Topic);
+        Assert.Equal(NonAscii, completion.Metadata.Topic());
     }
 
     [Theory]
@@ -152,7 +152,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         // Java completes the future after the callbacks run. The probe is the send task's state seen from inside the
         // callback; comparing continuation order would race RunContinuationsAsynchronously.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TaskStateProbeCallback probe = new TaskStateProbeCallback();
@@ -174,7 +174,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // The sync probe: the callback has run, on the completion thread, by the time the blocking Get returns.
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -205,7 +205,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // On failure too, the callback runs, on the completion thread, before Get throws.
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -258,10 +258,10 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         // Java's callback never sees null metadata: the -1 placeholder keeps the topic and the record's partition.
         Assert.NotNull(completion.Metadata);
-        Assert.Equal(Topic, completion.Metadata.Topic);
-        Assert.Equal(3, completion.Metadata.Partition);
-        Assert.Equal(-1L, completion.Metadata.Offset);
-        Assert.Equal(-1L, completion.Metadata.Timestamp);
+        Assert.Equal(Topic, completion.Metadata.Topic());
+        Assert.Equal(3, completion.Metadata.Partition());
+        Assert.Equal(-1L, completion.Metadata.Offset());
+        Assert.Equal(-1L, completion.Metadata.Timestamp());
 
         // The callback gets the send's own exception: the same code, message and flags.
         CorruptRecordException delivered = Assert.IsType<CorruptRecordException>(completion.Exception);
@@ -291,8 +291,8 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
-        Assert.Equal(Topic, completion.Metadata.Topic);
-        Assert.Equal(0, completion.Metadata.Partition);
+        Assert.Equal(Topic, completion.Metadata.Topic());
+        Assert.Equal(0, completion.Metadata.Partition());
     }
 
     [Theory]
@@ -317,8 +317,8 @@ public sealed class PublicProducerDeliveryCallbackTests
         Assert.Same(injected, FutureAssert.Unwrapped(failure));
         (RecordMetadata metadata, Exception? delivered) = Assert.Single(await SettledCompletions(callback, expected: 1));
         Assert.Same(injected, delivered);
-        Assert.Equal(1, metadata.Partition);
-        Assert.Equal(-1L, metadata.Offset);
+        Assert.Equal(1, metadata.Partition());
+        Assert.Equal(-1L, metadata.Offset());
     }
 
     [Theory]
@@ -335,10 +335,10 @@ public sealed class PublicProducerDeliveryCallbackTests
         DriveUntilResolved(() => producer.ErrorNext(null));
 
         RecordMetadata metadata = await WithTimeout(sendTask);
-        Assert.Equal(1, metadata.Partition);
+        Assert.Equal(1, metadata.Partition());
         (RecordMetadata delivered, Exception? exception) = Assert.Single(await SettledCompletions(callback, expected: 1));
         Assert.Null(exception);
-        Assert.Equal(metadata.Offset, delivered.Offset);
+        Assert.Equal(metadata.Offset(), delivered.Offset());
     }
 
     [Theory]
@@ -409,14 +409,14 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("first"), partition: 0), throwing));
 
         Assert.True(throwing.WasInvoked);
-        Assert.Equal(Topic, first.Topic);
-        Assert.Equal(0L, first.Offset);
+        Assert.Equal(Topic, first.Topic());
+        Assert.Equal(0L, first.Offset());
 
         RecordingDeliveryCallback recording = new RecordingDeliveryCallback();
         RecordMetadata second = await WithTimeout(producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("second"), partition: 0), recording));
 
-        Assert.Equal(1L, second.Offset);
+        Assert.Equal(1L, second.Offset());
         Assert.Single(await SettledCompletions(recording, expected: 1));
     }
 
@@ -442,7 +442,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         await TestTimeout.Run(async () => results = await Task.WhenAll(sends), s_deadline);
 
         Assert.Equal(RecordCount, results.Length);
-        Assert.All(results, metadata => Assert.Equal(Topic, metadata.Topic));
+        Assert.All(results, metadata => Assert.Equal(Topic, metadata.Topic()));
         Assert.Equal(RecordCount, throwing.InvocationCount);
     }
 
@@ -492,7 +492,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("first"), partition: 0),
             reentrant));
 
-        Assert.Equal(0, first.Partition);
+        Assert.Equal(0, first.Partition());
 
         Task<RecordMetadata>? retry = null;
         Stopwatch elapsed = Stopwatch.StartNew();
@@ -504,7 +504,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         Assert.NotNull(retry);
         RecordMetadata second = await WithTimeout(retry!);
-        Assert.Equal(1, second.Partition);
+        Assert.Equal(1, second.Partition());
     }
 
     [Fact]
@@ -512,7 +512,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // A token that ends the caller's Get wait leaves the record and its callback alone.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -529,14 +529,14 @@ public sealed class PublicProducerDeliveryCallbackTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => WithTimeout(wait));
         Assert.Equal(cts.Token, canceled.CancellationToken);
         Assert.Empty(callback.Completions);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
 
         Assert.True(producer.CompleteNext());
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
         Assert.Null(completion.Exception);
-        Assert.Equal(Topic, completion.Metadata.Topic);
+        Assert.Equal(Topic, completion.Metadata.Topic());
         Assert.Same(completion.Metadata, await WithTimeout(future.Get()));
     }
 
@@ -892,7 +892,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             bool autoComplete = true,
             ISerializer<byte[]>? valueSerializer = null)
         {
-            ISerializer<byte[]> value = valueSerializer ?? Serdes.ByteArray;
+            ISerializer<byte[]> value = valueSerializer ?? Serdes.ByteArray();
             return flavor == Sync
                 ? new SyncFlavor(autoComplete, value)
                 : new AsyncFlavor(autoComplete, value);
@@ -918,7 +918,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             internal SyncFlavor(bool autoComplete, ISerializer<byte[]> valueSerializer)
             {
                 _producer = new MockProducer<byte[], byte[]>(
-                    Serdes.ByteArray, valueSerializer, autoComplete);
+                    Serdes.ByteArray(), valueSerializer, autoComplete);
             }
 
             internal override Task<RecordMetadata> Send(
@@ -946,7 +946,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             internal AsyncFlavor(bool autoComplete, ISerializer<byte[]> valueSerializer)
             {
                 _producer = new AsyncMockProducer<byte[], byte[]>(
-                    Serdes.ByteArray, valueSerializer, autoComplete);
+                    Serdes.ByteArray(), valueSerializer, autoComplete);
             }
 
             internal override Task<RecordMetadata> Send(

@@ -641,7 +641,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int DestroysSeen { get; set; } = -1;
 
-        public byte[]? Serialize(string topic, byte[] data) => data;
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => data;
 
         public void Dispose()
         {
@@ -671,7 +671,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int Disposals => Volatile.Read(ref _disposals);
 
-        public byte[]? Serialize(string topic, byte[] data) => data;
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => data;
 
         public ValueTask DisposeAsync()
         {

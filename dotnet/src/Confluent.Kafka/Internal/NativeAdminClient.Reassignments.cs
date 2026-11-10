@@ -172,7 +172,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ElectLeadersOptions.TimeoutMs):
-                NativeMethods.ElectLeadersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ElectLeadersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ElectLeadersOptions has no C setter for " + setter + ".");
@@ -197,14 +197,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, NewPartitionReassignment?> entry in reassignments)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The reassignments map must not contain a topic partition with a null topic.",
                         nameof(reassignments));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(reassignments));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(reassignments));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);
@@ -287,11 +287,11 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(AlterPartitionReassignmentsOptions.TimeoutMs):
                 NativeMethods.AlterPartitionReassignmentsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterPartitionReassignmentsOptions.AllowReplicationFactorChange):
                 NativeMethods.AlterPartitionReassignmentsOptionsSetAllowReplicationFactorChange(
-                    native, (sbyte)(options.AllowReplicationFactorChange ? 1 : 0), ref outErr);
+                    native, (sbyte)(options.AllowReplicationFactorChange() ? 1 : 0), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterPartitionReassignmentsOptions has no C setter for " + setter + ".");
@@ -300,7 +300,7 @@ internal sealed partial class NativeAdminClient
 
     private static IntPtr NewNativePartitionReassignment(NewPartitionReassignment target)
     {
-        IReadOnlyList<int> replicas = target.TargetReplicas;
+        IReadOnlyList<int> replicas = target.TargetReplicas();
         int[] ids = new int[replicas.Count];
         for (int i = 0; i < ids.Length; i++)
         {
@@ -420,7 +420,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(ListPartitionReassignmentsOptions.TimeoutMs):
                 NativeMethods.ListPartitionReassignmentsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListPartitionReassignmentsOptions has no C setter for " + setter + ".");

@@ -33,7 +33,7 @@ internal sealed class RecordingSerializer<T> : ISerializer<T>
 
     internal int LastThreadId { get; private set; }
 
-    public byte[]? Serialize(string topic, T data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, T data)
     {
         InvocationCount++;
         LastDatumWasNull = data is null;
@@ -73,7 +73,7 @@ internal sealed class ThrowingSerializer<T> : ISerializer<T>
 
     internal Exception? LastThrown { get; private set; }
 
-    public byte[]? Serialize(string topic, T data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, T data)
     {
         InvocationCount++;
         Exception thrown = _make();
@@ -83,16 +83,26 @@ internal sealed class ThrowingSerializer<T> : ISerializer<T>
 }
 
 /// <summary>
-/// Counts its calls over <see cref="Serdes.Int64"/>, and serializes <see langword="null"/> to <see langword="null"/>
+/// Counts its calls over <see cref="Serdes.Long()"/>, and serializes <see langword="null"/> to <see langword="null"/>
 /// bytes, so that a tombstone differs from a present <c>0</c>.
 /// </summary>
 internal sealed class NullableInt64Serializer : ISerializer<long?>
 {
     internal int InvocationCount { get; private set; }
 
-    public byte[]? Serialize(string topic, long? data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, long? data)
     {
         InvocationCount++;
-        return data is null ? null : Serdes.Int64.Serialize(topic, data.Value);
+        return data is null ? null : Serdes.Long().Serialize(topic, data.Value);
     }
+}
+
+/// <summary>
+/// Returns the memory it is given unchanged, <see langword="null"/> included, so a send reads the caller's own bytes.
+/// </summary>
+internal sealed class MemorySerializer : ISerializer<ReadOnlyMemory<byte>?>
+{
+    internal static readonly MemorySerializer Instance = new MemorySerializer();
+
+    public ReadOnlyMemory<byte>? Serialize(string topic, ReadOnlyMemory<byte>? data) => data;
 }

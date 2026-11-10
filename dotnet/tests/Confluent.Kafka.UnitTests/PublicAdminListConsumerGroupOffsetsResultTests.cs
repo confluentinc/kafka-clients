@@ -148,7 +148,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
             await result.PartitionsToOffsetAndMetadata().Get();
 
-        Assert.Equal(7L, offsets[s_committed]!.Offset);
+        Assert.Equal(7L, offsets[s_committed]!.Offset());
         Assert.Same(result.PartitionsToOffsetAndMetadata("g").Get(), result.PartitionsToOffsetAndMetadata().Get());
     }
 
@@ -178,8 +178,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     {
         AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)), ("b", Completed(2)));
 
-        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("a").Get())[s_committed]!.Offset);
-        Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b").Get())[s_committed]!.Offset);
+        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("a").Get())[s_committed]!.Offset());
+        Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b").Get())[s_committed]!.Offset());
     }
 
     [Fact]
@@ -225,8 +225,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> all = await first;
 
         Assert.Equal(2, all.Count);
-        Assert.Equal(1L, all["a"][s_committed]!.Offset);
-        Assert.Equal(2L, all["A"][s_committed]!.Offset);
+        Assert.Equal(1L, all["a"][s_committed]!.Offset());
+        Assert.Equal(2L, all["A"][s_committed]!.Offset());
         Assert.Null(all["a"][s_uncommitted]);
     }
 
@@ -239,7 +239,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         KafkaException failure = new KafkaException("nope");
         broken.CompleteWithError(failure);
 
-        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok").Get())[s_committed]!.Offset);
+        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok").Get())[s_committed]!.Offset());
 
         Assert.Same(
             failure,

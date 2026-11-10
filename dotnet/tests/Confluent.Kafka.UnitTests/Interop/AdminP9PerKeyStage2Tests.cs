@@ -55,12 +55,12 @@ public sealed class AdminP9PerKeyStage2Tests
             TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: null));
 
         TopicDescription present = await TestTimeout.Run(
-            () => result.TopicNameValues!["cp3-present"].Get(), s_deadline);
-        Assert.Equal("cp3-present", present.Name);
-        Assert.Equal(3, present.Partitions.Count);
+            () => result.TopicNameValues()!["cp3-present"].Get(), s_deadline);
+        Assert.Equal("cp3-present", present.Name());
+        Assert.Equal(3, present.Partitions().Count);
 
         UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
-            () => TestTimeout.Run(() => result.TopicNameValues!["cp3-absent"].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.TopicNameValues()!["cp3-absent"].Get(), s_deadline));
         Assert.Equal("Topic cp3-absent not found.", failure.Message);
     }
 
@@ -78,9 +78,9 @@ public sealed class AdminP9PerKeyStage2Tests
         AsyncDescribeTopicsResult result =
             AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null));
 
-        TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues![id].Get(), s_deadline);
-        Assert.Equal(id, description.TopicId);
-        Assert.Equal("cp3-by-id", description.Name);
+        TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues()![id].Get(), s_deadline);
+        Assert.Equal(id, description.TopicId());
+        Assert.Equal("cp3-by-id", description.Name());
     }
 
     [Fact]
@@ -100,11 +100,11 @@ public sealed class AdminP9PerKeyStage2Tests
         AsyncDescribeConfigsResult result =
             AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic, broker, absent }, options: null));
 
-        Assert.NotNull(await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline));
-        Assert.NotNull(await TestTimeout.Run(() => result.Values[broker].Get(), s_deadline));
+        Assert.NotNull(await TestTimeout.Run(() => result.Values()[topic].Get(), s_deadline));
+        Assert.NotNull(await TestTimeout.Run(() => result.Values()[broker].Get(), s_deadline));
 
         UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
-            () => TestTimeout.Run(() => result.Values[absent].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[absent].Get(), s_deadline));
         Assert.Equal(
             "Resource ConfigResource(type=TOPIC, name='cp3-cfg-absent') not found.", failure.Message);
     }
@@ -122,9 +122,9 @@ public sealed class AdminP9PerKeyStage2Tests
         // Requested in descending order, so a reader that took a key for a position would swap them.
         AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(new[] { 1, 0 }, options: null));
 
-        Assert.Equal(2, result.Descriptions.Count);
-        Assert.Contains(0, result.Descriptions.Keys);
-        Assert.Contains(1, result.Descriptions.Keys);
+        Assert.Equal(2, result.Descriptions().Count);
+        Assert.Contains(0, result.Descriptions().Keys);
+        Assert.Contains(1, result.Descriptions().Keys);
 
         // Both keys resolve, and between them they account for every replica of the topic.
         // Which broker hosts which replica is the mock's choice, so the union is what is
@@ -133,11 +133,11 @@ public sealed class AdminP9PerKeyStage2Tests
         foreach (int broker in new[] { 1, 0 })
         {
             IReadOnlyDictionary<string, LogDirDescription> directories =
-                await TestTimeout.Run(() => result.Descriptions[broker].Get(), s_deadline);
+                await TestTimeout.Run(() => result.Descriptions()[broker].Get(), s_deadline);
             foreach (KeyValuePair<string, LogDirDescription> entry in directories)
             {
                 Assert.Equal("/tmp/kafka-logs", entry.Key);
-                replicas += entry.Value.ReplicaInfos.Count;
+                replicas += entry.Value.ReplicaInfos().Count;
             }
         }
 
@@ -198,7 +198,7 @@ public sealed class AdminP9PerKeyStage2Tests
                 {
                     AsyncDescribeTopicsResult result =
                         AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: null));
-                    foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> entry in result.TopicNameValues!)
+                    foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> entry in result.TopicNameValues()!)
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }
@@ -216,7 +216,7 @@ public sealed class AdminP9PerKeyStage2Tests
 
                     AsyncDescribeTopicsResult result =
                         AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: null));
-                    foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> entry in result.TopicIdValues!)
+                    foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> entry in result.TopicIdValues()!)
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }
@@ -233,7 +233,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     }
 
                     AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(resources, options: null));
-                    foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> entry in result.Values)
+                    foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> entry in result.Values())
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }
@@ -251,7 +251,7 @@ public sealed class AdminP9PerKeyStage2Tests
 
                     AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(brokers, options: null));
                     foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> entry
-                        in result.Descriptions)
+                        in result.Descriptions())
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }
@@ -264,7 +264,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     AsyncDescribeConsumerGroupsResult result =
                         AsyncDescribeConsumerGroupsResult.OfClient(admin.DescribeConsumerGroups(keys, options: null));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> entry
-                        in result.DescribedGroups)
+                        in result.DescribedGroups())
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }
@@ -277,7 +277,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     AsyncDescribeClassicGroupsResult result =
                         AsyncDescribeClassicGroupsResult.OfClient(admin.DescribeClassicGroups(keys, options: null));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> entry
-                        in result.DescribedGroups)
+                        in result.DescribedGroups())
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }
@@ -320,7 +320,7 @@ public sealed class AdminP9PerKeyStage2Tests
             default:
                 {
                     AsyncFenceProducersResult result = AsyncFenceProducersResult.OfClient(admin.FenceProducers(keys, options: null));
-                    foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.FencedProducers)
+                    foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.FencedProducers())
                     {
                         awaitables.Add(() => entry.Value.Get());
                     }

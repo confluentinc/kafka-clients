@@ -54,8 +54,8 @@ public sealed class AsyncDescribeClassicGroupsResult
 
     internal SafeAdminResultHandle? Native => _native;
 
-    /// <inheritdoc cref="DescribeClassicGroupsResult.DescribedGroups"/>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>> DescribedGroups => _futures;
+    /// <inheritdoc cref="DescribeClassicGroupsResult.DescribedGroups()"/>
+    public IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>> DescribedGroups() => _futures;
 
     /// <inheritdoc cref="DescribeClassicGroupsResult.All"/>
     public AsyncKafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>> All()

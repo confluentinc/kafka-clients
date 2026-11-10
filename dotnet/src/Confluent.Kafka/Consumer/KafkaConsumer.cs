@@ -195,15 +195,15 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) =>
-        _native.Seek(partition.Topic, partition.Partition, offset);
+        _native.Seek(partition.Topic(), partition.Partition(), offset);
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
-        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+        _native.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata);
 
     /// <inheritdoc/>
     public long? CurrentLag(TopicPartition partition) =>
-        _native.CurrentLag(partition.Topic, partition.Partition);
+        _native.CurrentLag(partition.Topic(), partition.Partition());
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();

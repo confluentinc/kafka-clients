@@ -19,12 +19,12 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Int32"/>: 4 big-endian bytes, as Java's <c>IntegerSerializer</c> and
+/// The serde behind <see cref="Serdes.Integer()"/>: 4 big-endian bytes, as Java's <c>IntegerSerializer</c> and
 /// <c>IntegerDeserializer</c>.
 /// </summary>
 internal sealed class Int32Serde : ISerde<int>
 {
-    public byte[]? Serialize(string topic, int data) =>
+    public ReadOnlyMemory<byte>? Serialize(string topic, int data) =>
         new[]
         {
             (byte)(data >> 24),

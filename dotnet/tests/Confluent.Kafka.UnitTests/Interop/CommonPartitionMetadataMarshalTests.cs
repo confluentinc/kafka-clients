@@ -64,11 +64,11 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
     {
         Node node = NodeMarshal.CopyOut(NewNode(7, "brøker-7.example", 9093, "rack-ø", isFenced: true))!;
 
-        Assert.Equal(7, node.Id);
-        Assert.Equal("brøker-7.example", node.Host);
-        Assert.Equal(9093, node.Port);
-        Assert.Equal("rack-ø", node.Rack);
-        Assert.True(node.IsFenced);
+        Assert.Equal(7, node.Id());
+        Assert.Equal("brøker-7.example", node.Host());
+        Assert.Equal(9093, node.Port());
+        Assert.Equal("rack-ø", node.Rack());
+        Assert.True(node.IsFenced());
     }
 
     [Fact]
@@ -76,11 +76,11 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
     {
         Node node = NodeMarshal.CopyOut(NewNode(3, "host-3", 9092, rack: null, isFenced: false))!;
 
-        Assert.Equal(3, node.Id);
-        Assert.Equal("host-3", node.Host);
-        Assert.Equal(9092, node.Port);
-        Assert.Null(node.Rack);
-        Assert.False(node.IsFenced);
+        Assert.Equal(3, node.Id());
+        Assert.Equal("host-3", node.Host());
+        Assert.Equal(9092, node.Port());
+        Assert.Null(node.Rack());
+        Assert.False(node.IsFenced());
     }
 
     [Fact]
@@ -99,19 +99,19 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
         PartitionInfo info = PartitionInfoMarshal.CopyOut(
             NewPartitionInfo(Topic, 4, n1, NewList(n1, n2, n3), NewList(n2, n1), NewList(n3)));
 
-        Assert.Equal(Topic, info.Topic);
-        Assert.Equal(4, info.Partition);
-        Assert.Equal(1, info.Leader!.Id);
-        Assert.Equal(new[] { 1, 2, 3 }, info.Replicas.Select(node => node.Id));
-        Assert.Equal(new[] { 2, 1 }, info.InSyncReplicas.Select(node => node.Id));
-        Assert.Equal(new[] { 3 }, info.OfflineReplicas.Select(node => node.Id));
+        Assert.Equal(Topic, info.Topic());
+        Assert.Equal(4, info.Partition());
+        Assert.Equal(1, info.Leader()!.Id());
+        Assert.Equal(new[] { 1, 2, 3 }, info.Replicas().Select(node => node.Id()));
+        Assert.Equal(new[] { 2, 1 }, info.InSyncReplicas().Select(node => node.Id()));
+        Assert.Equal(new[] { 3 }, info.OfflineReplicas().Select(node => node.Id()));
 
-        Node offline = info.OfflineReplicas[0];
-        Assert.Equal("host-3", offline.Host);
-        Assert.Equal(9093, offline.Port);
-        Assert.Equal("rack-3", offline.Rack);
-        Assert.True(offline.IsFenced);
-        Assert.Null(info.InSyncReplicas[0].Rack);
+        Node offline = info.OfflineReplicas()[0];
+        Assert.Equal("host-3", offline.Host());
+        Assert.Equal(9093, offline.Port());
+        Assert.Equal("rack-3", offline.Rack());
+        Assert.True(offline.IsFenced());
+        Assert.Null(info.InSyncReplicas()[0].Rack());
     }
 
     [Fact]
@@ -120,12 +120,12 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
         PartitionInfo info = PartitionInfoMarshal.CopyOut(
             NewPartitionInfo(Topic, 0, IntPtr.Zero, NewList(), NewList(), NewList()));
 
-        Assert.Equal(Topic, info.Topic);
-        Assert.Equal(0, info.Partition);
-        Assert.Null(info.Leader);
-        Assert.Empty(info.Replicas);
-        Assert.Empty(info.InSyncReplicas);
-        Assert.Empty(info.OfflineReplicas);
+        Assert.Equal(Topic, info.Topic());
+        Assert.Equal(0, info.Partition());
+        Assert.Null(info.Leader());
+        Assert.Empty(info.Replicas());
+        Assert.Empty(info.InSyncReplicas());
+        Assert.Empty(info.OfflineReplicas());
     }
 
     [Fact]
@@ -138,14 +138,14 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
 
         IReadOnlyList<PartitionInfo> infos = PartitionInfoListMarshal.CopyOut(list);
 
-        Assert.Equal(new[] { (Topic, 1), ("other", 0) }, infos.Select(info => (info.Topic, info.Partition)));
-        Assert.Equal(1, infos[0].Leader!.Id);
-        Assert.Null(infos[1].Leader);
+        Assert.Equal(new[] { (Topic, 1), ("other", 0) }, infos.Select(info => (Topic: info.Topic(), Partition: info.Partition())));
+        Assert.Equal(1, infos[0].Leader()!.Id());
+        Assert.Null(infos[1].Leader());
 
         IntPtr outErr = IntPtr.Zero;
         Assert.Equal(2, NativeMethods.ListSize(list, ref outErr));
         Assert.Equal(IntPtr.Zero, outErr);
-        Assert.Equal(Topic, PartitionInfoMarshal.CopyOut(first).Topic);
+        Assert.Equal(Topic, PartitionInfoMarshal.CopyOut(first).Topic());
     }
 
     [Fact]
@@ -165,14 +165,14 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
         {
             IReadOnlyList<PartitionInfo> infos = PartitionInfoListMarshal.CopyOutAndDestroy(PartitionsForTopic(cluster, Topic));
 
-            PartitionInfo[] byPartition = infos.OrderBy(info => info.Partition).ToArray();
-            Assert.Equal(new[] { 0, 1 }, byPartition.Select(info => info.Partition));
-            Assert.All(byPartition, info => Assert.Equal(Topic, info.Topic));
-            Assert.Equal(new[] { 1, 2 }, byPartition.Select(info => info.Leader!.Id));
-            Assert.Equal(new[] { 2, 1 }, byPartition[1].Replicas.Select(node => node.Id));
-            Assert.Equal(new[] { 2, 1 }, byPartition[1].InSyncReplicas.Select(node => node.Id));
-            Assert.Equal(new[] { 1 }, byPartition[1].OfflineReplicas.Select(node => node.Id));
-            Assert.Equal("rack-2", byPartition[1].Leader!.Rack);
+            PartitionInfo[] byPartition = infos.OrderBy(info => info.Partition()).ToArray();
+            Assert.Equal(new[] { 0, 1 }, byPartition.Select(info => info.Partition()));
+            Assert.All(byPartition, info => Assert.Equal(Topic, info.Topic()));
+            Assert.Equal(new[] { 1, 2 }, byPartition.Select(info => info.Leader()!.Id()));
+            Assert.Equal(new[] { 2, 1 }, byPartition[1].Replicas().Select(node => node.Id()));
+            Assert.Equal(new[] { 2, 1 }, byPartition[1].InSyncReplicas().Select(node => node.Id()));
+            Assert.Equal(new[] { 1 }, byPartition[1].OfflineReplicas().Select(node => node.Id()));
+            Assert.Equal("rack-2", byPartition[1].Leader()!.Rack());
 
             Assert.Empty(PartitionInfoListMarshal.CopyOutAndDestroy(PartitionsForTopic(cluster, "absent")));
         }

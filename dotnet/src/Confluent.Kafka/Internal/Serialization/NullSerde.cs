@@ -18,13 +18,13 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Null"/>, Java's <c>VoidSerializer</c> and <c>VoidDeserializer</c> over
+/// The serde behind <see cref="Serdes.Void()"/>, Java's <c>VoidSerializer</c> and <c>VoidDeserializer</c> over
 /// <see cref="object"/>: it serializes to <see langword="null"/> and deserializes any data to <see langword="null"/>,
 /// where Java's <c>VoidDeserializer</c> rejects non-null data.
 /// </summary>
 internal sealed class NullSerde : ISerde<object?>
 {
-    public byte[]? Serialize(string topic, object? data) => null;
+    public ReadOnlyMemory<byte>? Serialize(string topic, object? data) => null;
 
     public object? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 }

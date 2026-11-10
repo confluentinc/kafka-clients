@@ -123,7 +123,7 @@ public sealed class ProducerRecordBuildTests
         }
     }
 
-    private static IntPtr Build(in SerializedProducerRecord record, IntPtr key, IntPtr value)
+    internal static IntPtr Build(in SerializedProducerRecord record, IntPtr key, IntPtr value)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = ProducerSendMarshal.BuildRecord(in record, key, value, ref outErr);
@@ -140,7 +140,7 @@ public sealed class ProducerRecordBuildTests
         return Utf8Marshal.PtrToString(topic);
     }
 
-    private static T Read<T>(IntPtr native, Getter<T> getter)
+    internal static T Read<T>(IntPtr native, Getter<T> getter)
     {
         IntPtr outErr = IntPtr.Zero;
         T result = getter(native, ref outErr);
@@ -211,7 +211,7 @@ public sealed class ProducerRecordBuildTests
         }
     }
 
-    private static void Destroy(IntPtr native)
+    internal static void Destroy(IntPtr native)
     {
         IntPtr outErr = IntPtr.Zero;
         NativeMethods.ProducerRecordDestroy(native, ref outErr);
@@ -220,7 +220,7 @@ public sealed class ProducerRecordBuildTests
 
     private static byte[] Bytes(string value) => Encoding.UTF8.GetBytes(value);
 
-    private delegate T Getter<T>(IntPtr self, ref IntPtr outErr);
+    internal delegate T Getter<T>(IntPtr self, ref IntPtr outErr);
 
     /// <summary>A <c>kafka_Bytes_t</c> and a copy of its bytes in native memory, as the send passes a key or value.</summary>
     private sealed class NativeBytes : IDisposable
@@ -244,8 +244,8 @@ public sealed class ProducerRecordBuildTests
         }
     }
 
-    /// <summary>The native record's getters, which only this test reads.</summary>
-    private static class RecordNative
+    /// <summary>The native record's getters, which the producer interop tests read back.</summary>
+    internal static class RecordNative
     {
         private const string DllName = "confluent_kafka";
 

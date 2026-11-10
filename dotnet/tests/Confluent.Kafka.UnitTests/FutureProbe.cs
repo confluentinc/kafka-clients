@@ -32,21 +32,21 @@ internal abstract class FutureProbe
     internal abstract bool IsDone { get; }
 
     internal static FutureProbe Of(KafkaFuture future) =>
-        new SyncProbe(() => future.IsDone, () =>
+        new SyncProbe(() => future.IsDone(), () =>
         {
             future.Get();
             return BlockingCall.Returned;
         });
 
-    internal static FutureProbe Of<T>(KafkaFuture<T> future) => new SyncProbe(() => future.IsDone, () => future.Get());
+    internal static FutureProbe Of<T>(KafkaFuture<T> future) => new SyncProbe(() => future.IsDone(), () => future.Get());
 
-    internal static FutureProbe Of(AsyncKafkaFuture future) => new AsyncProbe(() => future.IsDone, future.Get(), static async task =>
+    internal static FutureProbe Of(AsyncKafkaFuture future) => new AsyncProbe(() => future.IsDone(), future.Get(), static async task =>
     {
         await task.ConfigureAwait(false);
         return BlockingCall.Returned;
     });
 
-    internal static FutureProbe Of<T>(AsyncKafkaFuture<T> future) => new AsyncProbe(() => future.IsDone, future.Get(), static async task =>
+    internal static FutureProbe Of<T>(AsyncKafkaFuture<T> future) => new AsyncProbe(() => future.IsDone(), future.Get(), static async task =>
         await ((Task<T>)task).ConfigureAwait(false));
 
     internal abstract void AssertPending();

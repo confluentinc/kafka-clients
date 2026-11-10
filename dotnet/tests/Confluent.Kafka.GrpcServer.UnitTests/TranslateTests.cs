@@ -173,15 +173,15 @@ public sealed class TranslateTests
 
         ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
 
-        Header[] headers = record.Headers.ToArray();
+        Header[] headers = record.Headers().ToArray();
         Assert.Equal(3, headers.Length);
-        Assert.Equal("b", headers[0].Key);
-        Assert.Equal(new byte[] { 1, 2 }, headers[0].Value);
-        Assert.Equal("trace-é", headers[1].Key);
-        Assert.Equal(new byte[] { 9 }, headers[1].Value);
-        Assert.Equal("b", headers[2].Key);
-        Assert.Equal(new byte[] { 3 }, headers[2].Value);
-        Assert.Equal(new byte[] { 7 }, record.Value);
+        Assert.Equal("b", headers[0].Key());
+        Assert.Equal(new byte[] { 1, 2 }, headers[0].Value());
+        Assert.Equal("trace-é", headers[1].Key());
+        Assert.Equal(new byte[] { 9 }, headers[1].Value());
+        Assert.Equal("b", headers[2].Key());
+        Assert.Equal(new byte[] { 3 }, headers[2].Value());
+        Assert.Equal(new byte[] { 7 }, record.Value());
     }
 
     [Fact]
@@ -192,9 +192,9 @@ public sealed class TranslateTests
 
         ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
 
-        Header header = Assert.Single(record.Headers);
-        Assert.Equal("empty", header.Key);
-        byte[]? value = header.Value;
+        Header header = Assert.Single(record.Headers());
+        Assert.Equal("empty", header.Key());
+        byte[]? value = header.Value();
         Assert.NotNull(value);
         Assert.Empty(value);
     }
@@ -206,10 +206,10 @@ public sealed class TranslateTests
 
         ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
 
-        Assert.Empty(record.Headers);
-        Assert.Equal("orders", record.Topic);
-        Assert.Equal(new byte[] { 1 }, record.Key);
-        Assert.Null(record.Value);
+        Assert.Empty(record.Headers());
+        Assert.Equal("orders", record.Topic());
+        Assert.Equal(new byte[] { 1 }, record.Key());
+        Assert.Null(record.Value());
     }
 
     public static TheoryData<Exception> ExceptionsWithoutAnId() => new TheoryData<Exception>

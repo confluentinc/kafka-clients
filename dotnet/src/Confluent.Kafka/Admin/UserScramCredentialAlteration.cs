@@ -29,11 +29,14 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public abstract class UserScramCredentialAlteration
 {
+    private readonly string _user;
+
     private protected UserScramCredentialAlteration(string user)
     {
-        User = user ?? throw new ArgumentNullException(nameof(user));
+        _user = user ?? throw new ArgumentNullException(nameof(user));
     }
 
     /// <summary>The user — Java's <c>user()</c>.</summary>
-    public string User { get; }
+    /// <returns>The user.</returns>
+    public string User() => _user;
 }

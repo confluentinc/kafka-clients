@@ -113,14 +113,14 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// <inheritdoc cref="KafkaFuture{T}.GetNow"/>
     public T GetNow(T valueIfAbsent) => Impl.GetNowWrapped(valueIfAbsent);
 
-    /// <inheritdoc cref="KafkaFuture{T}.IsCancelled"/>
-    public bool IsCancelled => Impl.IsCancelled;
+    /// <inheritdoc cref="KafkaFuture{T}.IsCancelled()"/>
+    public bool IsCancelled() => Impl.IsCancelled;
 
-    /// <inheritdoc cref="KafkaFuture{T}.IsCompletedExceptionally"/>
-    public bool IsCompletedExceptionally => Impl.IsCompletedExceptionally;
+    /// <inheritdoc cref="KafkaFuture{T}.IsCompletedExceptionally()"/>
+    public bool IsCompletedExceptionally() => Impl.IsCompletedExceptionally;
 
-    /// <inheritdoc cref="KafkaFuture{T}.IsDone"/>
-    public bool IsDone => Impl.IsDone;
+    /// <inheritdoc cref="KafkaFuture{T}.IsDone()"/>
+    public bool IsDone() => Impl.IsDone;
 
     /// <inheritdoc/>
     public override string ToString() =>
@@ -294,14 +294,14 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// <inheritdoc cref="KafkaFuture.GetNow"/>
     public void GetNow() => Impl.GetNowWrapped();
 
-    /// <inheritdoc cref="KafkaFuture.IsCancelled"/>
-    public bool IsCancelled => Impl.IsCancelled;
+    /// <inheritdoc cref="KafkaFuture.IsCancelled()"/>
+    public bool IsCancelled() => Impl.IsCancelled;
 
-    /// <inheritdoc cref="KafkaFuture.IsCompletedExceptionally"/>
-    public bool IsCompletedExceptionally => Impl.IsCompletedExceptionally;
+    /// <inheritdoc cref="KafkaFuture.IsCompletedExceptionally()"/>
+    public bool IsCompletedExceptionally() => Impl.IsCompletedExceptionally;
 
-    /// <inheritdoc cref="KafkaFuture.IsDone"/>
-    public bool IsDone => Impl.IsDone;
+    /// <inheritdoc cref="KafkaFuture.IsDone()"/>
+    public bool IsDone() => Impl.IsDone;
 
     /// <inheritdoc/>
     public override string ToString() =>

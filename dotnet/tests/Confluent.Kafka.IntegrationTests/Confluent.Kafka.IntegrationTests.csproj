@@ -13,6 +13,8 @@
     <IsPackable>false</IsPackable>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <IsTestProject>true</IsTestProject>
+    <!-- Only the linked NativeMemoryManager.cs, a MemoryManager<byte> over native memory, uses unsafe code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -33,6 +35,7 @@
   <ItemGroup>
     <Compile Include="..\Performance\Confluent.Kafka.PerformanceTests\KafkaBrokerFixture.cs" Link="KafkaBrokerFixture.cs" />
     <Compile Include="..\Performance\PerformanceCommon\PerfEnv.cs" Link="PerfEnv.cs" />
+    <Compile Include="..\Confluent.Kafka.UnitTests\NativeMemoryManager.cs" Link="NativeMemoryManager.cs" />
   </ItemGroup>
 
 </Project>

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
@@ -25,59 +24,72 @@ namespace Confluent.Kafka.Common;
 /// <remarks>Unlike Java's <c>PartitionInfo</c>, it has no value equality.</remarks>
 public sealed class PartitionInfo
 {
+    private readonly string _topic;
+    private readonly int _partition;
+    private readonly Node? _leader;
+    private readonly Node[] _replicas;
+    private readonly Node[] _inSyncReplicas;
+    private readonly Node[] _offlineReplicas;
+
     internal PartitionInfo(
         string topic,
         int partition,
         Node? leader,
-        IReadOnlyList<Node> replicas,
-        IReadOnlyList<Node> inSyncReplicas,
-        IReadOnlyList<Node> offlineReplicas)
+        Node[] replicas,
+        Node[] inSyncReplicas,
+        Node[] offlineReplicas)
     {
-        Topic = topic;
-        Partition = partition;
-        Leader = leader;
-        Replicas = replicas;
-        InSyncReplicas = inSyncReplicas;
-        OfflineReplicas = offlineReplicas;
+        _topic = topic;
+        _partition = partition;
+        _leader = leader;
+        _replicas = replicas;
+        _inSyncReplicas = inSyncReplicas;
+        _offlineReplicas = offlineReplicas;
     }
 
     /// <summary>The topic name.</summary>
-    public string Topic { get; }
+    /// <returns>The topic name.</returns>
+    public string Topic() => _topic;
 
     /// <summary>The partition id.</summary>
-    public int Partition { get; }
+    /// <returns>The partition id.</returns>
+    public int Partition() => _partition;
 
     /// <summary>The partition's leader, or <see langword="null"/> when it has none.</summary>
-    public Node? Leader { get; }
+    /// <returns>The partition's leader, or <see langword="null"/> when it has none.</returns>
+    public Node? Leader() => _leader;
 
     /// <summary>The partition's replicas.</summary>
-    public IReadOnlyList<Node> Replicas { get; }
+    /// <returns>The partition's replicas.</returns>
+    public Node[] Replicas() => _replicas;
 
-    /// <summary>The subset of <see cref="Replicas"/> that are in sync with the leader.</summary>
-    public IReadOnlyList<Node> InSyncReplicas { get; }
+    /// <summary>The subset of <see cref="Replicas()"/> that are in sync with the leader.</summary>
+    /// <returns>The subset of <see cref="Replicas()"/> that are in sync with the leader.</returns>
+    public Node[] InSyncReplicas() => _inSyncReplicas;
 
-    /// <summary>The subset of <see cref="Replicas"/> that are offline.</summary>
-    public IReadOnlyList<Node> OfflineReplicas { get; }
+    /// <summary>The subset of <see cref="Replicas()"/> that are offline.</summary>
+    /// <returns>The subset of <see cref="Replicas()"/> that are offline.</returns>
+    public Node[] OfflineReplicas() => _offlineReplicas;
 
     /// <inheritdoc/>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "Partition(topic = {0}, partition = {1}, leader = {2}, replicas = {3}, isr = {4}, offlineReplicas = {5})",
-            Topic,
-            Partition,
-            Leader is null ? "none" : Leader.Id.ToString(CultureInfo.InvariantCulture),
-            FormatNodeIds(Replicas),
-            FormatNodeIds(InSyncReplicas),
-            FormatNodeIds(OfflineReplicas));
+            _topic,
+            _partition,
+            _leader is null ? "none" : _leader.Id().ToString(CultureInfo.InvariantCulture),
+            FormatNodeIds(_replicas),
+            FormatNodeIds(_inSyncReplicas),
+            FormatNodeIds(_offlineReplicas));
 
-    private static string FormatNodeIds(IReadOnlyList<Node> nodes)
+    private static string FormatNodeIds(Node[] nodes)
     {
         StringBuilder builder = new StringBuilder("[");
-        for (int i = 0; i < nodes.Count; i++)
+        for (int i = 0; i < nodes.Length; i++)
         {
-            builder.Append(nodes[i].Id.ToString(CultureInfo.InvariantCulture));
-            if (i < nodes.Count - 1)
+            builder.Append(nodes[i].Id().ToString(CultureInfo.InvariantCulture));
+            if (i < nodes.Length - 1)
             {
                 builder.Append(',');
             }

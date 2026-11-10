@@ -245,7 +245,7 @@ public sealed class PublicSyncConsumerTimedOverloadTests
     [Fact]
     public void OnTheMock_TheTimedOverloads_AnswerAsTheUntimedOnes()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IConsumer<byte[], byte[]> sync = consumer;
         sync.Assign(new[] { s_tp0 });
@@ -298,7 +298,7 @@ public sealed class PublicSyncConsumerTimedOverloadTests
         new Dictionary<TopicPartition, long> { [s_tp0] = timestamp };
 
     private static IConsumer<byte[], byte[]> Create(bool mock) => mock
-        ? new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray)
+        ? new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray())
         : Real(defaultApiTimeoutMs: 60_000);
 
     private static KafkaConsumer<byte[], byte[]> Real(int defaultApiTimeoutMs) => new KafkaConsumer<byte[], byte[]>(
@@ -309,6 +309,6 @@ public sealed class PublicSyncConsumerTimedOverloadTests
             ["group.id"] = "test-group",
             ["default.api.timeout.ms"] = defaultApiTimeoutMs.ToString(CultureInfo.InvariantCulture),
         },
-        Serdes.ByteArray,
-        Serdes.ByteArray);
+        Serdes.ByteArray(),
+        Serdes.ByteArray());
 }

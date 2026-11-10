@@ -16,9 +16,11 @@ mod api_compat;
 mod bump_version;
 mod config_consts;
 mod config_types;
+mod dotnet_java_name_baseline;
 mod error_hierarchy;
 mod error_predicates;
 mod java;
+mod java_api;
 mod java_parse;
 mod javadoc;
 mod lint_custom;
@@ -46,6 +48,8 @@ fn main() -> anyhow::Result<()> {
         Some("generate-admin-options") => admin_gen::options::generate(Path::new(REPO_ROOT))?,
         Some("generate-admin-results") => admin_gen::results::generate(Path::new(REPO_ROOT))?,
         Some("java-deprecated") => java_deprecated()?,
+        Some("java-api") => java_api::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("dotnet-java-name-baseline") => dotnet_java_name_baseline::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
@@ -134,6 +138,7 @@ fn check_generated() -> anyhow::Result<()> {
     error_predicates::check_error_predicates_up_to_date()?;
     check_admin_options_up_to_date()?;
     check_admin_results_up_to_date()?;
+    check_java_api_up_to_date()?;
 
     println!("🔍 Checking generated code formatting...");
 
@@ -588,6 +593,17 @@ fn check_admin_results_up_to_date() -> anyhow::Result<()> {
         exit(1);
     }
     println!("✅ Generated admin Result modules are up to date");
+    Ok(())
+}
+
+/// Fail when a binding's copy of the Java API list no longer matches the Java sources.
+fn check_java_api_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking the bindings' Java API lists...");
+    if let Err(e) = java_api::check_binding_copies() {
+        eprintln!("\n❌ {e}");
+        exit(1);
+    }
+    println!("✅ The bindings' Java API lists are up to date");
     Ok(())
 }
 
@@ -2735,6 +2751,10 @@ fn print_help() {
   generate-admin-options  Regenerate the admin *Options Python classes from the Java sources
   generate-admin-results  Regenerate the admin *Result Python classes from the Java sources
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
+  java-api        Write the Java client's public API to a file, for the bindings' Java-name checks
+                  (--check: fail when the file is out of date instead of writing it)
+  dotnet-java-name-baseline  Rewrite the .NET binding's CKRDA0013 baseline from a build; it only shrinks
+                  (--add: also take findings it does not hold yet)
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
@@ -2849,6 +2869,8 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
+  cargo xtask java-api [--check] <file>
+  cargo xtask dotnet-java-name-baseline [--add]
   cargo xtask lint-custom [rule-name] [--no-baseline]
   cargo xtask ffi-baseline
   cargo xtask doc-baseline

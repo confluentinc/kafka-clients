@@ -21,15 +21,18 @@ namespace Confluent.Kafka.Common.Metrics;
 /// </summary>
 public sealed class KafkaMetric : IMetric
 {
+    private readonly MetricName _metricName;
+    private readonly object _metricValue;
+
     internal KafkaMetric(MetricName name, object value)
     {
-        Name = name;
-        Value = value;
+        _metricName = name;
+        _metricValue = value;
     }
 
     /// <inheritdoc/>
-    public MetricName Name { get; }
+    public MetricName MetricName() => _metricName;
 
     /// <inheritdoc/>
-    public object Value { get; }
+    public object MetricValue() => _metricValue;
 }

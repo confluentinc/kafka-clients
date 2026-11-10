@@ -31,7 +31,7 @@ public class DisconnectException : global::Confluent.Kafka.Common.Errors.Retriab
     /// The instance Java's <c>INSTANCE</c> holds. An error the client throws is never this instance, so compare by
     /// type. .NET records a stack trace on every throw, where Java's <c>ApiException</c> records none.
     /// </summary>
-    public static readonly DisconnectException Instance = new DisconnectException();
+    public static readonly DisconnectException INSTANCE = new DisconnectException();
 
     /// <summary>Initializes the exception, as Java's <c>DisconnectException()</c>.</summary>
     public DisconnectException()

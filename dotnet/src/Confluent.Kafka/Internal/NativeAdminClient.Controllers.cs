@@ -73,7 +73,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(UnregisterControllerOptions.TimeoutMs):
                 NativeMethods.UnregisterControllerOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("UnregisterControllerOptions has no C setter for " + setter + ".");

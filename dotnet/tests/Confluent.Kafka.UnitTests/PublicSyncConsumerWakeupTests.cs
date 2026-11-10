@@ -46,7 +46,7 @@ public sealed class PublicSyncConsumerWakeupTests
 
     private static MockConsumer<byte[], byte[]> ReadyToPoll()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;

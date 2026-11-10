@@ -36,14 +36,14 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: behaviour.FailEach is null);
+        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: behaviour.FailEach is null);
     }
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record) => _inner.Send(record);
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback)
     {
-        ulong index = ProducerProbe.IndexOf(record.Key);
+        ulong index = ProducerProbe.IndexOf(record.Key());
         _sends++;
         if (_behaviour.DisposeAfterSends is int disposeAfter && _sends == disposeAfter + 1)
         {

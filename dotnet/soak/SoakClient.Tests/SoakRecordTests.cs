@@ -32,7 +32,7 @@ public sealed class SoakRecordTests
     public void SerializeDeserializeRoundTrip()
     {
         var serializer = new SoakRecordSerializer(0);
-        byte[] payload = serializer.Serialize(Topic, new SoakRecord(42, 1765432100123, 3))!;
+        byte[] payload = serializer.Serialize(Topic, new SoakRecord(42, 1765432100123, 3))?.ToArray()!;
 
         SoakRecord parsed = s_deserializer.Deserialize(Topic, payload);
 
@@ -46,7 +46,7 @@ public sealed class SoakRecordTests
     public void RoundTripSurvivesPadding()
     {
         var serializer = new SoakRecordSerializer(10240);
-        byte[] payload = serializer.Serialize(Topic, new SoakRecord(7, 1765432100123, 1))!;
+        byte[] payload = serializer.Serialize(Topic, new SoakRecord(7, 1765432100123, 1))?.ToArray()!;
 
         Assert.Equal(10240, payload.Length);
 
@@ -66,7 +66,7 @@ public sealed class SoakRecordTests
     public void PaddingTargetIsExactAcrossMsgIdWidths(long msgId)
     {
         var serializer = new SoakRecordSerializer(50);
-        byte[] payload = serializer.Serialize(Topic, new SoakRecord(msgId, 1765432100123, 1))!;
+        byte[] payload = serializer.Serialize(Topic, new SoakRecord(msgId, 1765432100123, 1))?.ToArray()!;
         Assert.Equal(50, payload.Length);
     }
 
@@ -74,7 +74,7 @@ public sealed class SoakRecordTests
     public void NoPaddingWhenPrefixExceedsTarget()
     {
         var serializer = new SoakRecordSerializer(4);
-        byte[] payload = serializer.Serialize(Topic, new SoakRecord(123456, 1765432100123, 1))!;
+        byte[] payload = serializer.Serialize(Topic, new SoakRecord(123456, 1765432100123, 1))?.ToArray()!;
         Assert.Equal("123456|1765432100123|1|", Encoding.ASCII.GetString(payload));
     }
 
@@ -82,7 +82,7 @@ public sealed class SoakRecordTests
     public void PaddingGrowsSourceBufferBeyondDefault()
     {
         var serializer = new SoakRecordSerializer(100000);
-        byte[] payload = serializer.Serialize(Topic, new SoakRecord(1, 1765432100123, 1))!;
+        byte[] payload = serializer.Serialize(Topic, new SoakRecord(1, 1765432100123, 1))?.ToArray()!;
         Assert.Equal(100000, payload.Length);
     }
 

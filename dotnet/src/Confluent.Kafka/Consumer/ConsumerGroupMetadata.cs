@@ -19,38 +19,50 @@ namespace Confluent.Kafka.Consumer;
 /// <c>org.apache.kafka.clients.consumer.ConsumerGroupMetadata</c>, returned by <c>GroupMetadata()</c>.
 /// </summary>
 /// <remarks>
-/// Before the consumer has joined a group, <see cref="GroupId"/> is the configured <c>group.id</c>,
-/// <see cref="GenerationId"/> is <c>-1</c>, <see cref="MemberId"/> is empty, and <see cref="GroupInstanceId"/> is
+/// Before the consumer has joined a group, <see cref="GroupId()"/> is the configured <c>group.id</c>,
+/// <see cref="GenerationId()"/> is <c>-1</c>, <see cref="MemberId()"/> is empty, and <see cref="GroupInstanceId()"/> is
 /// the configured <c>group.instance.id</c>, or <see langword="null"/>. A mock consumer returns Java's mock values.
 /// </remarks>
 public sealed class ConsumerGroupMetadata
 {
+    private readonly string _groupId;
+    private readonly int _generationId;
+    private readonly string _memberId;
+    private readonly string? _groupInstanceId;
+
     internal ConsumerGroupMetadata(string groupId, int generationId, string memberId, string? groupInstanceId)
     {
-        GroupId = groupId;
-        GenerationId = generationId;
-        MemberId = memberId;
-        GroupInstanceId = groupInstanceId;
+        _groupId = groupId;
+        _generationId = generationId;
+        _memberId = memberId;
+        _groupInstanceId = groupInstanceId;
     }
 
     /// <summary>The consumer group id (the configured <c>group.id</c>).</summary>
-    public string GroupId { get; }
+    /// <returns>The consumer group id (the configured <c>group.id</c>).</returns>
+    public string GroupId() => _groupId;
 
     /// <summary>
     /// The group generation id, or <c>-1</c> when unknown (before the consumer has
     /// joined a group).
     /// </summary>
-    public int GenerationId { get; }
+    /// <returns>The group generation id, or <c>-1</c> when unknown (before the consumer has joined a
+    /// group).</returns>
+    public int GenerationId() => _generationId;
 
     /// <summary>
     /// The member id assigned by the coordinator, or the empty string before the
     /// consumer has joined a group.
     /// </summary>
-    public string MemberId { get; }
+    /// <returns>The member id assigned by the coordinator, or the empty string before the consumer has joined a
+    /// group.</returns>
+    public string MemberId() => _memberId;
 
     /// <summary>
     /// The static group instance id (the configured <c>group.instance.id</c>), or
     /// <see langword="null"/> when the consumer is not a static member.
     /// </summary>
-    public string? GroupInstanceId { get; }
+    /// <returns>The static group instance id (the configured <c>group.instance.id</c>), or <see langword="null"/>
+    /// when the consumer is not a static member.</returns>
+    public string? GroupInstanceId() => _groupInstanceId;
 }
