@@ -28,13 +28,18 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 internal sealed partial class NativeProducer
 {
-    // Held while SetFlushException sets the core's flush error and _mockFlushError, so concurrent calls leave the two
-    // equal.
-    private readonly object _mockFlushErrorGate = new object();
+    // Held while a setter sets the core's error and the binding's copy of it, so concurrent calls leave the two equal.
+    private readonly object _mockErrorGate = new object();
 
     // The core mock's flush error, for the flush the binding makes itself from a callback the core cannot see. The
     // core keeps its own copy, which its Flush, CommitTransaction and AbortTransaction throw.
     private Exception? _mockFlushError;
+
+    // The core mock's send error and fenced state, so Send checks them before it serializes, as Java's
+    // MockProducer.send does; the core checks them only once the record is serialized.
+    private Exception? _mockSendError;
+
+    private bool _mockFenced;
 
     // The mock's close error, kept here and not in the core, as Python's mock keeps its close_exception: Close throws it
     // before anything else, as Java's MockProducer.close() throws closeException before it sets closed, so the mock
@@ -45,26 +50,42 @@ internal sealed partial class NativeProducer
 
     private delegate sbyte MockFlagReader(IntPtr mock, ref IntPtr outErr);
 
-    internal void MockSetSendError(Exception? exception) =>
-        MockSetError(NativeMethods.MockProducerSetSendError, exception);
+    internal void MockSetSendError(Exception? exception)
+    {
+        lock (_mockErrorGate)
+        {
+            MockSetError(NativeMethods.MockProducerSetSendError, exception);
+            Volatile.Write(ref _mockSendError, exception);
+        }
+    }
 
     internal void MockSetFlushError(Exception? exception)
     {
-        lock (_mockFlushErrorGate)
+        lock (_mockErrorGate)
         {
             MockSetError(NativeMethods.MockProducerSetFlushError, exception);
             Volatile.Write(ref _mockFlushError, exception);
         }
     }
 
+    // What Java's MockProducer.send throws after its closed check and before it serializes: the fenced error, then the
+    // send exception; null when neither applies.
+    internal Exception? MockSendRefusal()
+    {
+        if (Volatile.Read(ref _mockFenced))
+        {
+            return new KafkaException(
+                "MockProducer is fenced.", new Common.Errors.ProducerFencedException("Fenced"));
+        }
+
+        return Volatile.Read(ref _mockSendError);
+    }
+
     internal void MockSetPartitionsForError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetPartitionsForError, exception);
 
-    internal void MockSetCloseError(Exception? exception)
-    {
-        ThrowIfClosed();
-        Volatile.Write(ref _mockCloseError, exception);
-    }
+    // Settable after close too, as Java's public field: Close throws it whatever the state.
+    internal void MockSetCloseError(Exception? exception) => Volatile.Write(ref _mockCloseError, exception);
 
     internal void MockSetInitTransactionError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetInitTransactionError, exception);
@@ -81,12 +102,15 @@ internal sealed partial class NativeProducer
     internal void MockSetAbortTransactionError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetAbortTransactionError, exception);
 
-    internal void MockFenceProducer() =>
+    internal void MockFenceProducer()
+    {
         CallMock((IntPtr mock, ref IntPtr outErr) =>
         {
             NativeMethods.MockProducerFenceProducer(mock, ref outErr);
             return 0;
         });
+        Volatile.Write(ref _mockFenced, true);
+    }
 
     internal bool MockTransactionInitialized() => MockFlag(NativeMethods.MockProducerTransactionInitialized);
 

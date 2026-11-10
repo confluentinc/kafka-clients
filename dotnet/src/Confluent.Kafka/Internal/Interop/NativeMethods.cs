@@ -886,8 +886,10 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerFlush(SafeProducerHandle self, ref IntPtr outErr);
 
-    // The five transaction operations: each `_cb` form queues its completion on the producer, and the blocking form
-    // serves only a mock's call from a sync delivery callback the drain runs (ffi-marshalling.md §A7).
+    // The five transaction operations: each `_cb` form queues its completion on the producer. The blocking form serves
+    // only a mock's call from a delivery callback: any of the five from a sync callback the drain runs, and
+    // InitTransactions, BeginTransaction or SendOffsetsToTransaction from a callback the core cannot see, which can run
+    // on a pool thread (ffi-marshalling.md §A7).
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_init_transactions_cb", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerInitTransactionsCb(SafeProducerHandle self, ProducerVoidCallback cb, IntPtr opaque);
 

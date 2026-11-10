@@ -164,7 +164,13 @@ public sealed class PublicProducerTransactionTests
         KafkaProducer<byte[], byte[]> producer = (KafkaProducer<byte[], byte[]>)Transactional(SyncFlavor, 3000);
         try
         {
-            Task init = Task.Run(producer.InitTransactions);
+            using ManualResetEventSlim started = new ManualResetEventSlim();
+            Task init = Task.Run(() =>
+            {
+                started.Set();
+                producer.InitTransactions();
+            });
+            Assert.True(started.Wait(Deadline), "InitTransactions never started");
             await Task.Delay(300);
             Assert.False(init.IsCompleted, "InitTransactions ended before the overlapping call");
 

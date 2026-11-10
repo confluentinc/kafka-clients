@@ -125,6 +125,13 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
 
+        Exception? refused = _native.MockSendRefusal();
+        if (refused is not null)
+        {
+            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(
+                Task.FromException<AsyncKafkaFuture<RecordMetadata>>(refused));
+        }
+
         // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: false);
@@ -271,8 +278,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
     /// <summary>
     /// Sets the exception that the first stage of <c>Send</c> fails with, as Java's <c>MockProducer.sendException</c> field: every later
-    /// call fails with this same instance, after the closed and fenced checks. The key and value are serialized first,
-    /// so a serializer's exception is thrown instead.
+    /// call fails with this same instance, after the closed and fenced checks and before the key and value are serialized.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
@@ -301,7 +307,6 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// set to.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
-    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public void SetCloseException(Exception? exception) => _native.MockSetCloseError(exception);
 
     /// <summary>

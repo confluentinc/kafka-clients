@@ -751,7 +751,8 @@ each goes when the reason it gives goes:
   `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
 - **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
   `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
-  `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, the five `Set*TransactionException` setters
+  `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
+  `SetPartitionsForException`, the five `Set*TransactionException` setters
   and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
   closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
   mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
@@ -1249,11 +1250,12 @@ object keeps from the consumer that gave it, the mocks' included. Recorded devia
   and must be retried"); once it has succeeded, whatever the core answers for a new call (on the
   mocks, `InitTransactions` again throws "MockProducer has already been initialized for
   transactions."). Only `IAsyncProducer` takes a token.
-- **Order of the null checks.** `SendOffsetsToTransaction` reports a null `groupMetadata` first
-  (`IllegalArgumentException` "Consumer group metadata could not be null"), then a null `offsets`
-  (`ArgumentNullException`), before the state checks, on all four classes. Java's `MockProducer`
-  makes its closed and state checks first, and refuses a null `groupMetadata` with
-  `NullPointerException`.
+- **Order of the null checks.** `SendOffsetsToTransaction` checks for a closed producer first, then a
+  null `groupMetadata` (`IllegalArgumentException` "Consumer group metadata could not be null"), then
+  a null `offsets` (`ArgumentNullException`), then the state, on all four classes. Java's
+  `KafkaProducer` and `MockProducer` check `groupMetadata` before the closed check (the mock with
+  `NullPointerException`), and Java's mock checks a null `offsets` only after its closed and state
+  checks.
 - **From a delivery callback.** From a sync delivery callback on `KafkaProducer` and
   `AsyncKafkaProducer` each of the five calls ends after `max.block.ms` with Kafka's
   `TimeoutException`, `BeginTransaction` included, where Java's `beginTransaction` returns at

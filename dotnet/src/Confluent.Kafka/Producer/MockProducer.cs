@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
@@ -96,6 +97,12 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     {
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
+
+        Exception? refused = _native.MockSendRefusal();
+        if (refused is not null)
+        {
+            ExceptionDispatchInfo.Capture(refused).Throw();
+        }
 
         // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
@@ -235,8 +242,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     /// <summary>
     /// Sets the exception that <c>Send</c> throws, as Java's <c>MockProducer.sendException</c> field: every later
-    /// call throws this same instance, after the closed and fenced checks. The key and value are serialized first,
-    /// so a serializer's exception is thrown instead.
+    /// call throws this same instance, after the closed and fenced checks and before the key and value are serialized.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
@@ -265,7 +271,6 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// to.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
-    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public void SetCloseException(Exception? exception) => _native.MockSetCloseError(exception);
 
     /// <summary>

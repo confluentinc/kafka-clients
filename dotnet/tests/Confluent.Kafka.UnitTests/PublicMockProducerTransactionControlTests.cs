@@ -230,6 +230,46 @@ public sealed class PublicMockProducerTransactionControlTests
         Assert.Equal(1, producer.HistoryCount());
     }
 
+    // Java's MockProducer.send checks the send exception and the fenced state before it serializes, so a throwing
+    // serializer is not reached. The async mock fails the first stage.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task Send_WithASendExceptionOrFenced_ThrowsBeforeSerializing(bool async)
+    {
+        ThrowingSerializer<string> serializer = new ThrowingSerializer<string>();
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "v");
+        KafkaException injected = new KafkaException("send");
+        KafkaException fenced;
+        if (async)
+        {
+            using AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(serializer, serializer);
+            producer.SetSendException(injected);
+            ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(record);
+            Assert.True(stage.IsFaulted);
+            Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => stage.AsTask()));
+            producer.SetSendException(null);
+            await producer.InitTransactions();
+            producer.FenceProducer();
+            stage = producer.Send(record);
+            Assert.True(stage.IsFaulted);
+            fenced = await Assert.ThrowsAsync<KafkaException>(() => stage.AsTask());
+        }
+        else
+        {
+            using MockProducer<string, string> producer = new MockProducer<string, string>(serializer, serializer);
+            producer.SetSendException(injected);
+            Assert.Same(injected, Assert.Throws<KafkaException>(() => producer.Send(record)));
+            producer.SetSendException(null);
+            producer.InitTransactions();
+            producer.FenceProducer();
+            fenced = Assert.Throws<KafkaException>(() => producer.Send(record));
+        }
+
+        Assert.Equal("MockProducer is fenced.", fenced.Message);
+        Assert.Equal("Fenced", Assert.IsType<ProducerFencedException>(fenced.InnerException).Message);
+        Assert.Equal(0, serializer.InvocationCount);
+    }
+
     [Theory]
     [MemberData(nameof(Flavors))]
     public async Task SetFlushException_ThrowsTheSameInstanceAndCompletesNoSend(bool async)
@@ -438,7 +478,6 @@ public sealed class PublicMockProducerTransactionControlTests
             () => producer.SetSendException(null),
             () => producer.SetFlushException(null),
             () => producer.SetPartitionsForException(null),
-            () => producer.SetCloseException(null),
             producer.FenceProducer,
             () => _ = producer.TransactionInitialized(),
             () => _ = producer.TransactionInFlight(),
@@ -454,6 +493,22 @@ public sealed class PublicMockProducerTransactionControlTests
             IllegalStateException e = Assert.Throws<IllegalStateException>(call);
             Assert.Equal(MockClosed, e.Message);
         }
+    }
+
+    // Java's closeException is a public field, so it can be set after close, and close throws it then too.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task SetCloseException_AfterClose_CloseThrowsIt(bool async)
+    {
+        using Mock producer = new Mock(async);
+        producer.Close();
+        KafkaException injected = new KafkaException("close");
+
+        producer.SetCloseException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => producer.CloseAsTask()));
+        producer.SetCloseException(null);
+        await producer.CloseAsTask();
     }
 
     [Fact]
