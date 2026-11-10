@@ -58,7 +58,7 @@ const HEADER: &str = "\
 # One tab-separated line per item; a nested class is Outer$Inner:
 #   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
-#   method    <class>  <static|instance>  <name(Type name, ...)>
+#   method    <class>  <static|instance|default>  <name(Type name, ...)>   (default: an interface's default method)
 #   field     <class>  <NAME>
 #   constant  <class>  <NAME>   (an enum constant)
 ";
@@ -234,7 +234,13 @@ pub(crate) fn render(
             if o.name == class.name() {
                 lines.push(format!("ctor\t{marker}\t{}", signature(o)));
             } else {
-                let scope = if o.is_static { "static" } else { "instance" };
+                let scope = if o.is_static {
+                    "static"
+                } else if o.is_default {
+                    "default"
+                } else {
+                    "instance"
+                };
                 lines.push(format!("method\t{marker}\t{scope}\t{}", signature(o)));
             }
         }
@@ -465,6 +471,34 @@ mod tests {
                 "method\torg.apache.kafka.common.IsolationLevel\tinstance\tordinal()",
                 "method\torg.apache.kafka.common.IsolationLevel\tstatic\tvalueOf(String ?)",
                 "method\torg.apache.kafka.common.IsolationLevel\tstatic\tvalues()",
+            ]
+        );
+    }
+
+    #[test]
+    fn marks_an_interfaces_default_methods() {
+        let listener = r#"
+            package x;
+            public interface ConsumerRebalanceListener {
+                void onPartitionsRevoked(Collection<TopicPartition> partitions);
+                default void onPartitionsLost(Collection<TopicPartition> partitions) {
+                    onPartitionsRevoked(partitions);
+                }
+                static ConsumerRebalanceListener noOp() { return null; }
+            }
+        "#;
+        let index = index(&[(&["clients", "consumer"], listener, false)]);
+        let lines = body(
+            &index,
+            &public(&["org.apache.kafka.clients.consumer.ConsumerRebalanceListener"]),
+        );
+        assert_eq!(
+            lines,
+            [
+                "type\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tinterface\t-",
+                "method\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tdefault\tonPartitionsLost(Collection partitions)",
+                "method\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tinstance\tonPartitionsRevoked(Collection partitions)",
+                "method\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tstatic\tnoOp()",
             ]
         );
     }
