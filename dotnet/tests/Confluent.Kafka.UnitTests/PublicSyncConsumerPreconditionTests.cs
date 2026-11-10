@@ -63,7 +63,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Subscribe((IReadOnlyCollection<string>)null!));
         Assert.Equal("topics", ex.ParamName);
     }
 
@@ -180,7 +180,7 @@ public sealed class PublicSyncConsumerPreconditionTests
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
 
-        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(null!));
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.Subscribe((IReadOnlyCollection<string>)null!));
         Assert.Equal("This consumer has already been closed.", ex.Message);
     }
 

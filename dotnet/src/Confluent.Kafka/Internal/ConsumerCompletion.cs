@@ -101,9 +101,9 @@ internal sealed class ConsumerCompletion<T> : ConsumerCompletion
 
     private readonly Func<IntPtr, long, T> _convert;
 
-    private readonly Action<bool>? _settle;
+    private readonly Action<IntPtr>? _settle;
 
-    internal ConsumerCompletion(Func<IntPtr, long, T> convert, Action<bool>? settle = null)
+    internal ConsumerCompletion(Func<IntPtr, long, T> convert, Action<IntPtr>? settle = null)
     {
         _convert = convert;
         _settle = settle;
@@ -117,7 +117,7 @@ internal sealed class ConsumerCompletion<T> : ConsumerCompletion
     {
         try
         {
-            _settle?.Invoke(error != IntPtr.Zero);
+            _settle?.Invoke(error);
         }
         finally
         {

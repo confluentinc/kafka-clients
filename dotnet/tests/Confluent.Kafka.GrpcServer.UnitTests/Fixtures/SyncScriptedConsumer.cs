@@ -59,6 +59,11 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
         _inner.Subscribe(topics, listener);
 
+    public void Subscribe(SubscriptionPattern pattern) => _inner.Subscribe(pattern);
+
+    public void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener listener) =>
+        _inner.Subscribe(pattern, listener);
+
     public void Unsubscribe() => _inner.Unsubscribe();
 
     public void Assign(IReadOnlyCollection<TopicPartition> partitions) => _inner.Assign(partitions);
