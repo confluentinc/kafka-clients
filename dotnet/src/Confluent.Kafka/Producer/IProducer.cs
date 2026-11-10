@@ -62,6 +62,208 @@ namespace Confluent.Kafka.Producer;
 public interface IProducer<TKey, TValue> : IDisposable
 {
     /// <summary>
+    /// Needs to be called before any other methods when the <c>transactional.id</c> is set in the configuration
+    /// (Java <c>initTransactions()</c>). It ensures any transactions initiated by previous instances of the producer
+    /// with the same <c>transactional.id</c> are completed: if the previous instance had failed with a transaction in
+    /// progress, it will be aborted; if the last transaction had begun completion, but not yet finished, this method
+    /// awaits its completion. It then gets the internal producer id and epoch, used in all future transactional
+    /// messages issued by the producer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This method will raise a <see cref="Common.Errors.TimeoutException"/> if the transactional state cannot be
+    /// initialized before expiration of <c>max.block.ms</c>. It is safe to retry, but once the transactional state
+    /// has been successfully initialized, this method should no longer be used.
+    /// </para>
+    /// <para>
+    /// Called from inside a delivery callback, it waits at most <c>max.block.ms</c>, then throws a
+    /// <see cref="Common.Errors.TimeoutException"/>, because its completion is queued behind the callback that
+    /// waits; the operation may still take effect. The same holds for the other four transaction methods. On a
+    /// <see cref="MockProducer{TKey, TValue}"/>, called from a delivery callback, each of the five completes, as
+    /// Java's mock does.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, or the producer is
+    /// closed.</exception>
+    /// <exception cref="UnsupportedVersionException">Fatal error indicating the broker does not support transactions
+    /// (i.e. if its version is lower than 0.11.0.0).</exception>
+    /// <exception cref="AuthorizationException">The configured <c>transactional.id</c> is not authorized, or the
+    /// idempotent producer id is unavailable. The call may be retried after fixing the permission.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this producer
+    /// (see <see cref="CommitTransaction"/>).</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The time taken for initializing the transaction has
+    /// surpassed <c>max.block.ms</c>.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
+    /// error.</exception>
+    void InitTransactions();
+
+    /// <summary>
+    /// Should be called before the start of each new transaction (Java <c>beginTransaction()</c>). Note that prior
+    /// to the first invocation of this method, you must invoke <see cref="InitTransactions"/> exactly one time.
+    /// </summary>
+    /// <remarks>
+    /// The core first hands over the records already sent, so this call can wait, where Java's returns at once;
+    /// called from inside a delivery callback it times out after <c>max.block.ms</c>, except on a
+    /// <see cref="MockProducer{TKey, TValue}"/> (see <see cref="InitTransactions"/>).
+    /// </remarks>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured,
+    /// <see cref="InitTransactions"/> has not yet been invoked, or the producer is closed.</exception>
+    /// <exception cref="ProducerFencedException">Another producer with the same <c>transactional.id</c> is
+    /// active.</exception>
+    /// <exception cref="InvalidProducerEpochException">The producer has attempted to produce with an old epoch to the
+    /// partition leader.</exception>
+    /// <exception cref="UnsupportedVersionException">Fatal error indicating the broker does not support transactions
+    /// (i.e. if its version is lower than 0.11.0.0).</exception>
+    /// <exception cref="AuthorizationException">Fatal error indicating that the configured <c>transactional.id</c> is
+    /// not authorized.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this producer
+    /// (see <see cref="CommitTransaction"/>).</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
+    /// error.</exception>
+    void BeginTransaction();
+
+    /// <summary>
+    /// Sends a list of specified offsets to the consumer group coordinator, and also marks those offsets as part of
+    /// the current transaction (Java <c>sendOffsetsToTransaction(offsets, groupMetadata)</c>). These offsets will be
+    /// considered committed only if the transaction is committed successfully. The committed offset should be the
+    /// next message your application will consume, i.e. <c>nextRecordToBeProcessed.Offset</c>. You should also add
+    /// the leader epoch as commit metadata.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This method should be used when you need to batch consumed and produced messages together, typically in a
+    /// consume-transform-produce pattern. The specified <paramref name="groupMetadata"/> should be extracted from the
+    /// used consumer via its <c>GroupMetadata()</c>.
+    /// </para>
+    /// <para>
+    /// This method is a blocking call that waits until the request has been received and acknowledged by the
+    /// consumer group coordinator; but the offsets are not considered as committed until the transaction itself is
+    /// successfully committed later (via <see cref="CommitTransaction"/>). The consumer should have
+    /// <c>enable.auto.commit=false</c> and should also not commit offsets manually.
+    /// </para>
+    /// <para>
+    /// A null <paramref name="groupMetadata"/> is refused before <paramref name="offsets"/> is read, and a null
+    /// <paramref name="offsets"/> before the state is checked. With an empty <paramref name="offsets"/>,
+    /// <see cref="KafkaProducer{TKey, TValue}"/> and <see cref="AsyncKafkaProducer{TKey, TValue}"/> return without
+    /// contacting the coordinator and without checking the transaction state, as Java's does: beyond those null
+    /// checks they throw only on a closed producer, or on one with no transaction support
+    /// (<c>enable.idempotence=false</c>). The mocks make their state checks first, as Java's mock does.
+    /// </para>
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit with the transaction.</param>
+    /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
+    /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key of <paramref name="offsets"/> has a null topic, or a value is
+    /// null.</exception>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
+    /// been started, or the producer is closed.</exception>
+    /// <exception cref="ProducerFencedException">Fatal error indicating another producer with the same
+    /// <c>transactional.id</c> is active.</exception>
+    /// <exception cref="UnsupportedVersionException">Fatal error indicating the broker does not support transactions
+    /// (i.e. if its version is lower than 0.11.0.0) or the broker doesn't support the latest version of the
+    /// transactional API with all consumer group metadata (i.e. if its version is lower than 2.5.0).</exception>
+    /// <exception cref="UnsupportedForMessageFormatException">Fatal error indicating the message format used for the
+    /// offsets topic on the broker does not support transactions.</exception>
+    /// <exception cref="AuthorizationException">Fatal error indicating that the configured <c>transactional.id</c> is
+    /// not authorized, or the consumer group id is not authorized.</exception>
+    /// <exception cref="Consumer.CommitFailedException">The commit failed and cannot be retried (e.g. if the
+    /// consumer has been kicked out of the group). Users should handle this by aborting the transaction.</exception>
+    /// <exception cref="FencedInstanceIdException">This producer instance gets fenced by the broker due to a
+    /// mis-configured consumer instance id within the group metadata.</exception>
+    /// <exception cref="InvalidProducerEpochException">The producer has attempted to produce with an old epoch to the
+    /// partition leader.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this producer
+    /// (see <see cref="CommitTransaction"/>).</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The combined time taken for resolving topic metadata and
+    /// sending the offsets has surpassed <c>max.block.ms</c>.</exception>
+    /// <exception cref="BootstrapResolutionException">DNS resolution of the bootstrap servers fails within
+    /// <c>bootstrap.resolve.timeout.ms</c>.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
+    /// other unexpected error.</exception>
+    void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, Consumer.OffsetAndMetadata> offsets,
+        Consumer.ConsumerGroupMetadata groupMetadata);
+
+    /// <summary>
+    /// Commits the ongoing transaction (Java <c>commitTransaction()</c>). This method will flush any unsent records
+    /// before actually committing the transaction.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// If any of the <c>Send</c> calls which were part of the transaction hit irrecoverable errors, this method will
+    /// throw the last received error immediately and the transaction will not be committed. So all <c>Send</c> calls
+    /// in a transaction must succeed in order for this method to succeed.
+    /// </para>
+    /// <para>
+    /// If the transaction is committed successfully and this method returns without throwing, it is guaranteed
+    /// that all delivery callbacks for records in the transaction will have been invoked and completed. Exceptions
+    /// thrown by callbacks are ignored; the producer proceeds to commit the transaction in any case.
+    /// </para>
+    /// <para>
+    /// This method will raise a <see cref="Common.Errors.TimeoutException"/> if the transaction cannot be committed
+    /// before expiration of <c>max.block.ms</c>, but this does not mean the request did not actually reach the
+    /// broker. It is safe to retry, but it is not possible to attempt a different operation (such as
+    /// <see cref="AbortTransaction"/>) since the commit may already be in the progress of completing. If not
+    /// retrying, the only option is to close the producer.
+    /// </para>
+    /// <para>
+    /// The transaction methods of one producer must not overlap: a call made while the producer still runs another
+    /// one's operation throws <see cref="ConcurrentModificationException"/> ("Transactional methods of
+    /// KafkaProducer are not safe for concurrent access."), where Java has no such check. The check covers the
+    /// operation only: a call made while a commit or an abort waits for the delivery callbacks is not refused.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
+    /// been started, or the producer is closed.</exception>
+    /// <exception cref="ProducerFencedException">Fatal error indicating another producer with the same
+    /// <c>transactional.id</c> is active.</exception>
+    /// <exception cref="UnsupportedVersionException">Fatal error indicating the broker does not support transactions
+    /// (i.e. if its version is lower than 0.11.0.0).</exception>
+    /// <exception cref="AuthorizationException">Fatal error indicating that the configured <c>transactional.id</c> is
+    /// not authorized.</exception>
+    /// <exception cref="InvalidProducerEpochException">The producer has attempted to produce with an old epoch to the
+    /// partition leader.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
+    /// producer.</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The time taken for committing the transaction has surpassed
+    /// <c>max.block.ms</c>.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
+    /// other unexpected error.</exception>
+    void CommitTransaction();
+
+    /// <summary>
+    /// Aborts the ongoing transaction (Java <c>abortTransaction()</c>). Any unflushed produce messages will be
+    /// aborted when this call is made. This call will throw immediately if any prior <c>Send</c> calls failed with a
+    /// <see cref="ProducerFencedException"/> or an <see cref="AuthorizationException"/>.
+    /// </summary>
+    /// <remarks>
+    /// This method will raise a <see cref="Common.Errors.TimeoutException"/> if the transaction cannot be aborted
+    /// before expiration of <c>max.block.ms</c>, but this does not mean the request did not actually reach the
+    /// broker. It is safe to retry, but it is not possible to attempt a different operation (such as
+    /// <see cref="CommitTransaction"/>) since the abort may already be in the progress of completing. If not
+    /// retrying, the only option is to close the producer.
+    /// </remarks>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
+    /// been started, or the producer is closed.</exception>
+    /// <exception cref="ProducerFencedException">Fatal error indicating another producer with the same
+    /// <c>transactional.id</c> is active.</exception>
+    /// <exception cref="InvalidProducerEpochException">The producer has attempted to produce with an old epoch to the
+    /// partition leader.</exception>
+    /// <exception cref="UnsupportedVersionException">Fatal error indicating the broker does not support transactions
+    /// (i.e. if its version is lower than 0.11.0.0).</exception>
+    /// <exception cref="AuthorizationException">Fatal error indicating that the configured <c>transactional.id</c> is
+    /// not authorized.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this producer
+    /// (see <see cref="CommitTransaction"/>).</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The time taken for aborting the transaction has surpassed
+    /// <c>max.block.ms</c>.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
+    /// error.</exception>
+    void AbortTransaction();
+
+    /// <summary>
     /// Serializes and sends <paramref name="record"/>, returning once the producer has it (Java
     /// <c>send(record)</c>). This blocks only while the producer waits for metadata or for buffer memory,
     /// up to <c>max.block.ms</c>.
