@@ -122,7 +122,11 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         return _inner.InitTransactions(cancellationToken);
     }
 
-    public void BeginTransaction() => _inner.BeginTransaction();
+    public Task BeginTransaction(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(BeginTransaction), cancellationToken);
+        return _inner.BeginTransaction(cancellationToken);
+    }
 
     public Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,

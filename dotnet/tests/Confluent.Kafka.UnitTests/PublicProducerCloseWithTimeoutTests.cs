@@ -194,7 +194,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
             Assert.Contains(initTransactionsTimeout, timeout.Message);
             try
             {
-                Assert.Throws<IllegalStateException>(producer.BeginTransaction);
+                await Assert.ThrowsAsync<IllegalStateException>(() => producer.BeginTransaction());
             }
             finally
             {

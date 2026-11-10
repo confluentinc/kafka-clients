@@ -73,12 +73,12 @@ public sealed class PublicMockProducerTransactionControlTests
         KafkaException injected = new KafkaException("begin");
         producer.SetBeginTransactionException(injected);
 
-        Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
-        Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.BeginTransaction));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.BeginTransaction));
         Assert.False(producer.TransactionInFlight());
 
         producer.SetBeginTransactionException(null);
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         Assert.True(producer.TransactionInFlight());
     }
 
@@ -88,18 +88,18 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         KafkaException injected = new KafkaException("begin");
         producer.SetBeginTransactionException(injected);
 
-        Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
-        Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.BeginTransaction));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.BeginTransaction));
         Assert.True(producer.TransactionInFlight());
 
         producer.SetBeginTransactionException(null);
         Assert.Equal(
             "Transaction already started",
-            Assert.Throws<IllegalStateException>(producer.BeginTransaction).Message);
+            (await Assert.ThrowsAsync<IllegalStateException>(producer.BeginTransaction)).Message);
     }
 
     [Theory]
@@ -108,7 +108,7 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         ProducerFencedException injected = new ProducerFencedException("offsets");
         producer.SetSendOffsetsToTransactionException(injected);
 
@@ -128,7 +128,7 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         InvalidOperationException injected = new InvalidOperationException("commit");
         producer.SetCommitTransactionException(injected);
 
@@ -149,7 +149,7 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         KafkaException injected = new KafkaException("abort");
         producer.SetAbortTransactionException(injected);
 
@@ -168,7 +168,7 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         Assert.Empty(producer.UncommittedOffsets());
 
         await producer.SendOffsets();
@@ -190,7 +190,7 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         await producer.SendOffsets();
         Assert.Single(producer.UncommittedOffsets());
 
@@ -207,7 +207,7 @@ public sealed class PublicMockProducerTransactionControlTests
         await producer.InitTransactions();
         producer.FenceProducer();
 
-        ProducerFencedException e = Assert.Throws<ProducerFencedException>(producer.BeginTransaction);
+        ProducerFencedException e = await Assert.ThrowsAsync<ProducerFencedException>(producer.BeginTransaction);
         Assert.Equal("MockProducer is fenced.", e.Message);
         e = await Assert.ThrowsAsync<ProducerFencedException>(producer.CommitTransaction);
         Assert.Equal("MockProducer is fenced.", e.Message);
@@ -255,7 +255,7 @@ public sealed class PublicMockProducerTransactionControlTests
     {
         using Mock producer = new Mock(async);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         KafkaException injected = new KafkaException("flush");
         producer.SetFlushException(injected);
 
@@ -610,17 +610,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
         internal Task InitTransactions() => Run(() => _sync!.InitTransactions(), () => _async!.InitTransactions());
 
-        internal void BeginTransaction()
-        {
-            if (_sync is not null)
-            {
-                _sync.BeginTransaction();
-            }
-            else
-            {
-                _async!.BeginTransaction();
-            }
-        }
+        internal Task BeginTransaction() => Run(() => _sync!.BeginTransaction(), () => _async!.BeginTransaction());
 
         internal Task SendOffsets() =>
             Run(

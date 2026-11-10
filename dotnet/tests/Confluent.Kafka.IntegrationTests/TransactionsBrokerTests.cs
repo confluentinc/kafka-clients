@@ -121,7 +121,7 @@ public sealed class TransactionsBrokerTests
 
         Assert.Equal(new[] { "a", "b", "c" }, records.Select(record => record.Value()));
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         foreach (ConsumerRecord<string, string> record in records)
         {
             await producer.Send(new ProducerRecord<string, string>(sink, record.Value().ToUpperInvariant(), record.Value(), partition: 0));
@@ -178,7 +178,7 @@ public sealed class TransactionsBrokerTests
             TransactionalConfigs("dotnet-abort-txn"), Serdes.String(), Serdes.String()))
         {
             await producer.InitTransactions();
-            producer.BeginTransaction();
+            await producer.BeginTransaction();
             AsyncKafkaFuture<RecordMetadata>[] aborted =
             {
                 await producer.Send(new ProducerRecord<string, string>(topic, "x1", partition: 0)),
@@ -190,7 +190,7 @@ public sealed class TransactionsBrokerTests
             Assert.Equal(0L, (await aborted[0].Get(s_get)).Offset());
             Assert.Equal(1L, (await aborted[1].Get(s_get)).Offset());
             await producer.AbortTransaction();
-            producer.BeginTransaction();
+            await producer.BeginTransaction();
             await producer.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
             await producer.CommitTransaction();
         }
@@ -234,13 +234,13 @@ public sealed class TransactionsBrokerTests
             new AsyncKafkaProducer<string, string>(configs, Serdes.String(), Serdes.String());
 
         await fenced.InitTransactions();
-        fenced.BeginTransaction();
+        await fenced.BeginTransaction();
         await fenced.Send(new ProducerRecord<string, string>(topic, "fenced", partition: 0));
         await fenced.Flush();
 
         // Initializing the newer producer aborts the older one's open transaction and fences it.
         await fencing.InitTransactions();
-        fencing.BeginTransaction();
+        await fencing.BeginTransaction();
         await fencing.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
 
         ProducerFencedException error = await Assert.ThrowsAsync<ProducerFencedException>(() => fenced.CommitTransaction());

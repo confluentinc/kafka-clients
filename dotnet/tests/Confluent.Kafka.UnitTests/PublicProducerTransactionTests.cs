@@ -190,7 +190,7 @@ public sealed class PublicProducerTransactionTests
             Assert.False(init.IsCompleted, "InitTransactions ended before the overlapping call");
 
             Exception? overlappingAsync = await CatchAsync(() => producer.InitTransactions());
-            Exception? overlappingBegin = Catch(producer.BeginTransaction);
+            Exception? overlappingBegin = await CatchAsync(() => producer.BeginTransaction());
 
             Assert.Equal(Overlapping, Assert.IsType<ConcurrentModificationException>(overlappingAsync).Message);
             Assert.Equal(Overlapping, Assert.IsType<ConcurrentModificationException>(overlappingBegin).Message);
@@ -204,6 +204,7 @@ public sealed class PublicProducerTransactionTests
 
     [Theory]
     [InlineData(Init)]
+    [InlineData(Begin)]
     [InlineData(SendOffsets)]
     [InlineData(Commit)]
     [InlineData(Abort)]
@@ -234,7 +235,7 @@ public sealed class PublicProducerTransactionTests
 
             Exception? canceled = await CatchAsync(() => init);
             Exception? retry = await CatchAsync(() => producer.InitTransactions());
-            Exception? begin = Catch(producer.BeginTransaction);
+            Exception? begin = await CatchAsync(() => producer.BeginTransaction());
 
             Assert.IsAssignableFrom<OperationCanceledException>(canceled);
             Assert.Equal(Overlapping, Assert.IsType<ConcurrentModificationException>(retry).Message);
@@ -260,7 +261,7 @@ public sealed class PublicProducerTransactionTests
 
             await Task.Delay(1500);
             Exception? retry = await CatchAsync(() => producer.InitTransactions());
-            Exception? begin = Catch(producer.BeginTransaction);
+            Exception? begin = await CatchAsync(() => producer.BeginTransaction());
 
             Assert.Contains(InitTimeout, Assert.IsType<KafkaTimeoutException>(retry).Message);
             Assert.Equal(
@@ -582,7 +583,7 @@ public sealed class PublicProducerTransactionTests
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
         SetMaxBlockMs(producer, MaxBlockMs);
         await producer.InitTransactions();
-        producer.BeginTransaction();
+        await producer.BeginTransaction();
         Exception? timedOut = null;
         long elapsedMs = 0;
         AfterAwait callback = new AfterAwait(async () =>
@@ -926,7 +927,7 @@ public sealed class PublicProducerTransactionTests
                 switch (operation)
                 {
                     case Init: return async.InitTransactions(cancellationToken);
-                    case Begin: return Run(async.BeginTransaction);
+                    case Begin: return async.BeginTransaction(cancellationToken);
                     case Commit: return async.CommitTransaction(cancellationToken);
                     case Abort: return async.AbortTransaction(cancellationToken);
                     default: throw new ArgumentException(operation);

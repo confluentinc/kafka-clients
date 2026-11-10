@@ -137,7 +137,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         _native.InitTransactionsWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public void BeginTransaction() => _native.BeginTransaction();
+    public Task BeginTransaction(CancellationToken cancellationToken = default) =>
+        _native.BeginTransactionWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task SendOffsetsToTransaction(
@@ -229,8 +230,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public void SetInitTransactionException(Exception? exception) => _native.MockSetInitTransactionError(exception);
 
     /// <summary>
-    /// Sets the exception that <see cref="BeginTransaction"/> throws, as Java's
-    /// <c>MockProducer.beginTransactionException</c> field: every later call throws this same instance, after the
+    /// Sets the exception that the task of <see cref="BeginTransaction"/> fails with, as Java's
+    /// <c>MockProducer.beginTransactionException</c> field: every later call fails with this same instance, after the
     /// closed, fenced and initialized checks, before the open-transaction check.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
