@@ -97,6 +97,24 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.SubscribeWithCallback(topics, callback, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(pattern, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Subscribe(
+        SubscriptionPattern pattern,
+        IConsumerRebalanceListener callback,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(pattern, callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Subscribe(
+        SubscriptionPattern pattern,
+        IAsyncConsumerRebalanceListener callback,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(pattern, callback, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeWithCallback(cancellationToken);
 

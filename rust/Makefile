@@ -208,38 +208,13 @@ test-integration-grpc-c-native:
 # (`__grpc_dotnet_async`) backends -- exactly as `__grpc_python` matches both
 # python arms -- so one target covers both dotnet gRPC images. To run only the
 # sync backend, add `--skip __grpc_dotnet_async`.
-#
-# TWO TESTS ARE SKIPPED FOR .NET ONLY, on both .NET arms: the consumer
-# pattern-subscribe tests. test_ml_subscribe_pattern_and_consume and
-# test_ml_pattern_listener_logs_assigned_and_revoked
-# (tests/integration/multilanguage_consumer_test.rs) subscribe with a
-# SubscriptionPattern, which the .NET consumer does not have yet, so both
-# consumer servicers answer a pattern Subscribe with -31
-# (LOCAL_UNSUPPORTED_OPERATION) instead of subscribing to no topic.
-#
-# The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the two
-# dotnet targets below (test-integration-grpc-dotnet, which the root
-# test-integration-dotnet and its -ssl / -sasl-ssl variants reach through dotnet/'s
-# test-integration, and test-integration-grpc-dotnet-native), which only ever run
-# __grpc_dotnet*, so no other backend loses coverage: python / c / rust still run
-# both.
-#
-# REMOVE the two skips when pattern subscribe lands in the .NET binding
-# (ledger row 148: Subscribe(SubscriptionPattern), with and without a listener)
-# and both consumer servicers subscribe with it; then remove DOTNET_GRPC_SKIPS
-# (the definition below and its uses in test-integration-grpc-dotnet and
-# test-integration-grpc-dotnet-native).
-DOTNET_GRPC_SKIPS = --skip test_ml_subscribe_pattern_and_consume \
-	--skip test_ml_pattern_listener_logs_assigned_and_revoked
 
 test-integration-grpc-dotnet:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-		$(DOTNET_GRPC_SKIPS)
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-		$(DOTNET_GRPC_SKIPS)
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
