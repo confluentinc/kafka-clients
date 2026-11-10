@@ -1593,7 +1593,7 @@ const-ness and its header text decide, not the type name:
 
     | # | Trigger | Route | Thread |
     |---|---|---|---|
-    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`IllegalStateException` "This consumer has already been closed."; during an explicit `Close`, another thread's call throws `ConcurrentModificationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy → dispose the deserializers the consumer was given (`dotnet/CLAUDE.md` §4 **Close/Dispose**, step 6) | the closing thread |
+    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`IllegalStateException` "This consumer has already been closed."; during an explicit `Close`, another thread's call throws `ConcurrentModificationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy → dispose the deserializers the consumer was given (`dotnet/CLAUDE.md` §4 **Close/Dispose**, step 6): the closing thread does, or, when `Poll`s are still deserializing, the last of them does once it ends (see the bullet below) | the closing thread; the deserializers: the closing thread, or the last `Poll` still deserializing |
     | 2 | `Dispose` / `DisposeAsync` from inside a callback on the drain thread (async consumers; a `Close` there throws `ConcurrentModificationException`, ledger 113) | the teardown is scheduled and the call returns; path 1's steps run once the drain's in-flight use has ended, never inside `__execute_callbacks`, and the drain thread is joined from the pool thread, never from itself | a pool thread, after the drain (as Python's runs in an executor off the loop, `python/confluent_kafka/consumer/async_consumer.py:604-608` at `3f8a5bc6`) |
 
     The cases, all on these two paths:
@@ -1643,10 +1643,14 @@ const-ness and its header text decide, not the type name:
         practice this is the sync consumers: a running drain thread roots its
         consumer.
       - **A live `ConsumerHandle`** does not defer the destroy (Category 6).
-      - **A `Poll` still deserializing on another thread** is not waited for: `Poll` deserializes after its
-        use ends (ledger 130), so a `Dispose` from another thread can dispose the deserializers while it runs,
-        as Python's `close()` can (ledger 384). A gate would bring back ledger 130's deadlock for a deserializer
-        that disposes its consumer.
+      - **A `Poll` still deserializing** is not waited for: `Poll` deserializes after its use ends (ledger 130),
+        so the teardown that destroys the consumer while one or more `Poll`s still deserialize hands the
+        deserializers over and returns, and the last of those `Poll`s disposes them once it has deserialized,
+        once, key then value (ledger 449). The count of `Poll`s holding records and the hand-off are decided
+        under one lock, so exactly one side disposes. Nothing waits, so a deserializer may still dispose its
+        consumer. A `Poll` takes its records inside its use, and the destroy runs only once the uses have ended
+        while new ones are refused as closed, so no `Poll` starts deserializing after it. This closes ledger
+        384's window, where a `Dispose` from another thread disposed the deserializers under a running `Poll`.
 
     Destroy first wakes the op still waiting (it fails with `WAKEUP`), awaits the
     `_cb` ops in flight, runs every pending callback on the destroying thread so each

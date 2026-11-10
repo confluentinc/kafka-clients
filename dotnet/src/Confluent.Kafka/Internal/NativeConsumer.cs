@@ -86,7 +86,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // once, as Python's closed check does.
     private volatile bool _destroyed;
     private readonly List<IntPtr> _recordBytes = new List<IntPtr>();
+
+    // The polls holding a records handle, each from inside its use until it has deserialized, and whether the teardown
+    // that destroyed the consumer while some held one handed them the deserializers: both under the _recordBytes lock.
     private int _recordsHeld;
+    private bool _deserializersHandedOver;
     private bool _recordBytesReleasable;
 
     // Closing: a teardown that will close (a Dispose, or a close the core accepted). ClosePending: an explicit Close
@@ -1707,14 +1711,27 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
     // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
     // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread: that is decided
-    // before the release, after which a waiting close may destroy it.
+    // before the release, after which a waiting close may destroy it. While a poll is still deserializing, that call
+    // hands them over instead and returns, and the last such poll disposes them once it has deserialized.
     private void ReleaseTheGateThenDisposeTheDeserializers(bool destroyedBefore)
     {
         bool destroyedByThisCall = !destroyedBefore && _destroyed;
         _closeGate.Release();
-        if (destroyedByThisCall)
+        if (destroyedByThisCall && !HandTheDeserializersToThePolls())
         {
             _serdes?.DisposeOnce();
+        }
+    }
+
+    // A poll takes its records inside its use, and the destroy runs only once the uses have ended while new ones are
+    // refused as closed, so after the destroy no poll takes records again and the count only falls: the teardown
+    // and the last poll decide under one lock, and exactly one of them disposes.
+    private bool HandTheDeserializersToThePolls()
+    {
+        lock (_recordBytes)
+        {
+            _deserializersHandedOver = _recordsHeld != 0;
+            return _deserializersHandedOver;
         }
     }
 
@@ -1728,6 +1745,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void DestroyRecords(IntPtr records)
     {
+        bool disposeTheDeserializers = false;
         try
         {
             ConsumerRecordsMarshal.Destroy(records);
@@ -1737,10 +1755,21 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             lock (_recordBytes)
             {
                 _recordsHeld--;
-                if (_recordsHeld == 0 && _recordBytesReleasable)
+                if (_recordsHeld == 0)
                 {
-                    FreeRecordBytes();
+                    if (_recordBytesReleasable)
+                    {
+                        FreeRecordBytes();
+                    }
+
+                    disposeTheDeserializers = _deserializersHandedOver;
+                    _deserializersHandedOver = false;
                 }
+            }
+
+            if (disposeTheDeserializers)
+            {
+                _serdes?.DisposeOnce();
             }
         }
     }

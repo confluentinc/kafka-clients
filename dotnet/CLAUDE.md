@@ -1200,8 +1200,9 @@ behavior*, not Java's method name, which is why Java's `commitSync` is our `Comm
 4. wait for in-flight uses;
 5. destroy on the closing thread;
 6. dispose the serializers or deserializers the producer or consumer was given that are `IDisposable`,
-   key then value, on the same thread (§4 **Serializers**); a producer whose async callbacks of serializer
-   failures still run disposes them once the last of those ends, and its close returns after that.
+   key then value, on the same thread (§4 **Serializers**), or, when a `Poll` is still deserializing, by the last such
+   `Poll` after it ends (ledger 449); a producer whose async callbacks of serializer failures still run disposes
+   them once the last of those ends, and its close returns after that.
 
 The admin mocks' `Close` does nothing (decision 21); their `Dispose` runs these steps. The producer and
 consumer mocks never dispose their serializers or deserializers, as Java's and Python's mocks. A

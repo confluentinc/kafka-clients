@@ -75,9 +75,9 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <see cref="ConfigException"/>, nor by a close refused with <see cref="ConcurrentModificationException"/>, which
     /// leaves the consumer open. So a deserializer shared with another client, or used after the close, sees it
     /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
-    /// A deserializer that is only <see cref="IAsyncDisposable"/> is not disposed. A <c>Close</c> or <c>Dispose</c> on
-    /// one thread can dispose the deserializers while a <c>Poll</c> on another thread is still deserializing; dispose
-    /// the consumer from the polling thread, or after its <c>Poll</c> has returned.
+    /// A deserializer that is only <see cref="IAsyncDisposable"/> is not disposed. When a <c>Poll</c> is still
+    /// deserializing, <c>Close</c> or <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers
+    /// after it ends.
     /// </remarks>
     public AsyncKafkaConsumer(
         IReadOnlyDictionary<string, object?> configs,

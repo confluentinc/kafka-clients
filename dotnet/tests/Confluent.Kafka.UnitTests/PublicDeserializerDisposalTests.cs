@@ -37,9 +37,10 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The deserializers a consumer was given: <see cref="KafkaConsumer{TKey, TValue}"/> and
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> dispose each one that is <see cref="IDisposable"/> once, key then
-/// value, after the destroy and on the thread that destroyed, and when the core fails to build the consumer with
-/// Java's wrapped error; a close that is refused disposes nothing, and the mocks never dispose them. Translates
-/// Python's deserializer-close tests of <c>test_kafka_consumer.py</c>.
+/// value, after the destroy and on the thread that destroyed, or, while a <c>Poll</c> is still deserializing, by that
+/// <c>Poll</c> after it ends, and when the core fails to build the consumer with Java's wrapped error; a close that is
+/// refused disposes nothing, and the mocks never dispose them. Translates Python's deserializer-close tests of
+/// <c>test_kafka_consumer.py</c>.
 /// </summary>
 public sealed class PublicDeserializerDisposalTests
 {
@@ -355,6 +356,149 @@ public sealed class PublicDeserializerDisposalTests
         {
             release.Set();
             poll?.End();
+            await DisposeBounded(consumer);
+        }
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, CloseHow)]
+    [InlineData(SyncFlavor, CloseWithOptionsHow)]
+    [InlineData(SyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow)]
+    [InlineData(AsyncFlavor, CloseWithOptionsHow)]
+    [InlineData(AsyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow)]
+    public async Task ACloseFromAnotherThreadWhileAPollDeserializes_ReturnsFirst_AndThatPollDisposesAfterIt(
+        string flavor,
+        string how)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        DisposableDeserializer key = new DisposableDeserializer("key", log);
+        DisposableDeserializer value = new DisposableDeserializer("value", log);
+        using ManualResetEventSlim deserializing = new ManualResetEventSlim(false);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+        value.OnDeserialize = () =>
+        {
+            deserializing.Set();
+            _ = release.Wait(Deadline);
+        };
+        IConsumerCommon consumer = MockGivenTheDeserializers(flavor, key, value);
+        DestroyLog destroys = WatchDestroy(consumer);
+        try
+        {
+            await ReadyWithARecord(consumer);
+            Task<int> poll = StartAPollOfItsOwn(consumer);
+            Assert.True(deserializing.Wait(Deadline), "the Poll never deserialized its record");
+
+            _ = await CloseBy(consumer, how);
+
+            Assert.Single(destroys.Destroys());
+            Assert.Equal(0, key.Disposals);
+            Assert.Equal(0, value.Disposals);
+            release.Set();
+            Assert.Equal(1, await TestTimeout.Run(() => poll, Deadline));
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            Assert.Equal(new[] { "key", "value" }, log);
+            Assert.False(value.DisposedWhileDeserializing, "the deserializers were disposed while the Poll deserialized");
+            Assert.Equal(value.DeserializeThreadId, key.ThreadId);
+            Assert.Equal(value.DeserializeThreadId, value.ThreadId);
+        }
+        finally
+        {
+            release.Set();
+            await DisposeBounded(consumer);
+        }
+
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, CloseHow)]
+    [InlineData(SyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow)]
+    [InlineData(AsyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow)]
+    public async Task ATeardownAfterThePollsHaveDeserialized_DisposesAtOnce_OnTheThreadThatDestroyed(
+        string flavor,
+        string how)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        DisposableDeserializer key = new DisposableDeserializer("key", log);
+        DisposableDeserializer value = new DisposableDeserializer("value", log);
+        IConsumerCommon consumer = MockGivenTheDeserializers(flavor, key, value);
+        DestroyLog destroys = WatchDestroy(consumer);
+        try
+        {
+            await ReadyWithARecord(consumer);
+            Assert.Equal(1, await TestTimeout.Run(() => StartAPollOfItsOwn(consumer), Deadline));
+
+            int closingThread = await CloseBy(consumer, how);
+
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            Assert.Equal(new[] { "key", "value" }, log);
+            (int destroyThread, string? _) = Assert.Single(destroys.Destroys());
+            Assert.Equal(destroyThread, key.ThreadId);
+            Assert.Equal(destroyThread, value.ThreadId);
+            if (closingThread != -1)
+            {
+                Assert.Equal(closingThread, key.ThreadId);
+            }
+        }
+        finally
+        {
+            await DisposeBounded(consumer);
+        }
+
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, CloseHow)]
+    [InlineData(SyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeHow)]
+    public async Task ADeserializerThatDisposesItsConsumer_Returns_AndItsPollDisposesTheDeserializersAfterIt(
+        string flavor,
+        string how)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        DisposableDeserializer key = new DisposableDeserializer("key", log);
+        DisposableDeserializer value = new DisposableDeserializer("value", log);
+        IConsumerCommon consumer = MockGivenTheDeserializers(flavor, key, value);
+        Exception? nested = null;
+        value.OnDeserialize = () => nested = Xunit.Record.Exception(() =>
+        {
+            if (how == CloseHow)
+            {
+                ((IConsumer<byte[], byte[]>)consumer).Close();
+            }
+            else
+            {
+                ((IDisposable)consumer).Dispose();
+            }
+        });
+        DestroyLog destroys = WatchDestroy(consumer);
+        try
+        {
+            await ReadyWithARecord(consumer);
+
+            Assert.Equal(1, await TestTimeout.Run(() => StartAPollOfItsOwn(consumer), Deadline));
+
+            Assert.Null(nested);
+            (int destroyThread, string? _) = Assert.Single(destroys.Destroys());
+            Assert.Equal(value.DeserializeThreadId, destroyThread);
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            Assert.Equal(new[] { "key", "value" }, log);
+            Assert.False(value.DisposedWhileDeserializing, "the deserializers were disposed inside the deserializer");
+            Assert.Equal(value.DeserializeThreadId, key.ThreadId);
+            Assert.Equal(value.DeserializeThreadId, value.ThreadId);
+        }
+        finally
+        {
             await DisposeBounded(consumer);
         }
     }
@@ -788,6 +932,73 @@ public sealed class PublicDeserializerDisposalTests
             ? new MockConsumer<byte[], byte[]>(key, value)
             : new AsyncMockConsumer<byte[], byte[]>(key, value);
 
+    // Only a mock returns records without a broker, so the mock's native consumer is given the SerdeDisposal the real
+    // consumers give NativeConsumer.Create: its Poll and teardown then dispose them as a real consumer does.
+    private static IConsumerCommon MockGivenTheDeserializers(
+        string flavor,
+        DisposableDeserializer key,
+        DisposableDeserializer value)
+    {
+        IConsumerCommon consumer = Mock(flavor, key, value);
+        typeof(NativeConsumer)
+            .GetField("_serdes", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(NativeOf(consumer), new SerdeDisposal(key, value));
+        return consumer;
+    }
+
+    private static NativeConsumer NativeOf(IConsumerCommon consumer) =>
+        (NativeConsumer)consumer.GetType()
+            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(consumer)!;
+
+    private static async Task ReadyWithARecord(IConsumerCommon consumer)
+    {
+        await Assign(consumer);
+        TopicPartition partition = s_partitions[0];
+        if (consumer is MockConsumer<byte[], byte[]> sync)
+        {
+            TestTimeout.Run(() => sync.Seek(partition, offset: 0), Deadline);
+            sync.AddRecord(partition.Topic(), partition.Partition(), offset: 0, key: new byte[] { 1 }, value: new byte[] { 2 });
+            return;
+        }
+
+        AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
+        await TestTimeout.Run(() => async.Seek(partition, offset: 0), Deadline);
+        async.AddRecord(partition.Topic(), partition.Partition(), offset: 0, key: new byte[] { 1 }, value: new byte[] { 2 });
+    }
+
+    // Off the test's thread: the sync Poll on a thread of its own, the async Poll from a pool thread, since a Poll
+    // whose completion has already arrived deserializes on the thread that called it.
+    private static Task<int> StartAPollOfItsOwn(IConsumerCommon consumer)
+    {
+        if (consumer is IAsyncConsumer<byte[], byte[]> async)
+        {
+            return Task.Run(() => CountOf(async.Poll(s_pollTimeout)));
+        }
+
+        IConsumer<byte[], byte[]> sync = (IConsumer<byte[], byte[]>)consumer;
+        TaskCompletionSource<int> polled = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Thread thread = new Thread(() =>
+        {
+            try
+            {
+                polled.SetResult(sync.Poll(s_pollTimeout).Count());
+            }
+            catch (Exception exception)
+            {
+                polled.SetException(exception);
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        thread.Start();
+        return polled.Task;
+    }
+
+    private static async Task<int> CountOf(Task<ConsumerRecords<byte[], byte[]>> poll) =>
+        (await poll.ConfigureAwait(false)).Count();
+
     private static string NullDeserializer(string key) =>
         "Invalid value null for configuration " + key + ": must be non-null.";
 
@@ -1167,8 +1378,9 @@ public sealed class PublicDeserializerDisposalTests
     }
 
     /// <summary>
-    /// A deserializer that records each <c>Dispose</c>: how many, the thread, its name in a shared log, and an optional
-    /// probe run inside it; it can throw from <c>Dispose</c>.
+    /// A deserializer that records each <c>Dispose</c>: how many, the thread, its name in a shared log, whether it came
+    /// while a <c>Deserialize</c> ran, and an optional probe run inside it; it can throw from <c>Dispose</c>, and runs
+    /// an optional action inside each <c>Deserialize</c>.
     /// </summary>
     private sealed class DisposableDeserializer : IDeserializer<byte[]>, IDisposable
     {
@@ -1177,6 +1389,8 @@ public sealed class PublicDeserializerDisposalTests
         private readonly bool _throws;
         private readonly ManualResetEventSlim _disposed = new ManualResetEventSlim();
         private int _disposals;
+        private int _deserializing;
+        private int _disposedWhileDeserializing;
 
         internal DisposableDeserializer(string name, ConcurrentQueue<string>? log = null, bool throws = false)
         {
@@ -1197,10 +1411,36 @@ public sealed class PublicDeserializerDisposalTests
 
         internal int DestroysSeen { get; set; } = -1;
 
-        public byte[] Deserialize(string topic, ReadOnlySpan<byte> data) => data.ToArray();
+        internal Action? OnDeserialize { get; set; }
+
+        internal int DeserializeThreadId { get; private set; } = -1;
+
+        internal bool DisposedWhileDeserializing => Volatile.Read(ref _disposedWhileDeserializing) != 0;
+
+        public byte[] Deserialize(string topic, ReadOnlySpan<byte> data)
+        {
+            byte[] copy = data.ToArray();
+            DeserializeThreadId = Environment.CurrentManagedThreadId;
+            _ = Interlocked.Increment(ref _deserializing);
+            try
+            {
+                OnDeserialize?.Invoke();
+            }
+            finally
+            {
+                _ = Interlocked.Decrement(ref _deserializing);
+            }
+
+            return copy;
+        }
 
         public void Dispose()
         {
+            if (Volatile.Read(ref _deserializing) != 0)
+            {
+                Volatile.Write(ref _disposedWhileDeserializing, 1);
+            }
+
             ThreadId = Environment.CurrentManagedThreadId;
             ThreadName = Thread.CurrentThread.Name;
             _log?.Enqueue(_name);
