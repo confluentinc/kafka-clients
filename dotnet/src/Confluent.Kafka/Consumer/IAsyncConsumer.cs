@@ -187,8 +187,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// RE2/J that the broker evaluates (Java <c>subscribe(SubscriptionPattern)</c>).
     /// </summary>
     /// <remarks>
-    /// A pattern that is not compatible with RE2/J is not refused here: a later
-    /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
+    /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, a pattern that is not compatible with RE2/J is not
+    /// refused here: a later <see cref="Poll(TimeSpan, CancellationToken)"/> fails with
+    /// <see cref="InvalidRegularExpression"/>. An <see cref="AsyncMockConsumer{TKey, TValue}"/> does not evaluate the
+    /// pattern, so its <see cref="Poll(TimeSpan, CancellationToken)"/> never fails this way.
     /// </remarks>
     /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
     /// <param name="cancellationToken">
@@ -228,8 +230,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The broker evaluates the pattern with Google RE2/J; one that is not compatible is not refused here: a later
-    /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
+    /// The broker evaluates the pattern with Google RE2/J; on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> one
+    /// that is not compatible is not refused here: a later <see cref="Poll(TimeSpan, CancellationToken)"/> fails with
+    /// <see cref="InvalidRegularExpression"/>. An <see cref="AsyncMockConsumer{TKey, TValue}"/> does not evaluate the
+    /// pattern, so its <see cref="Poll(TimeSpan, CancellationToken)"/> never fails this way.
     /// </para>
     /// <para>
     /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
@@ -288,8 +292,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// rebalance until another subscribe replaces it.
     /// </summary>
     /// <remarks>
-    /// The broker evaluates the pattern with Google RE2/J; one that is not compatible is not refused here: a later
-    /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
+    /// The broker evaluates the pattern with Google RE2/J; on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> one
+    /// that is not compatible is not refused here: a later <see cref="Poll(TimeSpan, CancellationToken)"/> fails with
+    /// <see cref="InvalidRegularExpression"/>. An <see cref="AsyncMockConsumer{TKey, TValue}"/> does not evaluate the
+    /// pattern, so its <see cref="Poll(TimeSpan, CancellationToken)"/> never fails this way.
     /// </remarks>
     /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
     /// <param name="callback">The rebalance listener to register.</param>
