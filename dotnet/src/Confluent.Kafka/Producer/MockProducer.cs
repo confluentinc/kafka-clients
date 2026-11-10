@@ -161,8 +161,8 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     public bool ErrorNext(Exception? exception) => _native.MockErrorNext(exception);
 
     /// <summary>
-    /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>); the native mock
-    /// exposes the count only.
+    /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>). The native mock
+    /// holds the records serialized, so the typed list Java returns is not available.
     /// </summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public int HistoryCount() => _native.MockHistoryCount();

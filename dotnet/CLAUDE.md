@@ -333,7 +333,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         bool autoComplete = true);
     public bool CompleteNext();
     public bool ErrorNext(Exception exception);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
-    public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
+    public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
     public void Clear();
     // Java's transaction controls (§4 Producer transactions); MockProducer has the same members
     public void SetInitTransactionException(Exception? exception);          // Java's field is a RuntimeException; null clears
@@ -365,9 +365,12 @@ can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **
 longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
 `kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
 `send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10;
-`ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` (Java returns the full record list; the ABI gives
-only a count, hence the .NET-only method `HistoryCount()`, as Python's `history_count()`), and for the same
-reason `MockProducer.uncommittedRecords()`, which also returns records. Add each when the ABI grows to cover it.
+`ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` and `MockProducer.uncommittedRecords()`.
+Java returns the records as they were sent, typed `ProducerRecord<K, V>`. The ABI returns the records too
+(`kafka_producer_MockProducer_history` / `_uncommitted_records`, a `kafka_List_t` of `ProducerRecord_t *`), but
+serialized: their key and value are bytes, and the mock takes serializers, not deserializers, so the binding
+cannot give back `TKey` / `TValue`. Python's mock is pure Python and keeps the typed records itself. The
+.NET-only `HistoryCount()` reads the size of that list. Add both when the binding can give back typed records.
 
 **The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
 the binding, **above** the bytes-based native producer and **before** the P/Invoke
@@ -1276,9 +1279,10 @@ The mocks carry Java's `MockProducer` transaction controls (§3 sketch), over th
 - Java's public fields `sendException`, `flushException`, `partitionsForException` and
   `closeException` are setters `Set<Field>(Exception?)`, as Python's `set_<field>`; CKRDA0013
   allowlists them, with the five transaction setters.
-- `UncommittedRecords()` and `History()` are left out: the ABI gives no record list
-  (`HistoryCount()` stands in). So the ports of Java's history tests check `HistoryCount()`, not
-  the records.
+- `UncommittedRecords()` and `History()` are left out: the ABI's records hold the serialized
+  bytes, and the binding cannot turn them back into typed `TKey` / `TValue` records (§3, clipped to
+  today's ABI). `HistoryCount()` stands in, so the ports of Java's history tests check
+  `HistoryCount()`, not the records.
 
 ### Threads and teardown (M19/P1)
 
