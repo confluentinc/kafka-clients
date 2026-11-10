@@ -1402,7 +1402,7 @@ const CS_LICENSE: &str = "// Copyright 2026 Confluent Inc.
 ";
 
 /// One config class as C#: a `public const` for each of Java's compile-time
-/// constants, a static get-only property for each other field; the client
+/// constants, a `static readonly` field for each other field; the client
 /// classes with a private constructor, the others with Java's implicit
 /// public one.
 fn render_cs(spec: &Spec, consts: &[Const]) -> Res<String> {
@@ -1427,7 +1427,7 @@ fn render_cs(spec: &Spec, consts: &[Const]) -> Res<String> {
         members.push(if c.constant {
             format!("{doc}    public const {ty} {} = {val};\n", c.name)
         } else {
-            format!("{doc}    public static {ty} {} {{ get; }} = {val};\n", c.name)
+            format!("{doc}    public static readonly {ty} {} = {val};\n", c.name)
         });
     }
     if spec.kind == Kind::ConstantsOnly {
@@ -1696,28 +1696,29 @@ mod tests {
     #[test]
     fn test_cs_constant_counts() {
         // A tripwire for a Kafka upgrade: the eight classes' fields, and which
-        // are not compile-time constants in Java (so a C# property, not a const).
+        // are not compile-time constants in Java (so a C# `static readonly` field, not a const).
         let root = repo_root();
         let outputs = outputs(&root).unwrap();
         let want: &[(usize, usize)] = &[(62, 0), (67, 5), (38, 1), (72, 0), (119, 0), (43, 4), (2, 0), (6, 1)];
         let mut total = 0;
-        let mut properties = Vec::new();
+        let mut readonly = Vec::new();
         for ((file, spec), (consts, props)) in CS_FILES.iter().zip(SPECS).zip(want) {
             let content = &outputs.iter().find(|(p, _)| *p == root.join(file)).unwrap().1;
             let c = content.matches("\n    public const ").count();
             let p: Vec<_> = content
                 .lines()
-                .filter_map(|l| l.strip_prefix("    public static "))
+                .filter_map(|l| l.strip_prefix("    public static readonly "))
                 .map(|l| format!("{}.{}", simple(spec.java), l.split_whitespace().nth(1).unwrap()))
                 .collect();
             assert_eq!((c, p.len()), (*consts, *props), "{file}");
+            assert!(!content.contains("{ get; }"), "{file} declares a property");
             assert_eq!(content.matches("    /// <summary>Java's <c>").count(), c + p.len(), "{file}");
             total += c + p.len();
-            properties.extend(p);
+            readonly.extend(p);
         }
         assert_eq!(total, 420);
         assert_eq!(
-            properties,
+            readonly,
             [
                 "ConsumerConfig.ASSIGN_FROM_SUBSCRIBED_ASSIGNORS",
                 "ConsumerConfig.DEFAULT_GROUP_PROTOCOL",
@@ -1733,9 +1734,9 @@ mod tests {
             ]
         );
         let consumer = &outputs.iter().find(|(p, _)| *p == root.join(CS_FILES[1])).unwrap().1;
-        assert!(consumer.contains("    public static string? DEFAULT_GROUP_REMOTE_ASSIGNOR { get; } = null;\n"));
+        assert!(consumer.contains("    public static readonly string? DEFAULT_GROUP_REMOTE_ASSIGNOR = null;\n"));
         assert!(consumer.contains(
-            "    public static IReadOnlyList<string> ASSIGN_FROM_SUBSCRIBED_ASSIGNORS { get; } = \
+            "    public static readonly IReadOnlyList<string> ASSIGN_FROM_SUBSCRIBED_ASSIGNORS = \
              new ReadOnlyCollection<string>(new[] { \"range\", \"roundrobin\", \"sticky\", \"cooperative-sticky\" });\n"
         ));
         let sasl = &outputs.iter().find(|(p, _)| *p == root.join(CS_FILES[4])).unwrap().1;
@@ -1859,12 +1860,12 @@ mod tests {
             "using System.Collections.Generic;\nusing System.Collections.ObjectModel;\n\nnamespace Confluent.Kafka.Example;"
         ));
         assert!(full.contains(
-            "    public static IReadOnlyList<string> X { get; } = new ReadOnlyCollection<string>(new[] { \"a\" });\n"
+            "    public static readonly IReadOnlyList<string> X = new ReadOnlyCollection<string>(new[] { \"a\" });\n"
         ));
         let empty = render_cs(&spec, &[c("Set<String>", Value::Set(vec![]))]).unwrap();
         assert!(!empty.contains("using System;"), "{empty}");
         assert!(empty.contains(
-            "    public static IReadOnlyCollection<string> X { get; } = \
+            "    public static readonly IReadOnlyCollection<string> X = \
              new ReadOnlyCollection<string>(System.Array.Empty<string>());\n"
         ));
         let none = render_cs(&spec, &[c("int", Value::Int(1))]).unwrap();

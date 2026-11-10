@@ -45,7 +45,7 @@ public enum SslClientAuth
 public static class SslClientAuths
 {
     /// <summary>The constants, in Java's declaration order — Java's <c>VALUES</c>.</summary>
-    public static IReadOnlyList<SslClientAuth> VALUES { get; } = new ReadOnlyCollection<SslClientAuth>(new[]
+    public static readonly IReadOnlyList<SslClientAuth> VALUES = new ReadOnlyCollection<SslClientAuth>(new[]
     {
         SslClientAuth.REQUIRED,
         SslClientAuth.REQUESTED,

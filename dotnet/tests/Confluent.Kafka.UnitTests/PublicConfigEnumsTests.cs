@@ -17,6 +17,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Reflection;
 
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Security.Auth;
@@ -167,6 +168,18 @@ public sealed class PublicConfigEnumsTests
         Assert.Equal(SslClientAuth.REQUIRED, values[0]);
         Assert.Same(values, SslClientAuths.VALUES);
         AssertReadOnly(values, SslClientAuth.NONE);
+    }
+
+    [Fact]
+    public void ConfigClasses_test_ssl_client_auth_ValuesIsAStaticReadOnlyField_NotAProperty()
+    {
+        FieldInfo? field = typeof(SslClientAuths).GetField(
+            nameof(SslClientAuths.VALUES), BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
+
+        Assert.True(field is { IsInitOnly: true, IsLiteral: false }, "SslClientAuths.VALUES is not a static readonly field.");
+        Assert.Equal(typeof(IReadOnlyList<SslClientAuth>), field!.FieldType);
+        Assert.Empty(typeof(SslClientAuths).GetProperties(
+            BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly));
     }
 
     [Theory]

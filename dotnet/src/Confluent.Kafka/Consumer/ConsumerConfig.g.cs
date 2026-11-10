@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Consumer;
 public class ConsumerConfig
 {
     /// <summary>Java's <c>ConsumerConfig.ASSIGN_FROM_SUBSCRIBED_ASSIGNORS</c>.</summary>
-    public static IReadOnlyList<string> ASSIGN_FROM_SUBSCRIBED_ASSIGNORS { get; } = new ReadOnlyCollection<string>(new[] { "range", "roundrobin", "sticky", "cooperative-sticky" });
+    public static readonly IReadOnlyList<string> ASSIGN_FROM_SUBSCRIBED_ASSIGNORS = new ReadOnlyCollection<string>(new[] { "range", "roundrobin", "sticky", "cooperative-sticky" });
 
     /// <summary>Java's <c>ConsumerConfig.GROUP_ID_CONFIG</c>.</summary>
     public const string GROUP_ID_CONFIG = "group.id";
@@ -54,7 +54,7 @@ public class ConsumerConfig
     public const string GROUP_PROTOCOL_CONFIG = "group.protocol";
 
     /// <summary>Java's <c>ConsumerConfig.DEFAULT_GROUP_PROTOCOL</c>.</summary>
-    public static string DEFAULT_GROUP_PROTOCOL { get; } = "classic";
+    public static readonly string DEFAULT_GROUP_PROTOCOL = "classic";
 
     /// <summary>Java's <c>ConsumerConfig.GROUP_PROTOCOL_DOC</c>.</summary>
     public const string GROUP_PROTOCOL_DOC = "The group protocol that the consumer uses. The supported values are <code>classic</code> or <code>consumer</code>. The default value is <code>classic</code>.";
@@ -63,7 +63,7 @@ public class ConsumerConfig
     public const string GROUP_REMOTE_ASSIGNOR_CONFIG = "group.remote.assignor";
 
     /// <summary>Java's <c>ConsumerConfig.DEFAULT_GROUP_REMOTE_ASSIGNOR</c>.</summary>
-    public static string? DEFAULT_GROUP_REMOTE_ASSIGNOR { get; } = null;
+    public static readonly string? DEFAULT_GROUP_REMOTE_ASSIGNOR = null;
 
     /// <summary>Java's <c>ConsumerConfig.GROUP_REMOTE_ASSIGNOR_DOC</c>.</summary>
     public const string GROUP_REMOTE_ASSIGNOR_DOC = "The name of the server-side assignor to use. If not specified, the group coordinator will pick the first assignor defined in the broker config group.consumer.assignors.This configuration is applied only if <code>group.protocol</code> is set to \"consumer\".";
@@ -213,7 +213,7 @@ public class ConsumerConfig
     public const string ISOLATION_LEVEL_DOC = "Controls how to read messages written transactionally. If set to <code>read_committed</code>, consumer.poll() will only return transactional messages which have been committed. If set to <code>read_uncommitted</code> (the default), consumer.poll() will return all messages, even transactional messages which have been aborted. Non-transactional messages will be returned unconditionally in either mode. <p>Messages will always be returned in offset order. Hence, in  <code>read_committed</code> mode, consumer.poll() will only return messages up to the last stable offset (LSO), which is the one less than the offset of the first open transaction. In particular any messages appearing after messages belonging to ongoing transactions will be withheld until the relevant transaction has been completed. As a result, <code>read_committed</code> consumers will not be able to read up to the high watermark when there are in flight transactions.</p><p> Further, when in <code>read_committed</code> the seekToEnd method will return the LSO</p>";
 
     /// <summary>Java's <c>ConsumerConfig.DEFAULT_ISOLATION_LEVEL</c>.</summary>
-    public static string DEFAULT_ISOLATION_LEVEL { get; } = "read_uncommitted";
+    public static readonly string DEFAULT_ISOLATION_LEVEL = "read_uncommitted";
 
     /// <summary>Java's <c>ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG</c>.</summary>
     public const string ALLOW_AUTO_CREATE_TOPICS_CONFIG = "allow.auto.create.topics";
@@ -231,7 +231,7 @@ public class ConsumerConfig
     public const string SHARE_ACQUIRE_MODE_CONFIG = "share.acquire.mode";
 
     /// <summary>Java's <c>ConsumerConfig.DEFAULT_SHARE_ACQUIRE_MODE</c>.</summary>
-    public static string DEFAULT_SHARE_ACQUIRE_MODE { get; } = "BATCH_OPTIMIZED";
+    public static readonly string DEFAULT_SHARE_ACQUIRE_MODE = "BATCH_OPTIMIZED";
 
     /// <summary>Java's <c>ConsumerConfig.AUTOMATIC_CONFIG_PROVIDERS_PROPERTY</c>.</summary>
     public const string AUTOMATIC_CONFIG_PROVIDERS_PROPERTY = "org.apache.kafka.automatic.config.providers";

@@ -111,7 +111,7 @@ public class AdminClientConfig
     public const string METADATA_RECOVERY_STRATEGY_DOC = "Controls how the client recovers when none of the brokers known to it is available. If set to <code>none</code>, the client fails. If set to <code>rebootstrap</code>, the client repeats the bootstrap process using <code>bootstrap.servers</code>. Rebootstrapping is useful when a client communicates with brokers so infrequently that the set of brokers may change entirely before the client refreshes metadata. Metadata recovery is triggered when all last-known brokers appear unavailable simultaneously. Brokers appear unavailable when disconnected and no current retry attempt is in-progress. Consider increasing <code>reconnect.backoff.ms</code> and <code>reconnect.backoff.max.ms</code> and decreasing <code>socket.connection.setup.timeout.ms</code> and <code>socket.connection.setup.timeout.max.ms</code> for the client. Rebootstrap is also triggered if connection cannot be established to any of the brokers for <code>metadata.recovery.rebootstrap.trigger.ms</code> milliseconds or if server requests rebootstrap.";
 
     /// <summary>Java's <c>AdminClientConfig.DEFAULT_METADATA_RECOVERY_STRATEGY</c>.</summary>
-    public static string DEFAULT_METADATA_RECOVERY_STRATEGY { get; } = "rebootstrap";
+    public static readonly string DEFAULT_METADATA_RECOVERY_STRATEGY = "rebootstrap";
 
     /// <summary>Java's <c>AdminClientConfig.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG</c>.</summary>
     public const string METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG = "metadata.recovery.rebootstrap.trigger.ms";

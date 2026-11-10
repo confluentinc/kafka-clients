@@ -55,7 +55,7 @@ public sealed class PublicConfigClassesTests
         { typeof(LogLevelConfig), "common/config/LogLevelConfig" },
     };
 
-    public static TheoryData<Type, int, string[]> ConstantsAndProperties => new()
+    public static TheoryData<Type, int, string[]> ConstantsAndReadOnlyFields => new()
     {
         { typeof(ProducerConfig), 62, Array.Empty<string>() },
         {
@@ -125,14 +125,14 @@ public sealed class PublicConfigClassesTests
         AssertConstant(typeof(ProducerConfig), nameof(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG), "bootstrap.servers");
         AssertConstant(typeof(ProducerConfig), nameof(ProducerConfig.CONFIG_PROVIDERS_CONFIG), "config.providers");
         AssertConstant(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_FETCH_MAX_BYTES), 50 * 1024 * 1024);
-        AssertProperty(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_GROUP_PROTOCOL), "classic");
-        AssertProperty(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_ISOLATION_LEVEL), "read_uncommitted");
-        AssertProperty<string?>(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_GROUP_REMOTE_ASSIGNOR), null);
+        AssertReadOnlyField(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_GROUP_PROTOCOL), "classic");
+        AssertReadOnlyField(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_ISOLATION_LEVEL), "read_uncommitted");
+        AssertReadOnlyField<string?>(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_GROUP_REMOTE_ASSIGNOR), null);
         AssertConstant(typeof(ConsumerConfig), nameof(ConsumerConfig.DEFAULT_EXCLUDE_INTERNAL_TOPICS), true);
         AssertConstant(
             typeof(AdminClientConfig), nameof(AdminClientConfig.DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS),
             300_000L);
-        AssertProperty(
+        AssertReadOnlyField(
             typeof(AdminClientConfig), nameof(AdminClientConfig.DEFAULT_METADATA_RECOVERY_STRATEGY), "rebootstrap");
         AssertConstant(typeof(ProducerConfig), nameof(ProducerConfig.SECURITY_PROVIDERS_CONFIG), "security.providers");
         AssertConstant(typeof(ConsumerConfig), nameof(ConsumerConfig.GROUP_ID_CONFIG), "group.id");
@@ -140,20 +140,20 @@ public sealed class PublicConfigClassesTests
         AssertConstant(typeof(SaslConfigs), nameof(SaslConfigs.DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR), 0.8);
         AssertConstant(typeof(SaslConfigs), nameof(SaslConfigs.DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS), (short)60);
         AssertConstant(typeof(SaslConfigs), nameof(SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN), 60_000L);
-        AssertProperty(typeof(SslConfigs), nameof(SslConfigs.DEFAULT_SSL_KEYMANGER_ALGORITHM), "SunX509");
-        AssertProperty(typeof(SslConfigs), nameof(SslConfigs.DEFAULT_SSL_TRUSTMANAGER_ALGORITHM), "PKIX");
+        AssertReadOnlyField(typeof(SslConfigs), nameof(SslConfigs.DEFAULT_SSL_KEYMANGER_ALGORITHM), "SunX509");
+        AssertReadOnlyField(typeof(SslConfigs), nameof(SslConfigs.DEFAULT_SSL_TRUSTMANAGER_ALGORITHM), "PKIX");
     }
 
     [Fact]
     public void ConfigClasses_test_evaluated_constants_TheCollectionsAreReadOnly_InJavasOrder()
     {
-        IReadOnlyList<string> assignors = AssertProperty<IReadOnlyList<string>>(
+        IReadOnlyList<string> assignors = AssertReadOnlyField<IReadOnlyList<string>>(
             typeof(ConsumerConfig), nameof(ConsumerConfig.ASSIGN_FROM_SUBSCRIBED_ASSIGNORS));
         Assert.Equal(new[] { "range", "roundrobin", "sticky", "cooperative-sticky" }, assignors);
         Assert.Equal("cooperative-sticky", assignors[3]);
         AssertReadOnly(assignors);
 
-        IReadOnlyCollection<string> reconfigurable = AssertProperty<IReadOnlyCollection<string>>(
+        IReadOnlyCollection<string> reconfigurable = AssertReadOnlyField<IReadOnlyCollection<string>>(
             typeof(SslConfigs), nameof(SslConfigs.RECONFIGURABLE_CONFIGS));
         Assert.Equal(
             new[]
@@ -166,7 +166,7 @@ public sealed class PublicConfigClassesTests
         Assert.Contains("ssl.keystore.type", reconfigurable);
         AssertReadOnly(reconfigurable);
 
-        IReadOnlyCollection<string> nonReconfigurable = AssertProperty<IReadOnlyCollection<string>>(
+        IReadOnlyCollection<string> nonReconfigurable = AssertReadOnlyField<IReadOnlyCollection<string>>(
             typeof(SslConfigs), nameof(SslConfigs.NON_RECONFIGURABLE_CONFIGS));
         Assert.Equal(
             new[]
@@ -178,16 +178,16 @@ public sealed class PublicConfigClassesTests
             nonReconfigurable);
         AssertReadOnly(nonReconfigurable);
 
-        IReadOnlyCollection<string> logLevels = AssertProperty<IReadOnlyCollection<string>>(
+        IReadOnlyCollection<string> logLevels = AssertReadOnlyField<IReadOnlyCollection<string>>(
             typeof(LogLevelConfig), nameof(LogLevelConfig.VALID_LOG_LEVELS));
         Assert.Equal(new[] { "FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE" }, logLevels);
         AssertReadOnly(logLevels);
     }
 
     [Theory]
-    [MemberData(nameof(ConstantsAndProperties))]
-    public void ConfigClasses_test_evaluated_constants_JavasCompileTimeConstantsAreConst_TheOthersProperties(
-        Type type, int constants, string[] properties)
+    [MemberData(nameof(ConstantsAndReadOnlyFields))]
+    public void ConfigClasses_test_evaluated_constants_JavasCompileTimeConstantsAreConst_TheOthersStaticReadOnlyFields(
+        Type type, int constants, string[] readOnlyFields)
     {
         MemberInfo[] members = type.GetMembers(PublicStatic)
             .Where(member => member is not MethodInfo { IsSpecialName: true })
@@ -196,14 +196,17 @@ public sealed class PublicConfigClassesTests
         Assert.All(
             members,
             member => Assert.True(
-                member is FieldInfo { IsLiteral: true } or PropertyInfo,
-                $"{type.Name}.{member.Name} is a {member.MemberType} that is neither a const nor a property."));
-        Assert.Equal(constants, members.OfType<FieldInfo>().Count());
-        PropertyInfo[] declared = members.OfType<PropertyInfo>().ToArray();
+                member is FieldInfo { IsLiteral: true } or FieldInfo { IsInitOnly: true },
+                $"{type.Name}.{member.Name} is a {member.MemberType} that is neither a const nor a static readonly field."));
+        Assert.Equal(constants, members.OfType<FieldInfo>().Count(field => field.IsLiteral));
         Assert.Equal(
-            properties.OrderBy(name => name, StringComparer.Ordinal),
-            declared.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
-        Assert.All(declared, property => Assert.False(property.CanWrite, $"{type.Name}.{property.Name} has a setter."));
+            readOnlyFields.OrderBy(name => name, StringComparer.Ordinal),
+            members.OfType<FieldInfo>()
+                .Where(field => field.IsInitOnly)
+                .Select(field => field.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(type.GetProperties(
+            BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly));
     }
 
     [Fact]
@@ -307,7 +310,6 @@ public sealed class PublicConfigClassesTests
         return members[0] switch
         {
             FieldInfo field => field.GetValue(null),
-            PropertyInfo property => property.GetValue(null),
             _ => throw new InvalidOperationException($"{type.Name}.{name} is a {members[0].MemberType}."),
         };
     }
@@ -320,15 +322,17 @@ public sealed class PublicConfigClassesTests
         Assert.Equal(expected, (T)field.GetRawConstantValue()!);
     }
 
-    private static void AssertProperty<T>(Type type, string name, T expected) =>
-        Assert.Equal(expected, AssertProperty<T>(type, name));
+    private static void AssertReadOnlyField<T>(Type type, string name, T expected) =>
+        Assert.Equal(expected, AssertReadOnlyField<T>(type, name));
 
-    private static T AssertProperty<T>(Type type, string name)
+    private static T AssertReadOnlyField<T>(Type type, string name)
     {
-        PropertyInfo? property = type.GetProperty(name, PublicStatic);
-        Assert.True(property is { CanWrite: false }, $"{type.Name}.{name} is not a get-only property.");
-        Assert.Equal(typeof(T), property!.PropertyType);
-        return (T)property.GetValue(null)!;
+        FieldInfo? field = type.GetField(name, PublicStatic);
+        Assert.True(
+            field is { IsInitOnly: true, IsLiteral: false },
+            $"{type.Name}.{name} is not a static readonly field.");
+        Assert.Equal(typeof(T), field!.FieldType);
+        return (T)field.GetValue(null)!;
     }
 
     private static void AssertReadOnly(IEnumerable<string> collection)

@@ -45,5 +45,5 @@ public class LogLevelConfig
     public const string TRACE_LOG_LEVEL = "TRACE";
 
     /// <summary>Java's <c>LogLevelConfig.VALID_LOG_LEVELS</c>.</summary>
-    public static IReadOnlyCollection<string> VALID_LOG_LEVELS { get; } = new ReadOnlyCollection<string>(new[] { "FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE" });
+    public static readonly IReadOnlyCollection<string> VALID_LOG_LEVELS = new ReadOnlyCollection<string>(new[] { "FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE" });
 }

@@ -129,7 +129,7 @@ public class SslConfigs
     public const string SSL_KEYMANAGER_ALGORITHM_DOC = "The algorithm used by key manager factory for SSL connections. Default value is the key manager factory algorithm configured for the Java Virtual Machine.";
 
     /// <summary>Java's <c>SslConfigs.DEFAULT_SSL_KEYMANGER_ALGORITHM</c>.</summary>
-    public static string DEFAULT_SSL_KEYMANGER_ALGORITHM { get; } = "SunX509";
+    public static readonly string DEFAULT_SSL_KEYMANGER_ALGORITHM = "SunX509";
 
     /// <summary>Java's <c>SslConfigs.SSL_TRUSTMANAGER_ALGORITHM_CONFIG</c>.</summary>
     public const string SSL_TRUSTMANAGER_ALGORITHM_CONFIG = "ssl.trustmanager.algorithm";
@@ -138,7 +138,7 @@ public class SslConfigs
     public const string SSL_TRUSTMANAGER_ALGORITHM_DOC = "The algorithm used by trust manager factory for SSL connections. Default value is the trust manager factory algorithm configured for the Java Virtual Machine.";
 
     /// <summary>Java's <c>SslConfigs.DEFAULT_SSL_TRUSTMANAGER_ALGORITHM</c>.</summary>
-    public static string DEFAULT_SSL_TRUSTMANAGER_ALGORITHM { get; } = "PKIX";
+    public static readonly string DEFAULT_SSL_TRUSTMANAGER_ALGORITHM = "PKIX";
 
     /// <summary>Java's <c>SslConfigs.SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG</c>.</summary>
     public const string SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG = "ssl.endpoint.identification.algorithm";
@@ -162,8 +162,8 @@ public class SslConfigs
     public const string SSL_ENGINE_FACTORY_CLASS_DOC = "The class of type org.apache.kafka.common.security.auth.SslEngineFactory to provide SSLEngine objects. Default value is org.apache.kafka.common.security.ssl.DefaultSslEngineFactory. Alternatively, setting this to org.apache.kafka.common.security.ssl.CommonNameLoggingSslEngineFactory will log the common name of expired SSL certificates used by clients to authenticate at any of the brokers with log level INFO. Note that this will cause a tiny delay during establishment of new connections from mTLS clients to brokers due to the extra code for examining the certificate chain provided by the client. Note further that the implementation uses a custom truststore based on the standard Java truststore and thus might be considered a security risk due to not being as mature as the standard one.";
 
     /// <summary>Java's <c>SslConfigs.RECONFIGURABLE_CONFIGS</c>.</summary>
-    public static IReadOnlyCollection<string> RECONFIGURABLE_CONFIGS { get; } = new ReadOnlyCollection<string>(new[] { "ssl.keystore.type", "ssl.keystore.location", "ssl.keystore.password", "ssl.key.password", "ssl.truststore.type", "ssl.truststore.location", "ssl.truststore.password", "ssl.keystore.certificate.chain", "ssl.keystore.key", "ssl.truststore.certificates" });
+    public static readonly IReadOnlyCollection<string> RECONFIGURABLE_CONFIGS = new ReadOnlyCollection<string>(new[] { "ssl.keystore.type", "ssl.keystore.location", "ssl.keystore.password", "ssl.key.password", "ssl.truststore.type", "ssl.truststore.location", "ssl.truststore.password", "ssl.keystore.certificate.chain", "ssl.keystore.key", "ssl.truststore.certificates" });
 
     /// <summary>Java's <c>SslConfigs.NON_RECONFIGURABLE_CONFIGS</c>.</summary>
-    public static IReadOnlyCollection<string> NON_RECONFIGURABLE_CONFIGS { get; } = new ReadOnlyCollection<string>(new[] { "ssl.client.auth", "ssl.protocol", "ssl.provider", "ssl.cipher.suites", "ssl.enabled.protocols", "ssl.keymanager.algorithm", "ssl.trustmanager.algorithm", "ssl.endpoint.identification.algorithm", "ssl.secure.random.implementation", "ssl.engine.factory.class" });
+    public static readonly IReadOnlyCollection<string> NON_RECONFIGURABLE_CONFIGS = new ReadOnlyCollection<string>(new[] { "ssl.client.auth", "ssl.protocol", "ssl.provider", "ssl.cipher.suites", "ssl.enabled.protocols", "ssl.keymanager.algorithm", "ssl.trustmanager.algorithm", "ssl.endpoint.identification.algorithm", "ssl.secure.random.implementation", "ssl.engine.factory.class" });
 }
