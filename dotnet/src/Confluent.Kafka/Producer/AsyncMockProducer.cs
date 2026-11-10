@@ -280,10 +280,10 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public void SetPartitionsForException(Exception? exception) => _native.MockSetPartitionsForError(exception);
 
     /// <summary>
-    /// Sets the exception that the task of <c>Close</c> fails with, as Java's <c>MockProducer.closeException</c> field: every
-    /// later call fails with this same instance and leaves the producer open (<see cref="Closed()"/> stays
-    /// <see langword="false"/>). A <c>Close</c> from inside a delivery callback returns at once and closes the producer
-    /// without it, and <c>Dispose</c> releases the producer whatever it is set to.
+    /// Sets the exception that the task of <c>Close</c> fails with, as Java's <c>MockProducer.closeException</c> field:
+    /// every later call, from inside a delivery callback too, fails with this same instance and leaves the producer open
+    /// (<see cref="Closed()"/> stays <see langword="false"/>). <c>DisposeAsync</c> releases the producer whatever it is
+    /// set to.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
@@ -323,7 +323,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
     /// <summary>
     /// Whether the producer is closed (Java <c>MockProducer.closed()</c>): <see langword="true"/> once <c>Close</c> or
-    /// <c>Dispose</c> has begun, unless <c>Close</c> failed with the exception <see cref="SetCloseException"/> set.
+    /// <c>Dispose</c> has begun. A <c>Close</c> that throws the exception <see cref="SetCloseException"/> set leaves it
+    /// <see langword="false"/>.
     /// </summary>
     public bool Closed() => _native.MockClosed;
 

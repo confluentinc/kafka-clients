@@ -31,6 +31,11 @@ internal sealed partial class NativeProducer
     // The core mock's flush error, for the flush the binding makes itself from a callback the core cannot see.
     private Exception? _mockFlushError;
 
+    // The mock's close error, kept here and not in the core, as Python's mock keeps its close_exception: Close throws it
+    // before anything else, as Java's MockProducer.close() throws closeException before it sets closed, so the mock
+    // stays open and every Close throws it. Java's close is not synchronized, so no Close waits for another.
+    private Exception? _mockCloseError;
+
     private delegate void MockErrorSetter(IntPtr mock, IntPtr error, ref IntPtr outErr);
 
     private delegate sbyte MockFlagReader(IntPtr mock, ref IntPtr outErr);
@@ -47,8 +52,11 @@ internal sealed partial class NativeProducer
     internal void MockSetPartitionsForError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetPartitionsForError, exception);
 
-    internal void MockSetCloseError(Exception? exception) =>
-        MockSetError(NativeMethods.MockProducerSetCloseError, exception);
+    internal void MockSetCloseError(Exception? exception)
+    {
+        ThrowIfClosed();
+        Volatile.Write(ref _mockCloseError, exception);
+    }
 
     // Read from the binding's own state, not the core's MockProducer_closed: a close that succeeds destroys the mock,
     // so the core could answer only while it is still open.
