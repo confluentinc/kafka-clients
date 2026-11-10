@@ -977,7 +977,7 @@ foreign-thread rules are gone; the no-throw rule stays because the frame below i
     its type, code and message asserted (DoD §3).
   - A send error from the call keeps `self_` alive until destroy; if the core fires the callback
     later (a record appended before `maybeAddPartition` fails, BH:38221-38225), it fires once.
-  - `ErrorNext(exception)`: the same instance reaches the callback, and `Get` throws an
+  - `ErrorNext(e)`: the same instance reaches the callback, and `Get` throws an
     `ExecutionException` whose `InnerException` is that instance (decision 15).
   - A throwing user callback: reported through `local_callback` (the future keeps the record's
     outcome), one `Trace.TraceError` seen by a `TraceListener`, and the other records unaffected.
@@ -987,7 +987,7 @@ foreign-thread rules are gone; the no-throw rule stays because the frame below i
   - Allocation budget (DoD §10): the plain `Send` and the callback `Send`, each budget set from a
     measurement, its sensitivity checked by injecting a second per-send allocation.
 
-**The async delivery callback (M19/P1, ledger 47).** `IAsyncDeliveryCallback` uses the sync
+**The async delivery callback (M19/P1, ledger 47).** `IAsyncCallback` uses the sync
 callback's per-record `Callback_t` and `self` `GCHandle`; nothing else crosses the boundary.
 The trampoline copies the borrowed metadata and error before it returns, calls the callback on
 the pump, and does not wait for its `Task`. Each step after the `Task` ends runs on the pump:
@@ -1026,7 +1026,7 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
     wakes on its own thread.
   - **In-callback rules** (Python's, plan §3.1 fact 3), on `KafkaProducer` and
     `AsyncKafkaProducer` (the mocks: below), for a wait called from inside a delivery callback: on
-    the `CompletionThread`, or, from an `IAsyncDeliveryCallback`, after an `await` too, through an
+    the `CompletionThread`, or, from an `IAsyncCallback`, after an `await` too, through an
     `AsyncLocal<bool>` flag set around `OnCompletion` and restored to its previous value when it
     returns, never to a constant: a synchronous method's `AsyncLocal` write changes its caller's
     context, so a nested call that reset it would clear the outer callback's flag (Python's

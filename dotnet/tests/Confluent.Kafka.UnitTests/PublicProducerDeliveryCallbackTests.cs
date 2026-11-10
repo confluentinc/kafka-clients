@@ -30,7 +30,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The delivery callback, <see cref="IDeliveryCallback"/> and <c>Send(record, callback)</c>, on both producer mocks;
+/// The delivery callback, <see cref="ICallback"/> and <c>Send(record, callback)</c>, on both producer mocks;
 /// every behavioural test runs against the sync and the async flavor.
 /// </summary>
 public sealed class PublicProducerDeliveryCallbackTests
@@ -471,7 +471,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         string line = await SettledTraceLine(listener, marker);
 
         // The trace names the delivery callback, not the trampoline or the offset-commit callback.
-        Assert.Contains("IDeliveryCallback", line, StringComparison.Ordinal);
+        Assert.Contains("ICallback", line, StringComparison.Ordinal);
         Assert.DoesNotContain("IOffsetCommitCallback", line, StringComparison.Ordinal);
     }
 
@@ -591,7 +591,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // The real clients need a broker, so this pins the shape on every class; the mocks cover the behaviour.
         MethodInfo? method = FindSend(
-            surface, typeof(ProducerRecord<byte[], byte[]>), typeof(IDeliveryCallback));
+            surface, typeof(ProducerRecord<byte[], byte[]>), typeof(ICallback));
 
         Assert.NotNull(method);
 
@@ -621,7 +621,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         MethodInfo? method = FindSend(
             surface,
             typeof(ProducerRecord<byte[], byte[]>),
-            typeof(IDeliveryCallback),
+            typeof(ICallback),
             typeof(CancellationToken));
 
         Assert.NotNull(method);
@@ -657,10 +657,10 @@ public sealed class PublicProducerDeliveryCallbackTests
         // The callback stays a sync void, as Java's, and its overload is kept beside the future.
         Assert.Equal(
             typeof(void),
-            typeof(IDeliveryCallback).GetMethod(nameof(IDeliveryCallback.OnCompletion))!.ReturnType);
+            typeof(ICallback).GetMethod(nameof(ICallback.OnCompletion))!.ReturnType);
 
         ParameterInfo[] parameters =
-            typeof(IDeliveryCallback).GetMethod(nameof(IDeliveryCallback.OnCompletion))!.GetParameters();
+            typeof(ICallback).GetMethod(nameof(ICallback.OnCompletion))!.GetParameters();
         Assert.Equal(typeof(RecordMetadata), parameters[0].ParameterType);
         Assert.Equal(typeof(Exception), parameters[1].ParameterType);
     }
@@ -746,7 +746,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>Records each completion and the thread it ran on.</summary>
-    private sealed class RecordingDeliveryCallback : IDeliveryCallback
+    private sealed class RecordingDeliveryCallback : ICallback
     {
         private readonly List<(RecordMetadata Metadata, Exception? Exception)> _completions =
             new List<(RecordMetadata, Exception?)>();
@@ -789,7 +789,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>A callback that throws.</summary>
-    private sealed class ThrowingDeliveryCallback : IDeliveryCallback
+    private sealed class ThrowingDeliveryCallback : ICallback
     {
         private readonly string _message;
 
@@ -812,7 +812,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>Sends again from inside the callback and captures any throw.</summary>
-    private sealed class ReentrantDeliveryCallback : IDeliveryCallback
+    private sealed class ReentrantDeliveryCallback : ICallback
     {
         private readonly Func<Task<RecordMetadata>> _send;
 
@@ -828,7 +828,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>Records the send task's state as seen from inside the callback.</summary>
-    private sealed class TaskStateProbeCallback : IDeliveryCallback
+    private sealed class TaskStateProbeCallback : ICallback
     {
         internal Task<RecordMetadata>? Task { get; set; }
 
@@ -899,10 +899,10 @@ public sealed class PublicProducerDeliveryCallbackTests
         }
 
         internal abstract Task<RecordMetadata> Send(
-            ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback);
+            ProducerRecord<byte[], byte[]> record, ICallback callback);
 
         internal abstract void SendInline(
-            ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback);
+            ProducerRecord<byte[], byte[]> record, ICallback? callback);
 
         internal abstract bool CompleteNext();
 
@@ -922,12 +922,12 @@ public sealed class PublicProducerDeliveryCallbackTests
             }
 
             internal override Task<RecordMetadata> Send(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback callback) =>
                 Task.Run(() => _producer.Send(record, callback).Get());
 
             // The future is discarded: every caller asserts a synchronous throw out of Send itself.
             internal override void SendInline(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback? callback) =>
                 _ = _producer.Send(record, callback!);
 
             internal override bool CompleteNext() => _producer.CompleteNext();
@@ -950,11 +950,11 @@ public sealed class PublicProducerDeliveryCallbackTests
             }
 
             internal override Task<RecordMetadata> Send(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback callback) =>
                 _producer.Send(record, callback).Delivery();
 
             internal override void SendInline(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback? callback) =>
                 _ = _producer.Send(record, callback!);
 
             internal override bool CompleteNext() => _producer.CompleteNext();

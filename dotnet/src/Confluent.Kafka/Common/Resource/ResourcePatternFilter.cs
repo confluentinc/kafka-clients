@@ -82,6 +82,103 @@ public sealed class ResourcePatternFilter
     /// <returns>Whether any component is <c>UNKNOWN</c>.</returns>
     public bool IsUnknown() => ResourceType() == Resource.ResourceType.UNKNOWN || PatternType() == Resource.PatternType.UNKNOWN;
 
+    /// <summary>
+    /// Whether this filter matches <paramref name="pattern"/> — Java's <c>matches(ResourcePattern)</c>. A
+    /// <see cref="PatternType.MATCH"/> filter with a name matches a literal pattern of that name or of
+    /// <see cref="ResourcePattern.WILDCARD_RESOURCE"/>, and a prefixed pattern the name starts with.
+    /// </summary>
+    /// <param name="pattern">The resource pattern to test.</param>
+    /// <returns>Whether the filter matches the pattern.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="pattern"/> is null and the filter reads it. A filter whose resource type is
+    /// <see cref="ResourceType.ANY"/>, whose name is null and whose pattern type is <see cref="PatternType.ANY"/> or
+    /// <see cref="PatternType.MATCH"/>, such as <see cref="ANY"/>, never reads it and matches a null pattern, as
+    /// Java's does.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// The filter is a <see cref="PatternType.MATCH"/> filter with a name and the pattern's type is neither literal
+    /// nor prefixed.
+    /// </exception>
+    public bool Matches(ResourcePattern pattern)
+    {
+        // The pattern is read only where Java's matches reads it, so ANY.Matches(null) is true.
+        if (_resourceType != Resource.ResourceType.ANY && _resourceType != Given(pattern).ResourceType())
+        {
+            return false;
+        }
+
+        if (_patternType != Resource.PatternType.ANY && _patternType != Resource.PatternType.MATCH && _patternType != Given(pattern).PatternType())
+        {
+            return false;
+        }
+
+        if (_name is null)
+        {
+            return true;
+        }
+
+        ResourcePattern given = Given(pattern);
+        if (_patternType == Resource.PatternType.ANY || _patternType == given.PatternType())
+        {
+            return string.Equals(_name, given.Name(), StringComparison.Ordinal);
+        }
+
+        switch (given.PatternType())
+        {
+            case Resource.PatternType.LITERAL:
+                return string.Equals(_name, given.Name(), StringComparison.Ordinal)
+                    || string.Equals(given.Name(), ResourcePattern.WILDCARD_RESOURCE, StringComparison.Ordinal);
+
+            case Resource.PatternType.PREFIXED:
+                return _name.StartsWith(given.Name(), StringComparison.Ordinal);
+
+            default:
+                throw new IllegalArgumentException("Unsupported PatternType: " + given.PatternType());
+        }
+    }
+
+    /// <summary>
+    /// Whether this filter matches at most one resource pattern — Java's <c>matchesAtMostOne()</c>: it has no
+    /// <see cref="FindIndefiniteField"/>.
+    /// </summary>
+    /// <returns>Whether every component is definite.</returns>
+    public bool MatchesAtMostOne() => FindIndefiniteField() is null;
+
+    /// <summary>
+    /// A description of the first component that keeps this filter from matching just one pattern, or
+    /// <see langword="null"/> when there is none — Java's <c>findIndefiniteField()</c>.
+    /// </summary>
+    /// <returns>Java's text for the indefinite component, or <see langword="null"/>.</returns>
+    public string? FindIndefiniteField()
+    {
+        if (_resourceType == Resource.ResourceType.ANY)
+        {
+            return "Resource type is ANY.";
+        }
+
+        if (_resourceType == Resource.ResourceType.UNKNOWN)
+        {
+            return "Resource type is UNKNOWN.";
+        }
+
+        if (_name is null)
+        {
+            return "Resource name is NULL.";
+        }
+
+        if (_patternType == Resource.PatternType.MATCH)
+        {
+            return "Resource pattern type is MATCH.";
+        }
+
+        if (_patternType == Resource.PatternType.UNKNOWN)
+        {
+            return "Resource pattern type is UNKNOWN.";
+        }
+
+        return null;
+    }
+
     /// <summary>Value equality over all three components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two are the same filter. A <c>null</c> name never equals <c>""</c>.</returns>
@@ -120,4 +217,7 @@ public sealed class ResourcePatternFilter
             ResourceType(),
             Name() ?? "<any>",
             PatternType());
+
+    private static ResourcePattern Given(ResourcePattern? pattern) =>
+        pattern ?? throw new ArgumentNullException(nameof(pattern));
 }

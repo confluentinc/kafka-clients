@@ -79,7 +79,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken = default)
     {
         if (record is null)
@@ -98,7 +98,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncDeliveryCallback callback,
+        IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
         if (record is null)
@@ -117,9 +117,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     // Not async, so a serializer throw stays synchronous.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback? callback,
+        ICallback? callback,
         CancellationToken cancellationToken,
-        IAsyncDeliveryCallback? asyncCallback = null)
+        IAsyncCallback? asyncCallback = null)
     {
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
@@ -159,17 +159,17 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public bool CompleteNext() => _native.MockCompleteNext();
 
     /// <summary>
-    /// Fails the earliest uncompleted send with <paramref name="exception"/> (Java <c>MockProducer.errorNext</c>); its
+    /// Fails the earliest uncompleted send with <paramref name="e"/> (Java <c>MockProducer.errorNext</c>); its
     /// delivery callback receives the same instance, and its future's <see cref="AsyncKafkaFuture{T}.Get()"/> faults
     /// with an <see cref="Confluent.Kafka.ExecutionException"/> around it.
     /// </summary>
-    /// <param name="exception">
+    /// <param name="e">
     /// The exception to fail the send with; <see langword="null"/> completes it successfully, as
     /// <see cref="CompleteNext"/> does.
     /// </param>
     /// <returns><see langword="true"/> if a pending send was completed; otherwise <see langword="false"/>.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool ErrorNext(Exception? exception) => _native.MockErrorNext(exception);
+    public bool ErrorNext(Exception? e) => _native.MockErrorNext(e);
 
     /// <summary>
     /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>); the native mock
@@ -183,6 +183,18 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// </summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
+
+    /// <summary>Whether the producer has been closed (Java <c>MockProducer.closed()</c>).</summary>
+    /// <returns><see langword="true"/> once the producer is closed or disposed.</returns>
+    public bool Closed() => _native.MockClosed();
+
+    /// <summary>
+    /// Whether every sent record has completed, none still waiting for <c>CompleteNext</c> or <c>ErrorNext</c> (Java
+    /// <c>MockProducer.flushed()</c>).
+    /// </summary>
+    /// <returns><see langword="true"/> when no completion is pending.</returns>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public bool Flushed() => _native.MockFlushed();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

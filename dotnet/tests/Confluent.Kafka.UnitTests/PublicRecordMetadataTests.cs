@@ -245,7 +245,7 @@ public sealed class PublicRecordMetadataTests
         return metadata;
     }
 
-    private sealed class RecordingCallback : IDeliveryCallback
+    private sealed class RecordingCallback : ICallback
     {
         internal RecordMetadata? Metadata { get; private set; }
 

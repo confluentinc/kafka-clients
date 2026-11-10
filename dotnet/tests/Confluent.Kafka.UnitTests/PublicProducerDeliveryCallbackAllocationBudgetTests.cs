@@ -205,7 +205,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     }
 
     private static async Task Warmup(
-        AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, IDeliveryCallback? callback)
+        AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, ICallback? callback)
     {
         // Warm up so the measured runs are steady-state.
         for (int i = 0; i < 3; i++)
@@ -219,7 +219,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         AsyncMockProducer<byte[], byte[]> producer,
         byte[] value,
         byte[] key,
-        IDeliveryCallback? callback,
+        ICallback? callback,
         out Task<RecordMetadata>[] sends)
     {
         // Pre-allocate the task array OUTSIDE the measured window (its allocation is not per-send).
@@ -264,7 +264,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     /// <summary>
     /// A do-nothing delivery callback — allocation tests must not have the callback itself allocate.
     /// </summary>
-    private sealed class CountingDeliveryCallback : IDeliveryCallback
+    private sealed class CountingDeliveryCallback : ICallback
     {
         private int _count;
 
