@@ -873,6 +873,84 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.False(registration.IsReleased);
     }
 
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public async Task Close_ReleasesTheCurrentAndEveryKeptRegistration(bool mock, bool async, bool withOptions)
+    {
+        NativeConsumer consumer = mock ? NativeConsumer.CreateMock(withPump: async) : NewKafkaConsumer(withPump: async);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        (ListenerRegistration first, ListenerRegistration second) =
+            await SubscribeThenRefuseASwitch(consumer, async ? Form.Async : Form.Sync);
+
+        await Close(consumer, async, withOptions);
+
+        Assert.True(first.IsReleased);
+        Assert.True(second.IsReleased);
+        Assert.Null(consumer.CurrentListenerRegistration);
+        Assert.Equal(0, consumer.RetainedListenerRegistrationCount);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task OnAKafkaConsumer_ACommitCallbackTheCloseRuns_StillHasEveryRegistration(bool async, bool withOptions)
+    {
+        NativeConsumer consumer = NewKafkaConsumer(withPump: async);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        (ListenerRegistration first, ListenerRegistration second) =
+            await SubscribeThenRefuseASwitch(consumer, async ? Form.Async : Form.Sync);
+        List<(ListenerRegistration? Current, bool FirstReleased, bool SecondReleased, int Kept)> seen =
+            new List<(ListenerRegistration?, bool, bool, int)>();
+        CommitProbe callback = new CommitProbe(() =>
+        {
+            lock (seen)
+            {
+                seen.Add((
+                    consumer.CurrentListenerRegistration,
+                    first.IsReleased,
+                    second.IsReleased,
+                    consumer.RetainedListenerRegistrationCount));
+            }
+        });
+        Dictionary<TopicPartition, OffsetAndMetadata> none = new Dictionary<TopicPartition, OffsetAndMetadata>();
+        if (async)
+        {
+            await TestTimeout.Run(() => consumer.CommitAsyncWithCallback(none, callback), s_deadline);
+        }
+        else
+        {
+            consumer.CommitAsync(none, callback);
+        }
+
+        lock (seen)
+        {
+            Assert.Empty(seen);
+        }
+
+        await Close(consumer, async, withOptions);
+
+        lock (seen)
+        {
+            (ListenerRegistration? current, bool firstReleased, bool secondReleased, int kept) = Assert.Single(seen);
+            Assert.Same(second, current);
+            Assert.False(firstReleased);
+            Assert.False(secondReleased);
+            Assert.Equal(1, kept);
+        }
+
+        Assert.True(first.IsReleased);
+        Assert.True(second.IsReleased);
+    }
+
     [Fact]
     public void Dispose_WithLiveRegistration_ReturnsWithoutHanging()
     {
@@ -899,7 +977,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
     private static ConsumerCallbackReporter Reporter() => new ConsumerCallbackReporter(IntPtr.Zero);
 
-    private static NativeConsumer NewKafkaConsumer(bool withGroupId = true)
+    private static NativeConsumer NewKafkaConsumer(bool withGroupId = true, bool withPump = true)
     {
         Dictionary<string, object?> configs = new Dictionary<string, object?>
         {
@@ -911,7 +989,50 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             configs["group.id"] = "listener-bridge-group";
         }
 
-        return NativeConsumer.Create(configs);
+        return NativeConsumer.Create(configs, withPump);
+    }
+
+    private static async Task<(ListenerRegistration First, ListenerRegistration Second)> SubscribeThenRefuseASwitch(
+        NativeConsumer consumer,
+        Form form)
+    {
+        await Subscribe(consumer, form, new SubscriptionPattern("t.*"), new RecordingListener());
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+        IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(
+            () => Subscribe(consumer, form, new[] { Topic }, new RecordingListener()));
+        Assert.Equal(MutuallyExclusive, refused.Message);
+        ListenerRegistration second = consumer.CurrentListenerRegistration!;
+        Assert.NotSame(first, second);
+        Assert.Equal(1, consumer.RetainedListenerRegistrationCount);
+        Assert.False(first.IsReleased);
+        Assert.False(second.IsReleased);
+        return (first, second);
+    }
+
+    private static Task Close(NativeConsumer consumer, bool async, bool withOptions)
+    {
+        CloseOptions options = CloseOptions.Timeout(TimeSpan.FromSeconds(5));
+        if (async)
+        {
+            return TestTimeout.Run(
+                () => (withOptions ? consumer.CloseWithCallback(options) : consumer.CloseWithCallback()).AsTask(),
+                s_deadline);
+        }
+
+        TestTimeout.Run(
+            () =>
+            {
+                if (withOptions)
+                {
+                    consumer.CloseSync(options);
+                }
+                else
+                {
+                    consumer.CloseSync();
+                }
+            },
+            s_deadline);
+        return Task.CompletedTask;
     }
 
     private static NativeConsumer NewUnresolvableKafkaConsumer() =>
@@ -1171,5 +1292,19 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _call();
 
         public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => _call();
+    }
+
+    /// <summary>A commit callback that runs the action it is given.</summary>
+    private sealed class CommitProbe : IOffsetCommitCallback
+    {
+        private readonly Action _call;
+
+        internal CommitProbe(Action call)
+        {
+            _call = call;
+        }
+
+        public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            _call();
     }
 }

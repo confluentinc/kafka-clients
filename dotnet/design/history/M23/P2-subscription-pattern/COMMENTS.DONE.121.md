@@ -357,3 +357,18 @@ Notes for the comment-only commit (S4):
    a listener subscribe after registration (real or mock, sync or `_cb`), STOP and report.
 
    Resolved in 39fb354a / 00b008be.
+
+## PR #326 Copilot comment E (thread PRRT_kwDOQjF7uc61iN-N, comment 4520497810, ledger row 446, Agreed) — approved for the Actor
+
+1. **must-fix (docs) — the listener-lifetime remarks say `Close` keeps the listener; it releases it** —
+   `dotnet/src/Confluent.Kafka/Consumer/IConsumer.cs` ~97, ~166; `IAsyncConsumer.cs` ~119, ~241;
+   `IConsumerRebalanceListener.cs` ~52-55. `Close()` tears the native consumer down (sync `CloseSync` →
+   `TearDownThenThrow` → `TearDown()` → `_handle.CloseExplicitly()`; the async close too), and `AfterDestroy`
+   (`NativeConsumer.cs` ~1794-1811) releases the current and every kept registration, as `Dispose` does, once the close's
+   callbacks have run; only `Unsubscribe` keeps it. Pre-existing wording (`3afba0a7`), copied into the pattern overloads.
+   **Fix (row 446):** the replacement texts in the coordinator's ruling (Manager's brief); `ffi-marshalling.md` decision
+   23 and its tests-required line consistent if they say close keeps it; a test pinning "Close releases the registration
+   after its callbacks" (sync and async, real and mock) if none exists. Verify per flavour first; if a statement is not
+   true for some flavour (e.g. a mock's `Close`), STOP and report.
+
+   Resolved in the fixup on a0c60133 (comment E).

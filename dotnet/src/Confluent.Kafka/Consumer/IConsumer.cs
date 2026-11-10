@@ -91,10 +91,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
     /// refused subscribe's listener, or none. A subscribe refused for an invalid argument, a missing <c>group.id</c>,
     /// concurrent use or an unresolvable bootstrap address does not register its listener and releases it; any other
-    /// refused subscribe keeps both until a subscribe succeeds or the consumer is disposed.
+    /// refused subscribe keeps both until a subscribe succeeds or the consumer is closed or disposed.
     /// A subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
-    /// listener-less <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as does disposing the consumer.
-    /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// listener-less <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as does closing or disposing the
+    /// consumer. <see cref="Unsubscribe"/> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does; closing the
+    /// consumer releases it once the close's callbacks have run, as disposing it does.
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
     /// keeps it too.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
@@ -160,10 +161,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
     /// refused subscribe's listener, or none. A subscribe refused for an invalid argument, a missing <c>group.id</c>,
     /// concurrent use or an unresolvable bootstrap address does not register its listener and releases it; any other
-    /// refused subscribe keeps both until a subscribe succeeds or the consumer is disposed.
+    /// refused subscribe keeps both until a subscribe succeeds or the consumer is closed or disposed.
     /// A subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
-    /// listener-less <see cref="Subscribe(SubscriptionPattern)"/> included, as does disposing the consumer.
-    /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// listener-less <see cref="Subscribe(SubscriptionPattern)"/> included, as does closing or disposing the consumer.
+    /// <see cref="Unsubscribe"/> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does; closing the consumer
+    /// releases it once the close's callbacks have run, as disposing it does.
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
     /// keeps it too.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
