@@ -1,5 +1,7 @@
 # CKRDA0013 findings not fixed yet, one key per line. A line that matches no finding is CKRDA0014: delete it.
 # Written from a build's findings less the allowlist; fixing a gap removes its line.
+default M:Confluent.Kafka.Consumer.IAsyncConsumerRebalanceListener.OnPartitionsLost(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Consumer.IConsumerRebalanceListener.OnPartitionsLost(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
 missing T:Confluent.Kafka.Admin.AlterClientQuotasResult org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult(Map)
 missing T:Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType#forId(byte)
 missing T:Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType#id()
@@ -178,9 +180,13 @@ missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.M
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#setMockMetrics(MetricName,Metric)
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterBroker(int,UnregisterBrokerOptions)
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)
+missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromType(byte)
+missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#mechanismName()
 missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#type()
 missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#parse(String)
 missing T:Confluent.Kafka.Admin.UpgradeType org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#code()
+missing T:Confluent.Kafka.Admin.UpgradeType org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#fromCode(int)
 missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#code()
 missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#fromCode(byte)
 missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#fromString(String)
@@ -423,6 +429,8 @@ unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.UpdateEndOffset(System.Strin
 unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.HistoryCount
 unmatched M:Confluent.Kafka.Producer.MockProducer`2.HistoryCount
 unmatched T:Confluent.Kafka.Admin.AlterConfigOpType
+unmatched T:Confluent.Kafka.Admin.ScramMechanisms
+unmatched T:Confluent.Kafka.Admin.UpgradeTypes
 unmatched T:Confluent.Kafka.Common.GroupStateExtensions
 unmatched T:Confluent.Kafka.Common.Quota.ClientQuotaMatchType
 unmatched T:Confluent.Kafka.Consumer.AsyncConsumerRebalanceListenerBase
