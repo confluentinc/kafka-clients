@@ -308,6 +308,44 @@ public sealed class PublicMockConsumerOwnerWaitTests
         }
     }
 
+    [Fact]
+    public async Task AsyncMock_AnotherThreadsSubscribe_WaitsForThisThreadsSubscribe_ThenIsAccepted()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        try
+        {
+            int[] state = new int[2];
+            Exception? failure = null;
+            Task? second = null;
+            Task first;
+            Thread other;
+            bool waited;
+            using (new ConsumerPumpStall(consumer))
+            {
+                first = consumer.Subscribe(new[] { Topic });
+                other = StartThread(() =>
+                {
+                    Volatile.Write(ref state[0], 1);
+                    failure = Record.Exception(() => { second = consumer.Subscribe(new[] { Topic }); });
+                    Volatile.Write(ref state[1], 1);
+                });
+                SpinUntilWaitingOrEnded(other, () => Volatile.Read(ref state[0]) == 1, () => Volatile.Read(ref state[1]) == 1);
+                waited = Volatile.Read(ref state[1]) == 0;
+            }
+
+            await TestTimeout.Run(() => first, s_deadline);
+
+            Assert.True(other.Join(s_bound), "the other thread's subscribe never returned");
+            Assert.True(waited, "the other thread's subscribe did not wait for this thread's subscribe");
+            Assert.Null(failure);
+            await TestTimeout.Run(() => second!, s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

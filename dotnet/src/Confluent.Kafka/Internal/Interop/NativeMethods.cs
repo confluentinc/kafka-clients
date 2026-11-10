@@ -309,6 +309,9 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_topics", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerSubscribeWithTopics(SafeConsumerHandle self, IntPtr topics, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_pattern", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSubscribeWithPattern(SafeConsumerHandle self, IntPtr pattern, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_unsubscribe", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerUnsubscribe(SafeConsumerHandle self, ref IntPtr outErr);
 
@@ -440,6 +443,10 @@ internal static partial class NativeMethods
     internal static extern void ConsumerSubscribeWithTopicsCb(
         SafeConsumerHandle self, IntPtr topics, ConsumerVoidCallback cb, IntPtr opaque);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_pattern_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSubscribeWithPatternCb(
+        SafeConsumerHandle self, IntPtr pattern, ConsumerVoidCallback cb, IntPtr opaque);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_unsubscribe_cb", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerUnsubscribeCb(SafeConsumerHandle self, ConsumerVoidCallback cb, IntPtr opaque);
 
@@ -564,6 +571,12 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_common_TopicPartition_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void TopicPartitionDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_SubscriptionPattern_new_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr SubscriptionPatternNew(IntPtr pattern, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_SubscriptionPattern_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void SubscriptionPatternDestroy(IntPtr self, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr OffsetAndMetadataWithLeaderEpochMetadata(
@@ -788,6 +801,14 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_topics_listener_cb", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerSubscribeWithTopicsListenerCb(
         SafeConsumerHandle self, IntPtr topics, IntPtr listener, ConsumerVoidCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_pattern_listener", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSubscribeWithPatternListener(
+        SafeConsumerHandle self, IntPtr pattern, IntPtr listener, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_pattern_listener_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSubscribeWithPatternListenerCb(
+        SafeConsumerHandle self, IntPtr pattern, IntPtr listener, ConsumerVoidCallback cb, IntPtr opaque);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer__set_callback_result_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerSetCallbackResult(

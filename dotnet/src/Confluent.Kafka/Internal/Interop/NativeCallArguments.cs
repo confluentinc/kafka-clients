@@ -35,6 +35,7 @@ internal sealed class NativeCallArguments : IDisposable
         Node,
         PartitionInfo,
         TopicPartitionInfo,
+        SubscriptionPattern,
     }
 
     internal IntPtr Utf8(string value)
@@ -51,6 +52,13 @@ internal sealed class NativeCallArguments : IDisposable
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.TopicPartitionNew(Utf8(topic), partition, ref outErr);
         return Track(handle, Kind.TopicPartition, ref outErr);
+    }
+
+    internal IntPtr SubscriptionPattern(string pattern)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr handle = NativeMethods.SubscriptionPatternNew(Utf8(pattern), ref outErr);
+        return Track(handle, Kind.SubscriptionPattern, ref outErr);
     }
 
     internal IntPtr TopicPartitionList(IReadOnlyList<(string Topic, int Partition)> partitions)
@@ -280,6 +288,9 @@ internal sealed class NativeCallArguments : IDisposable
                 break;
             case Kind.TopicPartitionInfo:
                 NativeMethods.TopicPartitionInfoDestroy(entry.Handle, ref outErr);
+                break;
+            case Kind.SubscriptionPattern:
+                NativeMethods.SubscriptionPatternDestroy(entry.Handle, ref outErr);
                 break;
         }
 
