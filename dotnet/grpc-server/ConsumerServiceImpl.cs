@@ -92,14 +92,20 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = id });
     }
 
-    // Without with_listener the plain Subscribe(topics) replaces, and so releases, a listener an
-    // earlier subscribe registered, as in Python.
+    // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe
+    // registered, as in Python.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
-        // Pattern subscription is not ported: answer -31 rather than subscribe to no topic.
         if (request.HasPattern)
         {
-            return RunStatus(request.ConsumerId, _ => throw new UnsupportedOperationException(Translate.PatternSubscribeUnsupported));
+            SubscriptionPattern pattern = new SubscriptionPattern(request.Pattern);
+            if (request.WithListener)
+            {
+                LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
+                return RunStatus(request.ConsumerId, c => c.Subscribe(pattern, listener));
+            }
+
+            return RunStatus(request.ConsumerId, c => c.Subscribe(pattern));
         }
 
         List<string> topics = new List<string>(request.Topics);

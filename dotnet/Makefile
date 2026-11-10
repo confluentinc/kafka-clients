@@ -73,9 +73,9 @@ grpc-native:
 # The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
 # server images, then run the `__grpc_dotnet` tests of the Rust harness against
 # them (rust/Makefile's test-integration-grpc-dotnet; the filter also matches
-# `__grpc_dotnet_async`, and it carries the .NET-only DOTNET_GRPC_SKIPS). Reached
-# from the root's test-integration-dotnet and its -ssl / -sasl-ssl variants, which
-# select the broker listener through INTEGRATION_TEST_PROTOCOL in the environment.
+# `__grpc_dotnet_async`). Reached from the root's test-integration-dotnet and its
+# -ssl / -sasl-ssl variants, which select the broker listener through
+# INTEGRATION_TEST_PROTOCOL in the environment.
 #
 # Cross-arch guard: both Dockerfiles COPY the *host-built*
 # rust/target/release/libconfluent_kafka.so straight into a Linux container. On a

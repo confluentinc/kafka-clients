@@ -472,6 +472,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     Task Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback,   // Java subscribe(Collection, callback) — M9/P6
         CancellationToken cancellationToken = default);
     Task Subscribe(IReadOnlyCollection<string> topics, IAsyncConsumerRebalanceListener callback, CancellationToken cancellationToken = default);   // Java subscribe(Collection, callback), async listener — M19/P1
+    Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default);
+    Task Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener callback, CancellationToken cancellationToken = default);
+    Task Subscribe(SubscriptionPattern pattern, IAsyncConsumerRebalanceListener callback, CancellationToken cancellationToken = default); // async listener, as the topics form (ledger 414)
     Task Unsubscribe(CancellationToken cancellationToken = default);
     // Java commitSync / commitSync(Map) (+ Duration overloads) — blocks in Java → Task over commit_sync*_cb (§4 note)
     Task Commit(CancellationToken cancellationToken = default);
@@ -542,6 +545,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // J
     ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);      // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
     void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback); // M9/P6
+    void Subscribe(SubscriptionPattern pattern);
+    void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener callback);
     void Unsubscribe();
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
@@ -595,6 +600,15 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    //
     public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent
     public void SetPollException(KafkaException? exception);                     // Java setPollException (decision 15); null clears
 }
+
+namespace Confluent.Kafka.Consumer;                       // Consumer/SubscriptionPattern.cs
+public sealed class SubscriptionPattern {                 // Java SubscriptionPattern
+    public SubscriptionPattern(string pattern);           // stores the argument as given, null too
+    public string Pattern();                              // a method (CKRDA0013 rule 2)
+    public override bool Equals(object? obj);             // ordinal, null-safe
+    public override int GetHashCode();                    // a null pattern throws ArgumentNullException (ledger 419)
+    public override string ToString();                    // the pattern; "null" for a null pattern (ledger 413)
+}
 ```
 
 **Clipped to today's ABI**, like the producer — the fuller Java surface lands as
@@ -614,7 +628,8 @@ typed poll; see §4), plus the **rebalance listener** — `IConsumerRebalanceLis
 both interfaces, and `MockConsumer`'s inherent `Rebalance(newAssignment)` driver and
 `AsyncMockConsumer`'s awaitable one (M9/P6; see the §4 listener row), and its async form
 `IAsyncConsumerRebalanceListener` (+ `AsyncConsumerRebalanceListenerBase`) on
-`IAsyncConsumer` (M19/P1), plus the **offset-commit
+`IAsyncConsumer` (M19/P1), plus pattern subscribe
+(`Subscribe(SubscriptionPattern[, listener])`, M23/P2), plus the **offset-commit
 callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads,
 on each flavor's interface since decision 13 (M9/P7; see the §4 commit-callback row), and its
 async form `IAsyncOffsetCommitCallback` on `IAsyncConsumer` (M19/P1), plus the **in-callback
@@ -625,7 +640,7 @@ consumer, which is what Java gets for free. (The **producer's** half — Java's
 `send(record, Callback)` — closed later, in M14/P1; see the §4 delivery-callback
 divergence. This sentence used to read "the callback-parity work" unqualified, which
 was true of the consumer only.) Still to come:
-pattern subscribe and headers for the deserializers (row 153; each `ConsumerRecord`'s `Headers` are its own, writable
+headers for the deserializers (row 153; each `ConsumerRecord`'s `Headers` are its own, writable
 copies today, ledger 293). ⚠ The typed **producer** is **no longer** deferred — it shipped in
 M11/P5 (generic-only, see the producer sketch above); this line said otherwise until
 M14/P1 corrected it, and the producer completion model (§A7) turned out not to gate it.
@@ -709,7 +724,7 @@ its C# realization, and where the enforcing rule lives.
 | `IllegalArgumentException` / `IllegalStateException` | The Java-named classes, with Java's message, for the binding's own checks too, so a check and the core's error for one condition have one class. A closed client throws `IllegalStateException` with its Java message: "Cannot perform operation after producer has been closed", "This consumer has already been closed.", "Cannot accept new calls when AdminClient is closing." The admin client throws it at the call *(deviation, as Python's: Java's `KafkaAdminClient` returns the Result and fails its futures with it; the native handle is gone after `Close`, so the call has no Result to return; ffi §C1)*. A .NET-only precondition (Java throws `NullPointerException` or nothing) keeps `ArgumentNullException` / `ArgumentOutOfRangeException`, except a negative timeout on a consumer lookup Java does not check (`Committed`, `PartitionsFor`, `ListTopics`, `OffsetsForTimes`, `BeginningOffsets`, `EndOffsets`): it throws `IllegalArgumentException` with the core's "Timeout must not be negative", the error the core's `_with_timeout` forms return (ffi §B5). A disposed `ConsumerHandle` keeps `ObjectDisposedException`. | validate **before** the FFI call — ffi §A5 |
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws `WakeupException` (**one-shot**), as Java's | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `ConcurrentModificationException`, sync and async, with Java's `acquire()` message, from the binding's owner check and the core's -2 alike (decision 17). | ffi §B5 |
-| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase` carry Java's `onPartitionsLost` default. Registered by the `Subscribe(topics, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
+| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase` carry Java's `onPartitionsLost` default. Registered by the `Subscribe(topics, callback)` and `Subscribe(pattern, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)` (`exception` is `Exception?`, the class of the error's id); passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**); on `IAsyncConsumer` also `IAsyncOffsetCommitCallback` — `Task OnComplete(offsets, exception)`, passed to two more `CommitAsync` overloads (M19/P1) | On `IConsumer` it runs inline on the caller's thread, inside the blocking call that delivers it (`Poll`, `Commit`, `Close`, …); on `IAsyncConsumer`, on the consumer's drain thread (`confluent-kafka-consumer-pump`) (decision 27). `offsets` is `null` on a failed commit (decision 22). An exception it throws, or the async form's faulted or cancelled `Task`, propagates out of the consumer call that delivered it (decision 12, ledger 47). See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | `Callback` (producer, `send(record, Callback)`) | `ICallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name. Except `beginTransaction()`: the core drains the queued sends first, so it waits, and `IAsyncProducer` makes it a `Task`, as Python's async classes make it `async def` | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
@@ -736,12 +751,14 @@ its C# realization, and where the enforcing rule lives.
 a state itself, it throws Java's class, at Java's point, with Java's message. These do not, and
 each goes when the reason it gives goes:
 
-- **Strings.** An unpaired surrogate is encoded as `?` (`0x3F`), as Java's
-  `String.getBytes(UTF_8)` does, by `StringSerde` and by every string the binding marshals to the
-  C ABI (topics, header keys, group ids, admin strings); a result whose key the core names shows
-  that `?`. A NUL character in a string argument throws `ArgumentException` at the call, because a
-  C string cannot carry it; Java sends it and the broker rejects the name. Goes when the C ABI
-  takes length-delimited strings.
+- **Strings.** An unpaired surrogate is encoded as `?` (`0x3F`), as Java's `String.getBytes(UTF_8)`
+  does, by `StringSerde` and by every string the binding marshals to the C ABI (topics, header keys,
+  group ids, admin strings); a result whose key the core names shows that `?`. A NUL character in a
+  string argument throws `ArgumentException` at the call, because a C string cannot carry it; Java
+  sends it and the broker rejects the name. A NUL in a `SubscriptionPattern` throws too, on the
+  mocks as well, since they pass the pattern to the C ABI like the real consumers; Java sends it,
+  and the broker evaluates it as a regular expression that no topic name can match. Goes when the C
+  ABI takes length-delimited strings.
 - **`NewTopic`** with a partition count or a replication factor below -1 throws
   `ArgumentOutOfRangeException` at construction; Java's future fails with
   `InvalidPartitionsException` / `InvalidReplicationFactorException`. The C ABI reads any negative
@@ -1555,10 +1572,8 @@ multilanguage arms over the two .NET gRPC images, and the perf stage. CI runs it
 runs the arms again over SSL and SASL_SSL. On macOS, CI runs `make test-dotnet-macos-docker` (the
 unit tests, without the integration tests, as Python's macOS job runs `test-unit` only), then starts
 Colima and runs `make test-integration-dotnet-native`: the arms with the gRPC server as a native
-process, with no perf stage. The
-arms skip only the tests named in `rust/Makefile`'s `DOTNET_GRPC_SKIPS`, each listed with its
-reason and its REMOVE condition. The gRPC server's own unit tests are a local gate, outside CI:
-`make -C dotnet test-grpc-server-dotnet`.
+process, with no perf stage. The arms skip no test. The gRPC server's own unit tests are a local
+gate, outside CI: `make -C dotnet test-grpc-server-dotnet`.
 
 ### 7.6 The gRPC test server (`grpc-server/`)
 

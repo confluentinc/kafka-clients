@@ -106,6 +106,13 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
         _native.Subscribe(topics, callback);
 
     /// <inheritdoc/>
+    public void Subscribe(SubscriptionPattern pattern) => _native.Subscribe(pattern);
+
+    /// <inheritdoc/>
+    public void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener callback) =>
+        _native.Subscribe(pattern, callback);
+
+    /// <inheritdoc/>
     public void Unsubscribe() => _native.Unsubscribe();
 
     /// <inheritdoc/>
