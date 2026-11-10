@@ -22,6 +22,7 @@ using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Metrics;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
@@ -158,20 +159,20 @@ public sealed class PublicValueTypeJavaEqualityTests
     [Fact]
     public void ConsumerGroupMetadata_Equality_AndToString_FollowJava()
     {
-        ConsumerGroupMetadata a = new ConsumerGroupMetadata("g", 1, "m", null);
-        ConsumerGroupMetadata b = new ConsumerGroupMetadata("g", 1, "m", null);
+        ConsumerGroupMetadata a = GroupMetadata("g", 1, "m", null);
+        ConsumerGroupMetadata b = GroupMetadata("g", 1, "m", null);
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
-        Assert.NotEqual(a, new ConsumerGroupMetadata("g", 1, "m", "i"));
-        Assert.NotEqual(a, new ConsumerGroupMetadata("h", 1, "m", null));
-        Assert.NotEqual(a, new ConsumerGroupMetadata("g", 2, "m", null));
-        Assert.NotEqual(a, new ConsumerGroupMetadata("g", 1, "n", null));
+        Assert.NotEqual(a, GroupMetadata("g", 1, "m", "i"));
+        Assert.NotEqual(a, GroupMetadata("h", 1, "m", null));
+        Assert.NotEqual(a, GroupMetadata("g", 2, "m", null));
+        Assert.NotEqual(a, GroupMetadata("g", 1, "n", null));
 
         Assert.Equal("GroupMetadata(groupId = g, generationId = 1, memberId = m, groupInstanceId = )", a.ToString());
         Assert.Equal(
             "GroupMetadata(groupId = g, generationId = -1, memberId = , groupInstanceId = i)",
-            new ConsumerGroupMetadata("g", -1, string.Empty, "i").ToString());
+            GroupMetadata("g", -1, string.Empty, "i").ToString());
     }
 
     [Fact]
@@ -219,4 +220,18 @@ public sealed class PublicValueTypeJavaEqualityTests
 
     private static TopicPartitionInfo Info(int partition, Node? leader, Node[] replicas, Node[] isr) =>
         new TopicPartitionInfo(partition, leader, replicas, isr);
+
+    // The library builds this type only from the core's metadata. Equality and ToString read only the four ids, so the
+    // tests pass an invalid (zero) handle, which is never released.
+    private static ConsumerGroupMetadata GroupMetadata(
+        string groupId,
+        int generationId,
+        string memberId,
+        string? groupInstanceId) =>
+        new ConsumerGroupMetadata(
+            groupId,
+            generationId,
+            memberId,
+            groupInstanceId,
+            new SafeConsumerGroupMetadataHandle(IntPtr.Zero));
 }
