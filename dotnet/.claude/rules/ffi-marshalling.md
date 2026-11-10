@@ -1953,8 +1953,13 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     negative timeout <ms>"; `Close`: "The timeout cannot be negative."); `Seek`'s negative
     offset; a null `Subscribe` collection ("Topic collection to subscribe to cannot be
     null") or a null or blank topic in it ("Topic collection to subscribe to cannot contain
-    null or empty topic"); a null or empty `SubscriptionPattern` ("Topic pattern to
-    subscribe to cannot be null" / "… cannot be empty"); a null `Assign` collection ("Topic partitions collection to
+    null or empty topic"); a null `SubscriptionPattern` ("Topic pattern to subscribe to
+    cannot be null"; on a mock Java's `MockConsumer` text, "Topic pattern cannot be null"),
+    and on a mock an empty one ("Topic pattern cannot be empty"), checked on a mock before
+    the closed check, as Java's `MockConsumer` checks the pattern before `ensureNotClosed()`
+    (on a `KafkaConsumer` the core refuses an empty pattern after its closed and `group.id`
+    checks, with Java's "Topic pattern to subscribe to cannot be empty"); a null `Assign`
+    collection ("Topic partitions collection to
     assign to cannot be null") or a null or blank topic in one of its partitions ("Topic
     partitions to assign to cannot have null or empty topic"); a null listener
     ("RebalanceListener cannot be null"); and a null `SeekToBeginning` / `SeekToEnd`
@@ -1966,7 +1971,8 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     closed."). Any other .NET-only precondition, where Java throws `NullPointerException`
     or nothing, keeps `ArgumentNullException` (a null `PartitionsFor` topic; a null
     `Pause` / `Resume`, `Committed`, `BeginningOffsets` or `EndOffsets` collection or
-    `OffsetsForTimes` map; a null config) or `ArgumentOutOfRangeException`. **Mandatory**, not
+    `OffsetsForTimes` map; a null config; a `SubscriptionPattern` whose `Pattern()` is
+    null) or `ArgumentOutOfRangeException`. **Mandatory**, not
     optional: a `NULL` where the header asks for a mandatory pointer comes back as -32
     "<param> must not be null" (`LocalNullPointerError`), which the error table maps to
     `ArgumentNullException` with the core's message and no `ParamName`. Any other panic in
@@ -2118,9 +2124,10 @@ same `ConcurrentModificationException`, sync or async (decision 17).
     async failure faults the `Task` (via `MockConsumer.SetPollException`, decision 15); the
     handle is freed exactly once; a non-ASCII message round-trips.
   - A null `Subscribe`, `Assign` or `SeekToBeginning` collection, a null topic in a
-    `Subscribe` or `Assign` argument, a null pattern or a null listener →
-    `IllegalArgumentException` with Java's message; a null `PartitionsFor` topic or `Pause`
-    collection → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
+    `Subscribe` or `Assign` argument, a null pattern (each flavour's text), an empty pattern
+    on a mock, or a null listener → `IllegalArgumentException` with Java's message; a null
+    `PartitionsFor` topic or `Pause` collection → `ArgumentNullException`; a pattern whose
+    `Pattern()` is null → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
     with Java's or the core's message; post-`Dispose` → `IllegalStateException` with the
     closed message; each before any native call.
   - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
@@ -2231,13 +2238,31 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
   - **Report exactly once per call**, on every path, including a method that throws
     before it returns a `Task` (the async listener, §B1). The async listener reports from
     its `Task`'s continuation, so the drain thread never waits on user code (decision 27).
-  - **`self_` lifetime** (decision 23): free the old listener's `GCHandle` when a
-    replacing `subscribe_*` succeeds, the new one when the `subscribe_*` fails, and the
-    current one after the consumer's destroy has returned. Keep it across `unsubscribe`:
+  - **`self_` lifetime** (decision 23): free the old listener's `GCHandle`, and every one
+    a failed `subscribe_*` left, when a replacing `subscribe_*` succeeds. A `subscribe_*`
+    that reported an error may already have registered its listener (the core's
+    `SubscriptionState` registers it before the subscription-type check, as Java's), so
+    the new one becomes the current one and the one it replaced is kept; a failed
+    listener-less `subscribe_*` changes nothing (row 431 (a)). A `subscribe_*` refused for
+    an invalid argument (-3), a missing `group.id` (24), concurrent use (-2) or an
+    unresolvable bootstrap address (-29, row 443) does not register its listener, as the
+    core raises those four only before the registration: free its own at once and change
+    nothing else. Any other refused `subscribe_*` (-4, 7 for
+    a timeout, -1 for a bare `KafkaException`, any other id) keeps both until a `subscribe_*`
+    succeeds or the consumer is destroyed (row 437). The id is read by the error-table helper
+    (`KafkaException.RefusedBeforeRegistering`) before the error is freed. Free a new one
+    at once also when no `subscribe_*` call was made, and the current and every kept one
+    after the consumer's destroy has returned. Keep it across `unsubscribe`:
     the header says `unsubscribe` releases the listener (BH:29392-29394 at `3f8a5bc6`), but
     Java's `unsubscribe()` leaves it registered (`SubscriptionState.java:347-355`), and
     Python keeps its context across it (`python/_confluentkafka.c:3870-3879`, `:3947-3954`
-    at `3f8a5bc6`).
+    at `3f8a5bc6`). On `KafkaConsumer` / `AsyncKafkaConsumer` a subscribe to no topics is
+    `unsubscribe`: keep the current and every kept one, and free its own once the call has
+    returned or completed.
+    On `AsyncKafkaConsumer` / `AsyncMockConsumer` a `subscribe_*` started while another one's
+    completion has not run is refused before the call, with -2's text and no registration: the core
+    frees its busy flag before it queues the completion, so two could settle out of order (row 441
+    (A)); the guard goes when the core queues first (row 442).
   - Destroy the `ConsumerRebalanceListener_t` handle right after the `subscribe_*` call:
     the call copied the registration (BH:29283-29287 at `3f8a5bc6`).
 
@@ -2335,9 +2360,17 @@ synchronous call.
     across call → `cb`) — and, for a registration, across the whole **live
     registration**, which is a much wider window.
   - **Listener:** the registration survives **N** fires (a churn loop); a replacing
-    subscribe frees the old `self_`; a failed subscribe frees the new one; an
-    `unsubscribe` frees nothing; destroy frees the current one after it returns; and
-    teardown with a live registration returns without hanging.
+    subscribe frees the old `self_`; a refused subscribe frees neither, its listener is
+    the one a mock's next rebalance fires, and the next successful subscribe frees both;
+    one refused for an invalid argument, a missing `group.id` or an unresolvable bootstrap
+    address frees only its own, on every retry, and a table over every id the header lists
+    classifies only -3, 24, -2 and -29 so (row 443); an `unsubscribe` frees nothing;
+    on `KafkaConsumer` / `AsyncKafkaConsumer` a
+    subscribe to no topics frees only its own; destroy frees the current and every kept
+    one after it returns; teardown with a live registration returns without hanging; and
+    on `AsyncKafkaConsumer` / `AsyncMockConsumer` a subscribe started while another has not
+    settled is refused with -2's text before the call, with no registration, and the next
+    is accepted once the first has settled, whether it succeeded or failed (row 441).
   - **Commit callback:** after `on_complete` reports, `self_` is freed once; after an
     initiation error it is kept until destroy, then freed once; a throwing callback's
     exception surfaces from the call that ran it; `CommitAsync(offsets)` with no callback
