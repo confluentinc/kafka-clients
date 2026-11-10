@@ -85,12 +85,19 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <summary>
     /// Subscribes to <paramref name="topics"/> with a rebalance listener (Java
     /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>). The listener fires on every later rebalance
-    /// until a subscribe that succeeds replaces it.
+    /// until another subscribe replaces it.
     /// </summary>
     /// <remarks>
-    /// A replacing subscribe releases the previous listener, a listener-less
-    /// <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as does disposing the consumer.
-    /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
+    /// refused subscribe's listener, or none. A subscribe refused for an invalid argument, a missing <c>group.id</c>,
+    /// concurrent use or an unresolvable bootstrap address does not register its listener and releases it; any other
+    /// refused subscribe keeps both until a subscribe succeeds or the consumer is closed or disposed.
+    /// A subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
+    /// listener-less <see cref="Subscribe(IReadOnlyCollection{string})"/> included, as does closing or disposing the
+    /// consumer. <see cref="Unsubscribe"/> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does; closing the
+    /// consumer releases it once the close's callbacks have run, as disposing it does.
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
+    /// keeps it too.
     /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
     /// may call on its own consumer.
     /// </remarks>
@@ -109,6 +116,89 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
     void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback);
+
+    /// <summary>
+    /// Subscribes to the topics matching <paramref name="pattern"/>, a regular expression compatible with Google
+    /// RE2/J that the broker evaluates (Java <c>subscribe(SubscriptionPattern)</c>).
+    /// </summary>
+    /// <remarks>
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a pattern that is not compatible with RE2/J is not refused
+    /// here: a later <see cref="Poll(TimeSpan)"/> fails with <see cref="InvalidRegularExpression"/>. A
+    /// <see cref="MockConsumer{TKey, TValue}"/> does not evaluate the pattern, so its <see cref="Poll(TimeSpan)"/>
+    /// never fails this way.
+    /// </remarks>
+    /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="pattern"/> is null or its pattern is empty, with the message of Java's
+    /// <c>KafkaConsumer</c> on a <see cref="KafkaConsumer{TKey, TValue}"/> and of Java's <c>MockConsumer</c> on a
+    /// <see cref="MockConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> contains a NUL character, which
+    /// the native client cannot receive unchanged.
+    /// </exception>
+    /// <exception cref="InvalidGroupIdException">
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <c>group.id</c> is not set.
+    /// </exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
+    /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    void Subscribe(SubscriptionPattern pattern);
+
+    /// <summary>
+    /// Subscribes to the topics matching <paramref name="pattern"/> with a rebalance listener (Java
+    /// <c>subscribe(SubscriptionPattern, ConsumerRebalanceListener)</c>). The listener fires on every later
+    /// rebalance until another subscribe replaces it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The broker evaluates the pattern with Google RE2/J; on a <see cref="KafkaConsumer{TKey, TValue}"/> one that is
+    /// not compatible is not refused here: a later <see cref="Poll(TimeSpan)"/> fails with
+    /// <see cref="InvalidRegularExpression"/>. A <see cref="MockConsumer{TKey, TValue}"/> does not evaluate the
+    /// pattern, so its <see cref="Poll(TimeSpan)"/> never fails this way.
+    /// </para>
+    /// <para>
+    /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
+    /// refused subscribe's listener, or none. A subscribe refused for an invalid argument, a missing <c>group.id</c>,
+    /// concurrent use or an unresolvable bootstrap address does not register its listener and releases it; any other
+    /// refused subscribe keeps both until a subscribe succeeds or the consumer is closed or disposed.
+    /// A subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
+    /// listener-less <see cref="Subscribe(SubscriptionPattern)"/> included, as does closing or disposing the consumer.
+    /// <see cref="Unsubscribe"/> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does; closing the consumer
+    /// releases it once the close's callbacks have run, as disposing it does.
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
+    /// keeps it too.
+    /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
+    /// may call on its own consumer.
+    /// </para>
+    /// </remarks>
+    /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
+    /// <param name="callback">The rebalance listener to register.</param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="callback"/> is null, or <paramref name="pattern"/> is null or its pattern is empty, with the
+    /// message of Java's <c>KafkaConsumer</c> on a <see cref="KafkaConsumer{TKey, TValue}"/> and of Java's
+    /// <c>MockConsumer</c> on a <see cref="MockConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> contains a NUL character, which
+    /// the native client cannot receive unchanged.
+    /// </exception>
+    /// <exception cref="InvalidGroupIdException">
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <c>group.id</c> is not set.
+    /// </exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
+    /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
+    void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener callback);
 
     /// <summary>
     /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>).
