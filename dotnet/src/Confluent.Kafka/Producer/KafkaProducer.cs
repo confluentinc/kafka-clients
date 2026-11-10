@@ -55,23 +55,39 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// </param>
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="configs"/>, <paramref name="keySerializer"/>, or
-    /// <paramref name="valueSerializer"/> is null.
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null: Java then reads the
+    /// <c>key.serializer</c> / <c>value.serializer</c> config, which .NET config cannot set.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
     /// <c>null</c>, or the client refuses a value.
     /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+    /// <remarks>
+    /// Each serializer that is <see cref="IDisposable"/> is disposed once, key then value, when the producer is closed
+    /// or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to construct kafka
+    /// producer", but not for a configuration the core refuses with another error, nor when this constructor throws
+    /// <see cref="ArgumentNullException"/> or refuses a serializer, a value's type or a <c>null</c> with
+    /// <see cref="ConfigException"/>. So a serializer shared with another client, or used after the close, sees it
+    /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
+    /// A serializer that is only <see cref="IAsyncDisposable"/> is not disposed.
+    /// </remarks>
     public KafkaProducer(
         IReadOnlyDictionary<string, object?> configs,
         ISerializer<TKey> keySerializer,
         ISerializer<TValue> valueSerializer)
     {
-        _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
-        _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
-        _native = NativeProducer.Create(configs);
+        // Java copies the config map first, so a null one fails before a missing serializer.
+        if (configs is null)
+        {
+            throw new ArgumentNullException(nameof(configs));
+        }
+
+        _keySerializer = NativeProducer.RequireSerializer(keySerializer, "key.serializer");
+        _valueSerializer = NativeProducer.RequireSerializer(valueSerializer, "value.serializer");
+        _native = NativeProducer.Create(configs, serdes: new SerdeDisposal(keySerializer, valueSerializer));
     }
 
     /// <inheritdoc/>

@@ -66,6 +66,19 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <c>group.protocol</c> is <c>classic</c>, which this client does not support; <c>classic</c> is
     /// also the default when the key is unset.
     /// </exception>
+    /// <remarks>
+    /// Each deserializer that is <see cref="IDisposable"/> is disposed once, key then value, when the consumer is
+    /// closed or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to
+    /// construct kafka consumer", but not for a configuration the core refuses with another error, nor when this
+    /// constructor throws
+    /// <see cref="ArgumentNullException"/> or refuses a deserializer, a value's type or a <c>null</c> with
+    /// <see cref="ConfigException"/>, nor by a close refused with <see cref="ConcurrentModificationException"/>, which
+    /// leaves the consumer open. So a deserializer shared with another client, or used after the close, sees it
+    /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
+    /// A deserializer that is only <see cref="IAsyncDisposable"/> is not disposed. When a <c>Poll</c> is still
+    /// deserializing, <c>Close</c> or <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers
+    /// after it ends.
+    /// </remarks>
     public AsyncKafkaConsumer(
         IReadOnlyDictionary<string, object?> configs,
         IDeserializer<TKey> keyDeserializer,
@@ -79,7 +92,7 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
 
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        _native = NativeConsumer.Create(configs);
+        _native = NativeConsumer.Create(configs, serdes: new SerdeDisposal(keyDeserializer, valueDeserializer));
     }
 
     /// <inheritdoc/>

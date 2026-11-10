@@ -512,7 +512,14 @@ one `PartitionsFor` delivers is the reader's). Read the signature, not the prefi
   - **Teardown order** (decision 7; `dotnet/CLAUDE.md` §4 **Close/Dispose**): refuse new calls
     (the closed client's `IllegalStateException`, §A5), close, stop and join the `CompletionThread`, wait for the
     in-flight uses (P/Invokes in progress) to reach 0, then release, so the destroy runs on the
-    closing thread and never inside `__execute_callbacks`. A `Close` called from a callback
+    closing thread and never inside `__execute_callbacks`. The serializers the producer was
+    given are then disposed on the same thread, or, while async callbacks of serializer failures
+    still run, the one that closed the producer included, once the last of them ends; a close from
+    inside one of them, or from a listener of its record's future, returns without waiting for that
+    (`dotnet/CLAUDE.md` §4 **Close/Dispose**, step 6). A send still running on another thread when the
+    close starts is not waited for: its serializers, its sync callback, and its async callback's part
+    before the send returns.
+    A `Close` called from a callback
     leaves the teardown to the `CompletionThread` after its drain. The destroy invalidates every
     view (BH:38787-38791), runs the callbacks still pending on its thread, and completes the
     unreported ones as success (`rust/src/ffi/producer/mod.rs:166-178` at `851c8d95`), so no
@@ -1595,7 +1602,7 @@ const-ness and its header text decide, not the type name:
 
     | # | Trigger | Route | Thread |
     |---|---|---|---|
-    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`IllegalStateException` "This consumer has already been closed."; during an explicit `Close`, another thread's call throws `ConcurrentModificationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy | the closing thread |
+    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`IllegalStateException` "This consumer has already been closed."; during an explicit `Close`, another thread's call throws `ConcurrentModificationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy → dispose the deserializers the consumer was given (`dotnet/CLAUDE.md` §4 **Close/Dispose**, step 6): the closing thread does, or, when `Poll`s are still deserializing, the last of them does once it ends (see the bullet below) | the closing thread; the deserializers: the closing thread, or the last `Poll` still deserializing |
     | 2 | `Dispose` / `DisposeAsync` from inside a callback on the drain thread (async consumers; a `Close` there throws `ConcurrentModificationException`, ledger 113) | the teardown is scheduled and the call returns; path 1's steps run once the drain's in-flight use has ended, never inside `__execute_callbacks`, and the drain thread is joined from the pool thread, never from itself | a pool thread, after the drain (as Python's runs in an executor off the loop, `python/confluent_kafka/consumer/async_consumer.py:604-608` at `3f8a5bc6`) |
 
     The cases, all on these two paths:
@@ -1621,6 +1628,7 @@ const-ness and its header text decide, not the type name:
         before that `cb` ran could still fail with -2. Python counts a waiting call
         the same way, "covering its submission, its wait and its callbacks"
         (`python/confluent_kafka/consumer/_base.py:445-456` at `3f8a5bc6`).
+      - **Another thread's `Dispose` while a close runs:** a callback that a close (a `Close` of any overload, `Dispose` or `DisposeAsync`) runs must not wait for another thread's `Dispose` or `DisposeAsync` of the same consumer, nor for its `Close` while the running close is a `Dispose` / `DisposeAsync`: those calls wait for the close, so the two hang (ledger 399). Java and Python throw there instead; .NET code expects `Dispose` not to throw.
       - **An explicit `Close` from another thread while an op runs:** the owner check
         refuses it at once → `ConcurrentModificationException`, before any state changes, so
         nothing is torn down and the consumer stays usable (ledgers 34 (ii), 136), as
@@ -1644,6 +1652,14 @@ const-ness and its header text decide, not the type name:
         practice this is the sync consumers: a running drain thread roots its
         consumer.
       - **A live `ConsumerHandle`** does not defer the destroy (Category 6).
+      - **A `Poll` still deserializing** is not waited for: `Poll` deserializes after its use ends (ledger 130),
+        so the teardown that destroys the consumer while one or more `Poll`s still deserialize hands the
+        deserializers over and returns, and the last of those `Poll`s disposes them once it has deserialized,
+        once, key then value (ledger 449). The count of `Poll`s holding records and the hand-off are decided
+        under one lock, so exactly one side disposes. Nothing waits, so a deserializer may still dispose its
+        consumer. A `Poll` takes its records inside its use, and the destroy runs only once the uses have ended
+        while new ones are refused as closed, so no `Poll` starts deserializing after it. This closes ledger
+        384's window, where a `Dispose` from another thread disposed the deserializers under a running `Poll`.
 
     Destroy first wakes the op still waiting (it fails with `WAKEUP`), awaits the
     `_cb` ops in flight, runs every pending callback on the destroying thread so each

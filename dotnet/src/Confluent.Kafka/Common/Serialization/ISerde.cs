@@ -16,7 +16,8 @@ namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
 /// A serializer and a deserializer for one type: Java's <c>Serde&lt;T&gt;</c>, but extending both interfaces
-/// instead of exposing <c>serializer()</c> and <c>deserializer()</c>, and without <c>close</c>.
+/// instead of exposing <c>serializer()</c> and <c>deserializer()</c>. Java's <c>close</c> is
+/// <see cref="System.IDisposable"/>, as on the two interfaces.
 /// </summary>
 /// <typeparam name="T">The type encoded and decoded.</typeparam>
 public interface ISerde<T> : ISerializer<T>, IDeserializer<T>
