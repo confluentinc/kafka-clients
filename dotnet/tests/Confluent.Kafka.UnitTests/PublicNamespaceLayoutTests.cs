@@ -332,6 +332,7 @@ public sealed class PublicNamespaceLayoutTests
         ("MockConsumer`2", "org.apache.kafka.clients.consumer.MockConsumer"),
         ("OffsetAndMetadata", "org.apache.kafka.clients.consumer.OffsetAndMetadata"),
         ("OffsetAndTimestamp", "org.apache.kafka.clients.consumer.OffsetAndTimestamp"),
+        ("SubscriptionPattern", "org.apache.kafka.clients.consumer.SubscriptionPattern"),
         ("AsyncKafkaProducer`2", "=KafkaProducer`2"),
         ("AsyncMockProducer`2", "=MockProducer`2"),
         ("IAsyncCallback", "=ICallback"),
