@@ -58,10 +58,6 @@ internal sealed partial class NativeProducer
         Volatile.Write(ref _mockCloseError, exception);
     }
 
-    // Read from the binding's own state, not the core's MockProducer_closed: a close that succeeds destroys the mock,
-    // so the core could answer only while it is still open.
-    internal bool MockClosed => Volatile.Read(ref _closed) != 0;
-
     internal void MockSetInitTransactionError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetInitTransactionError, exception);
 
@@ -91,8 +87,6 @@ internal sealed partial class NativeProducer
     internal bool MockTransactionCommitted() => MockFlag(NativeMethods.MockProducerTransactionCommitted);
 
     internal bool MockTransactionAborted() => MockFlag(NativeMethods.MockProducerTransactionAborted);
-
-    internal bool MockFlushed() => MockFlag(NativeMethods.MockProducerFlushed);
 
     internal bool MockSentOffsets() => MockFlag(NativeMethods.MockProducerSentOffsets);
 

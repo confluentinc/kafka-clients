@@ -200,7 +200,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <remarks>
     /// <para>
     /// If the transaction is committed successfully, the task completes after all delivery callbacks for records in
-    /// the transaction have been invoked and completed, an <see cref="IAsyncDeliveryCallback"/>'s task included.
+    /// the transaction have been invoked and completed, an <see cref="IAsyncCallback"/>'s task included.
     /// </para>
     /// <para>
     /// The token ends only the wait, as for <see cref="InitTransactions"/>, whose remarks also give the outcomes of

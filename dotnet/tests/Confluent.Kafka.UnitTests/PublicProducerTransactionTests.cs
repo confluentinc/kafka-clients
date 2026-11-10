@@ -958,7 +958,7 @@ public sealed class PublicProducerTransactionTests
     private static async Task<Func<bool>> MockSend(
         object producer,
         ProducerRecord<byte[], byte[]> record,
-        IDeliveryCallback? callback)
+        ICallback? callback)
     {
         if (producer is MockProducer<byte[], byte[]> sync)
         {
@@ -1094,7 +1094,7 @@ public sealed class PublicProducerTransactionTests
     }
 
     /// <summary>An async delivery callback whose task runs until its gate opens.</summary>
-    private sealed class HeldAsyncCallback : IAsyncDeliveryCallback
+    private sealed class HeldAsyncCallback : IAsyncCallback
     {
         private readonly Task _gate;
         private readonly TaskCompletionSource<bool> _started =
@@ -1112,7 +1112,7 @@ public sealed class PublicProducerTransactionTests
     }
 
     /// <summary>An async delivery callback that runs its body after an <c>await</c>.</summary>
-    private sealed class AfterAwait : IAsyncDeliveryCallback
+    private sealed class AfterAwait : IAsyncCallback
     {
         private readonly Func<Task> _body;
         private readonly ManualResetEventSlim _done = new ManualResetEventSlim();

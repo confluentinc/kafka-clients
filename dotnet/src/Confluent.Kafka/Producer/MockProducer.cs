@@ -174,7 +174,10 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     public void Clear() => _native.MockClear();
 
     /// <summary>Whether the producer has been closed (Java <c>MockProducer.closed()</c>).</summary>
-    /// <returns><see langword="true"/> once the producer is closed or disposed.</returns>
+    /// <returns>
+    /// <see langword="true"/> once <c>Close</c> or <c>Dispose</c> has begun. A <c>Close</c> that throws the exception
+    /// <see cref="SetCloseException"/> set leaves it <see langword="false"/>.
+    /// </returns>
     public bool Closed() => _native.MockClosed();
 
     /// <summary>

@@ -1050,9 +1050,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_aborted_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern sbyte MockProducerTransactionAborted(IntPtr self, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_flushed_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern sbyte MockProducerFlushed(IntPtr self, ref IntPtr outErr);
-
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_sent_offsets_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern sbyte MockProducerSentOffsets(IntPtr self, ref IntPtr outErr);
 

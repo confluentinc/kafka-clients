@@ -466,7 +466,7 @@ public sealed class PublicMockProducerTransactionControlTests
         new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
 
     /// <summary>A delivery callback that blocks the producer's completion thread until the test releases it.</summary>
-    private sealed class Blocking : IDeliveryCallback, IDisposable
+    private sealed class Blocking : ICallback, IDisposable
     {
         private int _returned;
 
@@ -492,7 +492,7 @@ public sealed class PublicMockProducerTransactionControlTests
     }
 
     /// <summary>A delivery callback that closes its producer and records what the close threw.</summary>
-    private sealed class ClosingInCallback : IDeliveryCallback
+    private sealed class ClosingInCallback : ICallback
     {
         private readonly Mock _producer;
         private readonly TaskCompletionSource<Exception?> _thrown =
@@ -510,7 +510,7 @@ public sealed class PublicMockProducerTransactionControlTests
     }
 
     /// <summary>An async delivery callback that flushes its producer after an await and records what it threw.</summary>
-    private sealed class FlushingAfterAnAwait : IAsyncDeliveryCallback
+    private sealed class FlushingAfterAnAwait : IAsyncCallback
     {
         private readonly AsyncMockProducer<byte[], byte[]> _producer;
         private readonly TaskCompletionSource<Exception?> _thrown =
@@ -563,7 +563,7 @@ public sealed class PublicMockProducerTransactionControlTests
                 () => _sync!.Send(Record()),
                 async () => await _async!.Send(Record()).ConfigureAwait(false));
 
-        internal Task Send(IDeliveryCallback callback) =>
+        internal Task Send(ICallback callback) =>
             Run(
                 () => _sync!.Send(Record(), callback),
                 async () => await _async!.Send(Record(), callback).ConfigureAwait(false));
