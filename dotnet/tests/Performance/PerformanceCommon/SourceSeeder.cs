@@ -94,8 +94,8 @@ public static class SourceSeeder
         }
     }
 
-    // The spawned tool is a Java producer whatever this exe's client is, so SASL goes in the Java form. A
-    // .properties value must be one line, so whitespace runs collapse to one space.
+    // The spawned tool is a Java producer whatever this exe's client is, so SASL goes in the Java form. The file
+    // holds the SASL secret, so it is readable by its owner only.
     private static string WriteProperties(string bootstrapServers)
     {
         var props = new List<KeyValuePair<string, string>>
@@ -105,16 +105,72 @@ public static class SourceSeeder
         };
         props.AddRange(SaslConfig.FromEnv(SaslForm.Java));
 
+        string path = Path.Combine(Path.GetTempPath(), $"txn_seed_{Guid.NewGuid():N}.properties");
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        using var writer = new StreamWriter(path, Encoding.ASCII, options);
+        writer.Write(PropertiesText(props));
+        return path;
+    }
+
+    /// <summary>Java <c>.properties</c> text for the pairs, each value escaped so <c>Properties.load</c> reads it back unchanged.</summary>
+    public static string PropertiesText(IEnumerable<KeyValuePair<string, string>> props)
+    {
         var text = new StringBuilder();
         foreach (KeyValuePair<string, string> kv in props)
         {
-            string oneLine = string.Join(' ', kv.Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-            text.Append(kv.Key).Append('=').Append(oneLine).Append('\n');
+            text.Append(kv.Key).Append('=');
+            AppendEscapedValue(text, kv.Value);
+            text.Append('\n');
         }
 
-        string path = Path.Combine(Path.GetTempPath(), $"txn_seed_{Guid.NewGuid():N}.properties");
-        File.WriteAllText(path, text.ToString());
-        return path;
+        return text.ToString();
+    }
+
+    // Properties.load reads ISO-8859-1, treats '\' as an escape, ends a value at a line break and drops its leading
+    // whitespace; '=', ':', '#' and '!' are literal inside a value.
+    private static void AppendEscapedValue(StringBuilder text, string value)
+    {
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            switch (c)
+            {
+                case '\\':
+                    text.Append(@"\\");
+                    break;
+                case '\n':
+                    text.Append(@"\n");
+                    break;
+                case '\r':
+                    text.Append(@"\r");
+                    break;
+                case '\t':
+                    text.Append(@"\t");
+                    break;
+                case '\f':
+                    text.Append(@"\f");
+                    break;
+                case ' ' when i == 0:
+                    text.Append(@"\ ");
+                    break;
+                default:
+                    if (c < 0x20 || c > 0x7E)
+                    {
+                        text.Append(@"\u").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture));
+                    }
+                    else
+                    {
+                        text.Append(c);
+                    }
+
+                    break;
+            }
+        }
     }
 
     private static void Append(StreamWriter log, object gate, string? line)

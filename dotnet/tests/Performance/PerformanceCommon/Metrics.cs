@@ -58,15 +58,13 @@ public sealed class Metrics : IDisposable
     private readonly Bucket _cpu = new Bucket();
     private readonly TextWriter _fd;
     private readonly object _writeLock = new object();
-    private readonly int _latencyTopBucket;
     private readonly bool _transactional;
-
-    private Bucket _latency;
-    private Bucket _bytes = new Bucket();
-    private Bucket _messages = new Bucket();
-    private Bucket _transactions = new Bucket();
-    private Bucket _commitLatency = new Bucket(withHistogram: true);
-    private Bucket _abortLatency = new Bucket(withHistogram: true);
+    private readonly Bucket _latency;
+    private readonly Bucket _bytes = new Bucket();
+    private readonly Bucket _messages = new Bucket();
+    private readonly Bucket _transactions = new Bucket();
+    private readonly Bucket _commitLatency = new Bucket(withHistogram: true);
+    private readonly Bucket _abortLatency = new Bucket(withHistogram: true);
 
     private long _windowStartMs;
     private long _measurementStartMs = UnsetMs;
@@ -95,7 +93,6 @@ public sealed class Metrics : IDisposable
     internal Metrics(TextWriter writer, int latencyTopBucket = LatencyHistogram.ProducerTopBucket, bool transactional = false)
     {
         _fd = writer;
-        _latencyTopBucket = latencyTopBucket;
         _transactional = transactional;
         _latency = new Bucket(withHistogram: true, latencyTopBucket);
         _windowStartMs = NowMs();
@@ -115,17 +112,17 @@ public sealed class Metrics : IDisposable
 
     public static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-    public void AddLatency(double latencyMs) => Volatile.Read(ref _latency).AddMeasurement(latencyMs);
+    public void AddLatency(double latencyMs) => _latency.AddMeasurement(latencyMs);
 
-    public void AddBytes(double count) => Volatile.Read(ref _bytes).AddMeasurement(count);
+    public void AddBytes(double count) => _bytes.AddMeasurement(count);
 
-    public void AddMessages(double count) => Volatile.Read(ref _messages).AddMeasurement(count);
+    public void AddMessages(double count) => _messages.AddMeasurement(count);
 
-    public void AddTransaction() => Volatile.Read(ref _transactions).AddMeasurement(1);
+    public void AddTransaction() => _transactions.AddMeasurement(1);
 
-    public void AddCommitLatency(double latencyMs) => Volatile.Read(ref _commitLatency).AddMeasurement(latencyMs);
+    public void AddCommitLatency(double latencyMs) => _commitLatency.AddMeasurement(latencyMs);
 
-    public void AddAbortLatency(double latencyMs) => Volatile.Read(ref _abortLatency).AddMeasurement(latencyMs);
+    public void AddAbortLatency(double latencyMs) => _abortLatency.AddMeasurement(latencyMs);
 
     public void ResetCpuBaseline() => _cpuSampler.ResetBaseline();
 
@@ -218,26 +215,18 @@ public sealed class Metrics : IDisposable
         long windowStart = _windowStartMs;
         _windowStartMs = NowMs();
 
-        // Swapped, as in Python, so new measurements go to a fresh bucket; RSS and CPU are touched
-        // only on this thread.
-        Bucket latency = Interlocked.Exchange(ref _latency, new Bucket(withHistogram: true, _latencyTopBucket));
-        Bucket bytes = Interlocked.Exchange(ref _bytes, new Bucket());
-        Bucket messages = Interlocked.Exchange(ref _messages, new Bucket());
-        Bucket transactions = Interlocked.Exchange(ref _transactions, new Bucket());
-        Bucket commitLatency = Interlocked.Exchange(ref _commitLatency, new Bucket(withHistogram: true));
-        Bucket abortLatency = Interlocked.Exchange(ref _abortLatency, new Bucket(withHistogram: true));
-
         _rss.AddMeasurement(_memorySampler.Sample());
         _cpu.AddMeasurement(_cpuSampler.Sample());
 
+        // Each bucket reads and resets under its own lock, so a measurement lands in exactly one window.
         BucketRollover rssRoll = _rss.Rollover();
         BucketRollover cpuRoll = _cpu.Rollover();
-        BucketRollover latencyRoll = latency.Rollover();
-        BucketRollover bytesRoll = bytes.Rollover();
-        BucketRollover messagesRoll = messages.Rollover();
-        BucketRollover transactionsRoll = transactions.Rollover();
-        BucketRollover commitLatencyRoll = commitLatency.Rollover();
-        BucketRollover abortLatencyRoll = abortLatency.Rollover();
+        BucketRollover latencyRoll = _latency.Rollover();
+        BucketRollover bytesRoll = _bytes.Rollover();
+        BucketRollover messagesRoll = _messages.Rollover();
+        BucketRollover transactionsRoll = _transactions.Rollover();
+        BucketRollover commitLatencyRoll = _commitLatency.Rollover();
+        BucketRollover abortLatencyRoll = _abortLatency.Rollover();
 
         cpuAverage = cpuRoll.Average;
         rssAverage = rssRoll.Average;

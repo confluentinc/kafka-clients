@@ -90,8 +90,18 @@ internal static class V3Config
     /// incremental with compression and falls back to full below a 16 KiB batch). A config that leaves the key unset
     /// (<c>USE_DEFAULTS</c>, as the Rust harness does) runs the core's default, <c>full</c>.
     /// </summary>
-    internal static string EffectiveAllocationStrategy(IReadOnlyDictionary<string, string> conf) =>
-        conf.TryGetValue(AllocationStrategyKey, out string? strategy) ? strategy : "full";
+    internal static string EffectiveAllocationStrategy(IReadOnlyDictionary<string, string> conf)
+    {
+        if (!conf.TryGetValue(AllocationStrategyKey, out string? strategy))
+        {
+            return "full";
+        }
+
+        bool smallBatch = conf.TryGetValue("batch.size", out string? batchSize)
+            && int.TryParse(batchSize, NumberStyles.Integer, CultureInfo.InvariantCulture, out int bytes)
+            && bytes < IncrementalMinBatchSize;
+        return smallBatch && string.Equals(strategy, "incremental", StringComparison.OrdinalIgnoreCase) ? "full" : strategy;
+    }
 
     private static string AllocationStrategy(string compressionType, int batchSize)
     {
