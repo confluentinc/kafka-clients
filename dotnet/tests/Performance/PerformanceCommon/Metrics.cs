@@ -58,8 +58,9 @@ public sealed class Metrics : IDisposable
     private readonly Bucket _cpu = new Bucket();
     private readonly TextWriter _fd;
     private readonly object _writeLock = new object();
+    private readonly int _latencyTopBucket;
 
-    private Bucket _latency = new Bucket(withHistogram: true);
+    private Bucket _latency;
     private Bucket _bytes = new Bucket();
     private Bucket _messages = new Bucket();
 
@@ -78,15 +79,28 @@ public sealed class Metrics : IDisposable
     private volatile bool _running;
 
     public Metrics()
-        : this(new StreamWriter(PerfEnv.GetString("METRICS_FILE", "metrics.jsonl"), append: false))
+        : this(LatencyHistogram.ProducerTopBucket)
     {
     }
 
-    internal Metrics(TextWriter writer)
+    private Metrics(int latencyTopBucket)
+        : this(new StreamWriter(PerfEnv.GetString("METRICS_FILE", "metrics.jsonl"), append: false), latencyTopBucket)
+    {
+    }
+
+    internal Metrics(TextWriter writer, int latencyTopBucket = LatencyHistogram.ProducerTopBucket)
     {
         _fd = writer;
+        _latencyTopBucket = latencyTopBucket;
+        _latency = new Bucket(withHistogram: true, latencyTopBucket);
         _windowStartMs = NowMs();
     }
+
+    /// <summary>
+    /// The consumer's metrics, whose per-window latency percentiles clamp at 600,000 ms, as Python's
+    /// <c>Metrics(latency_top_bucket=CONSUMER_MAX_LATENCY_MS)</c>.
+    /// </summary>
+    public static Metrics ForConsumer() => new Metrics(LatencyHistogram.ConsumerMaxLatencyMs);
 
     public static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -189,7 +203,7 @@ public sealed class Metrics : IDisposable
 
         // Swapped, as in Python, so new measurements go to a fresh bucket; RSS and CPU are touched
         // only on this thread.
-        Bucket latency = Interlocked.Exchange(ref _latency, new Bucket(withHistogram: true));
+        Bucket latency = Interlocked.Exchange(ref _latency, new Bucket(withHistogram: true, _latencyTopBucket));
         Bucket bytes = Interlocked.Exchange(ref _bytes, new Bucket());
         Bucket messages = Interlocked.Exchange(ref _messages, new Bucket());
 

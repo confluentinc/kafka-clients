@@ -32,6 +32,9 @@ internal static class V3Config
 
     private const string AllocationStrategyKey = "buffer.memory.allocation.strategy";
 
+    // The max.poll.records the EC2 runs give the Java consumer, which Python's Rust-core arm takes too.
+    private const int TunedMaxPollRecords = 2500;
+
     internal static Dictionary<string, string> BuildProducerConfig()
     {
         var conf = new Dictionary<string, string>
@@ -118,13 +121,30 @@ internal static class V3Config
             ["enable.auto.commit"] = "true",
         };
 
-        if (!cfg.UseDefaults)
+        // As Python's _rust_tuning; an unset setting keeps the core's default. No check.crcs override: the core keeps
+        // Java's default true, and Python sets false for the librdkafka consumer only.
+        if (cfg.FetchMinBytes is int fetchMinBytes)
         {
-            conf["fetch.min.bytes"] = Str(cfg.FetchMinBytes);
-            conf["max.partition.fetch.bytes"] = Str(cfg.MaxPartitionFetchBytes);
-            conf["max.poll.records"] = Str(cfg.BatchSize + 500);
+            conf["fetch.min.bytes"] = Str(fetchMinBytes);
+        }
 
-            // No check.crcs override: the core keeps Java's default true; Python sets false for the v2 consumer only.
+        if (cfg.MaxPartitionFetchBytes is int maxPartitionFetchBytes)
+        {
+            conf["max.partition.fetch.bytes"] = Str(maxPartitionFetchBytes);
+        }
+
+        if (cfg.FetchMaxWaitMs is int fetchMaxWaitMs)
+        {
+            conf["fetch.max.wait.ms"] = Str(fetchMaxWaitMs);
+        }
+
+        if (cfg.MaxPollRecords is int maxPollRecords)
+        {
+            conf["max.poll.records"] = Str(maxPollRecords);
+        }
+        else if (!cfg.UseDefaults)
+        {
+            conf["max.poll.records"] = Str(TunedMaxPollRecords);
         }
 
         foreach (KeyValuePair<string, string> kv in SaslConfig.FromEnv(SaslForm.Java))

@@ -28,6 +28,7 @@ internal static class V2Config
     private const int DefaultBatchSize = 1024 * 1024;
     private const int MaxRequestSizeCap = 8 * 1024 * 1024;
     private const int DefaultBufferMemoryMib = 32;
+    private const int DefaultMaxPollRecords = 500;
 
     internal static Dictionary<string, string> BuildProducerConfig()
     {
@@ -99,11 +100,25 @@ internal static class V2Config
             ["enable.auto.commit"] = "true",
         };
 
+        // As Python's _librdkafka_tuning, under librdkafka's names; an unset setting keeps librdkafka's default. No
+        // max.poll.records: librdkafka has none, and the harness reads ConsumeBatch records per poll instead.
+        if (cfg.FetchMinBytes is int fetchMinBytes)
+        {
+            conf["fetch.min.bytes"] = Str(fetchMinBytes);
+        }
+
+        if (cfg.MaxPartitionFetchBytes is int maxPartitionFetchBytes)
+        {
+            conf["fetch.message.max.bytes"] = Str(maxPartitionFetchBytes);
+        }
+
+        if (cfg.FetchMaxWaitMs is int fetchMaxWaitMs)
+        {
+            conf["fetch.wait.max.ms"] = Str(fetchMaxWaitMs);
+        }
+
         if (!cfg.UseDefaults)
         {
-            conf["fetch.min.bytes"] = Str(cfg.FetchMinBytes);
-            // No max.poll.records: librdkafka batches through Consume(num_messages).
-            conf["fetch.message.max.bytes"] = Str(cfg.MaxPartitionFetchBytes);
             conf["check.crcs"] = "false";
         }
 
@@ -114,6 +129,14 @@ internal static class V2Config
 
         return conf;
     }
+
+    /// <summary>
+    /// The most records one batch poll returns, as Python's <c>_librdkafka_batch</c>: <c>MAX_POLL_RECORDS</c>, else
+    /// 500 (the Java and Rust clients' default <c>max.poll.records</c>) under <c>USE_DEFAULTS=True</c>, else
+    /// <c>CONSUMER_BATCH_SIZE</c>.
+    /// </summary>
+    internal static int ConsumeBatch(ConsumerBenchmarkConfig cfg) =>
+        cfg.MaxPollRecords ?? (cfg.UseDefaults ? DefaultMaxPollRecords : cfg.BatchSize);
 
     internal static void PrintProducerConfiguration(IReadOnlyDictionary<string, string> conf, int keySize, int valueSize, bool doVerify)
     {
