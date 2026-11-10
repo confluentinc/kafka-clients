@@ -16,13 +16,16 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 using Confluent.Kafka.Producer;
 
 using Xunit;
@@ -504,6 +507,48 @@ public sealed class PublicSerializerDisposalTests
             ["max.block.ms"] = MaxBlockMs,
         };
 
+    [Theory]
+    [InlineData(CloseHow)]
+    [InlineData(CloseWithTimeoutHow)]
+    [InlineData(DisposeHow)]
+    [InlineData(DisposeAsyncHow)]
+    public async Task AnAsyncFailureCallbackStillRunning_KeepsTheSerializersUndisposedUntilItEnds(string how)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        DisposableSerializer key = new DisposableSerializer("key", log);
+        ApiFailingSerializer value = new ApiFailingSerializer("value", log);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        using ManualResetEventSlim afterDestroy = SignalAfterDestroy(producer);
+        HeldAsyncCallback callback = new HeldAsyncCallback();
+        try
+        {
+            _ = await producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), callback);
+            Assert.True(callback.Started.Wait(Deadline), "the failure callback never started");
+
+            Task<int> closing = Task.Run(() => CloseBy(producer, how));
+
+            Assert.True(afterDestroy.Wait(Deadline), "the " + how + " never destroyed the producer");
+            Assert.Equal(0, key.Disposals);
+            Assert.Equal(0, value.Disposals);
+            Assert.False(closing.IsCompleted, "the " + how + " ended before the failure callback");
+
+            callback.Release();
+            _ = await TestTimeout.Run(() => closing, Deadline);
+
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            Assert.Equal(new[] { "key", "value" }, log.ToArray());
+        }
+        finally
+        {
+            callback.Release();
+            await DisposeBounded(producer);
+        }
+
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+    }
+
     private static object Producer(
         string flavor,
         IReadOnlyDictionary<string, object?> configs,
@@ -515,6 +560,23 @@ public sealed class PublicSerializerDisposalTests
 
     private static string NullSerializer(string key) =>
         "Invalid value null for configuration " + key + ": must be non-null.";
+
+    private static ManualResetEventSlim SignalAfterDestroy(object producer)
+    {
+        NativeProducer native = (NativeProducer)producer.GetType()
+            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(producer)!;
+        FieldInfo afterDestroy = typeof(SafeProducerHandle)
+            .GetField("_afterDestroy", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Action release = (Action)afterDestroy.GetValue(native.Handle)!;
+        ManualResetEventSlim ran = new ManualResetEventSlim(false);
+        afterDestroy.SetValue(native.Handle, new Action(() =>
+        {
+            release();
+            ran.Set();
+        }));
+        return ran;
+    }
 
     private static async Task<int> CloseBy(object producer, string how)
     {
@@ -608,6 +670,50 @@ public sealed class PublicSerializerDisposalTests
         }
 
         return (trace.Lines(), trace.Events());
+    }
+
+    /// <summary>
+    /// A serializer whose <c>Serialize</c> throws Java's <c>RecordTooLargeException</c>, an <c>ApiException</c>, and
+    /// that records each <c>Dispose</c> in a shared log.
+    /// </summary>
+    private sealed class ApiFailingSerializer : ISerializer<byte[]>, IDisposable
+    {
+        private readonly string _name;
+        private readonly ConcurrentQueue<string> _log;
+        private int _disposals;
+
+        internal ApiFailingSerializer(string name, ConcurrentQueue<string> log)
+        {
+            _name = name;
+            _log = log;
+        }
+
+        internal int Disposals => Volatile.Read(ref _disposals);
+
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => throw new RecordTooLargeException("too large");
+
+        public void Dispose()
+        {
+            _log.Enqueue(_name);
+            _ = Interlocked.Increment(ref _disposals);
+        }
+    }
+
+    /// <summary>An async delivery callback that starts and then waits until the test releases it.</summary>
+    private sealed class HeldAsyncCallback : IAsyncDeliveryCallback
+    {
+        private readonly TaskCompletionSource<bool> _release =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal ManualResetEventSlim Started { get; } = new ManualResetEventSlim(false);
+
+        internal void Release() => _release.TrySetResult(true);
+
+        public Task OnCompletion(RecordMetadata metadata, Exception? exception)
+        {
+            Started.Set();
+            return _release.Task;
+        }
     }
 
     /// <summary>

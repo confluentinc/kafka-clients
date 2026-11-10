@@ -513,7 +513,8 @@ one `PartitionsFor` delivers is the reader's). Read the signature, not the prefi
     (the closed client's `IllegalStateException`, §A5), close, stop and join the `CompletionThread`, wait for the
     in-flight uses (P/Invokes in progress) to reach 0, then release, so the destroy runs on the
     closing thread and never inside `__execute_callbacks`. The serializers the producer was
-    given are then disposed on the same thread (`dotnet/CLAUDE.md` §4 **Close/Dispose**,
+    given are then disposed on the same thread, or, while async callbacks of serializer failures
+    still run, once the last of them ends (`dotnet/CLAUDE.md` §4 **Close/Dispose**,
     step 6). A `Close` called from a callback
     leaves the teardown to the `CompletionThread` after its drain. The destroy invalidates every
     view (BH:38787-38791), runs the callbacks still pending on its thread, and completes the

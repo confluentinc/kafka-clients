@@ -77,6 +77,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
     private readonly SerdeDisposal? _serdes;
+    private Task _serializersDisposed = Task.CompletedTask;
     private int _closed;
 
     private NativeProducer(
@@ -463,6 +464,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         _failureCallbacks.Wait();
+        WaitForTheSerializers();
     }
 
     public async ValueTask DisposeAsync()
@@ -489,6 +491,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         await _failureCallbacks.Snapshot().ConfigureAwait(false);
+        await Volatile.Read(ref _serializersDisposed).ConfigureAwait(false);
     }
 
     // A mock completes its pending sends before it closes, as Python's mock does on exit.
@@ -943,7 +946,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        return _failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None);
+        return ThenTheSerializersAsync(_failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None));
     }
 
     private void CloseWithin(long? timeoutMs)
@@ -966,6 +969,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         finally
         {
             _failureCallbacks.Wait();
+            WaitForTheSerializers();
         }
     }
 
@@ -1066,12 +1070,48 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         _handle.CloseExplicitly();
     }
 
-    // The serializers the producer was given are disposed after the destroy, on the thread that destroyed.
     private void AfterDestroy()
     {
         _completion.ReleaseNotifyOpaque();
         _reporter.ReleaseKept();
-        _serdes?.DisposeOnce();
+        Volatile.Write(ref _serializersDisposed, DisposeTheSerializersAfter(_failureCallbacks.Snapshot()));
+    }
+
+    // The serializers the producer was given are disposed after the destroy, on the thread that destroyed, unless an
+    // async callback of a serializer failure, which may still use them, is running: then once the last of those ends,
+    // as Python closes its serializers after its callbacks. A close returns only once they are disposed.
+    private Task DisposeTheSerializersAfter(Task failureCallbacks)
+    {
+        if (_serdes is not { } serdes)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (failureCallbacks.IsCompleted)
+        {
+            serdes.DisposeOnce();
+            return Task.CompletedTask;
+        }
+
+        return failureCallbacks.ContinueWith(
+            _ => serdes.DisposeOnce(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void WaitForTheSerializers() => Volatile.Read(ref _serializersDisposed).GetAwaiter().GetResult();
+
+    private async Task ThenTheSerializersAsync(Task closing)
+    {
+        try
+        {
+            await closing.ConfigureAwait(false);
+        }
+        finally
+        {
+            await Volatile.Read(ref _serializersDisposed).ConfigureAwait(false);
+        }
     }
 
     private void EnterUse()
