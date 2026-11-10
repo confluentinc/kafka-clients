@@ -1401,6 +1401,36 @@ const CS_LICENSE: &str = "// Copyright 2026 Confluent Inc.
 // limitations under the License.
 ";
 
+/// The C# remarks on the four Java defaults this client rejects (the JKS
+/// store types, the classic group protocol, the GSSAPI SASL mechanism), keyed
+/// by (class, constant): each value stays Java's, and the remark says what
+/// this client does with it.
+const CS_REMARKS: &[(&str, &str, &str)] = &[
+    (
+        "SslConfigs",
+        "DEFAULT_SSL_KEYSTORE_TYPE",
+        "This client reads only PEM stores and rejects JKS; when <c>ssl.keystore.type</c> is not set, it uses PEM.",
+    ),
+    (
+        "SslConfigs",
+        "DEFAULT_SSL_TRUSTSTORE_TYPE",
+        "This client reads only PEM stores and rejects JKS; when <c>ssl.truststore.type</c> is not set, it uses PEM.",
+    ),
+    (
+        "ConsumerConfig",
+        "DEFAULT_GROUP_PROTOCOL",
+        "This client's consumer rejects <c>classic</c> with an <see cref=\"UnsupportedOperationException\"/>, \
+         also when <c>group.protocol</c> is not set; set <c>group.protocol</c> to <c>consumer</c>.",
+    ),
+    (
+        "SaslConfigs",
+        "DEFAULT_SASL_MECHANISM",
+        "This client supports only the PLAIN mechanism; under <c>SASL_PLAINTEXT</c> or <c>SASL_SSL</c> it rejects \
+         <c>GSSAPI</c> with a <see cref=\"ConfigException\"/>, also when <c>sasl.mechanism</c> is not set; set \
+         <c>sasl.mechanism</c> to <c>PLAIN</c>.",
+    ),
+];
+
 /// One config class as C#: a `public const` for each of Java's compile-time
 /// constants, a `static readonly` field for each other field; the client
 /// classes with a private constructor, the others with Java's implicit
@@ -1423,7 +1453,10 @@ fn render_cs(spec: &Spec, consts: &[Const]) -> Res<String> {
     let mut members = Vec::new();
     for c in consts {
         let (ty, val) = cs_value(c)?;
-        let doc = format!("    /// <summary>Java's <c>{name}.{}</c>.</summary>\n", c.name);
+        let mut doc = format!("    /// <summary>Java's <c>{name}.{}</c>.</summary>\n", c.name);
+        if let Some((_, _, remark)) = CS_REMARKS.iter().find(|(class, field, _)| *class == name && *field == c.name) {
+            doc.push_str(&format!("    /// <remarks>{remark}</remarks>\n"));
+        }
         members.push(if c.constant {
             format!("{doc}    public const {ty} {} = {val};\n", c.name)
         } else {
@@ -1743,6 +1776,64 @@ mod tests {
         assert!(sasl.contains("    public const short DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS = 60;\n"));
         assert!(sasl.contains("    public const double DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR = 0.8;\n"));
         assert!(sasl.contains("    public const long DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS = 100L;\n"));
+    }
+
+    #[test]
+    fn test_cs_remarks_only_on_the_four_rejected_defaults() {
+        let root = repo_root();
+        let outputs = outputs(&root).unwrap();
+        let mut found = Vec::new();
+        for (file, spec) in CS_FILES.iter().zip(SPECS) {
+            let content = &outputs.iter().find(|(p, _)| *p == root.join(file)).unwrap().1;
+            let lines: Vec<_> = content.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if let Some(remark) = line.strip_prefix("    /// <remarks>") {
+                    let decl = lines[i + 1];
+                    let field = decl.split(" = ").next().unwrap().split_whitespace().last().unwrap();
+                    found.push((
+                        simple(spec.java).to_string(),
+                        field.to_string(),
+                        remark.to_string(),
+                        decl.to_string(),
+                    ));
+                }
+            }
+        }
+        let want = [
+            (
+                "ConsumerConfig",
+                "DEFAULT_GROUP_PROTOCOL",
+                "This client's consumer rejects <c>classic</c> with an <see cref=\"UnsupportedOperationException\"/>, \
+                 also when <c>group.protocol</c> is not set; set <c>group.protocol</c> to <c>consumer</c>.</remarks>",
+                "    public static readonly string DEFAULT_GROUP_PROTOCOL = \"classic\";",
+            ),
+            (
+                "SaslConfigs",
+                "DEFAULT_SASL_MECHANISM",
+                "This client supports only the PLAIN mechanism; under <c>SASL_PLAINTEXT</c> or <c>SASL_SSL</c> it \
+                 rejects <c>GSSAPI</c> with a <see cref=\"ConfigException\"/>, also when <c>sasl.mechanism</c> is not \
+                 set; set <c>sasl.mechanism</c> to <c>PLAIN</c>.</remarks>",
+                "    public const string DEFAULT_SASL_MECHANISM = \"GSSAPI\";",
+            ),
+            (
+                "SslConfigs",
+                "DEFAULT_SSL_KEYSTORE_TYPE",
+                "This client reads only PEM stores and rejects JKS; when <c>ssl.keystore.type</c> is not set, it uses \
+                 PEM.</remarks>",
+                "    public const string DEFAULT_SSL_KEYSTORE_TYPE = \"JKS\";",
+            ),
+            (
+                "SslConfigs",
+                "DEFAULT_SSL_TRUSTSTORE_TYPE",
+                "This client reads only PEM stores and rejects JKS; when <c>ssl.truststore.type</c> is not set, it uses \
+                 PEM.</remarks>",
+                "    public const string DEFAULT_SSL_TRUSTSTORE_TYPE = \"JKS\";",
+            ),
+        ];
+        assert_eq!(
+            found,
+            want.map(|(c, f, r, d)| (c.to_string(), f.to_string(), r.to_string(), d.to_string()))
+        );
     }
 
     /// A fake Java source tree holding `org.example.Fake` with `body`.

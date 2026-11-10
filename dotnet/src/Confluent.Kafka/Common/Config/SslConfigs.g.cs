@@ -63,6 +63,7 @@ public class SslConfigs
     public const string SSL_KEYSTORE_TYPE_DOC = "The file format of the key store file. This is optional for client. The values currently supported by the default <code>ssl.engine.factory.class</code> are [JKS, PKCS12, PEM].";
 
     /// <summary>Java's <c>SslConfigs.DEFAULT_SSL_KEYSTORE_TYPE</c>.</summary>
+    /// <remarks>This client reads only PEM stores and rejects JKS; when <c>ssl.keystore.type</c> is not set, it uses PEM.</remarks>
     public const string DEFAULT_SSL_KEYSTORE_TYPE = "JKS";
 
     /// <summary>Java's <c>SslConfigs.SSL_KEYSTORE_KEY_CONFIG</c>.</summary>
@@ -108,6 +109,7 @@ public class SslConfigs
     public const string SSL_TRUSTSTORE_TYPE_DOC = "The file format of the trust store file. The values currently supported by the default <code>ssl.engine.factory.class</code> are [JKS, PKCS12, PEM].";
 
     /// <summary>Java's <c>SslConfigs.DEFAULT_SSL_TRUSTSTORE_TYPE</c>.</summary>
+    /// <remarks>This client reads only PEM stores and rejects JKS; when <c>ssl.truststore.type</c> is not set, it uses PEM.</remarks>
     public const string DEFAULT_SSL_TRUSTSTORE_TYPE = "JKS";
 
     /// <summary>Java's <c>SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG</c>.</summary>

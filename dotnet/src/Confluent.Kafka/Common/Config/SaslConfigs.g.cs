@@ -33,6 +33,7 @@ public class SaslConfigs
     public const string GSSAPI_MECHANISM = "GSSAPI";
 
     /// <summary>Java's <c>SaslConfigs.DEFAULT_SASL_MECHANISM</c>.</summary>
+    /// <remarks>This client supports only the PLAIN mechanism; under <c>SASL_PLAINTEXT</c> or <c>SASL_SSL</c> it rejects <c>GSSAPI</c> with a <see cref="ConfigException"/>, also when <c>sasl.mechanism</c> is not set; set <c>sasl.mechanism</c> to <c>PLAIN</c>.</remarks>
     public const string DEFAULT_SASL_MECHANISM = "GSSAPI";
 
     /// <summary>Java's <c>SaslConfigs.SASL_JAAS_CONFIG</c>.</summary>

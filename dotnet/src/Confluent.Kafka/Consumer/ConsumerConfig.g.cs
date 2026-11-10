@@ -54,6 +54,7 @@ public class ConsumerConfig
     public const string GROUP_PROTOCOL_CONFIG = "group.protocol";
 
     /// <summary>Java's <c>ConsumerConfig.DEFAULT_GROUP_PROTOCOL</c>.</summary>
+    /// <remarks>This client's consumer rejects <c>classic</c> with an <see cref="UnsupportedOperationException"/>, also when <c>group.protocol</c> is not set; set <c>group.protocol</c> to <c>consumer</c>.</remarks>
     public static readonly string DEFAULT_GROUP_PROTOCOL = "classic";
 
     /// <summary>Java's <c>ConsumerConfig.GROUP_PROTOCOL_DOC</c>.</summary>
