@@ -101,6 +101,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
     /// another <c>Subscribe</c> made on this thread has not completed. On an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
+    /// Unlike Java's and Python's mocks, it also refuses an overlapping <c>Subscribe</c>: it runs on the native mock,
+    /// whose completions can arrive out of order.
     /// </exception>
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
 
@@ -143,6 +145,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
     /// another <c>Subscribe</c> made on this thread has not completed. On an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
+    /// Unlike Java's and Python's mocks, it also refuses an overlapping <c>Subscribe</c>: it runs on the native mock,
+    /// whose completions can arrive out of order.
     /// </exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
@@ -176,6 +180,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
     /// another <c>Subscribe</c> made on this thread has not completed. On an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
+    /// Unlike Java's and Python's mocks, it also refuses an overlapping <c>Subscribe</c>: it runs on the native mock,
+    /// whose completions can arrive out of order.
     /// </exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
@@ -220,6 +226,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
     /// another <c>Subscribe</c> made on this thread has not completed. On an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
+    /// Unlike Java's and Python's mocks, it also refuses an overlapping <c>Subscribe</c>: it runs on the native mock,
+    /// whose completions can arrive out of order.
     /// </exception>
     Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default);
 
@@ -280,6 +288,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
     /// another <c>Subscribe</c> made on this thread has not completed. On an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
+    /// Unlike Java's and Python's mocks, it also refuses an overlapping <c>Subscribe</c>: it runs on the native mock,
+    /// whose completions can arrive out of order.
     /// </exception>
     Task Subscribe(
         SubscriptionPattern pattern,
@@ -327,6 +337,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
     /// another <c>Subscribe</c> made on this thread has not completed. On an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
+    /// Unlike Java's and Python's mocks, it also refuses an overlapping <c>Subscribe</c>: it runs on the native mock,
+    /// whose completions can arrive out of order.
     /// </exception>
     Task Subscribe(
         SubscriptionPattern pattern,

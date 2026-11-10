@@ -2267,7 +2267,9 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     On `AsyncKafkaConsumer` / `AsyncMockConsumer` a `subscribe_*` started while another one's
     completion has not run is refused before the call, with -2's text and no registration: the core
     frees its busy flag before it queues the completion, so two could settle out of order (row 441
-    (A)); the guard goes when the core queues first (row 442).
+    (A)); the guard goes when the core queues first (row 442). On `AsyncMockConsumer` this differs
+    from Java's and Python's mocks, which never refuse it: the .NET mock runs on the core's mock
+    through the same `_cb` calls.
   - Destroy the `ConsumerRebalanceListener_t` handle right after the `subscribe_*` call:
     the call copied the registration (BH:29283-29287 at `3f8a5bc6`).
 

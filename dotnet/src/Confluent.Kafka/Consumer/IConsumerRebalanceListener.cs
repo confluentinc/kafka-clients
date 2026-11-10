@@ -21,7 +21,10 @@ namespace Confluent.Kafka.Consumer;
 /// The callbacks run when the partitions assigned to the consumer change, Java's
 /// <c>org.apache.kafka.clients.consumer.ConsumerRebalanceListener</c>. Pass an implementation to
 /// <see cref="IConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener)"/>
-/// or <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>.
+/// or <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>,
+/// or to their pattern forms
+/// <see cref="IConsumer{TKey, TValue}.Subscribe(SubscriptionPattern, IConsumerRebalanceListener)"/> and
+/// <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(SubscriptionPattern, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -53,6 +56,9 @@ namespace Confluent.Kafka.Consumer;
 /// included, releases it, as does closing or disposing the consumer (closing once its callbacks have run);
 /// <c>Unsubscribe()</c> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does, and so does a subscribe to no
 /// topics on a <c>KafkaConsumer</c> or <c>AsyncKafkaConsumer</c>, which is <c>Unsubscribe()</c>.
+/// Java's <c>MockConsumer</c> keeps firing the listener after <c>close()</c>; a closed
+/// <see cref="MockConsumer{TKey, TValue}"/> or <see cref="AsyncMockConsumer{TKey, TValue}"/> has released it, and its
+/// <c>Rebalance</c> throws <see cref="IllegalStateException"/>.
 /// </para>
 /// <para>
 /// Java's <c>onPartitionsLost</c> defaults to <c>onPartitionsRevoked</c>. A C# default interface method needs

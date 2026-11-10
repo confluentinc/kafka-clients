@@ -746,12 +746,14 @@ its C# realization, and where the enforcing rule lives.
 a state itself, it throws Java's class, at Java's point, with Java's message. These do not, and
 each goes when the reason it gives goes:
 
-- **Strings.** An unpaired surrogate is encoded as `?` (`0x3F`), as Java's
-  `String.getBytes(UTF_8)` does, by `StringSerde` and by every string the binding marshals to the
-  C ABI (topics, header keys, group ids, admin strings); a result whose key the core names shows
-  that `?`. A NUL character in a string argument throws `ArgumentException` at the call, because a
-  C string cannot carry it; Java sends it and the broker rejects the name. Goes when the C ABI
-  takes length-delimited strings.
+- **Strings.** An unpaired surrogate is encoded as `?` (`0x3F`), as Java's `String.getBytes(UTF_8)`
+  does, by `StringSerde` and by every string the binding marshals to the C ABI (topics, header keys,
+  group ids, admin strings); a result whose key the core names shows that `?`. A NUL character in a
+  string argument throws `ArgumentException` at the call, because a C string cannot carry it; Java
+  sends it and the broker rejects the name. A NUL in a `SubscriptionPattern` throws too, on the
+  mocks as well, since they pass the pattern to the C ABI like the real consumers; Java sends it,
+  and the broker evaluates it as a regular expression that no topic name can match. Goes when the C
+  ABI takes length-delimited strings.
 - **`NewTopic`** with a partition count or a replication factor below -1 throws
   `ArgumentOutOfRangeException` at construction; Java's future fails with
   `InvalidPartitionsException` / `InvalidReplicationFactorException`. The C ABI reads any negative
