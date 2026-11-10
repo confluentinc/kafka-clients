@@ -886,6 +886,40 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerFlush(SafeProducerHandle self, ref IntPtr outErr);
 
+    // The five transaction operations: each `_cb` form queues its completion on the producer, and the blocking form
+    // serves only a mock's call from a sync delivery callback the drain runs (ffi-marshalling.md §A7).
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_init_transactions_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerInitTransactionsCb(SafeProducerHandle self, ProducerVoidCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_init_transactions", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerInitTransactions(SafeProducerHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_begin_transaction_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerBeginTransactionCb(SafeProducerHandle self, ProducerVoidCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_begin_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerBeginTransaction(SafeProducerHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_offsets_to_transaction_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerSendOffsetsToTransactionCb(
+        SafeProducerHandle self, IntPtr offsets, IntPtr groupMetadata, ProducerVoidCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_offsets_to_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerSendOffsetsToTransaction(
+        SafeProducerHandle self, IntPtr offsets, IntPtr groupMetadata, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_commit_transaction_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerCommitTransactionCb(SafeProducerHandle self, ProducerVoidCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_commit_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerCommitTransaction(SafeProducerHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_abort_transaction_cb", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerAbortTransactionCb(SafeProducerHandle self, ProducerVoidCallback cb, IntPtr opaque);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_abort_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerAbortTransaction(SafeProducerHandle self, ref IntPtr outErr);
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void ProducerListCallback(IntPtr value, IntPtr error, IntPtr opaque);
 
@@ -1000,6 +1034,57 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_error_next_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern sbyte MockProducerErrorNext(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_fence_producer", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerFenceProducer(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_initialized_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionInitialized(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_in_flight_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionInFlight(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_committed_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionCommitted(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_aborted_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionAborted(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_sent_offsets_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerSentOffsets(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_commit_count_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long MockProducerCommitCount(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_consumer_group_offsets_history_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockProducerConsumerGroupOffsetsHistory(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_uncommitted_offsets_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockProducerUncommittedOffsets(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_send_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetSendError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_flush_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetFlushError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_partitions_for_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetPartitionsForError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_init_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetInitTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_begin_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetBeginTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_send_offsets_to_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetSendOffsetsToTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_commit_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetCommitTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_abort_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetAbortTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_handle_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern SafeConsumerReentrancyHandle ConsumerGetHandle(SafeConsumerHandle self, ref IntPtr outErr);

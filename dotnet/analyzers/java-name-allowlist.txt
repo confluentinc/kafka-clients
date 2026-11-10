@@ -78,3 +78,42 @@ overload M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Subscribe(System.Collection
 overload M:Confluent.Kafka.Producer.AsyncKafkaProducer`2.Send(Confluent.Kafka.Producer.ProducerRecord{`0,`1},Confluent.Kafka.Producer.IAsyncCallback,System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.Send(Confluent.Kafka.Producer.ProducerRecord{`0,`1},Confluent.Kafka.Producer.IAsyncCallback,System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Producer.IAsyncProducer`2.Send(Confluent.Kafka.Producer.ProducerRecord{`0,`1},Confluent.Kafka.Producer.IAsyncCallback,System.Threading.CancellationToken)
+
+# Java's MockProducer injects its errors through nine public fields (sendException, …); here they set the core mock's
+# state, so each is a setter Set<Field>, as Python's set_<field> (dotnet/CLAUDE.md §3).
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#abortTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#closeException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#partitionsForException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#abortTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#closeException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#partitionsForException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetAbortTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetBeginTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetCloseException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetCommitTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetFlushException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetInitTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetPartitionsForException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetSendException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.SetSendOffsetsToTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetAbortTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetBeginTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetCloseException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetCommitTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetFlushException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetInitTransactionException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetPartitionsForException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetSendException(System.Exception)
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetSendOffsetsToTransactionException(System.Exception)

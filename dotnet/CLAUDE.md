@@ -66,7 +66,8 @@ as `IAdmin` (`KafkaAdminClient` / `MockAdminClient`, M15); since M15/P14 that is
 the sync flavour, beside the async `IAsyncAdmin` (`AsyncKafkaAdminClient` /
 `AsyncMockAdminClient`). Every admin RPC returns its `*Result_t` at once, its futures complete
 through `kafka_common_KafkaFuture_get_cb`, and only `close` and `close_with_timeout` have `_cb`
-twins (M19/P1). Producer transactions are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+twins (M19/P1). Producer transactions are exposed on all four producer classes (§4 **Producer
+transactions**). Source of truth for the surface = `src/ffi/*.rs` +
 `cbindgen.toml` (the header is generated, not checked in).
 
 ---
@@ -290,6 +291,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);   // Java close(Duration) (M19/P1)
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
     IReadOnlyDictionary<MetricName, IMetric> Metrics();   // Java metrics() — NON-blocking, so it stays SYNC (M11/P8)
+    // Java's five transaction methods (§4 Producer transactions); each async form waits on its _cb twin
+    Task InitTransactions(CancellationToken cancellationToken = default);
+    Task BeginTransaction(CancellationToken cancellationToken = default);   // a Task, as Python's async begin_transaction
+    Task SendOffsetsToTransaction(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata, CancellationToken cancellationToken = default);
+    Task CommitTransaction(CancellationToken cancellationToken = default);
+    Task AbortTransaction(CancellationToken cancellationToken = default);
 }
 
 public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Future<T> (producer send) — M11/P3.6
@@ -303,7 +311,9 @@ public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Futu
 // signature, the callback fired on the producer's completion thread (`confluent-kafka-producer-completion`) before Get() returns
 // (KafkaProducer: inside Send, on the caller's thread, for a serializer's ApiException, §3); void Flush() /
 // Close(); void Close(TimeSpan) (M19/P1); IReadOnlyList<PartitionInfo> PartitionsFor(string);
-// IReadOnlyDictionary<MetricName, IMetric> Metrics() (M11/P8). Real + mock: KafkaProducer / MockProducer.
+// IReadOnlyDictionary<MetricName, IMetric> Metrics() (M11/P8); void InitTransactions() / BeginTransaction() /
+// SendOffsetsToTransaction(offsets, groupMetadata) / CommitTransaction() / AbortTransaction(), each waiting on its
+// _cb twin (§4 Producer transactions). Real + mock: KafkaProducer / MockProducer.
 // `Metrics()` and the callback-taking `Send` are declared IDENTICALLY on both producer interfaces —
 // there is deliberately **no** `IProducerCommon` for them (M11/P8 decision D-6; the asymmetry with the
 // consumer's `IConsumerCommon` is recorded rather than typed away). Both are **public-API additions**
@@ -323,8 +333,30 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         bool autoComplete = true);
     public bool CompleteNext();
     public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
-    public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
+    public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
     public void Clear();
+    // Java's transaction controls (§4 Producer transactions); MockProducer has the same members
+    public void SetInitTransactionException(Exception? exception);          // Java's field is a RuntimeException; null clears
+    public void SetBeginTransactionException(Exception? exception);
+    public void SetSendOffsetsToTransactionException(Exception? exception);
+    public void SetCommitTransactionException(Exception? exception);
+    public void SetAbortTransactionException(Exception? exception);
+    public void SetSendException(Exception? exception);                      // Java's public fields sendException, …: a setter each (allowlisted)
+    public void SetFlushException(Exception? exception);                     // also fails CommitTransaction / AbortTransaction
+    public void SetPartitionsForException(Exception? exception);
+    public void SetCloseException(Exception? exception);                     // Close throws it and leaves the producer open
+    public void FenceProducer();
+    public bool Closed();                   // Java closed(), read from the binding's state
+    public bool TransactionInitialized();   // Java transactionInitialized(), and likewise below
+    public bool TransactionInFlight();
+    public bool TransactionCommitted();
+    public bool TransactionAborted();
+    public bool Flushed();
+    public bool SentOffsets();
+    public long CommitCount();
+    public IReadOnlyList<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>>>
+        ConsumerGroupOffsetsHistory();                                       // METHOD: a fresh copy per call
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> UncommittedOffsets();
 }
 ```
 
@@ -333,9 +365,12 @@ can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **
 longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
 `kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
 `send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10;
-`ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` (Java returns the full record list; the ABI gives
-only a count, hence the .NET-only method `HistoryCount()`, as Python's `history_count()`). Add each when the
-ABI grows to cover it.
+`ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` and `MockProducer.uncommittedRecords()`.
+Java returns the records as they were sent, typed `ProducerRecord<K, V>`. The ABI returns the records too
+(`kafka_producer_MockProducer_history` / `_uncommitted_records`, a `kafka_List_t` of `ProducerRecord_t *`), but
+serialized: their key and value are bytes, and the mock takes serializers, not deserializers, so the binding
+cannot give back `TKey` / `TValue`. Python's mock is pure Python and keeps the typed records itself. The
+.NET-only `HistoryCount()` reads the size of that list. Add both when the binding can give back typed records.
 
 **The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
 the binding, **above** the bytes-based native producer and **before** the P/Invoke
@@ -364,7 +399,9 @@ binding builds it (ledger 300; an internal `SerializedProducerRecord` carrier). 
     stage completes); nothing crosses the ABI. The core never sees the error, so the binding
     cannot run Java's `maybeTransitionToErrorState`: a serializer that throws one of Java's
     fatal producer classes (`ProducerFencedException`, …) does not make the producer fatal, as
-    in Python (the transactional case belongs to the transactions step). Any other exception
+    in Python. On a transactional producer that leaves the transaction open where Java's
+    producer would refuse every later call; fixing it needs a core hook that moves the producer
+    into an error state *(recorded deviation, as Python's)*. Any other exception
     is rethrown unchanged. *(Python's `send()` raises every serializer error.)* The mocks
     rethrow every serializer exception unchanged, with no callback and no history entry, as
     Java's `MockProducer` does (it calls its serializers with no `try`), and as the core's and
@@ -670,7 +707,7 @@ its C# realization, and where the enforcing rule lives.
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase` carry Java's `onPartitionsLost` default. Registered by the `Subscribe(topics, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)` (`exception` is `Exception?`, the class of the error's id); passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**); on `IAsyncConsumer` also `IAsyncOffsetCommitCallback` — `Task OnComplete(offsets, exception)`, passed to two more `CommitAsync` overloads (M19/P1) | On `IConsumer` it runs inline on the caller's thread, inside the blocking call that delivers it (`Poll`, `Commit`, `Close`, …); on `IAsyncConsumer`, on the consumer's drain thread (`confluent-kafka-consumer-pump`) (decision 27). `offsets` is `null` on a failed commit (decision 22). An exception it throws, or the async form's faulted or cancelled `Task`, propagates out of the consumer call that delivered it (decision 12, ledger 47). See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | `Callback` (producer, `send(record, Callback)`) | `ICallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
-| **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
+| **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name. Except `beginTransaction()`: the core drains the queued sends first, so it waits, and `IAsyncProducer` makes it a `Task`, as Python's async classes make it `async def` | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
 | a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling, as a C# field: a `const` for a primitive or a string (`RecordMetadata.UNKNOWN_PARTITION`), a `static readonly` field otherwise (`Uuid.ZERO_UUID`, `Uuid.RESERVED`, `KafkaPrincipal.ANONYMOUS`, the filters' `ANY`, the mock admin clients' `DEFAULT_LOG_DIRS`), never a property; an enum member keeps the constant's name (`ResourceType.ANY`); numeric values unchanged. A .NET-only type with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`) the text the binding prints or sends is Java's, from an internal map, and the enum's own `ToString()` is a recorded deviation | ledger 285 |
 | a Java method, getters included (`topic()`, `isDone()`, `getName()`, `hasOffset()`) | a C# **method** with the PascalCase of Java's exact name, `get`, `is`, `has` and `should` kept (`Topic()`, `IsDone()`, `GetName()`, `RecordMetadata.HasOffset()`, `Uuid.GetMostSignificantBits()`), never a property; a member whose .NET name drifted from Java takes Java's (`TopicPartitionInfo.Isr()`, `IMetric.MetricName()` / `MetricValue()`, `ClientQuotaFilterComponent.Match()`). A Java static method is a C# static method: `Serdes.String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, each returning one shared stateless instance. Where a method is named like a type (`UpgradeType UpgradeType()`), an expression inside the class that reaches the type's members qualifies the type (`Admin.UpgradeType.UPGRADE` in `FeatureUpdate`, `Resource.ResourceType.ANY` in `ResourcePattern` and `ResourcePatternFilter`), since C# binds the simple name to the method group there; a type position needs no qualification (`TopicPartition TopicPartition()`) | ledger 365 |
@@ -713,10 +750,12 @@ each goes when the reason it gives goes:
   after the call, and with the call's error if the call failed; the Result cannot see that)*, and
   `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
 - **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
-  `Metrics`, and `MockProducer`'s `PartitionsFor`, `Metrics`, `CompleteNext`, `ErrorNext`, `Clear`
-  and `HistoryCount` throw the closed client's `IllegalStateException`, because the native handle
-  is gone; Java answers (Java's mock checks for close only in `send`, `flush` and the transaction
-  methods). Goes when the native object outlives `Close`.
+  `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
+  `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, the five `Set*TransactionException` setters
+  and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
+  closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
+  mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
+  when the native object outlives `Close`.
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
@@ -920,8 +959,9 @@ M19/P1: Java's `clientId()` is package-private and Python has no `client_id()` (
 producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`,
 Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; it maps **no**
 concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
-so its defensive null guard carries a producer-accurate message, decision D-5), `BeginTransaction()`,
-and the two metric-subscription methods.
+so its defensive null guard carries a producer-accurate message, decision D-5) and the two
+metric-subscription methods. `BeginTransaction` is not on this list: it waits while the core drains
+the queued sends, so it is a `Task` on `IAsyncProducer` (§4 **Producer transactions**).
 Everything else is async.
 
 ⚠ **`Seek` / `CurrentLag` (M19/P1, decision 22, ledger 103).** Both block in Java (an
@@ -1176,6 +1216,73 @@ Naming: `Commit` is Python's `commit()`; `CommitAsync` keeps Java's `commitAsync
 Python's is `commit_nowait()` (root `CLAUDE.md`, Class family). The map reads Java's *blocking
 behavior*, not Java's method name, which is why Java's `commitSync` is our `Commit`. There is
 **no** `CommitSync` member.
+
+### Producer transactions
+
+Java's `initTransactions`, `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction` and
+`abortTransaction`, on `IProducer` (`void`) and `IAsyncProducer` (`Task`, with a
+`CancellationToken`, `BeginTransaction` included, as Python's async classes make `begin_transaction`
+`async def`, where Java's `beginTransaction` returns at once).
+Each calls its `_cb` twin and waits on a managed `Completion` or `TaskCompletionSource`
+(`ffi-marshalling.md` §A7), `BeginTransaction` included, so it waits while the core drains the
+sends already handed over (root `producer-transactions.md` §13). The core makes every check, with
+Java's class and message; the binding adds only its closed check, first, as for every producer
+call, and on `SendOffsetsToTransaction` the consumer commit's check of the offsets' contents
+(`ArgumentException` "Topic names must not be null." / "Offset value must not be null."), since
+the map is built from the managed dictionary. With an empty `offsets` the real producers return at
+once without checking the transaction state, as Java's `KafkaProducer` does; the mocks check it
+first, as Java's `MockProducer` does. `SendOffsetsToTransaction` passes the core's own `ConsumerGroupMetadata` handle, which the
+object keeps from the consumer that gave it, the mocks' included. Recorded deviations:
+
+- **Overlapping calls.** A transaction call while the core still runs another one's operation on
+  the same producer throws the core's `ConcurrentModificationException` "Transactional methods of
+  KafkaProducer are not safe for concurrent access."; Java has no such check. The core releases its
+  flag before a commit or an abort waits for the delivery reports, so a call made during that wait
+  is not refused.
+- **Cancellation and retry.** A token already cancelled throws `OperationCanceledException` at
+  the call. A token that fires later ends only the wait; the operation runs on in the core, as
+  after Java's `max.block.ms` timeout, and a later call gets what the core answers: while the
+  core still runs the operation, `ConcurrentModificationException` (above; Java's retry would join the
+  pending result, Python's async producer answers as .NET does); once the core has timed it out,
+  Java's rules (the same call joins the pending result, another one throws
+  `IllegalStateException` "Cannot attempt operation `X` because the previous call to `Y` timed out
+  and must be retried"); once it has succeeded, whatever the core answers for a new call (on the
+  mocks, `InitTransactions` again throws "MockProducer has already been initialized for
+  transactions."). Only `IAsyncProducer` takes a token.
+- **Order of the null checks.** `SendOffsetsToTransaction` reports a null `groupMetadata` first
+  (`IllegalArgumentException` "Consumer group metadata could not be null"), then a null `offsets`
+  (`ArgumentNullException`), before the state checks, on all four classes. Java's `MockProducer`
+  makes its closed and state checks first, and refuses a null `groupMetadata` with
+  `NullPointerException`.
+- **From a delivery callback.** From a sync delivery callback on `KafkaProducer` and
+  `AsyncKafkaProducer` each of the five calls ends after `max.block.ms` with Kafka's
+  `TimeoutException`, `BeginTransaction` included, where Java's `beginTransaction` returns at
+  once (Python's does the same as .NET); from an async callback after an `await`, a commit or an
+  abort does (`ffi-marshalling.md` §A7). On the mocks the five calls complete from a delivery
+  callback, as Java's mock completes them, with one exception: from a callback the core cannot
+  see (on `AsyncMockProducer`, a sync callback or an async callback's synchronous part queued
+  behind an async callback, or an async callback after an `await`), `CommitTransaction` and
+  `AbortTransaction` wait for that callback's own report, so they end after `max.block.ms`
+  (60000 on a mock) with Kafka's `TimeoutException` *(recorded deviation from Java's mock; it
+  goes when the core has a commit and abort form that skips the report wait)*. The other three
+  take the blocking form there, which waits for no report, and complete at once (§A7).
+- **A serializer's fatal error** does not make a transactional producer fatal (§3, the
+  serializer's throw).
+
+The mocks carry Java's `MockProducer` transaction controls (§3 sketch), over the core mock's
+`kafka_producer_MockProducer_*` functions:
+- The five setters take `Exception?`, as `ErrorNext` does, since Java's fields are
+  `RuntimeException`; the call throws the same instance, and `null` clears it.
+- The flags, `CommitCount()`, `ConsumerGroupOffsetsHistory()` and `UncommittedOffsets()` are
+  methods, as every Java getter is (ledger 365); the last two copy a native container out, so
+  every call returns a fresh copy.
+- Java's public fields `sendException`, `flushException`, `partitionsForException` and
+  `closeException` are setters `Set<Field>(Exception?)`, as Python's `set_<field>`; CKRDA0013
+  allowlists them, with the five transaction setters.
+- `UncommittedRecords()` and `History()` are left out: the ABI's records hold the serialized
+  bytes, and the binding cannot turn them back into typed `TKey` / `TValue` records (§3, clipped to
+  today's ABI). `HistoryCount()` stands in, so the ports of Java's history tests check
+  `HistoryCount()`, not the records.
 
 ### Threads and teardown (M19/P1)
 

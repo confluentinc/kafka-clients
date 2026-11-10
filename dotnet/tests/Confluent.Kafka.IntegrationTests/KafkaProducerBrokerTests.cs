@@ -40,7 +40,8 @@ namespace Confluent.Kafka.IntegrationTests;
 /// serializer's memory gives: an array slice, native memory freed once the record is taken, and an empty key or value
 /// kept apart from a null one.
 /// </summary>
-public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
+[Collection(BrokerCollection.Name)]
+public sealed class KafkaProducerBrokerTests
 {
     private const int NativeValueLength = 1024;
 
