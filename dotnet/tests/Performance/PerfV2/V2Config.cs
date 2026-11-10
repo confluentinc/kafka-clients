@@ -27,6 +27,7 @@ internal static class V2Config
 {
     private const int DefaultBatchSize = 1024 * 1024;
     private const int MaxRequestSizeCap = 8 * 1024 * 1024;
+    private const int DefaultBufferMemoryMib = 32;
 
     internal static Dictionary<string, string> BuildProducerConfig()
     {
@@ -48,15 +49,16 @@ internal static class V2Config
         bool useDefaults = PerfEnv.GetBool("USE_DEFAULTS", false);
         if (!useDefaults)
         {
-            conf["acks"] = "all";
+            conf["acks"] = PerfEnv.GetString("ACKS", "all");
 
             int batchSize = PerfEnv.Has("BATCH_SIZE") ? PerfEnv.ParseInt("BATCH_SIZE") * 1024 : DefaultBatchSize;
             conf["batch.size"] = Str(batchSize);
 
-            int maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
-                ? PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
-                : Math.Min(batchSize * 64, MaxRequestSizeCap);
-            conf["message.max.bytes"] = Str(maxRequestSize);
+            // Capped at 8 MiB whether set or not, as the C, Rust, Java and Python harnesses do.
+            long maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
+                ? (long)PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
+                : (long)batchSize * 64;
+            conf["message.max.bytes"] = Str((int)Math.Min(maxRequestSize, MaxRequestSizeCap));
 
             conf["compression.type"] = PerfEnv.GetString("COMPRESSION_TYPE", "none");
             conf["enable.idempotence"] = PerfEnv.GetString("ENABLE_IDEMPOTENCE", "false");
@@ -66,12 +68,11 @@ internal static class V2Config
                 conf["max.in.flight.requests.per.connection"] = PerfEnv.GetString("MAX_IN_FLIGHT", string.Empty);
             }
 
-            if (PerfEnv.Has("BUFFER_MEMORY"))
-            {
-                long bufferMemoryBytes = (long)PerfEnv.ParseInt("BUFFER_MEMORY") * 1024 * 1024;
-                conf["queue.buffering.max.kbytes"] = (bufferMemoryBytes / 1024).ToString(CultureInfo.InvariantCulture);
-                conf["queue.buffering.max.messages"] = "2147483647";
-            }
+            // The same buffer as the Rust core's buffer.memory (32 MiB unless BUFFER_MEMORY says otherwise), with no
+            // message cap, so the two clients queue the same bytes before a send has to wait.
+            long bufferMemoryMib = PerfEnv.Has("BUFFER_MEMORY") ? PerfEnv.ParseInt("BUFFER_MEMORY") : DefaultBufferMemoryMib;
+            conf["queue.buffering.max.kbytes"] = (bufferMemoryMib * 1024).ToString(CultureInfo.InvariantCulture);
+            conf["queue.buffering.max.messages"] = "2147483647";
 
             conf["linger.ms"] = PerfEnv.GetString("LINGER_MS", "5");
 

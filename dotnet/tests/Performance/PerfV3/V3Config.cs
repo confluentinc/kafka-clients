@@ -27,6 +27,11 @@ internal static class V3Config
     private const int DefaultBatchSize = 1024 * 1024;
     private const int MaxRequestSizeCap = 8 * 1024 * 1024;
 
+    // The core's chunk size: below it the core falls back from incremental to full.
+    private const int IncrementalMinBatchSize = 16 * 1024;
+
+    private const string AllocationStrategyKey = "buffer.memory.allocation.strategy";
+
     internal static Dictionary<string, string> BuildProducerConfig()
     {
         var conf = new Dictionary<string, string>
@@ -47,15 +52,16 @@ internal static class V3Config
         bool useDefaults = PerfEnv.GetBool("USE_DEFAULTS", false);
         if (!useDefaults)
         {
-            conf["acks"] = "all";
+            conf["acks"] = PerfEnv.GetString("ACKS", "all");
 
             int batchSize = PerfEnv.Has("BATCH_SIZE") ? PerfEnv.ParseInt("BATCH_SIZE") * 1024 : DefaultBatchSize;
             conf["batch.size"] = Str(batchSize);
 
-            int maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
-                ? PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
-                : Math.Min(batchSize * 64, MaxRequestSizeCap);
-            conf["max.request.size"] = Str(maxRequestSize);
+            // Capped at 8 MiB whether set or not, as the C, Rust, Java and Python harnesses do.
+            long maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
+                ? (long)PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
+                : (long)batchSize * 64;
+            conf["max.request.size"] = Str((int)Math.Min(maxRequestSize, MaxRequestSizeCap));
 
             conf["compression.type"] = PerfEnv.GetString("COMPRESSION_TYPE", "none");
             conf["enable.idempotence"] = PerfEnv.GetString("ENABLE_IDEMPOTENCE", "false");
@@ -72,9 +78,32 @@ internal static class V3Config
             }
 
             conf["linger.ms"] = PerfEnv.GetString("LINGER_MS", "5");
+            conf[AllocationStrategyKey] = AllocationStrategy(conf["compression.type"], batchSize);
         }
 
         return conf;
+    }
+
+    /// <summary>
+    /// The effective <c>buffer.memory.allocation.strategy</c> of a producer config: <c>BUFFER_MEMORY_ALLOCATION_STRATEGY</c>
+    /// when set, else <c>incremental</c> where the core runs it and <c>full</c> where it does not (it refuses
+    /// incremental with compression and falls back to full below a 16 KiB batch). A config that leaves the key unset
+    /// (<c>USE_DEFAULTS</c>, as the Rust harness does) runs the core's default, <c>full</c>.
+    /// </summary>
+    internal static string EffectiveAllocationStrategy(IReadOnlyDictionary<string, string> conf) =>
+        conf.TryGetValue(AllocationStrategyKey, out string? strategy) ? strategy : "full";
+
+    private static string AllocationStrategy(string compressionType, int batchSize)
+    {
+        string? explicitStrategy = PerfEnv.GetStringOrNull("BUFFER_MEMORY_ALLOCATION_STRATEGY");
+        if (!string.IsNullOrEmpty(explicitStrategy))
+        {
+            return explicitStrategy;
+        }
+
+        bool coreRunsIncremental = string.Equals(compressionType, "none", StringComparison.OrdinalIgnoreCase)
+            && batchSize >= IncrementalMinBatchSize;
+        return coreRunsIncremental ? "incremental" : "full";
     }
 
     internal static Dictionary<string, string> BuildConsumerConfig(ConsumerBenchmarkConfig cfg)

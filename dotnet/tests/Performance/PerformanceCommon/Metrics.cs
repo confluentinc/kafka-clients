@@ -45,7 +45,8 @@ public readonly struct ExternalMetricsAggregations
 
 /// <summary>
 /// The shared metrics harness, Python's <c>Metrics</c>: per-window buckets that a background sampler rolls over each
-/// interval into one <c>metrics.jsonl</c> line in Python's schema, and the measured interval's CPU and RSS averages.
+/// interval into one line of <c>METRICS_FILE</c> (default <c>metrics.jsonl</c>) in Python's schema, and the measured
+/// interval's CPU and RSS averages.
 /// </summary>
 public sealed class Metrics : IDisposable
 {
@@ -77,7 +78,7 @@ public sealed class Metrics : IDisposable
     private volatile bool _running;
 
     public Metrics()
-        : this(new StreamWriter("metrics.jsonl", append: false))
+        : this(new StreamWriter(PerfEnv.GetString("METRICS_FILE", "metrics.jsonl"), append: false))
     {
     }
 

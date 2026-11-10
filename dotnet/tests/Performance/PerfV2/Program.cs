@@ -13,13 +13,14 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance.V2;
 
 /// <summary>
-/// The v2 (ckd) perf executable: <c>MODE</c> selects the producer or the consumer benchmark, and the exit code carries
-/// the verdict the launcher gates on.
+/// The v2 (ckd) perf executable: <c>MODE</c> selects the producer or the consumer benchmark, or the version report, and
+/// the exit code carries the verdict the launcher gates on.
 /// </summary>
 internal static class Program
 {
@@ -46,8 +47,11 @@ internal static class Program
                     return await ProducerMain.Run().ConfigureAwait(false);
                 case "consumer":
                     return await ConsumerMain.Run().ConfigureAwait(false);
+                case "version":
+                    PrintVersion();
+                    return 0;
                 default:
-                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer' or 'consumer')");
+                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer', 'consumer' or 'version')");
                     return UsageExitCode;
             }
         }
@@ -58,4 +62,12 @@ internal static class Program
             return InterruptedExitCode;
         }
     }
+
+    private static void PrintVersion() =>
+        RuntimeInfo.Print(new Dictionary<string, string>
+        {
+            ["client"] = RuntimeInfo.ProducerClient("dotnet-librdkafka"),
+            ["confluent_kafka_version"] = RuntimeInfo.AssemblyVersion(typeof(Library).Assembly),
+            ["librdkafka_version"] = Library.VersionString,
+        });
 }

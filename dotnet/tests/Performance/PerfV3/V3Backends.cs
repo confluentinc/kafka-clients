@@ -31,17 +31,17 @@ namespace Confluent.Kafka.Performance.V3;
 internal sealed class V3Delivery : ICallback
 {
     private readonly IPerfDeliveryCallback _callback;
-    private readonly long _sendStartMs;
+    private readonly long _sendStartTicks;
 
-    internal V3Delivery(IPerfDeliveryCallback callback, long sendStartMs)
+    internal V3Delivery(IPerfDeliveryCallback callback, long sendStartTicks)
     {
         _callback = callback;
-        _sendStartMs = sendStartMs;
+        _sendStartTicks = sendStartTicks;
     }
 
     public void OnCompletion(RecordMetadata metadata, Exception? exception) =>
         _callback.OnCompletion(
-            _sendStartMs,
+            _sendStartTicks,
             new PerfRecordMetadata(metadata.Topic(), metadata.Partition(), metadata.Offset(), metadata.Timestamp()),
             exception);
 }
@@ -105,8 +105,8 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
         new PerfSendHandle(s_get, _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)));
 
-    public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs) =>
-        _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartMs));
+    public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks) =>
+        _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartTicks));
 
     public void Flush(CancellationToken cancellationToken) => _producer.Flush();
 
@@ -150,11 +150,11 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
         return new PerfRecordMetadata(meta.Topic(), meta.Partition(), meta.Offset(), meta.Timestamp());
     }
 
-    public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+    public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks)
     {
         // The ValueTask is consumed, as it must be, and dropped: the callback reports the delivery.
         ValueTask<AsyncKafkaFuture<RecordMetadata>> send =
-            _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartMs));
+            _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartTicks));
         if (send.IsCompletedSuccessfully)
         {
             _ = send.Result;
