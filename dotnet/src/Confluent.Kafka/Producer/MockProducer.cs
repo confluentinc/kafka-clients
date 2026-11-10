@@ -257,9 +257,9 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     /// <summary>
     /// Sets the exception that <c>Close</c> throws, as Java's <c>MockProducer.closeException</c> field: every
-    /// later call throws this same instance and leaves the producer open (<see cref="Closed()"/> stays
-    /// <see langword="false"/>). A <c>Close</c> from inside a delivery callback returns at once and closes the producer
-    /// without it, and <c>Dispose</c> releases the producer whatever it is set to.
+    /// later call, from inside a delivery callback too, throws this same instance and leaves the producer open
+    /// (<see cref="Closed()"/> stays <see langword="false"/>). <c>Dispose</c> releases the producer whatever it is set
+    /// to.
     /// </summary>
     /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>

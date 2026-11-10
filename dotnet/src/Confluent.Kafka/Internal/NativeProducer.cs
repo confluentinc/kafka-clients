@@ -75,12 +75,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     private readonly long _maxBlockMs;
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
-    private readonly object _closeLock = new object();
     private int _closed;
-    private int _disposing;
-
-    // A mock's close in progress, whose outcome a concurrent Close shares, as Java's synchronized close() makes it wait.
-    private TaskCompletionSource<bool>? _mockClose;
 
     private NativeProducer(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
     {
@@ -438,7 +433,6 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
-        Interlocked.Exchange(ref _disposing, 1);
         FlushOpenMock();
         if (!TryBeginClose())
         {
@@ -465,7 +459,6 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        Interlocked.Exchange(ref _disposing, 1);
         await FlushOpenMockAsync().ConfigureAwait(false);
         if (!TryBeginClose())
         {
@@ -933,117 +926,51 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     private Task CloseWithCallbackWithin(long? timeoutMs, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TryBeginCloseCall(out TaskCompletionSource<bool>? outcome, out Task? inProgress))
+        if (Volatile.Read(ref _mockCloseError) is Exception closeError)
         {
-            return inProgress ?? Task.CompletedTask;
+            return Task.FromException(closeError);
+        }
+
+        if (!TryBeginClose())
+        {
+            return Task.CompletedTask;
         }
 
         if (InCallback)
         {
             CloseFromCallback(timeoutMs);
-            EndMockClose(outcome, null);
             return Task.CompletedTask;
         }
 
-        Task close = CloseAndTearDownAsync(timeoutMs, keepMockOpenOnError: true);
-        return _failureCallbacks.After(
-            outcome is null ? close : EndingMockClose(close, outcome), CancellationToken.None);
+        return _failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None);
     }
 
     private void CloseWithin(long? timeoutMs)
     {
-        if (!TryBeginCloseCall(out TaskCompletionSource<bool>? outcome, out Task? inProgress))
+        if (Volatile.Read(ref _mockCloseError) is Exception closeError)
         {
-            inProgress?.GetAwaiter().GetResult();
+            throw closeError;
+        }
+
+        if (!TryBeginClose())
+        {
             return;
         }
 
         if (InCallback)
         {
             CloseFromCallback(timeoutMs);
-            EndMockClose(outcome, null);
             return;
         }
 
         try
         {
-            CloseAndTearDown(timeoutMs, keepMockOpenOnError: true);
-            EndMockClose(outcome, null);
-        }
-        catch (Exception exception)
-        {
-            EndMockClose(outcome, exception);
-            throw;
+            CloseAndTearDown(timeoutMs);
         }
         finally
         {
             _failureCallbacks.Wait();
         }
-    }
-
-    // A Close that loses the race on a mock waits for the close in progress and throws what it throws; from a
-    // callback it returns at once, since the close in progress may wait for that callback's report.
-    private bool TryBeginCloseCall(out TaskCompletionSource<bool>? outcome, out Task? inProgress)
-    {
-        outcome = null;
-        inProgress = null;
-        if (!IsMock)
-        {
-            return TryBeginClose();
-        }
-
-        lock (_closeLock)
-        {
-            if (!TryBeginClose())
-            {
-                inProgress = InCallback ? null : _mockClose?.Task;
-                return false;
-            }
-
-            outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _mockClose = outcome;
-            return true;
-        }
-    }
-
-    private void EndMockClose(TaskCompletionSource<bool>? outcome, Exception? failure)
-    {
-        if (outcome is null)
-        {
-            return;
-        }
-
-        lock (_closeLock)
-        {
-            if (ReferenceEquals(_mockClose, outcome))
-            {
-                _mockClose = null;
-            }
-        }
-
-        if (failure is null)
-        {
-            outcome.TrySetResult(true);
-        }
-        else
-        {
-            outcome.TrySetException(failure);
-        }
-    }
-
-    private async Task EndingMockClose(Task close, TaskCompletionSource<bool> outcome)
-    {
-        try
-        {
-            await close.ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            EndMockClose(outcome, exception);
-            throw;
-        }
-
-        EndMockClose(outcome, null);
     }
 
     private void SubmitClose(long? timeoutMs, Action<IntPtr> onClosed) =>
@@ -1087,64 +1014,39 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
             }),
             opaque => NativeMethods.ProducerCloseWithTimeoutCb(_handle, 0, s_voidCompletion, opaque));
 
-    private void CloseAndTearDown(long? timeoutMs, bool keepMockOpenOnError = false)
+    private void CloseAndTearDown(long? timeoutMs)
     {
         Completion<IntPtr> closed = new Completion<IntPtr>(FreeError);
         IntPtr error = IntPtr.Zero;
-        bool reopened = false;
         try
         {
             SubmitClose(timeoutMs, closed.Complete);
             _ = closed.Wait(Timeout.InfiniteTimeSpan, out error);
-            reopened = keepMockOpenOnError && error != IntPtr.Zero && TryReopenMock();
         }
         finally
         {
-            if (!reopened)
-            {
-                TearDownKeeping(ref error);
-            }
+            TearDownKeeping(ref error);
         }
 
         KafkaException.ThrowIfFfiFailed(ref error);
     }
 
-    private async Task CloseAndTearDownAsync(long? timeoutMs, bool keepMockOpenOnError = false)
+    private async Task CloseAndTearDownAsync(long? timeoutMs)
     {
         TaskCompletionSource<IntPtr> closed =
             new TaskCompletionSource<IntPtr>(TaskCreationOptions.RunContinuationsAsynchronously);
         IntPtr error = IntPtr.Zero;
-        bool reopened = false;
         try
         {
             SubmitClose(timeoutMs, e => closed.SetResult(e));
             error = await closed.Task.ConfigureAwait(false);
-            reopened = keepMockOpenOnError && error != IntPtr.Zero && TryReopenMock();
         }
         finally
         {
-            if (!reopened)
-            {
-                TearDownKeeping(ref error);
-            }
+            TearDownKeeping(ref error);
         }
 
         KafkaException.ThrowIfFfiFailed(ref error);
-    }
-
-    // Java's MockProducer.close() throws its closeException before it sets closed, so a mock whose close failed stays
-    // open, as Python's does. A Dispose that met the close in progress returned at once, leaving the teardown to it:
-    // the full fences on both sides make one of them see the other, and whichever wins the close tears down. A real
-    // producer is torn down whatever its close reports, as Java's KafkaProducer.close() closes it anyway.
-    private bool TryReopenMock()
-    {
-        if (!IsMock)
-        {
-            return false;
-        }
-
-        Interlocked.Exchange(ref _closed, 0);
-        return Volatile.Read(ref _disposing) == 0 || !TryBeginClose();
     }
 
     private void TearDownKeeping(ref IntPtr closeError)

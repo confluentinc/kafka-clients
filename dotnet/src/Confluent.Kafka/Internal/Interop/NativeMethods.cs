@@ -1074,9 +1074,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_partitions_for_error_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MockProducerSetPartitionsForError(IntPtr self, IntPtr error, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_close_error_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void MockProducerSetCloseError(IntPtr self, IntPtr error, ref IntPtr outErr);
-
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_init_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MockProducerSetInitTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
 

@@ -307,11 +307,12 @@ public sealed class PublicMockProducerTransactionControlTests
         await producer.CloseAsTask();
     }
 
-    // Java's MockProducer.close() is synchronized: a close made while another runs waits for it, and with a
-    // closeException set both throw it and the producer stays open. The first close waits for a blocked callback.
+    // Java's MockProducer.close() is not synchronized and throws its closeException before it sets closed, as Python's
+    // mock raises its close_exception: with a delivery callback still running, closes made together each throw the
+    // same instance without waiting for it, and the producer stays open, so a send meanwhile is accepted.
     [Theory]
     [MemberData(nameof(Flavors))]
-    public async Task Close_DuringAFailingClose_WaitsForItAndThrowsTheSameInstance(bool async)
+    public async Task SetCloseException_ClosesWhileACallbackRuns_ThrowAtOnceAndLeaveTheProducerOpen(bool async)
     {
         using Mock producer = new Mock(async, autoComplete: false);
         KafkaException injected = new KafkaException("close");
@@ -322,14 +323,30 @@ public sealed class PublicMockProducerTransactionControlTests
         Assert.True(blocking.Entered.Wait(BlockingCall.Deadline), "the callback did not start");
 
         Task first = Task.Run(() => producer.CloseAsTask());
-        Assert.True(SpinWait.SpinUntil(() => producer.Closed(), BlockingCall.Deadline), "the first close did not begin");
-        Task second = Task.Run(() => producer.CloseAsTask());
-        await Task.Delay(BlockingCall.StillBlocked);
-        Assert.False(second.IsCompleted, "the second close did not wait for the first");
+        Task second = Task.Run(() => producer.CloseAsTask(TimeSpan.Zero));
 
-        blocking.Release.Set();
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Within(first)));
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Within(second)));
+        Assert.False(blocking.Returned, "a close waited for the running callback");
+        Assert.False(producer.Closed());
+        await producer.Send();
+        Assert.Equal(2, producer.HistoryCount());
+    }
+
+    // Java's and Python's mocks throw closeException from a close made inside a delivery callback too.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task SetCloseException_CloseFromADeliveryCallback_ThrowsTheSameInstance(bool async)
+    {
+        using Mock producer = new Mock(async, autoComplete: false);
+        KafkaException injected = new KafkaException("close");
+        producer.SetCloseException(injected);
+        ClosingInCallback closing = new ClosingInCallback(producer);
+        await producer.Send(closing);
+
+        Assert.True(producer.CompleteNext());
+
+        Assert.Same(injected, await Within(closing.Thrown));
         Assert.False(producer.Closed());
     }
 
@@ -451,14 +468,19 @@ public sealed class PublicMockProducerTransactionControlTests
     /// <summary>A delivery callback that blocks the producer's completion thread until the test releases it.</summary>
     private sealed class Blocking : IDeliveryCallback, IDisposable
     {
+        private int _returned;
+
         internal ManualResetEventSlim Entered { get; } = new ManualResetEventSlim();
 
         internal ManualResetEventSlim Release { get; } = new ManualResetEventSlim();
+
+        internal bool Returned => Volatile.Read(ref _returned) != 0;
 
         public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             Entered.Set();
             _ = Release.Wait(BlockingCall.Deadline);
+            Volatile.Write(ref _returned, 1);
         }
 
         public void Dispose()
@@ -466,6 +488,24 @@ public sealed class PublicMockProducerTransactionControlTests
             Release.Set();
             Entered.Dispose();
             Release.Dispose();
+        }
+    }
+
+    /// <summary>A delivery callback that closes its producer and records what the close threw.</summary>
+    private sealed class ClosingInCallback : IDeliveryCallback
+    {
+        private readonly Mock _producer;
+        private readonly TaskCompletionSource<Exception?> _thrown =
+            new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal ClosingInCallback(Mock producer) => _producer = producer;
+
+        internal Task<Exception?> Thrown => _thrown.Task;
+
+        public void OnCompletion(RecordMetadata metadata, Exception? exception)
+        {
+            Task close = _producer.CloseAsTask();
+            _thrown.SetResult(close.IsFaulted ? close.Exception!.InnerException : null);
         }
     }
 
