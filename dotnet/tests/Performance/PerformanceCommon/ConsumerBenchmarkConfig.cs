@@ -85,10 +85,10 @@ public sealed class ConsumerBenchmarkConfig
     public int? MaxPollRecords { get; private set; }
 
     /// <summary>
-    /// <c>CONSUMER_BATCH_SIZE</c>, the librdkafka exe's batch when neither <c>MAX_POLL_RECORDS</c> nor
-    /// <c>USE_DEFAULTS=True</c> sets it, so a run outside the driver keeps its tuned batch.
+    /// <c>CONSUMER_BATCH_SIZE</c> (default 2500, as Python's): both harnesses' batch when neither <c>MAX_POLL_RECORDS</c>
+    /// nor <c>USE_DEFAULTS=True</c> sets it, so a run outside the driver keeps its tuned batch.
     /// </summary>
-    public int BatchSize { get; private set; } = 2000;
+    public int BatchSize { get; private set; } = 2500;
 
     public bool AsyncMode { get; private set; }
 
@@ -130,7 +130,7 @@ public sealed class ConsumerBenchmarkConfig
             MaxPartitionFetchBytes = OptionalInt("MAX_PARTITION_FETCH_BYTES", tunedFetch),
             FetchMaxWaitMs = OptionalInt("FETCH_MAX_WAIT_MS", null),
             MaxPollRecords = OptionalInt("MAX_POLL_RECORDS", null),
-            BatchSize = PerfEnv.GetInt("CONSUMER_BATCH_SIZE", 2000),
+            BatchSize = PerfEnv.GetInt("CONSUMER_BATCH_SIZE", 2500),
             AsyncMode = PerfEnv.GetBool("ASYNC", false),
             PollSingle = PerfEnv.GetBool("POLL_SINGLE", false),
             UseDefaults = useDefaults,

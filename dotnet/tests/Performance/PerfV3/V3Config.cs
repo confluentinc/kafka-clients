@@ -32,9 +32,6 @@ internal static class V3Config
 
     private const string AllocationStrategyKey = "buffer.memory.allocation.strategy";
 
-    // The max.poll.records the EC2 runs give the Java consumer, which Python's Rust-core arm takes too.
-    private const int TunedMaxPollRecords = 2500;
-
     internal static Dictionary<string, string> BuildProducerConfig()
     {
         var conf = new Dictionary<string, string>
@@ -144,7 +141,7 @@ internal static class V3Config
         }
         else if (!cfg.UseDefaults)
         {
-            conf["max.poll.records"] = Str(TunedMaxPollRecords);
+            conf["max.poll.records"] = Str(cfg.BatchSize);
         }
 
         foreach (KeyValuePair<string, string> kv in SaslConfig.FromEnv(SaslForm.Java))

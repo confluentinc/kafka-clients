@@ -416,8 +416,9 @@ public static class ProducerBenchmark
         return failed;
     }
 
-    // The rates and messages_measured count the successful deliveries, the latency min/avg/max are exact and the
-    // percentiles come from the floor-ms histogram.
+    // The rates and messages_measured count every completed delivery, failed ones included, as Python's
+    // print_measurement_summary does; the latency covers the successful ones, its min/avg/max exact and its
+    // percentiles from the floor-ms histogram.
     private static (bool BudgetExceeded, bool ResultsWritten) PrintSummary(
         DeliverySnapshot snapshot,
         Metrics metrics,
@@ -426,8 +427,9 @@ public static class ProducerBenchmark
     {
         double totalTimeS = TicksToSeconds(run.AfterTicks - run.FirstTicks);
         double totalTimeMs = totalTimeS * 1000.0;
+        long completed = snapshot.Completed;
         long succeeded = snapshot.Succeeded;
-        double messageRate = totalTimeS > 0 ? succeeded / totalTimeS : 0.0;
+        double messageRate = totalTimeS > 0 ? completed / totalTimeS : 0.0;
         ExternalMetricsAggregations agg = metrics.ExternalMetricsAggregations();
 
         Console.WriteLine($"End time: {run.AfterMs} ms");
@@ -447,11 +449,11 @@ public static class ProducerBenchmark
             Console.WriteLine("No external metrics collected");
         }
 
-        double mibRate = totalTimeS > 0 ? (succeeded * (double)config.MessageSize) / (1024.0 * 1024.0) / totalTimeS : 0.0;
+        double mibRate = totalTimeS > 0 ? (completed * (double)config.MessageSize) / (1024.0 * 1024.0) / totalTimeS : 0.0;
         double minLatency = succeeded > 0 ? TicksToMs(snapshot.MinLatencyTicks) : 0.0;
         double averageLatency = succeeded > 0 ? TicksToMs(snapshot.TotalLatencyTicks) / succeeded : 0.0;
         double maxLatency = succeeded > 0 ? TicksToMs(snapshot.MaxLatencyTicks) : 0.0;
-        Console.WriteLine($"Average time: {(succeeded > 0 ? totalTimeMs / succeeded : 0.0):F2} ms");
+        Console.WriteLine($"Average time: {(completed > 0 ? totalTimeMs / completed : 0.0):F2} ms");
         Console.WriteLine($"Average rate msg/s: {messageRate:F2} msg/s");
         Console.WriteLine($"Average rate MiB/s: {mibRate:F2} MiB/s");
         Console.WriteLine($"Average latency: {averageLatency:F2} ms");
@@ -475,7 +477,7 @@ public static class ProducerBenchmark
         json.Append("  \"test\": \"producer\",\n");
         json.Append("  \"client\": ").Append(PerfFormat.JsonString(client)).Append(",\n");
         json.Append("  \"topic\": ").Append(PerfFormat.JsonString(config.TopicName)).Append(",\n");
-        json.Append("  \"messages_measured\": ").Append(PerfFormat.Num(succeeded)).Append(",\n");
+        json.Append("  \"messages_measured\": ").Append(PerfFormat.Num(completed)).Append(",\n");
         json.Append("  \"duration_s\": ").Append(PerfFormat.JsonFloat(totalTimeS)).Append(",\n");
         json.Append("  \"throughput_msg_s\": ").Append(PerfFormat.JsonFloat(messageRate)).Append(",\n");
         json.Append("  \"throughput_mib_s\": ").Append(PerfFormat.JsonFloat(mibRate)).Append(",\n");

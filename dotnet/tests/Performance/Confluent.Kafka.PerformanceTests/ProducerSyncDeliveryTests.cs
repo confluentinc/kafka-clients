@@ -145,7 +145,7 @@ public sealed class ProducerSyncDeliveryTests
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
         // The failed third record counts as completed, so the counts match, but it did not verify: the run fails.
-        // It is no successful delivery, so messages_measured leaves it out.
+        // messages_measured counts it too, as Python counts every completed delivery.
         Assert.Equal(5, result.MeasuredSent);
         Assert.Equal(1, Occurrences(output, "Produce call resulted in exception: delivery failed (fake)"));
         Assert.Equal(1, Occurrences(output, "Verified messages 4 does not match completed messages 5"));
@@ -154,7 +154,7 @@ public sealed class ProducerSyncDeliveryTests
         Assert.Contains("p50 latency:", output, StringComparison.Ordinal);
 
         using JsonDocument results = ReadResults("results.json");
-        Assert.Equal(4, results.RootElement.GetProperty("messages_measured").GetInt64());
+        Assert.Equal(5, results.RootElement.GetProperty("messages_measured").GetInt64());
     }
 
     private static async Task SendThatThrowsAsync()

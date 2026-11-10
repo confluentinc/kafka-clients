@@ -65,7 +65,8 @@ The .NET producer harness moves to the contract the C, Rust, Java and Python har
    checked on every send.
 4. 1,000 consecutive rejected sends fail the run, as in C and Rust.
 5. A failed delivery counts as completed and fails the run, as in C and Python.
-   `messages_measured` and `throughput_msg_s` count successful deliveries.
+   `messages_measured` and the rates count completed deliveries, as Python does; the latency covers
+   the successful ones.
 6. Latency clock: stamp with `Stopwatch.GetTimestamp()` (monotonic, sub-ms). Floor into the
    histogram buckets, and keep min, avg and max exact rather than reading them from the
    histogram.
@@ -227,7 +228,7 @@ per client, and follows the Rust and C transactional harnesses (the reference):
 - `dotnet/DOTNET.md` perf section and a `dotnet/tests/Performance` README describe:
   - how the driver runs the .NET harnesses;
   - the default configurations above;
-  - the consumer batch sizes when the harness runs outside the driver (PerfV2 2000, PerfV3 2500).
+  - the consumer batch size when the harness runs outside the driver (`CONSUMER_BATCH_SIZE`, 2500 for both, as Python).
 
 ## After all phases
 

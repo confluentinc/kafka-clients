@@ -48,8 +48,8 @@ settings apply to no arm. The tests and batches are in `tools/perf-cloud/`.
 - The transactional workload forces idempotence and `acks=all`.
 - **The consumer** takes the client defaults for every setting the test leaves out: the driver passes
   `USE_DEFAULTS=True`. Run outside the driver, without `USE_DEFAULTS`, the harnesses tune the fetch settings
-  (4 MiB) and read in batches of 2000 records (PerfV2) or 2500 (PerfV3, `max.poll.records`).
-  `MAX_POLL_RECORDS` sets both, and PerfV2 also reads `POLL_SINGLE` (one record per `Consume` call).
+  (4 MiB) and read in batches of `CONSUMER_BATCH_SIZE` records (2500 by default; PerfV3 as `max.poll.records`).
+  `MAX_POLL_RECORDS` overrides it, and PerfV2 also reads `POLL_SINGLE` (one record per `Consume` call).
 
 ## Run them by hand
 
