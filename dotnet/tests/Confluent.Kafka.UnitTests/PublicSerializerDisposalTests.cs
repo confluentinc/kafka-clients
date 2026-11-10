@@ -57,6 +57,8 @@ public sealed class PublicSerializerDisposalTests
 
     private static readonly TimeSpan s_closeTimeout = TimeSpan.FromSeconds(5);
 
+    private static readonly TimeSpan s_disposalWindow = TimeSpan.FromMilliseconds(200);
+
     [Theory]
     [InlineData(SyncFlavor, CloseHow)]
     [InlineData(SyncFlavor, CloseWithTimeoutHow)]
@@ -553,6 +555,90 @@ public sealed class PublicSerializerDisposalTests
         Assert.Equal(1, value.Disposals);
     }
 
+    [Theory]
+    [InlineData(CloseHow, false, false)]
+    [InlineData(CloseWithTimeoutHow, false, false)]
+    [InlineData(DisposeHow, false, false)]
+    [InlineData(DisposeAsyncHow, false, false)]
+    [InlineData(CloseHow, true, false)]
+    [InlineData(CloseWithTimeoutHow, true, false)]
+    [InlineData(DisposeHow, true, false)]
+    [InlineData(DisposeAsyncHow, true, false)]
+    [InlineData(CloseHow, false, true)]
+    [InlineData(CloseWithTimeoutHow, false, true)]
+    [InlineData(DisposeHow, false, true)]
+    [InlineData(DisposeAsyncHow, false, true)]
+    [InlineData(CloseHow, true, true)]
+    [InlineData(CloseWithTimeoutHow, true, true)]
+    [InlineData(DisposeHow, true, true)]
+    [InlineData(DisposeAsyncHow, true, true)]
+    public async Task AFailureCallbackThatClosesItsProducer_ReturnsFirst_AndTheSerializersWaitForEveryFailureCallback(
+        string how,
+        bool beforeItsFirstAwait,
+        bool theHeldOneEndsFirst)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        DisposableSerializer key = new DisposableSerializer("key", log);
+        ApiFailingSerializer value = new ApiFailingSerializer("value", log);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        using ManualResetEventSlim afterDestroy = SignalAfterDestroy(producer);
+        HeldAsyncCallback held = new HeldAsyncCallback();
+        ClosingAsyncCallback closing = new ClosingAsyncCallback(producer, how, beforeItsFirstAwait);
+        try
+        {
+            AsyncKafkaFuture<RecordMetadata> heldFuture =
+                await producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), held);
+            Assert.True(held.Started.Wait(Deadline), "the held failure callback never started");
+
+            // Off the test's thread: a close made before the callback's first await runs inside this Send.
+            AsyncKafkaFuture<RecordMetadata> closed = await TestTimeout.Run(
+                () => Task.Run(
+                    () => producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 2 }), closing).AsTask()),
+                Deadline);
+
+            Assert.True(closing.Closed.Wait(Deadline), "the " + how + " from inside a failure callback did not return");
+            Assert.Null(closing.Failure);
+            Assert.True(afterDestroy.IsSet, "the " + how + " from inside a failure callback did not destroy");
+            Assert.Equal(0, key.Disposals);
+            Assert.Equal(0, value.Disposals);
+
+            // Each callback's future is done just before the callback counts as ended, so a disposal waiting only
+            // for that callback would follow within the window.
+            if (theHeldOneEndsFirst)
+            {
+                held.Release();
+                Assert.True(SpinWait.SpinUntil(heldFuture.IsDone, Deadline), "the held failure callback never ended");
+                Assert.False(
+                    SpinWait.SpinUntil(() => value.Disposals != 0, s_disposalWindow),
+                    "the serializers were disposed while the closing failure callback still ran");
+                closing.Release();
+            }
+            else
+            {
+                closing.Release();
+                Assert.True(SpinWait.SpinUntil(closed.IsDone, Deadline), "the closing failure callback never ended");
+                Assert.False(
+                    SpinWait.SpinUntil(() => value.Disposals != 0, s_disposalWindow),
+                    "the serializers were disposed while the held failure callback still ran");
+                held.Release();
+            }
+
+            Assert.True(SpinWait.SpinUntil(() => value.Disposals != 0, Deadline), "the serializers were never disposed");
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            Assert.Equal(new[] { "key", "value" }, log.ToArray());
+        }
+        finally
+        {
+            closing.Release();
+            held.Release();
+            await DisposeBounded(producer);
+        }
+
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+    }
+
     private static object Producer(
         string flavor,
         IReadOnlyDictionary<string, object?> configs,
@@ -717,6 +803,68 @@ public sealed class PublicSerializerDisposalTests
         {
             Started.Set();
             return _release.Task;
+        }
+    }
+
+    /// <summary>
+    /// An async delivery callback that closes its producer, before its first <c>await</c> or after one, records whether
+    /// the close threw, and then waits until the test releases it.
+    /// </summary>
+    private sealed class ClosingAsyncCallback : IAsyncCallback
+    {
+        private readonly AsyncKafkaProducer<byte[], byte[]> _producer;
+        private readonly string _how;
+        private readonly bool _beforeItsFirstAwait;
+        private readonly TaskCompletionSource<bool> _release =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal ClosingAsyncCallback(AsyncKafkaProducer<byte[], byte[]> producer, string how, bool beforeItsFirstAwait)
+        {
+            _producer = producer;
+            _how = how;
+            _beforeItsFirstAwait = beforeItsFirstAwait;
+        }
+
+        internal ManualResetEventSlim Closed { get; } = new ManualResetEventSlim(false);
+
+        internal Exception? Failure { get; private set; }
+
+        internal void Release() => _release.TrySetResult(true);
+
+        public async Task OnCompletion(RecordMetadata metadata, Exception? exception)
+        {
+            if (!_beforeItsFirstAwait)
+            {
+                await Task.Yield();
+            }
+
+            try
+            {
+                await Close().ConfigureAwait(false);
+            }
+            catch (Exception failure)
+            {
+                Failure = failure;
+            }
+
+            Closed.Set();
+            await _release.Task.ConfigureAwait(false);
+        }
+
+        private Task Close()
+        {
+            switch (_how)
+            {
+                case CloseHow:
+                    return _producer.Close();
+                case CloseWithTimeoutHow:
+                    return _producer.Close(s_closeTimeout);
+                case DisposeHow:
+                    _producer.Dispose();
+                    return Task.CompletedTask;
+                default:
+                    return _producer.DisposeAsync().AsTask();
+            }
         }
     }
 

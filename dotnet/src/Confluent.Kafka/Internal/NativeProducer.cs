@@ -525,7 +525,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         await _failureCallbacks.Snapshot().ConfigureAwait(false);
-        await Volatile.Read(ref _serializersDisposed).ConfigureAwait(false);
+        await TheSerializersDisposed().ConfigureAwait(false);
     }
 
     // A mock completes its pending sends before it closes, as Python's mock does on exit.
@@ -1108,12 +1108,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         _completion.ReleaseNotifyOpaque();
         _reporter.ReleaseKept();
-        Volatile.Write(ref _serializersDisposed, DisposeTheSerializersAfter(_failureCallbacks.Snapshot()));
+        Volatile.Write(ref _serializersDisposed, DisposeTheSerializersAfter(_failureCallbacks.All()));
     }
 
     // The serializers the producer was given are disposed after the destroy, on the thread that destroyed, unless an
-    // async callback of a serializer failure, which may still use them, is running: then once the last of those ends,
-    // as Python closes its serializers after its callbacks. A close returns only once they are disposed.
+    // async callback of a serializer failure, which may still use them, is running, the one that closed the producer
+    // included: then once the last of those ends, as Python closes its serializers after its callbacks. A close
+    // returns only once they are disposed, except one from inside such a callback, which would wait for itself. A
+    // send still running on another thread when the close starts is not waited for, as in Java and Python.
     private Task DisposeTheSerializersAfter(Task failureCallbacks)
     {
         if (_serdes is not { } serdes)
@@ -1134,7 +1136,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             TaskScheduler.Default);
     }
 
-    private void WaitForTheSerializers() => Volatile.Read(ref _serializersDisposed).GetAwaiter().GetResult();
+    private void WaitForTheSerializers() => TheSerializersDisposed().GetAwaiter().GetResult();
+
+    private Task TheSerializersDisposed() =>
+        _failureCallbacks.Inside ? Task.CompletedTask : Volatile.Read(ref _serializersDisposed);
 
     private async Task ThenTheSerializersAsync(Task closing)
     {
@@ -1144,7 +1149,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
         finally
         {
-            await Volatile.Read(ref _serializersDisposed).ConfigureAwait(false);
+            await TheSerializersDisposed().ConfigureAwait(false);
         }
     }
 

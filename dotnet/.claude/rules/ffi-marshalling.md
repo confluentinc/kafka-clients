@@ -514,8 +514,11 @@ one `PartitionsFor` delivers is the reader's). Read the signature, not the prefi
     in-flight uses (P/Invokes in progress) to reach 0, then release, so the destroy runs on the
     closing thread and never inside `__execute_callbacks`. The serializers the producer was
     given are then disposed on the same thread, or, while async callbacks of serializer failures
-    still run, once the last of them ends (`dotnet/CLAUDE.md` §4 **Close/Dispose**,
-    step 6). A `Close` called from a callback
+    still run, the one that closed the producer included, once the last of them ends; a close from
+    inside one of them returns without waiting for that (`dotnet/CLAUDE.md` §4 **Close/Dispose**,
+    step 6). A send still running on another thread when the close starts is not waited for: its
+    serializers, its sync callback, and its async callback's part before the send returns.
+    A `Close` called from a callback
     leaves the teardown to the `CompletionThread` after its drain. The destroy invalidates every
     view (BH:38787-38791), runs the callbacks still pending on its thread, and completes the
     unreported ones as success (`rust/src/ffi/producer/mod.rs:166-178` at `851c8d95`), so no
