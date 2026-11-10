@@ -18,7 +18,9 @@ namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
 /// Converts a <typeparamref name="T"/> to the bytes of a record key or value: Java's
-/// <c>Serializer&lt;T&gt;</c>, without its headers overload and its <c>configure</c> and <c>close</c>.
+/// <c>Serializer&lt;T&gt;</c>, without its headers overload and its <c>configure</c>. Java's <c>close</c> is
+/// <see cref="System.IDisposable"/>: a producer disposes a serializer it was given that implements it, and a mock
+/// producer does not.
 /// </summary>
 /// <typeparam name="T">The type encoded.</typeparam>
 public interface ISerializer<T>

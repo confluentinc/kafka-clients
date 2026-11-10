@@ -41,6 +41,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 {
     private const string GroupIdConfig = "group.id";
 
+    private const string ConstructionFailedMessage = "Failed to construct kafka consumer";
+
     private const string DefaultOffsetResetStrategy = "latest";
 
     private const int LocalConcurrentModification = -2;
@@ -86,8 +88,17 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly HandleUses _uses = new HandleUses();
     private readonly SemaphoreSlim _closeGate = new SemaphoreSlim(1, 1);
     private readonly bool _groupIdDefined;
+    private readonly SerdeDisposal? _serdes;
+
+    // Set once the destroy has returned and never cleared: from then on a Close or Dispose from any thread returns at
+    // once, as Python's closed check does.
+    private volatile bool _destroyed;
     private readonly List<IntPtr> _recordBytes = new List<IntPtr>();
+
+    // The polls holding a records handle, each from inside its use until it has deserialized, and whether the teardown
+    // that destroyed the consumer while some held one handed them the deserializers: both under the _recordBytes lock.
     private int _recordsHeld;
+    private bool _deserializersHandedOver;
     private bool _recordBytesReleasable;
 
     // Closing: a teardown that will close (a Dispose, or a close the core accepted). ClosePending: an explicit Close
@@ -151,10 +162,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool _closeEnded;
 
-    private NativeConsumer(SafeConsumerHandle handle, bool groupIdDefined, bool withPump)
+    private NativeConsumer(SafeConsumerHandle handle, bool groupIdDefined, bool withPump, SerdeDisposal? serdes)
     {
         _handle = handle;
         _groupIdDefined = groupIdDefined;
+        _serdes = serdes;
 #pragma warning disable CKRDA0005 // Reports use the raw view: the destroy runs pending callbacks while this SafeHandle is being released.
         _reporter = new ConsumerCallbackReporter(handle.DangerousGetHandle(), PulseOwnerWaiters);
 #pragma warning restore CKRDA0005
@@ -196,32 +208,57 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
     /// <summary>
-    /// A consumer constructor's deserializer, or Java's <c>ConfigException</c> for a null one: Java falls back to the
-    /// <paramref name="key"/> config, a class name, which .NET config cannot hold, so the key is always missing.
+    /// A consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
+    /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
+    /// <paramref name="key"/> config names no class; .NET config cannot name one.
     /// </summary>
     internal static T RequireDeserializer<T>(T? deserializer, string key)
         where T : class =>
-        deserializer ?? throw new ConfigException(
-            "Missing required configuration \"" + key + "\" which has no default value.");
+        deserializer ?? throw new ConfigException(key, null, "must be non-null.");
 
-    internal static NativeConsumer Create(IReadOnlyDictionary<string, object?> configs, bool withPump = true)
+    internal static NativeConsumer Create(
+        IReadOnlyDictionary<string, object?> configs,
+        bool withPump = true,
+        SerdeDisposal? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
-        IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
-        if (outErr != IntPtr.Zero)
+        IntPtr classPointer;
+        try
         {
-            IntPtr destroyErr = IntPtr.Zero;
-            NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
-            FreeError(ref destroyErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
+        }
+        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+        {
+            // Java's constructor closes the deserializers when a step inside its try fails, which the core reports
+            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
+            // and disposes nothing.
+            serdes?.DisposeOnce();
+            throw;
         }
 
-        return Start(
-            new SafeKafkaConsumerHandle(view, classPointer),
-            groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
-            withPump);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
+            if (outErr != IntPtr.Zero)
+            {
+                IntPtr destroyErr = IntPtr.Zero;
+                NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
+                FreeError(ref destroyErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return Start(
+                new SafeKafkaConsumerHandle(view, classPointer),
+                groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+                withPump,
+                serdes);
+        }
+        catch
+        {
+            serdes?.DisposeOnce();
+            throw;
+        }
     }
 
     internal static NativeConsumer CreateMock(string? autoOffsetReset = null, bool withPump = true)
@@ -243,7 +280,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump);
+        return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump, serdes: null);
     }
 
     internal void Seek(string topic, int partition, long offset)
@@ -1570,6 +1607,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void CloseSync(IntPtr options)
     {
+        if (_destroyed)
+        {
+            return;
+        }
+
         if (_reporter.InCallback)
         {
             ThrowUnlessClosing();
@@ -1589,6 +1631,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         _closeGate.Wait();
+        bool destroyedBefore = _destroyed;
         try
         {
             if (!TryBeginExplicitClose(Environment.CurrentManagedThreadId))
@@ -1618,7 +1661,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
         finally
         {
-            _closeGate.Release();
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
         }
     }
 
@@ -1793,6 +1836,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void AfterDestroy()
     {
+        _destroyed = true;
         _reporter.MarkDestroyed();
         lock (_callbackHandleGate)
         {
@@ -1833,6 +1877,33 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
+    // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
+    // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread: that is decided
+    // before the release, after which a waiting close may destroy it. While a poll is still deserializing, that call
+    // hands them over instead and returns, and the last such poll disposes them once it has deserialized.
+    private void ReleaseTheGateThenDisposeTheDeserializers(bool destroyedBefore)
+    {
+        bool destroyedByThisCall = !destroyedBefore && _destroyed;
+        _closeGate.Release();
+        if (destroyedByThisCall && !HandTheDeserializersToThePolls())
+        {
+            _serdes?.DisposeOnce();
+        }
+    }
+
+    // A poll takes its records inside its use, and the destroy runs only once the uses have ended while new ones are
+    // refused as closed, so after the destroy no poll takes records again and the count only falls: the teardown
+    // and the last poll decide under one lock, and exactly one of them disposes.
+    private bool HandTheDeserializersToThePolls()
+    {
+        lock (_recordBytes)
+        {
+            _deserializersHandedOver = _recordsHeld != 0;
+            return _deserializersHandedOver;
+        }
+    }
+
     private void HoldRecords()
     {
         lock (_recordBytes)
@@ -1843,6 +1914,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void DestroyRecords(IntPtr records)
     {
+        bool disposeTheDeserializers = false;
         try
         {
             ConsumerRecordsMarshal.Destroy(records);
@@ -1852,10 +1924,21 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             lock (_recordBytes)
             {
                 _recordsHeld--;
-                if (_recordsHeld == 0 && _recordBytesReleasable)
+                if (_recordsHeld == 0)
                 {
-                    FreeRecordBytes();
+                    if (_recordBytesReleasable)
+                    {
+                        FreeRecordBytes();
+                    }
+
+                    disposeTheDeserializers = _deserializersHandedOver;
+                    _deserializersHandedOver = false;
                 }
+            }
+
+            if (disposeTheDeserializers)
+            {
+                _serdes?.DisposeOnce();
             }
         }
     }
@@ -2227,6 +2310,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
+        if (_destroyed)
+        {
+            return;
+        }
+
         if (_reporter.InCallback)
         {
             DisposeInsideACallback();
@@ -2234,6 +2322,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         _closeGate.Wait();
+        bool destroyedBefore = _destroyed;
         try
         {
             if (!TryBeginClose())
@@ -2262,7 +2351,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
         finally
         {
-            _closeGate.Release();
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
         }
     }
 
