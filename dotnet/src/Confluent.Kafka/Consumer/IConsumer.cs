@@ -43,6 +43,10 @@ namespace Confluent.Kafka.Consumer;
 /// commit callbacks run on it inside the blocking call that delivers them. What a callback may call on its own
 /// consumer is in <see cref="IConsumerRebalanceListener"/>.
 /// </para>
+/// <para>
+/// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes the deserializers it was given when it closes, as its
+/// constructor says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
 /// <typeparam name="TValue">The deserialized value type.</typeparam>

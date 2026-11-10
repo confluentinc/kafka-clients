@@ -37,7 +37,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData(nameof(AsyncKafkaConsumer<byte[], byte[]>))]
     [InlineData(nameof(MockConsumer<byte[], byte[]>))]
     [InlineData(nameof(AsyncMockConsumer<byte[], byte[]>))]
-    public void Constructor_NullDeserializer_ThrowsJavasMissingConfiguration(string consumer)
+    public void Constructor_NullDeserializer_ThrowsJavasConfigException(string consumer)
     {
         Dictionary<string, object?> config = new Dictionary<string, object?>
         {
@@ -53,9 +53,9 @@ public sealed class PublicSyncConsumerPreconditionTests
         };
 
         ConfigException key = Assert.Throws<ConfigException>(() => create(null, null));
-        Assert.Equal("Missing required configuration \"key.deserializer\" which has no default value.", key.Message);
+        Assert.Equal("Invalid value null for configuration key.deserializer: must be non-null.", key.Message);
         ConfigException value = Assert.Throws<ConfigException>(() => create(Serdes.ByteArray(), null));
-        Assert.Equal("Missing required configuration \"value.deserializer\" which has no default value.", value.Message);
+        Assert.Equal("Invalid value null for configuration value.deserializer: must be non-null.", value.Message);
     }
 
     [Fact]
