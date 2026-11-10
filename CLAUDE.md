@@ -718,7 +718,6 @@ The JavaScript client, npm package `@confluentinc/kafka-javascript` in `javascri
   | How the TypeScript layer gets types for the addon's functions (Q4). | The team. |
   | The other `tsc` settings, such as the JavaScript target, and the oldest TypeScript version (Q74). | Open. |
   | The formatter, the package-check tool and the docs tool (Q64, Q74). | Open. |
-  | The review note on the preview's version and tag, which asks for `4.4.x`, never `latest`, and a log line saying the client is a preview (Q75). | No outcome yet. |
   | Schema Registry's release for 4.x (Q75). | Its team. Check later that it has shipped. |
   | Where Schema Registry's source lives once `master` becomes the 4.x mirror (Q75). | Open. |
   | The list of forms that Q30 leaves out. | To be made. |
