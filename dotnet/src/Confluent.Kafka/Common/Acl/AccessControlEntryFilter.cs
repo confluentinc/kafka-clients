@@ -105,6 +105,85 @@ public sealed class AccessControlEntryFilter
     public bool IsUnknown() =>
         Operation() == AclOperation.UNKNOWN || PermissionType() == AclPermissionType.UNKNOWN;
 
+    /// <summary>
+    /// Whether this filter matches <paramref name="other"/> — Java's <c>matches(AccessControlEntry)</c>: each
+    /// component is <see langword="null"/> or <c>ANY</c>, or equal to the entry's.
+    /// </summary>
+    /// <param name="other">The access control entry to test.</param>
+    /// <returns>Whether the filter matches the entry.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="other"/> is null and the filter reads it. A filter whose principal and host are null and whose
+    /// operation and permission type are <c>ANY</c>, such as <see cref="ANY"/>, never reads it and matches a null
+    /// entry, as Java's does.
+    /// </exception>
+    public bool Matches(AccessControlEntry other)
+    {
+        // The entry is read only where Java's matches reads it, so ANY.Matches(null) is true.
+        if (_principal is not null && !string.Equals(_principal, Given(other).Principal(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (_host is not null && !string.Equals(_host, Given(other).Host(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (_operation != AclOperation.ANY && _operation != Given(other).Operation())
+        {
+            return false;
+        }
+
+        return _permissionType == AclPermissionType.ANY || _permissionType == Given(other).PermissionType();
+    }
+
+    /// <summary>
+    /// Whether this filter matches at most one entry — Java's <c>matchesAtMostOne()</c>: it has no
+    /// <see cref="FindIndefiniteField"/>.
+    /// </summary>
+    /// <returns>Whether every component is definite.</returns>
+    public bool MatchesAtMostOne() => FindIndefiniteField() is null;
+
+    /// <summary>
+    /// A description of the first component that keeps this filter from matching just one entry, or
+    /// <see langword="null"/> when there is none — Java's <c>findIndefiniteField()</c>.
+    /// </summary>
+    /// <returns>Java's text for the indefinite component, or <see langword="null"/>.</returns>
+    public string? FindIndefiniteField()
+    {
+        if (_principal is null)
+        {
+            return "Principal is NULL";
+        }
+
+        if (_host is null)
+        {
+            return "Host is NULL";
+        }
+
+        if (_operation == AclOperation.ANY)
+        {
+            return "Operation is ANY";
+        }
+
+        if (_operation == AclOperation.UNKNOWN)
+        {
+            return "Operation is UNKNOWN";
+        }
+
+        if (_permissionType == AclPermissionType.ANY)
+        {
+            return "Permission type is ANY";
+        }
+
+        if (_permissionType == AclPermissionType.UNKNOWN)
+        {
+            return "Permission type is UNKNOWN";
+        }
+
+        return null;
+    }
+
     /// <summary>Value equality over all four components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>
@@ -145,4 +224,7 @@ public sealed class AccessControlEntryFilter
             Host() ?? "<any>",
             Operation(),
             PermissionType());
+
+    private static AccessControlEntry Given(AccessControlEntry? other) =>
+        other ?? throw new ArgumentNullException(nameof(other));
 }

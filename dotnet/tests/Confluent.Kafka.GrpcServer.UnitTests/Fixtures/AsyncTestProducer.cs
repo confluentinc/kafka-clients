@@ -51,7 +51,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<byte[], byte[]> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Send), cancellationToken);
@@ -94,7 +94,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<byte[], byte[]> record,
-        IAsyncDeliveryCallback callback,
+        IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Send), cancellationToken);
@@ -164,13 +164,13 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     }
 
     /// <summary>Counts each delivery-callback invocation, then forwards it unchanged.</summary>
-    private sealed class CountingCallback : IDeliveryCallback
+    private sealed class CountingCallback : ICallback
     {
-        private readonly IDeliveryCallback _target;
+        private readonly ICallback _target;
         private readonly ulong _index;
         private readonly ProducerProbe _probe;
 
-        internal CountingCallback(IDeliveryCallback target, ulong index, ProducerProbe probe)
+        internal CountingCallback(ICallback target, ulong index, ProducerProbe probe)
         {
             _target = target;
             _index = index;

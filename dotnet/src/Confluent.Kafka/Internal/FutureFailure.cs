@@ -31,10 +31,10 @@ namespace Confluent.Kafka.Internal;
 internal static class FutureFailure
 {
     private const string AsyncCallbackFailed =
-        "Confluent.Kafka: an IAsyncDeliveryCallback (OnCompletion) task faulted or was canceled after a serializer " +
+        "Confluent.Kafka: an IAsyncCallback (OnCompletion) task faulted or was canceled after a serializer " +
         "failed the record; the record's outcome is unchanged. Details: {0}";
 
-    internal static KafkaFuture<RecordMetadata> Send(string topic, int? partition, ApiException error, IDeliveryCallback? callback)
+    internal static KafkaFuture<RecordMetadata> Send(string topic, int? partition, ApiException error, ICallback? callback)
     {
         // A throw from the callback leaves the send, as it leaves Java's.
         callback?.OnCompletion(Placeholder(topic, partition), error);
@@ -45,8 +45,8 @@ internal static class FutureFailure
         string topic,
         int? partition,
         ApiException error,
-        IDeliveryCallback? callback,
-        IAsyncDeliveryCallback? asyncCallback,
+        ICallback? callback,
+        IAsyncCallback? asyncCallback,
         CancellationToken cancellationToken,
         PendingCallbacks? pending = null)
     {
@@ -91,7 +91,7 @@ internal static class FutureFailure
         private readonly HashSet<Task> _running = new HashSet<Task>();
         private readonly AsyncLocal<bool> _inside = new AsyncLocal<bool>();
 
-        internal Task Call(IAsyncDeliveryCallback callback, RecordMetadata metadata, Exception exception)
+        internal Task Call(IAsyncCallback callback, RecordMetadata metadata, Exception exception)
         {
             // A nested call restores the outer flag: this write changes the caller's context.
             bool outer = _inside.Value;

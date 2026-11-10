@@ -154,7 +154,7 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal(2, replicationFactor);
         Assert.NotEqual(Uuid.ZERO_UUID, topicId);
 
-        Assert.Equal(topicId, Uuid.Parse(topicId.ToString()));
+        Assert.Equal(topicId, Uuid.FromString(topicId.ToString()));
 
         Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
         Assert.Equal(ConfigValue, config.Get("custom.marker")!.Value());

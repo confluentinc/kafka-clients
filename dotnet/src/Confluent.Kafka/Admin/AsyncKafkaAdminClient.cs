@@ -67,9 +67,9 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null) =>
         AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(
-            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
+            topics ?? throw new ArgumentNullException(nameof(topics)),
             options));
 
     /// <inheritdoc/>

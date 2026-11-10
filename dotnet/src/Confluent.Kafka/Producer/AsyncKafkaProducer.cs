@@ -33,6 +33,12 @@ namespace Confluent.Kafka.Producer;
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
 public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TValue>
 {
+    /// <summary>The name prefix of the producer's network thread, Java's <c>KafkaProducer.NETWORK_THREAD_PREFIX</c>.</summary>
+    public const string NETWORK_THREAD_PREFIX = "kafka-producer-network-thread";
+
+    /// <summary>The group of the producer's metrics, Java's <c>KafkaProducer.PRODUCER_METRIC_GROUP_NAME</c>.</summary>
+    public const string PRODUCER_METRIC_GROUP_NAME = "producer-metrics";
+
     private readonly NativeProducer _native;
     private readonly ISerializer<TKey> _keySerializer;
     private readonly ISerializer<TValue> _valueSerializer;
@@ -83,7 +89,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken = default)
     {
         if (record is null)
@@ -102,7 +108,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncDeliveryCallback callback,
+        IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
         if (record is null)
@@ -121,9 +127,9 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     // Not async, so a serializer throw stays synchronous.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback? callback,
+        ICallback? callback,
         CancellationToken cancellationToken,
-        IAsyncDeliveryCallback? asyncCallback = null)
+        IAsyncCallback? asyncCallback = null)
     {
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
