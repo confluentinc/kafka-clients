@@ -28,7 +28,12 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 internal sealed partial class NativeProducer
 {
-    // The core mock's flush error, for the flush the binding makes itself from a callback the core cannot see.
+    // Held while SetFlushException sets the core's flush error and _mockFlushError, so concurrent calls leave the two
+    // equal.
+    private readonly object _mockFlushErrorGate = new object();
+
+    // The core mock's flush error, for the flush the binding makes itself from a callback the core cannot see. The
+    // core keeps its own copy, which its Flush, CommitTransaction and AbortTransaction throw.
     private Exception? _mockFlushError;
 
     // The mock's close error, kept here and not in the core, as Python's mock keeps its close_exception: Close throws it
@@ -45,8 +50,11 @@ internal sealed partial class NativeProducer
 
     internal void MockSetFlushError(Exception? exception)
     {
-        MockSetError(NativeMethods.MockProducerSetFlushError, exception);
-        Volatile.Write(ref _mockFlushError, exception);
+        lock (_mockFlushErrorGate)
+        {
+            MockSetError(NativeMethods.MockProducerSetFlushError, exception);
+            Volatile.Write(ref _mockFlushError, exception);
+        }
     }
 
     internal void MockSetPartitionsForError(Exception? exception) =>

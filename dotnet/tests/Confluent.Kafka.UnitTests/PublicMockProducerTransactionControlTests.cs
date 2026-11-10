@@ -371,6 +371,32 @@ public sealed class PublicMockProducerTransactionControlTests
         producer.SetFlushException(null);
     }
 
+    // SetFlushException sets the core's flush error, which Flush throws, and the binding's copy, which a flush from a
+    // callback the core cannot see throws. A second call waits for the first, so the two copies end equal: here both
+    // clear, as the clear ran last.
+    [Fact]
+    public async Task SetFlushException_ConcurrentCalls_LeaveBothFlushPathsEqual()
+    {
+        AsyncMockProducer<byte[], byte[]> producer =
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
+        using PausingException pausing = new PausingException();
+
+        Task set = Task.Run(() => producer.SetFlushException(pausing));
+        Assert.True(pausing.Entered.Wait(BlockingCall.Deadline), "the first call did not start");
+        Task clear = Task.Run(() => producer.SetFlushException(null));
+        Assert.NotSame(clear, await Task.WhenAny(clear, Task.Delay(TimeSpan.FromMilliseconds(200))));
+        pausing.Release.Set();
+        await Within(set);
+        await Within(clear);
+
+        await producer.Flush();
+        FlushingAfterAnAwait flushing = new FlushingAfterAnAwait(producer);
+        _ = await producer.Send(Record(), flushing);
+        Assert.True(producer.CompleteNext());
+        Assert.Null(await Within(flushing.Thrown));
+    }
+
     [Theory]
     [MemberData(nameof(Flavors))]
     public void Closed_IsFalseUntilClose(bool async)
@@ -481,6 +507,39 @@ public sealed class PublicMockProducerTransactionControlTests
             Entered.Set();
             _ = Release.Wait(BlockingCall.Deadline);
             Volatile.Write(ref _returned, 1);
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            Entered.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// An exception whose message, read once while the binding hands it to the core, waits until the test releases it.
+    /// </summary>
+    private sealed class PausingException : Exception, IDisposable
+    {
+        private int _read;
+
+        internal ManualResetEventSlim Entered { get; } = new ManualResetEventSlim();
+
+        internal ManualResetEventSlim Release { get; } = new ManualResetEventSlim();
+
+        public override string Message
+        {
+            get
+            {
+                if (Interlocked.Exchange(ref _read, 1) == 0)
+                {
+                    Entered.Set();
+                    _ = Release.Wait(BlockingCall.Deadline);
+                }
+
+                return "flush";
+            }
         }
 
         public void Dispose()
