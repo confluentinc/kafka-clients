@@ -74,11 +74,13 @@ producer-max-1kb-200p-key100b  rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=102
 # The keyed test with buffer.memory.allocation.strategy=incremental (KIP-1332):
 # batches take 16 KiB chunks as records arrive instead of reserving the whole
 # 1 MiB batch.size, so the default 32 MiB buffer.memory no longer caps the
-# open batches at 32 across the 200 partitions. Only Rust and Java read it, so
-# it runs with --clients rust,java (check refuses the other clients). The
-# report's Δ is against librdkafka, so it gives none here: compare each
-# client with its own run of producer-max-1kb-200p-key100b (the same test,
-# full strategy) and of producer-max-1kb-200p-key100b-bufmem256.
+# open batches at 32 across the 200 partitions. Only the Rust, Java and .NET
+# Rust-core clients read it, so it runs with --clients rust,java (check refuses
+# the other clients). The report's Δ is against librdkafka, so it gives none
+# here: compare each client with its own run of producer-max-1kb-200p-key100b
+# (the same test, full strategy) and of producer-max-1kb-200p-key100b-bufmem256.
+# The .NET Rust-core arms run incremental on those two by default; the report
+# shows each client's strategy.
 producer-max-1kb-200p-key100b-incremental  rust  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024 BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental
 
 # The keyed test with the full strategy and 256 MiB of buffer.memory, room for

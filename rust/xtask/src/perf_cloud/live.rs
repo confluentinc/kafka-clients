@@ -20,7 +20,8 @@
 //!
 //! A running client's numbers come from what its harness writes as it goes:
 //!
-//! - the producer and transactional harnesses and the Python consumer write
+//! - the producer and transactional harnesses and the Python and .NET
+//!   consumers write
 //!   one line per window (about a second) to `metrics.jsonl` in the arm's
 //!   directory: JSON whose leaves are numbers as strings, with the window's
 //!   messages, bytes, latency total, count and max, one CPU and one RSS

@@ -245,11 +245,15 @@ const HARNESS_VARS: &[&str] = &[
 /// ...), which would change the dotnet group's clients only.
 const DOTNET_RUNTIME_PREFIXES: &[&str] = &["DOTNET_", "COMPlus_"];
 
-/// Whether `var` is a .NET runtime setting the scrub removes. `DOTNET_ROOT`
-/// (and its per-architecture forms) says where the runtime is installed,
-/// which only finds it, so it stays.
+/// The .NET variables the scrub keeps: `DOTNET_ROOT` (and its per-architecture
+/// forms) says where the runtime is installed, and the globalization settings
+/// let it start on a host without ICU. Neither changes how a client performs.
+const DOTNET_KEPT_PREFIXES: &[&str] = &["DOTNET_ROOT", "DOTNET_SYSTEM_GLOBALIZATION_"];
+
+/// Whether `var` is a .NET runtime setting the scrub removes.
 fn is_dotnet_runtime_setting(var: &str) -> bool {
-    DOTNET_RUNTIME_PREFIXES.iter().any(|p| var.starts_with(p)) && !var.starts_with("DOTNET_ROOT")
+    DOTNET_RUNTIME_PREFIXES.iter().any(|p| var.starts_with(p))
+        && !DOTNET_KEPT_PREFIXES.iter().any(|p| var.starts_with(p))
 }
 
 /// Remove from `command`'s environment every [`HARNESS_VARS`] entry and every
@@ -2166,6 +2170,7 @@ fn artifact_sources(repo: &Path, artifact: &Path) -> Vec<PathBuf> {
                 dotnet.join(DOTNET_RUST_HARNESS),
                 dotnet.join("PerformanceCommon"),
                 repo.join("dotnet/src/Confluent.Kafka"),
+                repo.join("dotnet/Directory.Build.props"),
                 repo.join("rust/src"),
             ],
         ),
@@ -2175,7 +2180,11 @@ fn artifact_sources(repo: &Path, artifact: &Path) -> Vec<PathBuf> {
         ),
         (
             dotnet_harness(repo, DOTNET_LIBRDKAFKA_HARNESS),
-            vec![dotnet.join(DOTNET_LIBRDKAFKA_HARNESS), dotnet.join("PerformanceCommon")],
+            vec![
+                dotnet.join(DOTNET_LIBRDKAFKA_HARNESS),
+                dotnet.join("PerformanceCommon"),
+                repo.join("dotnet/Directory.Build.props"),
+            ],
         ),
         (
             rust_consumer_harness(repo),
@@ -4764,7 +4773,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     }
 
     #[test]
-    fn the_scrub_removes_the_dotnet_runtime_settings_but_not_its_location() {
+    fn the_scrub_removes_the_dotnet_runtime_settings_but_not_its_location_or_globalization() {
         for var in [
             "DOTNET_gcServer",
             "DOTNET_TieredPGO",
@@ -4776,6 +4785,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         for var in [
             "DOTNET_ROOT",
             "DOTNET_ROOT_X64",
+            "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT",
+            "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY",
             "PATH",
             "XDOTNET_gcServer",
             "complus_x",
@@ -5503,7 +5514,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             artifact_sources(repo, &dotnet_harness(repo, "PerfV2")),
             [
                 PathBuf::from("/repo/dotnet/tests/Performance/PerfV2"),
-                PathBuf::from("/repo/dotnet/tests/Performance/PerformanceCommon")
+                PathBuf::from("/repo/dotnet/tests/Performance/PerformanceCommon"),
+                PathBuf::from("/repo/dotnet/Directory.Build.props")
             ]
         );
         assert_eq!(
@@ -5512,6 +5524,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 PathBuf::from("/repo/dotnet/tests/Performance/PerfV3"),
                 PathBuf::from("/repo/dotnet/tests/Performance/PerformanceCommon"),
                 PathBuf::from("/repo/dotnet/src/Confluent.Kafka"),
+                PathBuf::from("/repo/dotnet/Directory.Build.props"),
                 PathBuf::from("/repo/rust/src")
             ]
         );
