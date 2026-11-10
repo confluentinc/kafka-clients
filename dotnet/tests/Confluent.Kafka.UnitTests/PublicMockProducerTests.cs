@@ -867,7 +867,7 @@ public sealed class PublicMockProducerTests : IDisposable
 
     private sealed class IntegerKeySerializer : ISerializer<object>
     {
-        public byte[]? Serialize(string topic, object data) => Serdes.Integer().Serialize(topic, (int)data);
+        public ReadOnlyMemory<byte>? Serialize(string topic, object data) => Serdes.Integer().Serialize(topic, (int)data);
     }
 
     private sealed class RecordingCallback : IDeliveryCallback
