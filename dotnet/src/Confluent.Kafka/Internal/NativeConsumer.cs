@@ -600,9 +600,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    internal void Rebalance(IReadOnlyCollection<TopicPartition> partitions)
+    internal void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(newAssignment, paramName: nameof(newAssignment));
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -611,9 +611,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitions)
+    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitionsLost, paramName: nameof(partitionsLost));
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -1793,6 +1793,101 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
 
+    internal void SetOffsetsException(KafkaException? exception) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetOffsetsError(
+                mock, exception is null ? IntPtr.Zero : ManagedExceptionCarrier.ToError(exception), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets)
+    {
+        if (newOffsets is null)
+        {
+            throw new ArgumentNullException(nameof(newOffsets));
+        }
+
+        int count = newOffsets.Count;
+        string[] topics = new string[count];
+        int[] partitions = new int[count];
+        long[] offsets = new long[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
+        {
+            topics[index] = entry.Key.Topic() ?? throw new ArgumentException("Topic names must not be null.", nameof(newOffsets));
+            partitions[index] = entry.Key.Partition();
+            offsets[index] = entry.Value;
+            index++;
+        }
+
+        CallMock((mock, arguments) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerUpdateDurationOffsets(mock, arguments.LongMap(topics, partitions, offsets, count), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void ScheduleNopPollTask() =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerScheduleNopPollTask(mock, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void SetMaxPollRecords(long maxPollRecords) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetMaxPollRecords(mock, maxPollRecords, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    // Java's lastPollTimeout() is the one mock helper that is not synchronized, so this read takes no ownership and
+    // answers while another thread's call holds the mock, as the native getter does.
+    internal TimeSpan? LastPollTimeout()
+    {
+        long timeoutMs = -1;
+        CallMock(
+            (mock, _) =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                timeoutMs = NativeMethods.MockConsumerLastPollTimeout(mock, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            },
+            UseKind.Unowned);
+        return timeoutMs < 0 ? null : TimeSpan.FromMilliseconds(timeoutMs);
+    }
+
+    // Close tears the native mock down, so once closed the answer is the managed state's, as Java's closed() still is.
+    internal bool MockClosed()
+    {
+        if (Volatile.Read(ref _closed) != Open)
+        {
+            return true;
+        }
+
+        bool closed = false;
+        try
+        {
+            CallMock((mock, _) =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                closed = NativeMethods.MockConsumerClosed(mock, ref outErr) != 0;
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            });
+        }
+        catch (IllegalStateException) when (Volatile.Read(ref _closed) != Open)
+        {
+            return true;
+        }
+
+        return closed;
+    }
+
     internal void Wakeup()
     {
         if (!TryEnterUse(out int owner, UseKind.Unowned))
@@ -2263,11 +2358,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // assigned.
     internal static (string Topic, int Partition)[] SnapshotPartitions(
         IReadOnlyCollection<TopicPartition> partitions,
-        bool nullTopicIsUnassigned = false)
+        bool nullTopicIsUnassigned = false,
+        string paramName = "partitions")
     {
         if (partitions is null)
         {
-            throw new ArgumentNullException(nameof(partitions));
+            throw new ArgumentNullException(paramName);
         }
 
         (string Topic, int Partition)[] snapshot = new (string, int)[partitions.Count];
@@ -2278,7 +2374,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 throw nullTopicIsUnassigned
                     ? new IllegalStateException(NoCurrentAssignment(tp.Partition()))
-                    : new ArgumentException("Topic names must not be null.", nameof(partitions));
+                    : new ArgumentException("Topic names must not be null.", paramName);
             }
 
             snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
@@ -2372,10 +2468,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    private void CallMock(Action<IntPtr, NativeCallArguments> call)
+    private void CallMock(Action<IntPtr, NativeCallArguments> call, UseKind kind = UseKind.Owned)
     {
         bool added = false;
-        int owner = EnterUse();
+        int owner = EnterUse(kind);
         try
         {
             using NativeCallArguments arguments = new NativeCallArguments();

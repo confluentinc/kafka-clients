@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using System.Globalization;
+
 namespace Confluent.Kafka.Consumer;
 
 /// <summary>
@@ -65,4 +68,46 @@ public sealed class ConsumerGroupMetadata
     /// <returns>The static group instance id (the configured <c>group.instance.id</c>), or <see langword="null"/>
     /// when the consumer is not a static member.</returns>
     public string? GroupInstanceId() => _groupInstanceId;
+
+    /// <summary>
+    /// Value equality over the group id, the generation id, the member id and the group instance id, Java's
+    /// <c>equals</c>.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two are the same group membership.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is ConsumerGroupMetadata other
+            && _generationId == other._generationId
+            && string.Equals(_groupId, other._groupId, StringComparison.Ordinal)
+            && string.Equals(_memberId, other._memberId, StringComparison.Ordinal)
+            && string.Equals(_groupInstanceId, other._groupInstanceId, StringComparison.Ordinal));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + (_groupId is null ? 0 : StringComparer.Ordinal.GetHashCode(_groupId));
+            hash = (hash * 31) + _generationId;
+            hash = (hash * 31) + (_memberId is null ? 0 : StringComparer.Ordinal.GetHashCode(_memberId));
+            hash = (hash * 31) + (_groupInstanceId is null ? 0 : StringComparer.Ordinal.GetHashCode(_groupInstanceId));
+            return hash;
+        }
+    }
+
+    /// <summary>
+    /// A diagnostic rendering in Java's <c>toString()</c> form, an absent group instance id printed empty.
+    /// </summary>
+    /// <returns>The rendering.</returns>
+    public override string ToString() =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "GroupMetadata(groupId = {0}, generationId = {1}, memberId = {2}, groupInstanceId = {3})",
+            _groupId,
+            _generationId,
+            _memberId,
+            _groupInstanceId ?? string.Empty);
 }

@@ -63,7 +63,7 @@ internal static class TestValues
     }
 
     /// <summary>A delivery callback that captures the outcome of the one send it is given.</summary>
-    private sealed class CapturingCallback : IDeliveryCallback
+    private sealed class CapturingCallback : ICallback
     {
         private readonly TaskCompletionSource<Exception?> _outcome =
             new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);

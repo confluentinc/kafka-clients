@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Producer;
 
 /// <summary>
 /// The metadata for a record that has been acknowledged by the server, Java's
-/// <c>org.apache.kafka.clients.producer.RecordMetadata</c>. On a failed delivery an <see cref="IDeliveryCallback"/>
+/// <c>org.apache.kafka.clients.producer.RecordMetadata</c>. On a failed delivery an <see cref="ICallback"/>
 /// receives Java's placeholder instead.
 /// </summary>
 public sealed class RecordMetadata

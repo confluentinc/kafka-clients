@@ -645,7 +645,7 @@ public sealed class PublicSerializerDisposalTests
         return Task.CompletedTask;
     }
 
-    private static async Task Send(object producer, IDeliveryCallback callback)
+    private static async Task Send(object producer, ICallback callback)
     {
         ProducerRecord<byte[], byte[]> record = Record(Topic("serde-close-in-callback"));
         if (producer is KafkaProducer<byte[], byte[]> sync)
@@ -704,7 +704,7 @@ public sealed class PublicSerializerDisposalTests
     }
 
     /// <summary>An async delivery callback that starts and then waits until the test releases it.</summary>
-    private sealed class HeldAsyncCallback : IAsyncDeliveryCallback
+    private sealed class HeldAsyncCallback : IAsyncCallback
     {
         private readonly TaskCompletionSource<bool> _release =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

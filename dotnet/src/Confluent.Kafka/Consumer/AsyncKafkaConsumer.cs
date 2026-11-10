@@ -106,16 +106,16 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IConsumerRebalanceListener listener,
+        IConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default) =>
-        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+        _native.SubscribeWithCallback(topics, callback, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IAsyncConsumerRebalanceListener listener,
+        IAsyncConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default) =>
-        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+        _native.SubscribeWithCallback(topics, callback, cancellationToken);
 
     /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
@@ -133,8 +133,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.SeekWithCallback(partition, offsetAndMetadata, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default) =>
-        _native.CurrentLagWithCallback(partition, cancellationToken);
+    public Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default) =>
+        _native.CurrentLagWithCallback(topicPartition, cancellationToken);
 
     /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>

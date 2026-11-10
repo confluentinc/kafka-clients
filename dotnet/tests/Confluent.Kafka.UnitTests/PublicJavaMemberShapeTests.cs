@@ -198,6 +198,11 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Common.Uuid.RESERVED",
         "Confluent.Kafka.Common.Uuid.ZERO_UUID",
         "Confluent.Kafka.Consumer.ConsumerRecord`2.NO_TIMESTAMP",
+        "Confluent.Kafka.Consumer.ConsumerRecord`2.NULL_SIZE",
+        "Confluent.Kafka.Producer.AsyncKafkaProducer`2.NETWORK_THREAD_PREFIX",
+        "Confluent.Kafka.Producer.AsyncKafkaProducer`2.PRODUCER_METRIC_GROUP_NAME",
+        "Confluent.Kafka.Producer.KafkaProducer`2.NETWORK_THREAD_PREFIX",
+        "Confluent.Kafka.Producer.KafkaProducer`2.PRODUCER_METRIC_GROUP_NAME",
         "Confluent.Kafka.Producer.RecordMetadata.UNKNOWN_PARTITION",
     };
 

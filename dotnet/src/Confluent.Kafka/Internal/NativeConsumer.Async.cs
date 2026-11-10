@@ -127,11 +127,16 @@ internal sealed partial class NativeConsumer
             topics, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
     }
 
-    internal Task RebalanceWithCallback(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunMockPartitions(partitions, NativeMethods.MockConsumerRebalanceCb, AsyncOperation.Rebalance);
+    internal Task RebalanceWithCallback(IReadOnlyCollection<TopicPartition> newAssignment) =>
+        RunMockPartitions(
+            newAssignment, nameof(newAssignment), NativeMethods.MockConsumerRebalanceCb, AsyncOperation.Rebalance);
 
-    internal Task LosePartitionsWithCallback(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunMockPartitions(partitions, NativeMethods.MockConsumerLosePartitionsCb, AsyncOperation.LosePartitions);
+    internal Task LosePartitionsWithCallback(IReadOnlyCollection<TopicPartition> partitionsLost) =>
+        RunMockPartitions(
+            partitionsLost,
+            nameof(partitionsLost),
+            NativeMethods.MockConsumerLosePartitionsCb,
+            AsyncOperation.LosePartitions);
 
     private Task SubscribeWithRegistration(
         IReadOnlyCollection<string> topics,
@@ -175,10 +180,11 @@ internal sealed partial class NativeConsumer
 
     private Task RunMockPartitions(
         IReadOnlyCollection<TopicPartition> partitions,
+        string paramName,
         NativeMockPartitionsCb call,
         AsyncOperation operation)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions, paramName: paramName);
         return Finish(
             Submit(CancellationToken.None, s_void, (arguments, opaque) =>
             {

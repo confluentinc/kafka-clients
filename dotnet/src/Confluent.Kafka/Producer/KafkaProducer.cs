@@ -31,6 +31,12 @@ namespace Confluent.Kafka.Producer;
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
 public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 {
+    /// <summary>The name prefix of the producer's network thread, Java's <c>KafkaProducer.NETWORK_THREAD_PREFIX</c>.</summary>
+    public const string NETWORK_THREAD_PREFIX = "kafka-producer-network-thread";
+
+    /// <summary>The group of the producer's metrics, Java's <c>KafkaProducer.PRODUCER_METRIC_GROUP_NAME</c>.</summary>
+    public const string PRODUCER_METRIC_GROUP_NAME = "producer-metrics";
+
     private readonly NativeProducer _native;
     private readonly ISerializer<TKey> _keySerializer;
     private readonly ISerializer<TValue> _valueSerializer;
@@ -95,7 +101,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
     {
         if (record is null)
         {
@@ -110,7 +116,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
         return SendValidated(record, callback);
     }
 
-    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, IDeliveryCallback? callback)
+    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, ICallback? callback)
     {
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();

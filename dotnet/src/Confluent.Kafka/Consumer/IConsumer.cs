@@ -99,9 +99,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// may call on its own consumer.
     /// </remarks>
     /// <param name="topics">The topics to subscribe to.</param>
-    /// <param name="listener">The rebalance listener to register.</param>
+    /// <param name="callback">The rebalance listener to register.</param>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="listener"/> is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>,
+    /// <paramref name="callback"/> is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
     /// </exception>
     /// <exception cref="ArgumentNullException">
@@ -112,7 +112,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
-    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener);
+    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback);
 
     /// <summary>
     /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>).
@@ -397,17 +397,17 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
 
     /// <summary>
-    /// Returns the consumer's lag for <paramref name="partition"/> (Java <c>currentLag(TopicPartition)</c>), or
+    /// Returns the consumer's lag for <paramref name="topicPartition"/> (Java <c>currentLag(TopicPartition)</c>), or
     /// <see langword="null"/> when it is not known.
     /// </summary>
-    /// <param name="partition">The topic-partition whose lag to read.</param>
+    /// <param name="topicPartition">The topic-partition whose lag to read.</param>
     /// <returns>The current lag, or <see langword="null"/> when it is not known.</returns>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or <paramref name="partition"/> is not assigned to a
+    /// The consumer is closed, or <paramref name="topicPartition"/> is not assigned to a
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
-    long? CurrentLag(TopicPartition partition);
+    long? CurrentLag(TopicPartition topicPartition);
 
     /// <summary>
     /// Returns the last committed offset for each of <paramref name="partitions"/> (Java

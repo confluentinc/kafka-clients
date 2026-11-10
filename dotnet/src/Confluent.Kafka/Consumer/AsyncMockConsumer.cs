@@ -85,16 +85,16 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IConsumerRebalanceListener listener,
+        IConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default) =>
-        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+        _native.SubscribeWithCallback(topics, callback, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IAsyncConsumerRebalanceListener listener,
+        IAsyncConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default) =>
-        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+        _native.SubscribeWithCallback(topics, callback, cancellationToken);
 
     /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
@@ -112,8 +112,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.SeekWithCallback(partition, offsetAndMetadata, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default) =>
-        _native.CurrentLagWithCallback(partition, cancellationToken);
+    public Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default) =>
+        _native.CurrentLagWithCallback(topicPartition, cancellationToken);
 
     /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
@@ -356,7 +356,47 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public void SetPollException(KafkaException? exception) => _native.SetPollException(exception);
 
     /// <summary>
-    /// Simulates a rebalance to the new full assignment <paramref name="partitions"/> (Java
+    /// Makes the offset queries throw <paramref name="exception"/>, the same instance (Java
+    /// <c>MockConsumer.setOffsetsException</c>); <see langword="null"/> clears a pending one.
+    /// </summary>
+    /// <param name="exception">The exception for the offset queries, or <see langword="null"/> to clear a pending one.</param>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void SetOffsetsException(KafkaException? exception) => _native.SetOffsetsException(exception);
+
+    /// <summary>
+    /// Sets the offsets the <c>by_duration</c> reset strategy resets to (Java
+    /// <c>MockConsumer.updateDurationOffsets(Map)</c>).
+    /// </summary>
+    /// <param name="newOffsets">The offset of each partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A partition in <paramref name="newOffsets"/> has a null topic.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateDurationOffsets(newOffsets);
+
+    /// <summary>Schedules a poll task that does nothing (Java <c>MockConsumer.scheduleNopPollTask()</c>).</summary>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void ScheduleNopPollTask() => _native.ScheduleNopPollTask();
+
+    /// <summary>
+    /// Sets the most records one poll returns (Java <c>MockConsumer.setMaxPollRecords(long)</c>).
+    /// </summary>
+    /// <param name="maxPollRecords">The most records one poll returns, at least <c>1</c>.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="maxPollRecords"/> is less than <c>1</c>.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void SetMaxPollRecords(long maxPollRecords) => _native.SetMaxPollRecords(maxPollRecords);
+
+    /// <summary>The timeout of the last poll (Java <c>MockConsumer.lastPollTimeout()</c>).</summary>
+    /// <returns>The last poll's timeout, or <see langword="null"/> before the first poll.</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public TimeSpan? LastPollTimeout() => _native.LastPollTimeout();
+
+    /// <summary>Whether the consumer has been closed (Java <c>MockConsumer.closed()</c>).</summary>
+    /// <returns><see langword="true"/> once the consumer is closed or disposed.</returns>
+    public bool Closed() => _native.MockClosed();
+
+    /// <summary>
+    /// Simulates a rebalance to the new full assignment <paramref name="newAssignment"/> (Java
     /// <c>MockConsumer.rebalance(Collection)</c>).
     /// </summary>
     /// <remarks>
@@ -366,15 +406,15 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// instance. Buffered records are cleared, as in Java. On a manually assigned consumer the <see cref="Task"/>
     /// faults with <see cref="ArgumentException"/>, as Java's <c>IllegalArgumentException</c>.
     /// </remarks>
-    /// <param name="partitions">The new full assignment.</param>
+    /// <param name="newAssignment">The new full assignment.</param>
     /// <returns>A <see cref="Task"/> that completes when the rebalance is done.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    public Task Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.RebalanceWithCallback(partitions);
+    public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment) => _native.RebalanceWithCallback(newAssignment);
 
     /// <summary>
-    /// Simulates losing <paramref name="partitions"/> without a clean revocation (Java
+    /// Simulates losing <paramref name="partitionsLost"/> without a clean revocation (Java
     /// <c>MockConsumer.losePartitions(Collection)</c>).
     /// </summary>
     /// <remarks>
@@ -384,13 +424,13 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
     /// <see cref="IllegalStateException"/>, as Java's.
     /// </remarks>
-    /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
+    /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>
     /// <returns>A <see cref="Task"/> that completes when the partitions are lost.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
-        _native.LosePartitionsWithCallback(partitions);
+    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost) =>
+        _native.LosePartitionsWithCallback(partitionsLost);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

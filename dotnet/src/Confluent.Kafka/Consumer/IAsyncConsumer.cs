@@ -114,13 +114,13 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// listener runs, what throwing does, and what it may call on its own consumer.
     /// </remarks>
     /// <param name="topics">The topics to subscribe to.</param>
-    /// <param name="listener">The rebalance listener to register.</param>
+    /// <param name="callback">The rebalance listener to register.</param>
     /// <param name="cancellationToken">
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="listener"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
+    /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
     /// </exception>
     /// <exception cref="ArgumentNullException">
@@ -132,7 +132,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IConsumerRebalanceListener listener,
+        IConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -141,14 +141,14 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// until a subscribe that succeeds replaces it.
     /// </summary>
     /// <param name="topics">The topics to subscribe to.</param>
-    /// <param name="listener">The rebalance listener to register.</param>
+    /// <param name="callback">The rebalance listener to register.</param>
     /// <param name="cancellationToken">
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>A <see cref="Task"/> that completes when the subscription is applied.</returns>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="listener"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
+    /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
     /// </exception>
     /// <exception cref="ArgumentNullException">
@@ -160,7 +160,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IAsyncConsumerRebalanceListener listener,
+        IAsyncConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -566,21 +566,21 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Returns the consumer's lag for <paramref name="partition"/> (Java <c>currentLag(TopicPartition)</c>), or
+    /// Returns the consumer's lag for <paramref name="topicPartition"/> (Java <c>currentLag(TopicPartition)</c>), or
     /// <see langword="null"/> when it is not known.
     /// </summary>
-    /// <param name="partition">The topic-partition whose lag to read.</param>
+    /// <param name="topicPartition">The topic-partition whose lag to read.</param>
     /// <param name="cancellationToken">
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>The current lag, or <see langword="null"/> when it is not known.</returns>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or <paramref name="partition"/> is not assigned to an
+    /// The consumer is closed, or <paramref name="topicPartition"/> is not assigned to an
     /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
-    Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default);
+    Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the last committed offset, with its metadata and leader epoch, for each of
