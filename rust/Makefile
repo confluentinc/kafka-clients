@@ -208,50 +208,13 @@ test-integration-grpc-c-native:
 # (`__grpc_dotnet_async`) backends -- exactly as `__grpc_python` matches both
 # python arms -- so one target covers both dotnet gRPC images. To run only the
 # sync backend, add `--skip __grpc_dotnet_async`.
-#
-# THREE TESTS ARE SKIPPED FOR .NET ONLY, on both .NET arms -- the three producer
-# transaction tests.
-#
-# The producer transaction tests.
-# `multilanguage_test!` emits one arm per backend for every test it wraps, so the
-# three transaction tests in tests/integration/producer_transactions_test.rs
-# generate __grpc_dotnet / __grpc_dotnet_async arms like every other backend. The
-# .NET gRPC server cannot serve them: ProducerServiceImpl /
-# AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
-# transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
-# AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
-# so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
-# yet (dotnet/CLAUDE.md §1).
-#
-# The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the two
-# dotnet targets below (test-integration-grpc-dotnet, which the root
-# test-integration-dotnet and its -ssl / -sasl-ssl variants reach through dotnet/'s
-# test-integration, and test-integration-grpc-dotnet-native), which only ever run
-# __grpc_dotnet*, so no other backend loses coverage: python / c / rust still run
-# all three.
-#
-# REMOVE the three transaction skips when the
-# .NET producer reaches transaction parity with Python (the 10 transaction
-# P/Invokes, the public surface on IProducer/IAsyncProducer and the four producer
-# types, the MockProducer transaction controls, and the five RPCs in both
-# producer servicers, whose SendOffsetsToTransaction must read the group metadata
-# by id from the GroupMetadataStore that the consumer servicers' GroupMetadata
-# RPC fills, as Python's does). Deleting them is the last step of that phase, not
-# a follow-up to it. With all three gone, remove DOTNET_GRPC_SKIPS (the definition
-# below and its uses in test-integration-grpc-dotnet and
-# test-integration-grpc-dotnet-native).
-DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
-	--skip test_aborted_transaction_records_are_discarded \
-	--skip test_consume_transform_produce_with_offsets
 
 test-integration-grpc-dotnet:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-		$(DOTNET_GRPC_SKIPS)
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
-		$(DOTNET_GRPC_SKIPS)
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
