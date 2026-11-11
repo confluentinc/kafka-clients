@@ -16,9 +16,9 @@
 #
 
 #
-# NOTE: For GA, Confluent will provide a supported Schema Registry client that
-# works with this Python client. During the preview, use the third-party
-# python-schema-registry-client package, as this example does.
+# NOTE: For GA, we have plans to provide a Confluent supported Schema Registry
+# client that works with this Python client. During the preview, use the
+# third-party python-schema-registry-client package, as this example does.
 #
 
 #
@@ -139,8 +139,4 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        sys.stderr.write('avro consumer failed: %s\n' % e)
-        sys.exit(1)
+    main()

@@ -19,7 +19,7 @@ Build the client into the repository's venv, then start a broker:
 
 ```bash
 make devel-build-python        # from the repository root
-docker run -d --rm --name kafka -p 9092:9092 apache/kafka:4.3.1
+docker run -d --rm --name kafka -p 9092:9092 apache/kafka:4.4.0
 ```
 
 ```bash
@@ -40,8 +40,8 @@ it is assigned and the ones revoked from it.
 
 `schemaregistry/` has an Avro producer and a consumer that reads what it writes.
 They need a Schema Registry and the third-party `python-schema-registry-client` package. For GA,
-Confluent will provide a supported Schema Registry client that works with this Python client. See
-[`schemaregistry/README.md`](schemaregistry/README.md) for why, how they work, and how to run them.
+we have plans to provide a Confluent supported Schema Registry client that works with this Python
+client. See [`schemaregistry/README.md`](schemaregistry/README.md) for why and how to run them.
 
 ## Notes
 

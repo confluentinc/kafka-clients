@@ -1,7 +1,7 @@
 # Schema Registry examples
 
-> **Note:** For GA, Confluent will provide a supported Schema Registry client that works with this
-> Python client. During the preview, use the third-party
+> **Note:** For GA, we have plans to provide a Confluent supported Schema Registry client that works
+> with this Python client. During the preview, use the third-party
 > [`python-schema-registry-client`](https://pypi.org/project/python-schema-registry-client/) package,
 > as these examples do.
 
@@ -20,31 +20,35 @@ Run the producer first, then the consumer: the consumer reads the records the pr
 - `python-schema-registry-client` has no Kafka client dependency, so it installs cleanly beside
   4.4.*.
 
-## Requirements
+## Running them
 
-Install the registry client into the same environment as this client:
+1. Start Kafka. Skip this step if the broker from [`../README.md`](../README.md) is already running
+   (`docker ps` lists `kafka`).
+   ```bash
+   docker run -d --rm --name kafka -p 9092:9092 apache/kafka:4.4.0
+   ```
+2. Start Schema Registry. It shares the host network, so its Kafka client reaches the broker at
+   `localhost:9092` (Docker on Linux, or Docker Desktop 4.34+ with host networking turned on).
+   ```bash
+   docker run -d --rm --name schema-registry --network host \
+     -e SCHEMA_REGISTRY_HOST_NAME=localhost \
+     -e SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081 \
+     -e SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=PLAINTEXT://localhost:9092 \
+     confluentinc/cp-schema-registry:latest
+   ```
+3. Install the registry client into the repository's venv.
+   ```bash
+   cd python/examples/schemaregistry
+   ../../../venv/bin/pip install python-schema-registry-client==2.6.1
+   ```
+4. Run the producer, then the consumer.
+   ```bash
+   ../../../venv/bin/python avro_producer.py
+   ../../../venv/bin/python avro_consumer.py
+   ```
 
-```bash
-pip install python-schema-registry-client
-```
+Notes:
 
-The examples need a Kafka broker on `localhost:9092` and a Schema Registry on `http://localhost:8081`.
-The registry's own Kafka client reaches the broker on the container network:
-
-```bash
-docker network create kafka-examples
-docker run -d --rm --name kafka --network kafka-examples -p 9092:9092 \
-  -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
-  -e KAFKA_LISTENERS=PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093 \
-  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092,INTERNAL://kafka:29092 \
-  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT \
-  -e KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
-  -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
-  apache/kafka:4.3.1
-docker run -d --rm --name schema-registry --network kafka-examples -p 8081:8081 \
-  -e SCHEMA_REGISTRY_HOST_NAME=schema-registry \
-  -e SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081 \
-  -e SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=PLAINTEXT://kafka:29092 \
-  confluentinc/cp-schema-registry:latest
-```
+- To reach a broker or registry elsewhere, set `KAFKA_BOOTSTRAP_SERVERS` and `SCHEMA_REGISTRY_URL`
+  (defaults `localhost:9092` and `http://localhost:8081`).
+- `docker stop schema-registry` stops the registry when you are done (`--rm` then removes it).
