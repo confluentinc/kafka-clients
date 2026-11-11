@@ -22,6 +22,12 @@ Run the producer first, then the consumer: the consumer reads the records the pr
 
 ## Requirements
 
+Install the registry client into the same environment as this client:
+
+```bash
+pip install python-schema-registry-client
+```
+
 The examples need a Kafka broker on `localhost:9092` and a Schema Registry on `http://localhost:8081`.
 The registry's own Kafka client reaches the broker on the container network:
 
