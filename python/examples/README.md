@@ -10,6 +10,8 @@
 | `async_consumer.py` | `consumer_context_manager.py` on asyncio: `AsyncKafkaConsumer` in an `async with` block, with a listener whose methods are coroutines. |
 | `admin.py` | Creates a topic with `Admin`, reads each topic's `KafkaFuture` with `get()` (a failure arrives as `ExecutionError`, the error being its `__cause__`), and lists the topics. |
 | `async_admin.py` | The same on asyncio: `AsyncAdmin` in an `async with` block; a call returns its result at once and each `AsyncKafkaFuture` is awaited through `get()`. |
+| `schemaregistry/avro_producer.py` | Sends 10 `User` records as Avro to `avro-users`, registering the schema in Schema Registry. |
+| `schemaregistry/avro_consumer.py` | Reads them back from `avro-users`, decoding each value with the schema fetched from Schema Registry. |
 
 ## Running them
 
@@ -33,6 +35,31 @@ The other producers take the same arguments as `producer.py`, and the other cons
 
 Start a second consumer in the same group to see a rebalance: each consumer prints the partitions
 it is assigned and the ones revoked from it.
+
+## Schema Registry examples
+
+`schemaregistry/` has an Avro producer and consumer, the Python peers of `rust/examples/schemaregistry`.
+This package has no Schema Registry serdes of its own, and the PyPI `confluent-kafka` package cannot be
+installed beside it (both install `confluent_kafka`). So the examples use
+[`python-schema-registry-client`](https://pypi.org/project/python-schema-registry-client/), which has
+no Kafka client dependency, wrapped in serdes of this client: the producer is given `User` objects and
+`poll()` returns decoded `User` values. This client calls serdes synchronously, so the wrappers use the
+package's synchronous client. Only the first record of a schema reaches the registry; the registry
+client caches the schema and its id after that.
+
+Install the registry client and start a Schema Registry beside the broker (see
+`rust/examples/README.md` for the container):
+
+```bash
+venv/bin/pip install python-schema-registry-client     # from the repository root
+cd python/examples/schemaregistry
+../../../venv/bin/python avro_producer.py
+../../../venv/bin/python avro_consumer.py
+```
+
+They connect to `localhost:9092` and `http://localhost:8081` by default. Set
+`KAFKA_BOOTSTRAP_SERVERS` and `SCHEMA_REGISTRY_URL` to use others. The consumer stops after a poll
+interval (30 s) with no records.
 
 ## Notes
 
