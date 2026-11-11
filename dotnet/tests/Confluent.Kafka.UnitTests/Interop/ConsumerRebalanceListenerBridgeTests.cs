@@ -57,7 +57,9 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
 
-    private static readonly TimeSpan s_settle = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan s_settle = TimeSpan.FromSeconds(10);
+
+    private static readonly TimeSpan s_collectPause = TimeSpan.FromMilliseconds(20);
 
     /// <summary>The listener method a theory drives.</summary>
     public enum Method
@@ -1129,14 +1131,21 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     private static async Task AssertCollected(WeakReference listener)
     {
         Stopwatch watch = Stopwatch.StartNew();
-        do
+        while (true)
         {
             await Task.Yield();
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
+            if (!listener.IsAlive || watch.Elapsed >= s_settle)
+            {
+                break;
+            }
+
+            // A pause between rounds lets the other threads run on a loaded runner; back-to-back full collections
+            // can starve them.
+            await Task.Delay(s_collectPause);
         }
-        while (listener.IsAlive && watch.Elapsed < s_settle);
 
         Assert.False(listener.IsAlive, "the listener's registration was not released");
     }
