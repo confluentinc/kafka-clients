@@ -16,18 +16,18 @@
 
 // N6 check-ownership (javascript/CLAUDE.md boundary rule 9: ownership follows
 // the signature). Owned and borrowed are read from the bindings header:
-//   - src/ receives a handle type OWNED when it gets it as the return value
+//   - native/ receives a handle type OWNED when it gets it as the return value
 //     of a header function returning a non-const `kafka_..._t *` (an
 //     `__as_` view excepted: it is borrowed, root CLAUDE.md §4), through an
 //     `out_err` (`kafka_common_Error_t`), or as a non-const `kafka_..._t *`
-//     parameter of a completion src/ implements for a `_cb` twin;
-//   - each owned type is destroyed somewhere in src/ (a header
+//     parameter of a completion native/ implements for a `_cb` twin;
+//   - each owned type is destroyed somewhere in native/ (a header
 //     `<Type>_destroy` / `_destroy_err`), or handed to a header function whose
 //     documentation says it consumes that parameter ("(consumed)"). A
 //     set-level check;
-//   - a delivery completion (an interface method src/ implements, an
+//   - a delivery completion (an interface method native/ implements, an
 //     `_fn_t`) never passes a `const` (borrowed) parameter to a destroy: a
-//     header `_destroy`, or a src/ function that destroys its parameter,
+//     header `_destroy`, or a native/ function that destroys its parameter,
 //     whatever casts the argument carries (one is needed to pass a `const`
 //     handle to a destroy at all).
 
@@ -46,9 +46,9 @@ function destroysOf(type) {
 module.exports = {
   name: 'check-ownership',
   kinds: ['never-destroyed', 'borrowed-destroyed'],
-  needs: ['src', 'header'],
+  needs: ['native', 'header'],
   hint:
-    'Destroy every handle src/ receives owned, or hand it to a call that consumes it; never destroy a ' +
+    'Destroy every handle native/ receives owned, or hand it to a call that consumes it; never destroy a ' +
     'borrowed (const) one (javascript/CLAUDE.md boundary rule 9).',
   check(ctx) {
     const { bodies, calls, header, resolve } = cModel(ctx);
@@ -102,10 +102,10 @@ module.exports = {
         kind: 'never-destroyed',
         subject: type,
         at: firstAt.get(type),
-        message: `src/ receives it owned (${where}) but never destroys it (${destroysOf(type).join(' / ')}) nor hands it to a call that consumes it`,
+        message: `native/ receives it owned (${where}) but never destroys it (${destroysOf(type).join(' / ')}) nor hands it to a call that consumes it`,
       });
     }
-    // The src functions that destroy a parameter (`error_discard(e)`), to a fixed point:
+    // The native functions that destroy a parameter (`error_discard(e)`), to a fixed point:
     // `<function>#<parameter index>`.
     // `<file>:<function>#<parameter index>`.
     const destroyers = new Set();
@@ -128,7 +128,7 @@ module.exports = {
         });
       }
     }
-    // The interface methods src implements: functions passed to an interface's constructor as an _fn_t.
+    // The interface methods native/ implements: functions passed to an interface's constructor as an _fn_t.
     const methods = new Map();
     for (const c of calls) {
       const proto = header.get(c.name);

@@ -33,45 +33,45 @@ test('the callback, then the future, then one report: in C and in TypeScript', (
 
 test('each finding kind, with its exact text', () => {
   let r = runN(RULE, {
-    'src/producer.c': PRODUCER_C.replace(
+    'native/producer.c': PRODUCER_C.replace(
       '    call_ref(self_, metadata, error);\n    if (!p->destroying) {\n        FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));\n    }',
       '    if (!p->destroying) {\n        FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));\n    }\n    call_ref(self_, metadata, error);',
     ),
-    'lib/producer/producer.ts': PRODUCER_TS.replace(
-      '      callback(m, e);\n      future[\'_complete\'](m);',
-      '      future[\'_complete\'](m);\n      callback(m, e);',
+    'src/producer/producer.ts': PRODUCER_TS.replace(
+      '      callback(m, e);\n      future.internalComplete(m);',
+      '      future.internalComplete(m);\n      callback(m, e);',
     ),
   });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     'send_on_completion: reports __set_callback_result_err (line 10) before running the callback (line 12)',
-    'lib/producer/producer.ts:11: completes the future before running the user callback',
+    'src/producer/producer.ts:11: completes the future before running the user callback',
   ]);
   r = runN(RULE, {
-    'src/producer.c': PRODUCER_C.replace('    call_ref(self_, metadata, error);', '    call_ref(self_, metadata, error);\n    call_ref(self_, metadata, error);'),
-    'lib/producer/producer.ts': PRODUCER_TS.replace('      future[\'_complete\'](m);', '      future[\'_complete\'](m);\n      future[\'_complete\'](m);'),
+    'native/producer.c': PRODUCER_C.replace('    call_ref(self_, metadata, error);', '    call_ref(self_, metadata, error);\n    call_ref(self_, metadata, error);'),
+    'src/producer/producer.ts': PRODUCER_TS.replace('      future.internalComplete(m);', '      future.internalComplete(m);\n      future.internalComplete(m);'),
   });
   assert.deepEqual(findings(r), [
     'send_on_completion: calls call_ref 2 time(s) and __set_callback_result_err 1 time(s), not once each',
-    'lib/producer/producer.ts:11: runs the user callback 1 time(s) and completes the future 2 time(s), not once each',
+    'src/producer/producer.ts:11: runs the user callback 1 time(s) and completes the future 2 time(s), not once each',
   ]);
 });
 
 test('a report outside the destroying guard is a finding (rule 6)', () => {
-  const r = runN(RULE, { 'src/producer.c': PRODUCER_C.replace('    if (!p->destroying) {\n', '    {\n') });
+  const r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    if (!p->destroying) {\n', '    {\n') });
   assert.deepEqual(findings(r), ['send_on_completion: reports __set_callback_result_err (line 11) outside an if (!…destroying) guard']);
 });
 
 test('the C report must be what the guard guards; a nested block inside the guard is fine', () => {
   let r = runN(RULE, {
-    'src/producer.c': PRODUCER_C.replace(
+    'native/producer.c': PRODUCER_C.replace(
       '    if (!p->destroying) {\n        FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));\n    }',
       '    if (!p->destroying) delivered = 1;\n    FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));',
     ),
   });
   assert.deepEqual(findings(r), ['send_on_completion: reports __set_callback_result_err (line 11) outside an if (!…destroying) guard']);
   r = runN(RULE, {
-    'src/producer.c': PRODUCER_C.replace(
+    'native/producer.c': PRODUCER_C.replace(
       '    if (!p->destroying) {\n',
       '    if (!p->destroying) {\n        if (id < 0) {\n            id = 0;\n        }\n',
     ),
@@ -79,7 +79,7 @@ test('the C report must be what the guard guards; a nested block inside the guar
   assert.equal(r.status, 0, r.text);
   // Unbraced, the report is the guarded statement.
   r = runN(RULE, {
-    'src/producer.c': PRODUCER_C.replace(
+    'native/producer.c': PRODUCER_C.replace(
       '    if (!p->destroying) {\n        FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));\n    }',
       '    if (!p->destroying) FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));',
     ),
@@ -90,24 +90,45 @@ test('the C report must be what the guard guards; a nested block inside the guar
 test('a delivery callback is followed into the functions it calls, and one the rule cannot follow is a finding', () => {
   // The body moved into a module function that completes the future first.
   let r = runN(RULE, {
-    'lib/producer/producer.ts': PRODUCER_TS.replace(
-      "    const onComplete = (m: unknown, e: unknown): void => {\n      callback(m, e);\n      future['_complete'](m);\n    };",
+    'src/producer/producer.ts': PRODUCER_TS.replace(
+      "    const onComplete = (m: unknown, e: unknown): void => {\n      callback(m, e);\n      future.internalComplete(m);\n    };",
       '    const onComplete = (m: unknown, e: unknown): void => deliver(future, callback, m, e);',
-    ) + "\nfunction deliver(future: Future, callback: Callback, m: unknown, e: unknown): void {\n  future['_complete'](m);\n  callback(m, e);\n}\n",
+    ) + "\nfunction deliver(future: Future, callback: Callback, m: unknown, e: unknown): void {\n  future.internalComplete(m);\n  callback(m, e);\n}\n",
   });
-  assert.deepEqual(findings(r), ['lib/producer/producer.ts:11: completes the future before running the user callback']);
+  assert.deepEqual(findings(r), ['src/producer/producer.ts:11: completes the future before running the user callback']);
   // A delivery callback that never completes the future.
   r = runN(RULE, {
-    'lib/producer/producer.ts': PRODUCER_TS.replace("      future['_complete'](m);\n", '      void future;\n'),
+    'src/producer/producer.ts': PRODUCER_TS.replace("      future.internalComplete(m);\n", '      void future;\n'),
   });
-  assert.deepEqual(findings(r), ['lib/producer/producer.ts:11: runs the user callback 1 time(s) and completes the future 0 time(s), not once each']);
+  assert.deepEqual(findings(r), ['src/producer/producer.ts:11: runs the user callback 1 time(s) and completes the future 0 time(s), not once each']);
   // One built by a call: nothing to read.
   r = runN(RULE, {
-    'lib/producer/producer.ts': PRODUCER_TS.replace('    native.send(onComplete);', '    native.send(((f) => f)(onComplete));'),
+    'src/producer/producer.ts': PRODUCER_TS.replace('    native.send(onComplete);', '    native.send(((f) => f)(onComplete));'),
   });
   assert.deepEqual(findings(r), [
-    'lib/producer/producer.ts:15: hands native.send a delivery callback the rule cannot follow: a function literal, or a const, readonly or module function of lib/',
+    'src/producer/producer.ts:15: hands native.send a delivery callback the rule cannot follow: a function literal, or a const, readonly or module function of src/',
   ]);
+});
+
+test('one completion site reached from two paths counts once: a Promise the callback returned completes it later', () => {
+  let r = runN(RULE, {
+    'src/producer/producer.ts': PRODUCER_TS.replace(
+      "    const onComplete = (m: unknown, e: unknown): void => {\n      callback(m, e);\n      future.internalComplete(m);\n    };",
+      '    const onComplete = (m: unknown, e: unknown): unknown => {\n      const r: unknown = callback(m, e);\n' +
+        '      if (r instanceof Promise) return r.then(() => complete(future, m));\n      return complete(future, m);\n    };',
+    ) + '\nfunction complete(future: Future, m: unknown): void {\n  future.internalComplete(m);\n}\n',
+  });
+  assert.equal(r.status, 0, r.text);
+  assert.ok(r.out.includes('✅ check-completion-order: 2 item(s) checked'), r.text);
+  // Two sites are still two.
+  r = runN(RULE, {
+    'src/producer/producer.ts': PRODUCER_TS.replace(
+      "    const onComplete = (m: unknown, e: unknown): void => {\n      callback(m, e);\n      future.internalComplete(m);\n    };",
+      '    const onComplete = (m: unknown, e: unknown): unknown => {\n      const r: unknown = callback(m, e);\n' +
+        '      if (r instanceof Promise) return r.then(() => future.internalComplete(m));\n      return future.internalComplete(m);\n    };',
+    ),
+  });
+  assert.deepEqual(findings(r), ['src/producer/producer.ts:11: runs the user callback 1 time(s) and completes the future 2 time(s), not once each']);
 });
 
 test('an unlisted completion and an unused entry are findings', () => {
@@ -126,6 +147,6 @@ test('cannot run without the TypeScript program', () => {
 });
 
 test('no completion fails: 0 items checked', () => {
-  const r = runN(RULE, { 'src/producer.c': 'void f(void) {}\n', 'lib/producer/producer.ts': 'export {};\n' }, { COMPLETIONS: [] });
+  const r = runN(RULE, { 'native/producer.c': 'void f(void) {}\n', 'src/producer/producer.ts': 'export {};\n' }, { COMPLETIONS: [] });
   assert.ok(r.err.includes('❌ check-completion-order: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

@@ -18,7 +18,7 @@
 # Builds the Node.js addon of this machine's platform for its npm platform package, for the
 # "Release (JavaScript): native addon" blocks of semaphore.yml. The Rust core is the library the
 # Python wheels and the NuGet package carry, built the same way (.semaphore/build-ffi-library.sh),
-# whose static archive the addon links (javascript/binding.gyp, CONFLUENT_KAFKA_LINK=static), so
+# whose static archive the addon links (javascript/native/binding.gyp, CONFLUENT_KAFKA_LINK=static), so
 # the addon is the one file of the platform package. On Linux both are built in the
 # manylinux_2_28 image that build-wheels.sh uses, so that the addon needs glibc 2.28 at most: the
 # addon with a pinned Node.js whose tarball's SHA-256 is checked, and node-gyp as its npm bundles
@@ -35,7 +35,8 @@
 set -eu
 
 # The Node.js whose node-gyp and headers build the Linux addon: the Node 22 of the CI jobs
-# (`sem-version node 22`). Node-API is ABI-stable, so the addon also loads in Node 18, 20 and 24.
+# (`sem-version node 22`). Node-API is ABI-stable, so the addon also loads in Node 24 and 26
+# (package.json's engines: >=22.14.0).
 NODE_VERSION=22.23.4
 NODE_SHA256_X64=b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406
 NODE_SHA256_ARM64=f7a1e486dbc8b286847815b477d4fb5e9fb963ed4489c3e1588853d685f589f9
@@ -92,7 +93,7 @@ if [ "${1:-}" = "--in-docker" ]; then
     make -C /build build-addon CONFLUENT_KAFKA_LINK=static \
         CONFLUENT_KAFKA_LIB_DIR=/io/python/native/lib CONFLUENT_KAFKA_INCLUDE_DIR=/io/python/native/include
     mkdir -p "/out/$platform"
-    cp /build/build/Release/confluent-kafka-javascript.node "/out/$platform/"
+    cp /build/native/build/Release/confluent-kafka-javascript.node "/out/$platform/"
     chown -R "$(stat -c %u:%g /io)" /out
     addon="/out/$platform/confluent-kafka-javascript.node"
     echo "== LINKAGE =="; ldd "$addon" || true
@@ -110,7 +111,6 @@ fi
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) platform=linux-x64-gnu ;;
-    Linux-aarch64) platform=linux-arm64-gnu ;;
     Darwin-arm64) platform=darwin-arm64 ;;
     *) die "the package has no platform package for $(uname -s) $(uname -m)" ;;
 esac
@@ -136,7 +136,7 @@ case "$platform" in
         make -C javascript build-addon CONFLUENT_KAFKA_LINK=static \
             CONFLUENT_KAFKA_LIB_DIR="$PWD/python/native/lib" CONFLUENT_KAFKA_INCLUDE_DIR="$PWD/python/native/include"
         mkdir -p "$out/$platform"
-        cp javascript/build/Release/confluent-kafka-javascript.node "$out/$platform/"
+        cp javascript/native/build/Release/confluent-kafka-javascript.node "$out/$platform/"
         echo "== LINKAGE =="; otool -L "$out/$platform/confluent-kafka-javascript.node" || true
         echo "== MINIMUM OS VERSION =="; otool -l "$out/$platform/confluent-kafka-javascript.node" | grep -A3 LC_BUILD_VERSION || true
         ;;

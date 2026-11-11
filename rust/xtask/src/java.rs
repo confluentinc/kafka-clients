@@ -193,6 +193,11 @@ pub struct Overload {
     pub is_default: bool,
     /// The names of its parameters, in order.
     pub param_names: Vec<String>,
+    /// Its parameter types as written, annotations and `final` dropped,
+    /// rendered by [`render_type`] with a varargs `...` as `[]`
+    /// (`BiConsumer<? super T, ? super Throwable>`, `KafkaFuture<?>[]`); empty
+    /// for an implicit member.
+    pub param_types: Vec<String>,
     /// Whether it returns its own class: a static one is a factory.
     pub returns_class: bool,
     /// Its return type as written, annotations dropped, rendered by
@@ -1263,6 +1268,7 @@ impl Scanned {
                     is_static,
                     is_default: false,
                     param_names: Vec::new(),
+                    param_types: Vec::new(),
                     returns_class: false,
                     return_type,
                     javadoc: None,
@@ -1489,7 +1495,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                     out[idx].enum_constants.push(name.clone());
                 } else if next == Some(&Tok::Punct('(')) {
                     if is_method_decl(&toks, i, &out[idx].path) {
-                        let (params, param_names) = params(&toks, i + 1);
+                        let (params, param_names, param_types) = params(&toks, i + 1);
                         let returns_class = returns_class(&toks, i, &out[idx].path);
                         let return_type = return_type(&toks, i);
                         let implicit = if out[idx].is_interface {
@@ -1507,6 +1513,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                             is_static: std::mem::take(&mut is_static),
                             is_default: std::mem::take(&mut is_default),
                             param_names,
+                            param_types,
                             returns_class,
                             return_type,
                             javadoc: doc.take(),
@@ -1641,11 +1648,14 @@ fn past_parens(toks: &[Tok], open: usize) -> usize {
 /// The parameter types of the declaration whose `(` is at `open`, as simple
 /// names (annotations, `final`, generic arguments and parameter names are
 /// dropped, and arrays and varargs become `[]`), and the parameter names.
-fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>) {
+fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>, Vec<String>) {
     let close = past_parens(toks, open) - 1;
     let mut out = Vec::new();
     let mut names = Vec::new();
+    let mut types = Vec::new();
     let mut current: Vec<Tok> = Vec::new();
+    // The parameter's tokens, type arguments included.
+    let mut full: Vec<Tok> = Vec::new();
     let mut angle = 0usize;
     let mut j = open + 1;
     while j < close {
@@ -1654,24 +1664,43 @@ fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>) {
                 j = annotation(toks, j).1;
                 continue;
             },
-            Tok::Punct('<') => angle += 1,
-            Tok::Punct('>') => angle = angle.saturating_sub(1),
             Tok::Punct(',') if angle == 0 => {
                 let param = std::mem::take(&mut current);
                 out.push(param_type(&param));
                 names.push(param_name(&param));
+                types.push(full_param_type(&std::mem::take(&mut full)));
             },
-            Tok::Ident(f) if f == "final" => {},
-            t if angle == 0 => current.push(t.clone()),
-            _ => {},
+            Tok::Ident(f) if f == "final" && angle == 0 => {},
+            t => {
+                match t {
+                    Tok::Punct('<') => angle += 1,
+                    Tok::Punct('>') => angle = angle.saturating_sub(1),
+                    _ => {},
+                }
+                if angle == 0 && !matches!(t, Tok::Punct('>')) {
+                    current.push(t.clone());
+                }
+                full.push(t.clone());
+            },
         }
         j += 1;
     }
     if !current.is_empty() {
         out.push(param_type(&current));
         names.push(param_name(&current));
+        types.push(full_param_type(&full));
     }
-    (out, names)
+    (out, names, types)
+}
+
+/// The type of one parameter as written, from its tokens (type arguments
+/// included): the tokens before its name, a varargs `...` as `[]`.
+fn full_param_type(toks: &[Tok]) -> String {
+    let name = toks.iter().rposition(|t| matches!(t, Tok::Ident(_))).unwrap_or(toks.len());
+    let ty = &toks[..name];
+    let dots = ty.windows(3).filter(|w| w.iter().all(|t| *t == Tok::Punct('.'))).count();
+    let end = ty.len() - 3 * dots;
+    format!("{}{}", render_type(&ty[..end]), "[]".repeat(dots))
 }
 
 /// The name of one parameter from its tokens: the last identifier.

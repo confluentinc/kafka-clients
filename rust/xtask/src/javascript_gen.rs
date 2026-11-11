@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The generated files of the Node.js client (`javascript/lib/`, TypeScript
+//! The generated files of the Node.js client (`javascript/src/`, TypeScript
 //! sources that `make -C javascript build` compiles into `javascript/dist/`),
 //! from the same Java sources and FFI enum as the Python client's
 //! (`javascript/CLAUDE.md`, "Generated files"):
 //!
 //!   - the error hierarchy ([`crate::error_hierarchy::js`]): one class per
 //!     Python error class, in the folder of its Java package, plus
-//!     `lib/_error_registry.ts`;
+//!     `src/internal/error_registry.ts`;
 //!   - the config classes' constants ([`crate::config_consts::js`]);
-//!   - the producer's key-type table `lib/_config_types.ts`
+//!   - the producer's key-type table `src/internal/config_types.ts`
 //!     ([`crate::config_types::js`]).
 //!
 //! Every generated module carries [`GENERATED_MARKER`]. A folder holding only
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 type Res<T> = anyhow::Result<T>;
 
 /// The Node.js client's sources, relative to the repository root.
-pub(crate) const JS_LIB: &str = "javascript/lib";
+pub(crate) const JS_SRC: &str = "javascript/src";
 
 /// The marker of every generated module (in its leading comment block).
 pub(crate) const GENERATED_MARKER: &str = "GENERATED, DO NOT EDIT";
@@ -69,12 +69,12 @@ pub(crate) fn header(from: &str) -> String {
     )
 }
 
-/// The lib/ folders whose `index.ts` is hand-written (they also hold
+/// The src/ folders whose `index.ts` is hand-written (they also hold
 /// hand-written modules); the generator owns only the marked block there.
-/// `""` is `lib/` itself.
+/// `""` is `src/` itself.
 const MIXED_DIRS: &[&str] = &["", "common", "common/config", "producer"];
 
-/// The lib/ folders whose `index.ts` is hand-written and which hold no
+/// The src/ folders whose `index.ts` is hand-written and which hold no
 /// generated module: their parents' blocks do not export them.
 const HAND_WRITTEN_DIRS: &[&str] = &["common/security", "common/security/auth"];
 
@@ -92,7 +92,7 @@ pub(crate) const ES_MODULE_MARKER: &str = "export declare const __esModule: true
 pub(crate) type GeneratedFile = (PathBuf, String);
 
 /// One generated public module: the class `name`, defined in
-/// `lib/<dir>/<stem>.ts` (`dir` is `""` for `lib/` itself).
+/// `src/<dir>/<stem>.ts` (`dir` is `""` for `src/` itself).
 pub(crate) struct JsModule {
     pub dir: String,
     pub stem: String,
@@ -100,8 +100,8 @@ pub(crate) struct JsModule {
     pub content: String,
 }
 
-/// `import` path from a module in `from_dir` to `lib/<to>` (`to` a path under
-/// lib/ without `.ts`).
+/// `import` path from a module in `from_dir` to `src/<to>` (`to` a path under
+/// src/ without `.ts`).
 pub(crate) fn rel_import(from_dir: &str, to: &str) -> String {
     let from: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
     let target: Vec<&str> = to.split('/').collect();
@@ -272,23 +272,15 @@ fn parent_dir(dir: &str) -> Option<String> {
     }
 }
 
-fn last_segment(dir: &str) -> &str {
-    dir.rsplit('/').next().unwrap_or(dir)
-}
-
-/// The `export` lines of a folder's index for `members` and its generated
-/// child folders `subdirs`: a class from its module, a child folder as a
-/// namespace.
-fn export_lines(members: &[&JsModule], subdirs: &[String]) -> Vec<String> {
-    let mut lines: Vec<String> = members
+/// The `export` lines of a folder's index for `members`: each class from its
+/// module, by name. A child folder is never re-exported: each package has its
+/// own import path, and an index re-exports only its own folder's classes
+/// (root CLAUDE.md, JavaScript Binding Conventions, Layout and modules).
+fn export_lines(members: &[&JsModule]) -> Vec<String> {
+    members
         .iter()
         .map(|m| format!("export {{ {} }} from './{}';", m.name, m.stem))
-        .collect();
-    lines.extend(subdirs.iter().map(|d| {
-        let n = last_segment(d);
-        format!("export * as {n} from './{n}';")
-    }));
-    lines
+        .collect()
 }
 
 /// The marked block of a hand-written `index.ts` holding `lines`.
@@ -304,7 +296,7 @@ fn exports_block(lines: &[String]) -> String {
 
 /// The `index.ts` files and blocks for `modules`.
 fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, String)>> {
-    let lib = repo_root.join(JS_LIB);
+    let lib = repo_root.join(JS_SRC);
     let mut by_dir: BTreeMap<String, Vec<&JsModule>> = BTreeMap::new();
     for m in modules {
         by_dir.entry(m.dir.clone()).or_default().push(m);
@@ -318,19 +310,12 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
                 break;
             }
             if HAND_WRITTEN_DIRS.contains(&cur.as_str()) {
-                anyhow::bail!("javascript: generated module in the hand-written folder lib/{cur}");
+                anyhow::bail!("javascript: generated module in the hand-written folder src/{cur}");
             }
             generated_dirs.insert(cur.clone());
             d = parent_dir(&cur);
         }
     }
-    let children = |dir: &str| -> Vec<String> {
-        generated_dirs
-            .iter()
-            .filter(|d| parent_dir(d).as_deref() == Some(dir))
-            .cloned()
-            .collect()
-    };
     let index_path = |dir: &str| -> PathBuf {
         if dir.is_empty() {
             lib.join("index.ts")
@@ -344,7 +329,7 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
     for dir in &all_dirs {
         let mut members: Vec<&JsModule> = by_dir.get(dir).cloned().unwrap_or_default();
         members.sort_by(|a, b| a.name.cmp(&b.name));
-        let lines = export_lines(&members, &children(dir));
+        let lines = export_lines(&members);
         let path = index_path(dir);
         if MIXED_DIRS.contains(&dir.as_str()) {
             mixed_seen.insert(dir.clone());
@@ -358,16 +343,16 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
         let what = if members.is_empty() {
             "a parent folder of generated modules".to_string()
         } else {
-            format!("the generated modules of lib/{dir}/")
+            format!("the generated modules of src/{dir}/")
         };
         let mut text = header(&format!("the Java sources ({what})"));
         text.push('\n');
         text.push_str(&format!(
             "// `{}`: {what}.\n\n",
             if dir.is_empty() {
-                "lib".to_string()
+                "src".to_string()
             } else {
-                format!("lib/{dir}")
+                format!("src/{dir}")
             }
         ));
         for l in &lines {
@@ -384,15 +369,14 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
         ));
         out.push((path, text));
     }
-    // A mixed folder with nothing generated keeps a block of its generated
-    // child folders (empty when it has none).
+    // A mixed folder with nothing generated keeps an empty block.
     for dir in MIXED_DIRS {
         if mixed_seen.contains(*dir) {
             continue;
         }
         let path = index_path(dir);
         let current = fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let lines = export_lines(&[], &children(dir));
+        let lines = export_lines(&[]);
         out.push((
             path.clone(),
             splice(&current, EXPORTS_BEGIN, EXPORTS_END, &exports_block(&lines), &path)?,
@@ -415,7 +399,7 @@ fn splice(current: &str, begin: &str, end: &str, block: &str, path: &Path) -> Re
 
 /// Every generated file of the Node.js client: `(path, content)`.
 pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
-    let lib = repo_root.join(JS_LIB);
+    let lib = repo_root.join(JS_SRC);
     let (mut modules, registry) = crate::error_hierarchy::js::outputs(repo_root)?;
     let mut out = vec![registry];
     modules.extend(crate::config_consts::js::modules(repo_root)?);
@@ -423,7 +407,7 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for m in &modules {
         if !seen.insert((m.dir.clone(), m.stem.clone())) {
-            anyhow::bail!("javascript: two generated modules for lib/{}/{}.ts", m.dir, m.stem);
+            anyhow::bail!("javascript: two generated modules for src/{}/{}.ts", m.dir, m.stem);
         }
         let dir = if m.dir.is_empty() {
             lib.clone()
@@ -437,14 +421,14 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     Ok(out)
 }
 
-/// Generated modules under lib/ that no generator produces any more: `.ts`
+/// Generated modules under src/ that no generator produces any more: `.ts`
 /// files carrying [`GENERATED_MARKER`] that are not among `outputs`, and any
 /// `.js` one (the generated JavaScript modules the client had before its
 /// sources became TypeScript).
 fn orphaned(repo_root: &Path, outputs: &[(PathBuf, String)]) -> Res<Vec<PathBuf>> {
     let expected: BTreeSet<&PathBuf> = outputs.iter().map(|(p, _)| p).collect();
     let mut orphans = Vec::new();
-    let mut stack = vec![repo_root.join(JS_LIB)];
+    let mut stack = vec![repo_root.join(JS_SRC)];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
@@ -571,18 +555,9 @@ mod tests {
             name: "XError".into(),
             content: String::new(),
         };
-        let lines = export_lines(&[&m], &["common/errors".to_string()]);
-        assert_eq!(
-            lines,
-            [
-                "export { XError } from './x_error';",
-                "export * as errors from './errors';"
-            ]
-        );
-        assert_eq!(
-            exports_block(&lines),
-            format!("{EXPORTS_BEGIN}\n{}\n{}\n{EXPORTS_END}", lines[0], lines[1])
-        );
+        let lines = export_lines(&[&m]);
+        assert_eq!(lines, ["export { XError } from './x_error';"]);
+        assert_eq!(exports_block(&lines), format!("{EXPORTS_BEGIN}\n{}\n{EXPORTS_END}", lines[0]));
         assert_eq!(exports_block(&[]), format!("{EXPORTS_BEGIN}\n{EXPORTS_END}"));
     }
 
@@ -592,7 +567,7 @@ mod tests {
         let all = outputs(root).unwrap();
         let errors = all
             .iter()
-            .find(|(p, _)| p.ends_with("javascript/lib/common/errors/index.ts"))
+            .find(|(p, _)| p.ends_with("javascript/src/common/errors/index.ts"))
             .unwrap();
         assert!(errors.1.ends_with(&format!("{ES_MODULE_MARKER}\n")));
         assert!(errors.1.contains("export { ApiError } from './api_error';\n"));

@@ -44,3 +44,16 @@ test('the lockfile matches package.json', () => {
   assert.deepEqual(lock.packages[''].devDependencies ?? {}, pkg.devDependencies ?? {});
   assert.deepEqual(lock.packages[''].dependencies ?? {}, pkg.dependencies ?? {});
 });
+
+test('package.json names no platform package: the published copy pins them', () => {
+  // The published main package pins each platform package of npm/ in its
+  // optionalDependencies (.semaphore/check-npm.py manifest, npm/README.md).
+  // Pinned here, `npm ci` would fail as soon as the version is on the
+  // registry (the lockfile, which cannot lock a package not yet published,
+  // would then be out of sync), or, with the lockfile regenerated, install the
+  // released addon, which the loader prefers to the checkout's own build.
+  assert.ok(!('optionalDependencies' in pkg), 'package.json has optionalDependencies');
+  for (const name of Object.keys(lock.packages)) {
+    assert.doesNotMatch(name, /(^|\/)node_modules\/@confluentinc\/kafka-javascript-/, `the lockfile locks ${name}`);
+  }
+});

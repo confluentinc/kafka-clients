@@ -44,11 +44,21 @@
 //! semver order, than the current one is refused.
 //!
 //! `--javascript-version <semver>` sets the version of the Node.js client's
-//! npm package, `"version"` in [`JAVASCRIPT_PACKAGE`] and both of its copies
-//! in [`JAVASCRIPT_LOCK`], in the semver form only and 4.0.0 or higher (the
-//! npm name is shared with an earlier client whose versions are 1.x). It is a
+//! npm packages: `"version"` in [`JAVASCRIPT_PACKAGE`], both of its copies in
+//! [`JAVASCRIPT_LOCK`], and `"version"` in the `package.json` of every
+//! platform package under [`JAVASCRIPT_PLATFORM_DIR`], which the published
+//! main package pins at exactly that version in its `optionalDependencies`
+//! (`.semaphore/check-npm.py manifest` writes the pins from them, as a pin
+//! committed in the repository's `package.json` would break `npm ci` once the
+//! version is on the registry). It is in the semver form only and 4.0.0 or
+//! higher (the npm name is shared with an earlier client whose versions are
+//! 1.x); it alone may also be a `-preview.N`, between dev and rc. It is a
 //! fourth line, like .NET's: it moves only when given, and a version lower
-//! than the current one is refused.
+//! than the current one is refused. Its `MAJOR.MINOR` is the Apache Kafka
+//! release of [`KAFKA_GRADLE_PROPERTIES`], and its `PATCH` follows
+//! `rfc/versioning.md`: `AK_patch * 100 + core_patch * 10 + binding_patch`,
+//! the hundreds that Kafka release's patch, and a digit back at 0 whenever a
+//! digit to its left moves up.
 //!
 //! What is released together:
 //!
@@ -92,6 +102,15 @@ const JAVASCRIPT_LOCK: &str = "javascript/package-lock.json";
 /// versions are the earlier librdkafka-based client's.
 const JAVASCRIPT_MIN_MAJOR: u64 = 4;
 
+/// The folder of the Node.js client's platform packages: one folder each,
+/// holding the `package.json` it is published with.
+const JAVASCRIPT_PLATFORM_DIR: &str = "javascript/npm";
+
+/// The Apache Kafka release the clients are built from: its `version=` line
+/// gives the JavaScript version's `MAJOR.MINOR` and the hundreds of its
+/// `PATCH` (`rfc/versioning.md`).
+const KAFKA_GRADLE_PROPERTIES: &str = "kafka/gradle.properties";
+
 const USAGE: &str =
     "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440_VERSION] \
      [--dotnet-version SEMVER] [--javascript-version SEMVER]\n\
@@ -100,9 +119,11 @@ const USAGE: &str =
      a package's current one is refused, so pass --python-version while the crate's is lower.\n\
      --dotnet-version sets the .NET package's version (dotnet/Directory.Build.props), in the semver\n\
      form; without it that version is left as it is. It only moves up too.\n\
-     --javascript-version sets the Node.js package's version (javascript/package.json and its\n\
-     lockfile), in the semver form and 4.0.0 or higher; without it that version is left as it is.\n\
-     It only moves up too.";
+     --javascript-version sets the Node.js packages' version (javascript/package.json, its\n\
+     lockfile and javascript/npm/<platform>/package.json), in the semver form and 4.0.0 or higher,\n\
+     -preview.N allowed too; without it that version is left as it is. It only moves up too, its\n\
+     MAJOR.MINOR is the Apache Kafka release in kafka/, and its PATCH is\n\
+     AK_patch * 100 + core_patch * 10 + binding_patch (rfc/versioning.md).";
 
 /// A pre-release stage, in semver precedence order (its labels compare as
 /// ASCII text).
@@ -111,26 +132,36 @@ enum Stage {
     Alpha,
     Beta,
     Dev,
+    /// The JavaScript package's preview releases only (`4.4.0-preview.1`):
+    /// no other version takes it.
+    Preview,
     Rc,
 }
 
 impl Stage {
+    /// The stages of every version but the JavaScript package's.
     const ALL: [Stage; 4] = [Stage::Alpha, Stage::Beta, Stage::Dev, Stage::Rc];
+    /// The stages of the JavaScript package's version.
+    const JAVASCRIPT: [Stage; 5] = [Stage::Alpha, Stage::Beta, Stage::Dev, Stage::Preview, Stage::Rc];
 
     fn semver(self) -> &'static str {
         match self {
             Stage::Alpha => "alpha",
             Stage::Beta => "beta",
             Stage::Dev => "dev",
+            Stage::Preview => "preview",
             Stage::Rc => "rc",
         }
     }
 
+    /// The PEP 440 label. A preview version is a JavaScript one, which is
+    /// never written in PEP 440 form, so it is never asked for it.
     fn pep440(self) -> &'static str {
         match self {
             Stage::Alpha => "a",
             Stage::Beta => "b",
             Stage::Dev => ".dev",
+            Stage::Preview => unreachable!("a preview version is the JavaScript package's, never a Python one"),
             Stage::Rc => "rc",
         }
     }
@@ -150,6 +181,12 @@ impl PackageVersion {
     /// else, such as a build suffix or another pre-release label, does not
     /// parse.
     pub(crate) fn parse(text: &str) -> Option<Self> {
+        Self::parse_stages(text, &Stage::ALL)
+    }
+
+    /// [`Self::parse`] with the pre-release stages `stages` (only the
+    /// JavaScript package's version takes `-preview.N`).
+    fn parse_stages(text: &str, stages: &[Stage]) -> Option<Self> {
         let mut release_len = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
         // The dot of PEP 440's `.devN` belongs to the suffix.
         if text[..release_len].ends_with('.') {
@@ -172,12 +209,12 @@ impl PackageVersion {
         let (stage, n) = match suffix.strip_prefix('-') {
             Some(semver) => {
                 let (label, n) = semver.split_once('.')?;
-                let stage = Stage::ALL.into_iter().find(|s| s.semver() == label)?;
+                let stage = stages.iter().copied().find(|s| s.semver() == label)?;
                 (stage, n)
             },
             None => {
                 let (label, n) = suffix.split_at(suffix.find(|c: char| c.is_ascii_digit())?);
-                let stage = Stage::ALL.into_iter().find(|s| s.pep440() == label)?;
+                let stage = stages.iter().copied().find(|s| *s != Stage::Preview && s.pep440() == label)?;
                 (stage, n)
             },
         };
@@ -364,6 +401,11 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
             let lock = read(&lock_path)?;
             let current = javascript_version(&package, &lock)?;
             ensure_javascript_not_lowered(current, javascript)?;
+            let kafka = kafka_release(&read(&root.join(KAFKA_GRADLE_PROPERTIES)).with_context(|| {
+                format!("the JavaScript version follows the Apache Kafka release of {KAFKA_GRADLE_PROPERTIES}: run `make submodules` first")
+            })?)?;
+            let current_version = parse_javascript_version(current).expect("checked by ensure_javascript_not_lowered");
+            ensure_javascript_patch_digits(current_version, javascript, kafka)?;
             let value = javascript.to_string();
             edits.push((
                 package_path,
@@ -373,6 +415,19 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
                 lock_path,
                 set_json_strings(JAVASCRIPT_LOCK, &lock, &[&["version"], &["packages", "", "version"]], &value)?,
             ));
+            for platform in javascript_platform_manifests(&root)? {
+                let file = relative(&root, &platform);
+                let manifest = read(&platform)?;
+                let (start, end) = json_string_range(&file, &manifest, &["version"])?;
+                if manifest[start..end] != *current {
+                    anyhow::bail!(
+                        "{file} has `{}`, not `{current}`, the version of {JAVASCRIPT_PACKAGE}: the platform packages \
+                         are released with the main package, at its version",
+                        &manifest[start..end]
+                    );
+                }
+                edits.push((platform, set_json_strings(&file, &manifest, &[&["version"]], &value)?));
+            }
         },
         None => {
             println!("   {JAVASCRIPT_PACKAGE} is not changed: pass --javascript-version to set the JavaScript version")
@@ -441,15 +496,15 @@ fn ensure_dotnet_not_lowered(current: &str, new: PackageVersion) -> anyhow::Resu
 /// The JavaScript version given with `--javascript-version`: the semver form
 /// only, as npm writes it, and 4.0.0 or higher.
 fn parse_javascript_version(text: &str) -> anyhow::Result<PackageVersion> {
-    match PackageVersion::parse(text) {
+    match PackageVersion::parse_stages(text, &Stage::JAVASCRIPT) {
         Some(version) if version.to_string() == text && version.major >= JAVASCRIPT_MIN_MAJOR => Ok(version),
         Some(version) if version.to_string() == text => anyhow::bail!(
             "`{text}` is below {JAVASCRIPT_MIN_MAJOR}.0.0: the versions of @confluentinc/kafka-javascript below \
              {JAVASCRIPT_MIN_MAJOR} are the earlier librdkafka-based client's"
         ),
         _ => anyhow::bail!(
-            "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, such \
-             as 4.4.0-beta.1"
+            "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N, -preview.N or \
+             -rc.N, such as 4.4.0-preview.1"
         ),
     }
 }
@@ -483,6 +538,99 @@ fn ensure_javascript_not_lowered(current: &str, new: PackageVersion) -> anyhow::
             "{JAVASCRIPT_PACKAGE} is at {current}: the JavaScript version {new} would lower it. JavaScript versions \
              only move up; pass --javascript-version with a version not below {current}"
         );
+    }
+    Ok(())
+}
+
+/// The `package.json` of every platform package, one per folder of
+/// [`JAVASCRIPT_PLATFORM_DIR`], in name order.
+fn javascript_platform_manifests(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let dir = root.join(JAVASCRIPT_PLATFORM_DIR);
+    let mut manifests = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("listing {}", dir.display()))? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let manifest = entry.path().join("package.json");
+            if !manifest.is_file() {
+                anyhow::bail!("{} has no package.json", relative(root, &entry.path()));
+            }
+            manifests.push(manifest);
+        }
+    }
+    if manifests.is_empty() {
+        anyhow::bail!("{JAVASCRIPT_PLATFORM_DIR} has no platform package");
+    }
+    manifests.sort();
+    Ok(manifests)
+}
+
+/// The `MAJOR.MINOR.PATCH` of the Apache Kafka release in the
+/// `gradle.properties` text `properties`, from its `version=` line.
+fn kafka_release(properties: &str) -> anyhow::Result<(u64, u64, u64)> {
+    let version = properties
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("version="))
+        .with_context(|| format!("{KAFKA_GRADLE_PROPERTIES} has no version= line"))?
+        .trim();
+    let mut parts = version.split('.');
+    match (
+        parts.next().and_then(number),
+        parts.next().and_then(number),
+        parts.next().and_then(number),
+        parts.next(),
+    ) {
+        (Some(major), Some(minor), Some(patch), None) => Ok((major, minor, patch)),
+        _ => anyhow::bail!("{KAFKA_GRADLE_PROPERTIES} has version={version}, not an Apache Kafka release X.Y.Z"),
+    }
+}
+
+/// Refuses a JavaScript version `new` whose digits do not follow
+/// `rfc/versioning.md`, given the `current` one and the Apache Kafka release
+/// `kafka`: `MAJOR.MINOR` is Kafka's, and `PATCH` is `AK_patch * 100 +
+/// core_patch * 10 + binding_patch`, the hundreds being Kafka's patch, and
+/// each digit back at 0 when a digit to its left moves up.
+fn ensure_javascript_patch_digits(
+    current: PackageVersion,
+    new: PackageVersion,
+    kafka: (u64, u64, u64),
+) -> anyhow::Result<()> {
+    let (kafka_major, kafka_minor, kafka_patch) = kafka;
+    if (new.major, new.minor) != (kafka_major, kafka_minor) {
+        anyhow::bail!(
+            "{new} is not on the Apache Kafka line: its MAJOR.MINOR must be {kafka_major}.{kafka_minor}, the release in \
+             kafka/ (rfc/versioning.md)"
+        );
+    }
+    let digits = |patch: u64| (patch / 100, patch / 10 % 10, patch % 10);
+    let (ak, core, binding) = digits(new.patch);
+    if ak != kafka_patch {
+        anyhow::bail!(
+            "{new} has the Apache Kafka patch {ak} (PATCH = AK_patch * 100 + core_patch * 10 + binding_patch), but \
+             kafka/ is {kafka_major}.{kafka_minor}.{kafka_patch}: its PATCH must be in {}..={}",
+            kafka_patch * 100,
+            kafka_patch * 100 + 99
+        );
+    }
+    if (current.major, current.minor) == (new.major, new.minor) {
+        let (current_ak, current_core, _) = digits(current.patch);
+        if ak > current_ak && (core, binding) != (0, 0) {
+            anyhow::bail!(
+                "{new} moves the Apache Kafka patch from {current_ak} to {ak}, which resets the core and binding \
+                 digits: use {}.{}.{}",
+                new.major,
+                new.minor,
+                ak * 100
+            );
+        }
+        if ak == current_ak && core > current_core && binding != 0 {
+            anyhow::bail!(
+                "{new} moves the core patch from {current_core} to {core}, which resets the binding digit: use \
+                 {}.{}.{}",
+                new.major,
+                new.minor,
+                ak * 100 + core * 10
+            );
+        }
     }
     Ok(())
 }
@@ -1226,6 +1374,75 @@ version = \"9.9.9\"
             edited_lock.replace("\"version\": \"99.0.0\"", &format!("\"version\": \"{current}\"")),
             lock
         );
+        let platforms = javascript_platform_manifests(&root).expect("the platform packages");
+        assert!(!platforms.is_empty());
+        for platform in platforms {
+            let file = relative(&root, &platform);
+            let manifest = read(&platform).expect("a platform package.json");
+            let (start, end) = json_string_range(&file, &manifest, &["version"]).expect("one version");
+            assert_eq!(&manifest[start..end], current, "{file} is at the main package's version");
+            let edited = set_json_strings(&file, &manifest, &[&["version"]], "99.0.0").expect("settable");
+            assert_eq!(
+                edited,
+                manifest.replacen(&format!("\"version\": \"{current}\""), "\"version\": \"99.0.0\"", 1)
+            );
+        }
+        let kafka = kafka_release(&read(&root.join(KAFKA_GRADLE_PROPERTIES)).expect("kafka/ is checked out"))
+            .expect("a Kafka release");
+        let current = parse_javascript_version(current).expect("a JavaScript version");
+        assert_eq!(
+            (current.major, current.minor),
+            (kafka.0, kafka.1),
+            "the JavaScript version is on Kafka's line"
+        );
+        ensure_javascript_patch_digits(current, current, kafka).expect("the current version follows the RFC");
+    }
+
+    #[test]
+    fn kafka_release_reads_the_version_line() {
+        assert_eq!(
+            kafka_release("group=org.apache.kafka\nversion=4.4.0\nscalaVersion=2.13\n").unwrap(),
+            (4, 4, 0)
+        );
+        assert_eq!(kafka_release("version=4.3.1\n").unwrap(), (4, 3, 1));
+        assert!(kafka_release("version=4.4.0-SNAPSHOT\n").is_err());
+        assert!(kafka_release("group=org.apache.kafka\n").is_err());
+    }
+
+    #[test]
+    fn javascript_patch_digits_follow_the_versioning_rfc() {
+        let v = |text: &str| parse_javascript_version(text).expect(text);
+        let check = |current: &str, new: &str, kafka| ensure_javascript_patch_digits(v(current), v(new), kafka);
+        // rfc/versioning.md's worked examples, on Apache Kafka 4.3.0 and 4.3.1.
+        for (current, new) in [("4.3.0", "4.3.1"), ("4.3.1", "4.3.10"), ("4.3.0-preview.1", "4.3.0")] {
+            check(current, new, (4, 3, 0)).unwrap_or_else(|e| panic!("{current} -> {new}: {e}"));
+        }
+        for (current, new) in [("4.3.10", "4.3.100"), ("4.3.120", "4.3.123"), ("4.0.101", "4.0.200")] {
+            let kafka = (v(new).major, v(new).minor, v(new).patch / 100);
+            check(current, new, kafka).unwrap_or_else(|e| panic!("{current} -> {new}: {e}"));
+        }
+        // The preview, and GA on the next Kafka line.
+        check("4.4.0-preview.1", "4.4.0-preview.2", (4, 4, 0)).unwrap();
+        check("4.4.0-preview.2", "4.5.0", (4, 5, 0)).unwrap();
+        assert_eq!(
+            check("4.4.0", "4.5.0", (4, 4, 0)).unwrap_err().to_string(),
+            "4.5.0 is not on the Apache Kafka line: its MAJOR.MINOR must be 4.4, the release in kafka/ (rfc/versioning.md)"
+        );
+        assert_eq!(
+            check("4.3.0", "4.3.100", (4, 3, 0)).unwrap_err().to_string(),
+            "4.3.100 has the Apache Kafka patch 1 (PATCH = AK_patch * 100 + core_patch * 10 + binding_patch), but \
+             kafka/ is 4.3.0: its PATCH must be in 0..=99"
+        );
+        assert_eq!(
+            check("4.3.12", "4.3.110", (4, 3, 1)).unwrap_err().to_string(),
+            "4.3.110 moves the Apache Kafka patch from 0 to 1, which resets the core and binding digits: use 4.3.100"
+        );
+        assert_eq!(
+            check("4.3.12", "4.3.21", (4, 3, 0)).unwrap_err().to_string(),
+            "4.3.21 moves the core patch from 1 to 2, which resets the binding digit: use 4.3.20"
+        );
+        check("4.3.12", "4.3.13", (4, 3, 0)).unwrap();
+        check("4.3.12", "4.3.20", (4, 3, 0)).unwrap();
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -1428,11 +1645,18 @@ version = \"9.9.9\"
             "4.4.0-alpha.1",
             "4.4.0-beta.2",
             "4.4.0-dev.3",
+            "4.4.0-preview.1",
             "4.4.0-rc.0",
             "10.0.100",
         ] {
             assert_eq!(parse_javascript_version(text).unwrap().to_string(), text);
         }
+        // A preview sorts after dev and before rc, as semver compares the labels.
+        let [dev, preview, later_preview, rc] = ["4.4.0-dev.9", "4.4.0-preview.1", "4.4.0-preview.2", "4.4.0-rc.1"]
+            .map(|t| parse_javascript_version(t).unwrap());
+        assert!(dev < preview && preview < later_preview && later_preview < rc);
+        // No other version takes it.
+        assert_eq!(PackageVersion::parse("4.4.0-preview.1"), None);
         for text in [
             "4.4.0b1",
             "4.4.0.dev1",
@@ -1446,8 +1670,8 @@ version = \"9.9.9\"
             assert_eq!(
                 parse_javascript_version(text).unwrap_err().to_string(),
                 format!(
-                    "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, \
-                     such as 4.4.0-beta.1"
+                    "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N, \
+                     -preview.N or -rc.N, such as 4.4.0-preview.1"
                 )
             );
         }

@@ -19,8 +19,8 @@ name: create-release-tag
 #     hand.
 #   - JAVASCRIPT_VERSION: the tag is javascript/v<JAVASCRIPT_VERSION>, and
 #     "Release (JavaScript):" builds and tests the ${NPM_PACKAGE} packages and
-#     records them in the tag build's artifacts as a release bundle, whose
-#     publish.sh publishes them to npmjs.com by hand.
+#     records them in the tag build's artifacts, from which its "Publish to
+#     npm" promotion (publish-npm.yml) publishes them.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python,
 #     4.4.0-dev.1 for dotnet and javascript) is tagged like any other. A rust
 #     dev version is tested and packaged, never published; a python dev
@@ -41,7 +41,7 @@ name: create-release-tag
 #     optionally by .devN), <Version> in dotnet/Directory.Build.props
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N,
 #     -dev.N or -rc.N), or "version" in javascript/package.json (the same
-#     form, 4.0.0 or higher);
+#     form, -preview.N allowed too, 4.0.0 or higher);
 #   - on a release branch <major>.<minor>.x, only rust is entered, and its
 #     version is of that <major>.<minor>, the only one its publish block
 #     accepts from the branch; the python, dotnet and javascript release blocks
@@ -50,7 +50,7 @@ name: create-release-tag
 #     is a dev version, higher than every version on crates.io; for python, not
 #     yet on Test PyPI or PyPI; for dotnet, not yet on nuget.org; for
 #     javascript, not yet on npmjs.com for the main package or any of its
-#     three platform packages;
+#     two platform packages;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing (see the push below for the one exception, a failing push). The publish blocks repeat the tag, version and registry checks on
@@ -78,7 +78,7 @@ global_job_config:
     # updated. The release blocks never run on a branch build, so they are not
     # listed.
     - name: REQUIRED_CI_JOBS
-      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-javascript (Linux amd64) — plaintext;verify-javascript (Linux amd64) — ssl;verify-javascript (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);verify-javascript (macOS arm64);verify-dotnet (Windows amd64);verify-dotnet (Windows x86);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64)"
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-javascript (Linux amd64) — plaintext;verify-javascript (Linux amd64) — ssl;verify-javascript (Linux amd64) — sasl_ssl (plain);verify-javascript (Linux amd64) — node 24;verify-javascript (Linux amd64) — node 26;verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);verify-javascript (macOS arm64);verify-dotnet (Windows amd64);verify-dotnet (Windows x86);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64)"
 
 blocks:
   - name: "Create release tag"
@@ -134,8 +134,8 @@ blocks:
                   javascript)
                     version_param=JAVASCRIPT_VERSION
                     version=${JAVASCRIPT_VERSION:-}
-                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
-                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N'
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or -rc.N'
                     dev_pattern='-dev\.[0-9]+$'
                     manifest=javascript/package.json
                     manifest_key=version
@@ -304,7 +304,7 @@ blocks:
                     fi
                     ;;
                   javascript)
-                    for package in "${NPM_PACKAGE}" "${NPM_PACKAGE}-linux-x64-gnu" "${NPM_PACKAGE}-linux-arm64-gnu" "${NPM_PACKAGE}-darwin-arm64"; do
+                    for package in "${NPM_PACKAGE}" "${NPM_PACKAGE}-linux-x64-gnu" "${NPM_PACKAGE}-darwin-arm64"; do
                       /usr/bin/python3 .semaphore/check-published-npm.py versions "${package}" > "${published_file}" \
                         || refuse "could not read npmjs.com to confirm that ${package} ${version} is new"
                       if grep -qxF -- "${version}" "${published_file}"; then
@@ -422,6 +422,6 @@ blocks:
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
                   python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI, then that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
                   dotnet) echo "Pushed ${tag} at ${head_sha}. Its build runs CI, builds and tests the package, and records ${NUGET_PACKAGE} ${version} in its artifacts as nuget/release/${NUGET_PACKAGE}.${version}.nupkg. Then upload that file to nuget.org by hand." ;;
-                  javascript) echo "Pushed ${tag} at ${head_sha}. Its build runs CI, builds and tests the packages, and records ${NPM_PACKAGE} ${version} in its artifacts as npm/release/confluent-kafka-javascript-${version}-release.zip. Then publish it by hand with its publish.sh (javascript/release/README.txt)." ;;
+                  javascript) echo "Pushed ${tag} at ${head_sha}. Its build runs CI, builds and tests the packages, and records ${NPM_PACKAGE} ${version} in its artifacts under npm/release/. Then run its \"Publish to npm\" promotion (publish-npm.yml)." ;;
                 esac
               done

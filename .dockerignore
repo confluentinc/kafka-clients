@@ -33,6 +33,7 @@ python/**/__pycache__
 # node_modules: the JavaScript image builds the addon, compiles the library and
 # installs its packages itself.
 javascript/build
+javascript/native/build
 javascript/dist
 javascript/node_modules
 rust/consumer-perf/target

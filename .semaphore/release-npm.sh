@@ -16,21 +16,21 @@
 #
 #
 # Records the tested npm packages of a JavaScript release tag build as the release, for the
-# "Release (JavaScript): record" block of semaphore.yml. Nothing is published: the release is
-# published to npmjs.com by hand, with the publish.sh of the bundle this script writes.
+# "Release (JavaScript): record" block of semaphore.yml. Nothing is published here: the manual
+# "Publish to npm" promotion of that build (publish-npm.yml, .semaphore/publish-npm.sh) publishes
+# exactly what this script recorded.
 #
 # Usage, from the repository root of a javascript/v<version> tag build:
 #   .semaphore/release-npm.sh
 #       Refuses unless all of the following hold, then records the release in the workflow's
-#       artifacts: npm/release/confluent-kafka-javascript-<version>-release.zip, holding the four
-#       tarballs, their SHA256SUMS, publish.sh and README.txt (javascript/release/), with the
-#       tarballs' checksums in npm/release/SHA256SUMS. It loads no token, and reads npmjs.com only
-#       to list the versions of the packages.
+#       artifacts: the three tarballs under npm/release/, with their checksums in
+#       npm/release/SHA256SUMS. It loads no token, and reads npmjs.com only to list the versions
+#       of the packages.
 #         - the build is of a JavaScript release tag that still points at the commit the build
 #           checked out, and that commit is part of master;
 #         - the tag matches "version" in javascript/package.json at that commit, which is 4.0.0
 #           or higher, and the package is ${NPM_PACKAGE};
-#         - npmjs.com has that version of none of the four packages yet, as it never takes a
+#         - npmjs.com has that version of none of the three packages yet, as it never takes a
 #           version twice;
 #         - the tarballs the pack block recorded are the tarballs every verification block of
 #           ${NPM_PLATFORMS} tested;
@@ -44,7 +44,7 @@
 set -uo pipefail
 
 work=/tmp/npm-release
-ALL_PLATFORMS="linux-x64-gnu linux-arm64-gnu darwin-arm64"
+ALL_PLATFORMS="linux-x64-gnu darwin-arm64"
 
 # Fails with a message stating why nothing was recorded.
 refuse() {
@@ -56,18 +56,18 @@ sha256_of() {
     sha256sum "$1" | cut -d' ' -f1
 }
 
-# Sets PACKAGE_VERSION, the tag name without its leading `javascript/v`, and BUNDLE. The block's
+# Sets PACKAGE_VERSION, the tag name without its leading `javascript/v`. The block's
 # `run` condition already limits it to JavaScript release tags; the check is repeated here, so
 # that the release does not depend on that condition alone. A build whose jobs were redirected to
 # another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see .semaphore/job-start.sh) did not test the
 # tagged commit.
 release_version() {
-    local release_tag_pattern='^javascript/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
+    local release_tag_pattern='^javascript/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?$'
     if [ "${SEMAPHORE_GIT_REF_TYPE:-}" != "tag" ]; then
         refuse "only a release tag build records a release (ref type '${SEMAPHORE_GIT_REF_TYPE:-}'); push a tag javascript/v<version> for the master commit to release"
     fi
     if ! [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]]; then
-        refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a JavaScript release tag (javascript/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N)"
+        refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a JavaScript release tag (javascript/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or -rc.N)"
     fi
     if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
         refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_TAG_NAME}"
@@ -79,7 +79,6 @@ release_version() {
     if [ "${PACKAGE_VERSION%%.*}" -lt 4 ]; then
         refuse "${PACKAGE_VERSION} is below 4.0.0; the versions of ${NPM_PACKAGE} below 4 are confluent-kafka-javascript's"
     fi
-    BUNDLE="confluent-kafka-javascript-${PACKAGE_VERSION}-release.zip"
 }
 
 # Because a version on npmjs.com can never be replaced, the tag must still point at the commit
@@ -108,7 +107,7 @@ check_tag() {
 
 release_version
 echo "Recording ${NPM_PACKAGE} ${PACKAGE_VERSION} as the release"
-if ! { rm -rf "${work}" && mkdir -p "${work}/bundle"; }; then
+if ! { rm -rf "${work}" && mkdir -p "${work}"; }; then
     refuse "could not create ${work}"
 fi
 check_tag
@@ -165,44 +164,26 @@ done
     || refuse "the packed tarballs do not pass check-npm.py"
 printf '%s\n' "${checksums}" > "${work}/SHA256SUMS"
 
-# The bundle: the tarballs, their SHA256SUMS, publish.sh and its README.txt. The zip is written
-# with fixed entry times, so that a rerun over the same tarballs writes the same bytes.
-cp "${work}/built/"*.tgz "${work}/SHA256SUMS" javascript/release/publish.sh javascript/release/README.txt "${work}/bundle/" \
-    || refuse "could not assemble the bundle"
-/usr/bin/python3 - "${work}/bundle" "${work}/${BUNDLE}" <<'PYTHON' || refuse "could not write ${BUNDLE}"
-import os, sys, zipfile
-
-source, target = sys.argv[1:]
-with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-    for name in sorted(os.listdir(source)):
-        entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-        entry.compress_type = zipfile.ZIP_DEFLATED
-        entry.external_attr = (0o100755 if name == "publish.sh" else 0o100644) << 16
-        with open(os.path.join(source, name), "rb") as f:
-            archive.writestr(entry, f.read())
-PYTHON
-bundle_sum=$(sha256_of "${work}/${BUNDLE}") || refuse "could not hash ${BUNDLE}"
-
-# Once recorded, the release is final: it may already have been downloaded and published. A
-# rerun of the pack block packs other bytes (a pack need not be reproducible), so its tarballs are
-# not recorded over them. SHA256SUMS claims the release: it is pushed first, without --force,
-# which fails when the file exists, so a pull that fails for another reason cannot lead to a
-# recorded release being replaced. The bundle is then written under it, so that the bundle
-# recorded always holds the tarballs SHA256SUMS names, and a rerun completes a job interrupted
-# between the two pushes.
+# Once recorded, the release is final: the promotion may already have published it. A rerun of
+# the pack block packs other bytes (a pack need not be reproducible), so its tarballs are not
+# recorded over them. SHA256SUMS claims the release: it is pushed first, without --force, which
+# fails when the file exists, so a pull that fails for another reason cannot lead to a recorded
+# release being replaced. The tarballs are then written under it, so that npm/release always
+# holds the tarballs SHA256SUMS names, and a rerun completes a job interrupted between the
+# pushes.
 if artifact pull workflow npm/release/SHA256SUMS --destination "${work}/recorded.sha256" --force >/dev/null 2>&1; then
     if ! cmp -s "${work}/SHA256SUMS" "${work}/recorded.sha256"; then
         refuse "this workflow already recorded $(tr '\n' ' ' < "${work}/recorded.sha256")as the release, which may already be on npmjs.com; it is not replaced by the repacked $(tr '\n' ' ' < "${work}/SHA256SUMS"). Publish the recorded release, or release a new version"
     fi
-    echo "This workflow already recorded these tarballs; recording the bundle again"
+    echo "This workflow already recorded these tarballs; recording them again"
 else
     artifact push workflow "${work}/SHA256SUMS" --destination npm/release/SHA256SUMS \
         || refuse "could not record the checksums of the tarballs, either because this workflow already recorded a release that could not be read, or because the artifact store failed; rerun this job"
 fi
-artifact push workflow "${work}/${BUNDLE}" --destination "npm/release/${BUNDLE}" --force \
-    || refuse "could not record ${BUNDLE}; rerun this job"
+for file in ${listing}; do
+    artifact push workflow "${work}/built/${file}" --destination "npm/release/${file}" --force \
+        || refuse "could not record ${file}; rerun this job"
+done
 cat "${work}/SHA256SUMS"
-echo "${bundle_sum}  ${BUNDLE}"
-echo "Recorded ${BUNDLE}, holding the tarballs that were tested on: ${NPM_PLATFORMS}."
-echo "Download npm/release/${BUNDLE} from this workflow's artifacts, check that its SHA-256 and"
-echo "those of the tarballs in it are the ones printed above, then run its publish.sh (README.txt)."
+echo "Recorded the tarballs under npm/release/, tested on: ${NPM_PLATFORMS}."
+echo "Run the manual \"Publish to npm\" promotion of this workflow to publish them (publish-npm.yml)."

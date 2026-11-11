@@ -26,11 +26,14 @@
 //   - the platform package of <platform> is installed in the project, at
 //     <version>, as is the main package, whose optionalDependencies name it at
 //     that version;
-//   - every entry point of the main package's `exports` loads;
+//   - every entry point of the main package's `exports` loads, a deep import
+//     fails with ERR_PACKAGE_PATH_NOT_EXPORTED, and the folder behind each
+//     import path holds a package.json pointing at its module in dist/;
 //   - the addon loaded is the platform package's, and the main package has no
 //     development build;
-//   - a KafkaProducer can be created and closed, against an address where no
-//     broker listens.
+//   - a record with headers can be built, and a KafkaProducer created, sent
+//     to and closed, against an address where no broker listens: the send
+//     seals the record's headers.
 // It exits non-zero on the first failure.
 
 const assert = require('node:assert/strict');
@@ -92,25 +95,61 @@ async function main() {
   assert.ok(entryPoints.length > 1, `${MAIN} exports ${entryPoints.length} entry points`);
   for (const subpath of entryPoints) {
     const specifier = subpath === '.' ? MAIN : `${MAIN}/${subpath.slice(2)}`;
-    const loaded = projectRequire(specifier);
-    assert.ok(Object.keys(loaded).length > 0, `${specifier} exports nothing`);
+    // A Java package with no class of its own (common/protocol,
+    // common/security) keeps its import path and exports nothing.
+    projectRequire(specifier);
     console.log(`loaded ${specifier}`);
   }
+
+  // A deep import fails: users import a package's path, never a file.
+  for (const deep of [`${MAIN}/dist/producer/kafka_producer`, `${MAIN}/dist/internal/config`, `${MAIN}/producer/kafka_producer`]) {
+    assert.throws(() => projectRequire(deep), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' }, deep);
+  }
+  // The folders behind the import paths exist, for resolvers that do not read
+  // `exports`: each holds a package.json whose main and types are in dist/.
+  for (const subpath of entryPoints.filter((p) => p !== '.')) {
+    const folder = path.join(mainDir, ...subpath.slice(2).split('/'));
+    const stub = readJson(path.join(folder, 'package.json'));
+    const target = mainManifest.exports[subpath];
+    assert.equal(path.resolve(folder, stub.main), path.resolve(mainDir, target.default), `${subpath}/package.json main`);
+    assert.equal(path.resolve(folder, stub.types), path.resolve(mainDir, target.types), `${subpath}/package.json types`);
+    assert.ok(fs.existsSync(path.resolve(folder, stub.types)), `${subpath}/package.json points at a missing declaration`);
+    // Loaded as a directory, as such a resolver does, it is the path's module.
+    assert.equal(require(folder), projectRequire(`${MAIN}/${subpath.slice(2)}`), `${subpath} as a folder`);
+  }
+  console.log('deep imports fail, and the folders behind the import paths resolve');
 
   // The one addon loaded is the platform package's.
   const addons = Object.keys(require.cache).filter((file) => file.endsWith('.node'));
   assert.deepEqual(addons.map((file) => fs.realpathSync(file)), [addonPath], `the addons loaded are ${addons}`);
   console.log(`the addon is ${addonPath}`);
 
-  // A producer opens and closes; nothing listens at 127.0.0.1:9.
-  const { KafkaProducer } = projectRequire(`${MAIN}/producer`);
-  const producer = new KafkaProducer({
-    'bootstrap.servers': '127.0.0.1:9',
-    'max.block.ms': 1000,
-    'request.timeout.ms': 500,
-    'delivery.timeout.ms': 1000,
+  // A producer opens, takes a record with headers and closes; nothing
+  // listens at 127.0.0.1:9.
+  const { KafkaProducer, ProducerRecord } = projectRequire(`${MAIN}/producer`);
+  const { Header } = projectRequire(`${MAIN}/common/header`);
+  const record = new ProducerRecord({
+    topic: 'package-smoke',
+    partition: null,
+    key: 'k',
+    value: Buffer.from('v'),
+    headers: [new Header({ key: 'h', value: Buffer.from('1') }), new Header({ key: 'n', value: null })],
   });
-  await producer.close();
+  const producer = new KafkaProducer({
+    configs: {
+      'bootstrap.servers': '127.0.0.1:9',
+      'max.block.ms': 1000,
+      'request.timeout.ms': 500,
+      'delivery.timeout.ms': 1000,
+    },
+  });
+  const sent = producer.send(record).then(
+    () => 'sent',
+    (error) => error.name,
+  );
+  assert.throws(() => record.headers.add({ key: 'late', value: null }), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+  await producer.close({ timeout: 0 });
+  console.log(`the send of a record with headers ended: ${await sent}`);
   console.log(`${MAIN} ${version} works on ${platform}`);
 }
 

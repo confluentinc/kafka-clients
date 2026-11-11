@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The Node.js client's `lib/_config_types.ts`: the `ConfigDef` type of every
+//! The Node.js client's `src/internal/config_types.ts`: the `ConfigDef` type of every
 //! producer config key and what its validator does with `null`, as the Python
 //! client's `_config_types.py` (the producer table only: the Node.js client
 //! has no consumer or admin client yet).
@@ -22,13 +22,13 @@ use std::path::{Path, PathBuf};
 
 use super::{client_types, null_rule, NullRule, Reader};
 use crate::config_consts;
-use crate::javascript_gen::{header, js_str, JS_LIB};
+use crate::javascript_gen::{header, js_str, JS_SRC};
 
 type Res<T> = anyhow::Result<T>;
 
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
-/// `lib/_config_types.ts` and its content.
+/// `src/internal/config_types.ts` and its content.
 pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let mut consts = config_consts::Reader::new(repo_root);
@@ -55,8 +55,8 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
         "\n// The `ConfigDef` type of every producer config key (Java's `ProducerConfig`,\n\
          // with `withClientSslSupport()` / `withClientSaslSupport()`), and what its\n\
          // validator does with `null` (private; python/confluent_kafka/_config_types.py's\n\
-         // PRODUCER / PRODUCER_NULL). `_config` checks a value's JavaScript type against\n\
-         // its key's type and passes every other key to the core as given.\n\
+         // PRODUCER / PRODUCER_NULL). `internal/config` checks a value's JavaScript type\n\
+         // against its key's type and passes every other key to the core as given.\n\
          //\n\
          // PRODUCER_NULL maps each key whose `ConfigDef` validator rejects an explicit\n\
          // `null` (`ConfigDef.parseValue` runs the validator on it) to the\n\
@@ -79,7 +79,7 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
         text.push('\n');
     }
     text.push_str("]);\n");
-    Ok((repo_root.join(JS_LIB).join("_config_types.ts"), text))
+    Ok((repo_root.join(JS_SRC).join("internal").join("config_types.ts"), text))
 }
 
 #[cfg(test)]
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn test_producer_table() {
         let (path, text) = output(&repo_root()).unwrap();
-        assert!(path.ends_with("javascript/lib/_config_types.ts"));
+        assert!(path.ends_with("javascript/src/internal/config_types.ts"));
         assert!(text.contains("export const PRODUCER: ReadonlyMap<string, string> = new Map<string, string>([\n"));
         assert!(
             text.contains("export const PRODUCER_NULL: ReadonlyMap<string, NullRule> = new Map<string, NullRule>([\n")

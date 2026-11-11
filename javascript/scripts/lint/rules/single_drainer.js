@@ -23,7 +23,7 @@
 //     from the producer's pump;
 //   - no `_destroy` call sits lexically inside `cbq_drain`'s loop, whatever
 //     its form (a `cbq_drain` without a loop the rule can read fails);
-//   - no function that runs inside the drain (a completion src/ hands to a
+//   - no function that runs inside the drain (a completion native/ hands to a
 //     `_cb` twin or to an interface's constructor) reaches a client's
 //     destroy (`<Class>_destroy` of a class with `__execute_callbacks`,
 //     directly or through an `__as_` view) through the C call graph.
@@ -56,7 +56,7 @@ module.exports = {
     'drain-missing',
     'drain-unused-allowance',
   ],
-  needs: ['src', 'header'],
+  needs: ['native', 'header'],
   EXECUTORS,
   DRAIN_CALLERS,
   hint:
@@ -68,7 +68,7 @@ module.exports = {
     let checked = 0;
     const drain = resolve('cbq_drain');
     if (!drain) {
-      return { findings: [{ kind: 'drain-missing', subject: 'cbq_drain', message: 'is defined in no src/*.c' }], checked: 1 };
+      return { findings: [{ kind: 'drain-missing', subject: 'cbq_drain', message: 'is defined in no native/*.c' }], checked: 1 };
     }
     for (const c of calls) {
       if (c.directive) continue;
@@ -103,7 +103,7 @@ module.exports = {
     // The drain loop, whatever its form (`while`, `for`, `do`), read on the
     // code with comments and literals blanked: no destroy inside it.
     const code = scan(drain.body).code;
-    // The src functions the loop calls by name run inside the drain too.
+    // The native functions the loop calls by name run inside the drain too.
     const loopCalls = [];
     const loop = /\b(while|for)\s*\(|\bdo\s*\{/.exec(code);
     if (loop === null) {
@@ -130,7 +130,7 @@ module.exports = {
         }
       }
     }
-    // What runs inside the drain: every function src/ hands to a `_cb` twin
+    // What runs inside the drain: every function native/ hands to a `_cb` twin
     // (its completion) or to an interface's constructor (`..._new` /
     // `..._new_err`, as an `_fn_t`), and what they call. None reaches a
     // client's destroy: a close completion only marks the client, and the
@@ -180,7 +180,7 @@ module.exports = {
       raw.push({
         kind: 'drain-missing',
         subject: 'cbq_init',
-        message: "is passed no src function as its cbq_execute_fn: the rule cannot follow the executor cbq_drain's loop calls",
+        message: "is passed no native function as its cbq_execute_fn: the rule cannot follow the executor cbq_drain's loop calls",
       });
     }
     for (const c of loopCalls) {

@@ -25,7 +25,7 @@ This is a proposal for the user to apply. No agent edits `javascript/CLAUDE.md`.
 Each rule's checks are described in the comment at the top of its file in
 `javascript/scripts/lint/rules/`, and in PLAN.md §4. The linter is two tools (PLAN.md §3.5):
 ESLint runs the rules that read TypeScript, named `kafka/<rule>`, with typescript-eslint's
-recommended type-checked rules on `lib/`; the runner runs the addon's C rules, named
+recommended type-checked rules on `src/`; the runner runs the addon's C rules, named
 `check-<rule>`. no-todo, exception-word and java-line are split by file type, so they are
 named on both sides (`kafka/no-todo and check-no-todo`). It runs as:
 
@@ -80,11 +80,16 @@ tests and the reviewer (PLAN.md §5).
    a heuristic with an allowlist: no lock outside callback_queue.c, no module or instance store
    of records; not: that the ordering contract is documented on send, in its declaration and in
    the README)`.
-8. "Zero extra copies of key and value": `(partly checked by check-zero-copy, a heuristic with an
-   allowlist: no copy or allocation of the key and value on the send path, the kafka_Bytes_t
-   over the buffer's own memory, and in lib/ no copy of a bytes-typed value (Buffer.from,
-   new Uint8Array, Uint8Array.from, slice); not: the napi_ref kept until the hand-over
-   completion, nor the user-facing contract)`.
+8. "One copy of the app's key and value; strings encoded as Java encodes them": `(partly
+   checked by check-one-copy, a heuristic with an allowlist: no copy or allocation on the send
+   path but the listed ones, the one copy of the app's key and value (js_bytes_copy) among
+   them, js_bytes_copy called only from its listed call site, and in src/ no copy of a
+   bytes-typed value (Buffer.from, new Uint8Array, Uint8Array.from, slice); and by
+   check-string-encoding: no string encoded outside src/internal/encode.ts (Buffer.from,
+   Buffer.alloc with a string fill, a Buffer's write or fill of a string, new Buffer,
+   TextEncoder); not: that the strings handed to the addon as strings go through
+   javaWellFormed, that the copy is freed at the hand-over completion, nor the user-facing
+   contract)`.
 9. "Ownership follows the signature": `(partly checked by check-ownership: every owned handle type
    destroyed somewhere, by type and not per path, and no borrowed one destroyed in a delivery
    completion; the out_err slots by check-out-err; not: a leak on one path, nor the orphan
@@ -101,10 +106,14 @@ tests and the reviewer (PLAN.md §5).
 - Supported import forms: `(not checked by the linter: test/typing)`.
 - "Class and member names follow Java": `(checked by kafka/java-name for the classes and
   kafka/java-members for the members)`.
-- "Java getters are read-only properties …": `(partly checked by kafka/getters-readonly and
-  kafka/java-members: a property is read-only (a get accessor or a static readonly constant)
-  and named by the getter rule; not: which Java getters are properties, since a getter kept as
-  a method passes, as KafkaFuture's isDone() is)`.
+- "A data object's Java getters are public `readonly` fields …": `(partly checked by
+  kafka/data-objects, kafka/java-members and kafka/java-completeness: on a data class each Java
+  getter is a readonly field of its Java name, elsewhere a method; no get accessor, no mutable
+  field; the data classes' list; not: that the objects are not frozen, the send-time re-check of
+  a reassigned field, or Java's -1 and null values, which the unit tests cover)`.
+- "A Java enum is a class …": `(partly checked by kafka/java-completeness and kafka/data-objects:
+  name(), ordinal(), values() and valueOf() are there, and no field is named as one of them; not:
+  their behaviour, the messages or toJSON(), which the unit tests cover)`.
 - "One Java overload set is one function …": `(checked by kafka/overload-shape)`.
 - "A blocking Java method returns a `Promise` …": `(partly checked by kafka/waiting-call-promise
   and kafka/type-mapping: the return types, from the native path and the type table; not: when
@@ -114,21 +123,20 @@ tests and the reviewer (PLAN.md §5).
 - "Java `null` is `null` … A Java `long` crosses as a JS `number`": `(partly checked by
   kafka/type-mapping: the type table and long as number; not: nullability, which it strips
   before comparing)`.
-- "Errors: …": `(partly checked by kafka/java-name: the class names, their Error suffix and their
-  folders; not: the hierarchy, the fields or fromNative, which the generator, check-generated
-  and the tests cover)`.
+- "Errors: …": `(partly checked by kafka/java-name, kafka/java-members and kafka/data-objects:
+  the class names, their Error suffix and folders, and no public member but name, message and
+  cause; not: the hierarchy, the constructor forms or fromNative, which the generator,
+  check-generated and the tests cover)`.
 - The after-close and configuration bullets: `(not checked by the linter: tests)`.
 
 ### Files and layout
 
-- `src/` bullet: `(not checked by the linter: test/static/layout.test.js)`.
-- `lib/` bullet:
+- `native/` bullet: `(not checked by the linter: test/static/layout.test.js)`.
+- `src/` bullet:
   - "one public Java type per file, snake_case names": `(checked by kafka/java-name)`;
-  - "A `_` member another class calls is TypeScript `private` …": `(checked by
-    kafka/private-members)`;
-  - "The addon is loaded, and its one-time setup done, in `lib/_native.ts`, never in an
-    `index.ts`; `lib/_native_loader.ts` finds it, …": `(partly checked by kafka/native-registry:
-    the loader is imported only by lib/_native.ts and every registered function is used
+  - "The addon is loaded, and its one-time setup done, in `src/internal/native.ts`, never in an
+    `index.ts`; `src/internal/native_loader.ts` finds it, …": `(partly checked by kafka/native-registry:
+    the loader is imported only by src/internal/native.ts and every registered function is used
     through it; not: the loader's search order, platform package first, which the unit tests
     cover)`.
 - Types bullet, "the prose docs are TSDoc comments (`@param name -`, `@returns`, `@throws` …), with
@@ -137,6 +145,15 @@ tests and the reviewer (PLAN.md §5).
   function types and backquoted options included; @returns on functions; every @throws
   backquoted, naming a class that exists, and one per Java @throws; no JSDoc types; not: what the
   text says)`.
+- Types bullet, "A Java constructor that is not public is a TypeScript `private` constructor …
+  `internalCreate` … `@internal` … `stripInternal`": `(partly checked by kafka/internal-members,
+  kafka/public-audience and test/typing: no `_` member, the `internal...` name and `@internal`
+  together on a public member, no `@internal` constructor, no bracket access by an `_` or
+  `internal...` key (kafka/internal-members); a Java non-public constructor translated as a public
+  one (kafka/public-audience); `private constructor();` in the declarations of RecordMetadata,
+  KafkaFuture and the two enums, and no internal member declared (test/typing); not: that a class
+  users must not build has a private constructor when Java's is public, or that the factory is
+  named `internalCreate`, which review covers)`.
 
 ### Files and process
 
@@ -171,7 +188,7 @@ Each item gives the decision, the place in `javascript/CLAUDE.md`, and the propo
      finding."
 
 3. **`Header` beside `ProducerRecord`** (decision 5).
-   - Place: "Files and layout", `lib/` bullet, after "one public Java type per file".
+   - Place: "Files and layout", `src/` bullet, after "one public Java type per file".
    - Add: "(one exception: `Header` is declared in `producer/producer_record.ts`, beside
      `ProducerRecord`)".
 
@@ -179,22 +196,18 @@ Each item gives the decision, the place in `javascript/CLAUDE.md`, and the propo
    - Place: "Java shape, JS idiom".
    - Add: "Java's `equals` and `hashCode` are not translated."
 
-5. **A `public final` field** (decision 7).
-   - Place: the getters bullet.
-   - Add: "A Java `public final` instance field may instead be a `readonly` property of an object
-     the constructor freezes (`Object.freeze(this)` as a top-level statement), and so may an
-     enum's `name`, which translates `Enum#name()`. When a name is both a public final field and a
-     getter, the field wins."
+5. **A `public final` field** (decision 7). Already in `javascript/CLAUDE.md`, nothing to add:
+   the data-object bullet of "Java shape, JS idiom" ("Java's `public final` instance fields are
+   `readonly` fields of a frozen object") and the enum bullet (Java's `SecurityProtocol.name` field
+   and `name()` are the one method).
 
-6. **`Duration`** (decision 8).
-   - Place: the overload bullet, after "`close({timeoutMs}?)`".
-   - Add: "A Java `Duration x`, a parameter or an option, is `xMs: number`, in milliseconds."
+6. **`Duration`** (decision 8). Already in `javascript/CLAUDE.md`, nothing to add: the `Duration`
+   bullet of "Java shape, JS idiom" (the exported `Duration` type, `Infinity` as no limit,
+   `RangeError` for `NaN`, `-Infinity` and above `Number.MAX_SAFE_INTEGER`).
 
-7. **Trailing optional parameters** (decision 9).
-   - Place: the overload bullet.
-   - Add: "When the forms differ only by trailing parameters, one function taking the longest
-     form, the shorter forms' missing parameters optional, is accepted instead of an options
-     object (`send(record, callback?)`)."
+7. **Trailing optional parameters** (decision 9). Superseded, nothing to add: the overload bullet
+   of "Java shape, JS idiom" says what replaced it (a one-parameter form also takes the bare value,
+   the configs may be the bare config map, and more than one argument is the form error).
 
 8. **Merged forms** (the Python convention, root CLAUDE.md "Signatures").
    - Place: the overload bullet.
@@ -204,18 +217,17 @@ Each item gives the decision, the place in `javascript/CLAUDE.md`, and the propo
      `V value` never merge, although both are `Data` in JavaScript (`ProducerRecord` keeps
      `key` and `value`, as Python's `ProducerRecord[K, V]` does)."
 
-9. **An option whose Java parameter may be null** (decision 10).
-   - Place: the overload bullet.
-   - Add: "Such an option may be left out, omission meaning `null`. 'May be null' needs a positive
-     statement: a boxed primitive or a `K` / `V` type, or a Javadoc `@param` saying 'may be null',
-     'can be null', 'if null', 'null means', 'null for', 'or null' or 'nullable', and none of
-     'not null', 'non-null', 'may not be null', 'must not be null', 'cannot be null' or 'not be
-     null'."
+9. **An option whose Java parameter may be null** (decision 10). Superseded, nothing to add: the
+   overload bullet of "Java shape, JS idiom" says what replaced it (the given names must be exactly
+   one Java form's; `null` is given; `undefined` throws `TypeError` naming the parameter, except a
+   config value, which is dropped, and a bare `undefined` to a method with a form of no parameter,
+   which is no argument: `close(undefined)` is `close()`, and `flush(undefined)` or
+   `SecurityProtocol.values(undefined)` is the call with none).
 
 10. **The test-only registration** (decision 12).
-    - Place: "Files and layout", the `lib/_native.ts` sentence.
-    - Add: "Every function `src/addon.c` registers is used from `lib/`, except `probe`, which only
-      `test/unit/_native.test.js` calls."
+    - Place: "Files and layout", the `src/internal/native.ts` sentence.
+    - Add: "Every function `native/addon.c` registers is used from `src/`, except `probe`, which only
+      `test/unit/internal/native.test.js` calls."
 
 11. **The addon rules' allowlists** (decisions 13 and 14).
     - Place: "Boundary rules", a closing paragraph.
@@ -238,7 +250,7 @@ Each item gives the decision, the place in `javascript/CLAUDE.md`, and the propo
 13. **Static tests beside the linter** (decision 16).
     - Place: the `header_conformance.test.js` bullet under "Files and process".
     - Replace it with: "`test/static/header_conformance.test.js` asserts that every `kafka_*`
-      function `src/*.c` calls is declared in the bindings header and is not a plain name that has
+      function `native/*.c` calls is declared in the bindings header and is not a plain name that has
       an `_err` twin, that the producer calls the functions of the plan, and that the one blocking
       close is the finalizer's. The rule linter checks the rest of rules 4 and 5
       (`check-cb-twin-only`). Keep both passing when adding calls."
@@ -253,7 +265,7 @@ Each item gives the decision, the place in `javascript/CLAUDE.md`, and the propo
     - Place: "Files and process".
     - Add: "`make -C javascript lint-rules` runs the rule linter: ESLint (`eslint.config.cjs`,
       the local `kafka/` rules and typescript-eslint's recommended type-checked rules on
-      `lib/`) and the runner (`scripts/lint_rules.js`, the addon's C rules). A finding of the
+      `src/`) and the runner (`scripts/lint_rules.js`, the addon's C rules). A finding of the
       standard rules that the code means is kept with `// eslint-disable-next-line <rule> --
       <reason>`, the reason naming the rule of this file it follows."
 
