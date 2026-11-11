@@ -94,7 +94,7 @@ public class PublicJavaMemberShapeTests
     }
 
     [Fact]
-    public void Serdes_AreJavasStaticMethods_EachOverTheSameStatelessInstance()
+    public void Serdes_AreJavasStaticMethods_EachReturningANewSerde()
     {
         Assert.Empty(typeof(Serdes).GetProperties(BindingFlags.Public | BindingFlags.Static));
 
@@ -102,21 +102,29 @@ public class PublicJavaMemberShapeTests
         {
             ("String", typeof(ISerde<string>)),
             ("ByteArray", typeof(ISerde<byte[]>)),
-            ("Integer", typeof(ISerde<int>)),
-            ("Long", typeof(ISerde<long>)),
-            ("Double", typeof(ISerde<double>)),
-            ("UUID", typeof(ISerde<Guid>)),
+            ("Integer", typeof(ISerde<int?>)),
+            ("Long", typeof(ISerde<long?>)),
+            ("Short", typeof(ISerde<short?>)),
+            ("Float", typeof(ISerde<float?>)),
+            ("Double", typeof(ISerde<double?>)),
+            ("ByteBuffer", typeof(ISerde<ReadOnlyMemory<byte>?>)),
+            ("UUID", typeof(ISerde<Guid?>)),
+            ("Boolean", typeof(ISerde<bool?>)),
             ("Void", typeof(ISerde<object?>)),
         })
         {
             MethodInfo method = typeof(Serdes).GetMethod(name, BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null)!;
             Assert.NotNull(method);
             Assert.Equal(type, method.ReturnType);
-            Assert.Same(method.Invoke(null, null), method.Invoke(null, null));
+            Assert.NotSame(method.Invoke(null, null), method.Invoke(null, null));
         }
 
         Assert.Equal(
-            new[] { "ByteArray", "Double", "Integer", "Long", "String", "UUID", "Void" },
+            new[]
+            {
+                "Boolean", "ByteArray", "ByteBuffer", "Double", "Float", "Integer", "Long", "SerdeFrom", "SerdeFrom",
+                "Short", "String", "UUID", "Void",
+            },
             typeof(Serdes).GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
                 .Select(method => method.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));

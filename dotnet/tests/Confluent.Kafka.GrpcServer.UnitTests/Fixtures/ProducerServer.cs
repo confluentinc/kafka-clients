@@ -78,8 +78,8 @@ internal sealed class ProducerServer : IDisposable
     internal ulong RegisterPendingMock()
     {
         _pending = _servicer is ProducerServiceImpl
-            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false)
-            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false)
+            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         return Register(_pending);
     }
 
@@ -87,8 +87,8 @@ internal sealed class ProducerServer : IDisposable
     internal ulong RegisterTransactionalMock()
     {
         _pending = _servicer is ProducerServiceImpl
-            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray())
-            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         return Register(_pending);
     }
 

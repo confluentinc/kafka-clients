@@ -959,6 +959,158 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tconfigure(Map configs, boolean isKey)\n"
                 + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"));
 
+    private const string Serializer =
+        "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+        + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tconfigure(Map configs, boolean isKey)\n"
+        + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tserialize(String topic, Headers headers, T data)\n"
+        + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n";
+
+    [Fact]
+    public Task AnOverloadedDefault_IsReplacedByAnInterfaceNamedAfterTheParameterItAdds_AndAnotherDefaultAfterItsMethod() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface ISerializer<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public interface ISerializerWithHeaders<T> : ISerializer<T>
+                {
+                    byte[] Serialize(string topic, object headers, T data);
+                }
+
+                public interface ISerializerWithConfigure<T> : ISerializer<T>
+                {
+                    void Configure(IReadOnlyDictionary<string, object> configs, bool isKey);
+                }
+
+                public static class SerializerExtensions
+                {
+                    public static byte[] Serialize<T>(this ISerializer<T> serializer, string topic, object headers, T data) =>
+                        serializer is ISerializerWithHeaders<T> withHeaders
+                            ? withHeaders.Serialize(topic, headers, data)
+                            : serializer.Serialize(topic, data);
+
+                    public static void Configure<T>(this ISerializer<T> serializer, IReadOnlyDictionary<string, object> configs, bool isKey)
+                    {
+                        if (serializer is ISerializerWithConfigure<T> withConfigure)
+                        {
+                            withConfigure.Configure(configs, isKey);
+                        }
+                    }
+                }
+            }
+            """,
+            Files(Serializer));
+
+    [Fact]
+    public Task AnOverloadedDefaultsInterface_NamedAfterItsMethod_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface {|#1:ISerializer|}<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public interface {|#0:ISerializerWithSerialize|}<T> : ISerializer<T>
+                {
+                    byte[] Serialize(string topic, object headers, T data);
+                }
+
+                public static class SerializerExtensions
+                {
+                    public static byte[] Serialize<T>(this ISerializer<T> serializer, string topic, object headers, T data) =>
+                        serializer.Serialize(topic, data);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tserialize(String topic, Headers headers, T data)\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"),
+            Name(0, "unmatched T:Confluent.Kafka.Common.Serialization.ISerializerWithSerialize`1: Java has no type of this name, so "
+                + "its members are not checked"),
+            Name(1, "with T:Confluent.Kafka.Common.Serialization.ISerializer`1 "
+                + "org.apache.kafka.common.serialization.Serializer#serialize(String,Headers,T): has no ISerializerWithHeaders that "
+                + "extends it and declares Java's default Serializer.serialize, so a user cannot replace it"));
+
+    [Fact]
+    public Task OneSpanForm_PairsWithJavasByteArrayOverload_LeavingItsByteBufferTwinMissing() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface {|#0:IDeserializer|}<T>
+                {
+                    T Deserialize(string topic, ReadOnlySpan<byte> data);
+                }
+
+                public interface IDeserializerWithHeaders<T> : IDeserializer<T>
+                {
+                    T Deserialize(string topic, object headers, ReadOnlySpan<byte> data);
+                }
+
+                public static class DeserializerExtensions
+                {
+                    public static T Deserialize<T>(this IDeserializer<T> deserializer, string topic, object headers, ReadOnlySpan<byte> data) =>
+                        deserializer is IDeserializerWithHeaders<T> withHeaders
+                            ? withHeaders.Deserialize(topic, headers, data)
+                            : deserializer.Deserialize(topic, data);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Deserializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Deserializer\tdefault\tdeserialize(String topic, Headers headers, ByteBuffer data)\n"
+                + "method\torg.apache.kafka.common.serialization.Deserializer\tdefault\tdeserialize(String topic, Headers headers, byte[] data)\n"
+                + "method\torg.apache.kafka.common.serialization.Deserializer\tinstance\tdeserialize(String topic, byte[] data)\n"),
+            Name(0, "missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 "
+                + "org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer): has no counterpart of "
+                + "Java's org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)"));
+
+    [Fact]
+    public Task DefaultsAddingAParameterOfOneNameWithOtherTypes_AreNamedWithTheType() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public interface IWriter
+                {
+                    void Write(string topic);
+                }
+
+                public interface IWriterWithValueInt : IWriter
+                {
+                    void Write(string topic, int value);
+                }
+
+                public interface IWriterWithValueString : IWriter
+                {
+                    void Write(string topic, string value);
+                }
+
+                public static class WriterExtensions
+                {
+                    public static void Write(this IWriter writer, string topic, int value) => writer.Write(topic);
+
+                    public static void Write(this IWriter writer, string topic, string value) => writer.Write(topic);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Writer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.Writer\tdefault\twrite(String topic, String value)\n"
+                + "method\torg.apache.kafka.common.Writer\tdefault\twrite(String topic, int value)\n"
+                + "method\torg.apache.kafka.common.Writer\tinstance\twrite(String topic)\n"));
+
     [Fact]
     public Task AJavaInterfacesStaticMethod_SitsInAStaticClassWithTheInterfacesJavaName() =>
         Verifier.VerifyWithFilesAsync(
@@ -1411,6 +1563,66 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\treassignments(Optional partitions, Options options)\n"
                 + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\treassignments(Set partitions, Options options)\n"
                 + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\tdeserialize(String topic, byte[] data)\n"));
+
+    [Fact]
+    public Task AClassOfAGenericInterfaceConstruction_LeavesTheInterfaceMembersToTheInterface() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface ISerializer<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public sealed class LongSerializer : ISerializer<long?>
+                {
+                    public byte[] Serialize(string topic, long? data) => null;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"
+                + "type\torg.apache.kafka.common.serialization.LongSerializer\tclass\torg.apache.kafka.common.serialization.Serializer\n"
+                + "ctor\torg.apache.kafka.common.serialization.LongSerializer\tLongSerializer()\n"
+                + "method\torg.apache.kafka.common.serialization.LongSerializer\tinstance\tserialize(String topic, Long data)\n"));
+
+    [Fact]
+    public Task ACloseablesClose_IsStillRequiredOnATypeThatIsIDisposable() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public interface {|#0:IProducer|} : IDisposable
+                {
+                    void Flush();
+                }
+            }
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface {|#1:ISerde|} : IDisposable
+                {
+                    object Serializer();
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.producer.Producer\tinterface\tCloseable\n"
+                + "method\torg.apache.kafka.clients.producer.Producer\tinstance\tclose()\n"
+                + "method\torg.apache.kafka.clients.producer.Producer\tinstance\tflush()\n"
+                + "type\torg.apache.kafka.common.serialization.Serde\tinterface\tCloseable\n"
+                + "method\torg.apache.kafka.common.serialization.Serde\tdefault\tclose()\n"
+                + "method\torg.apache.kafka.common.serialization.Serde\tinstance\tserializer()\n"),
+            Name(0, "missing T:Confluent.Kafka.Producer.IProducer org.apache.kafka.clients.producer.Producer#close(): "
+                + "has no counterpart of Java's org.apache.kafka.clients.producer.Producer#close()"),
+            Name(1, "missing T:Confluent.Kafka.Common.Serialization.ISerde org.apache.kafka.common.serialization.Serde#close(): "
+                + "has no counterpart of Java's org.apache.kafka.common.serialization.Serde#close()"));
 
     private const string Records = """
         using System.Collections;

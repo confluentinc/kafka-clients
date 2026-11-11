@@ -35,7 +35,7 @@ internal sealed class RecordingDeserializer<T> : IDeserializer<T>
 
     internal string? LastThreadName { get; private set; }
 
-    public T Deserialize(string topic, ReadOnlySpan<byte> data)
+    public T? Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         InvocationCount++;
         LastSpanLength = data.Length;
@@ -59,7 +59,7 @@ internal sealed class ThrowingDeserializer<T> : IDeserializer<T>
 
     internal int InvocationCount { get; private set; }
 
-    public T Deserialize(string topic, ReadOnlySpan<byte> data)
+    public T? Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         InvocationCount++;
         throw new BoomException();
@@ -94,6 +94,6 @@ internal sealed class NullableInt64Deserializer : IDeserializer<long?>
     public long? Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         InvocationCount++;
-        return Serdes.Long().Deserialize(topic, data);
+        return Serdes.Long().Deserializer().Deserialize(topic, data);
     }
 }

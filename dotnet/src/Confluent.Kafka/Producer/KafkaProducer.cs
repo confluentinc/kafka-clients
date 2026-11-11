@@ -41,6 +41,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     private readonly NativeProducer _native;
     private readonly ISerializer<TKey> _keySerializer;
     private readonly ISerializer<TValue> _valueSerializer;
+    private readonly ISerializerWithHeaders<TKey>? _keyWithHeaders;
+    private readonly ISerializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
     /// Creates a producer from a configuration map of Java's dotted keys and the key and value serializers
@@ -51,7 +53,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the
     /// key's validator refuses <c>null</c>. The serializer keys (<c>key.serializer</c>, <c>value.serializer</c>,
     /// <c>serializer.encoding</c>, <c>key.serializer.encoding</c>, <c>value.serializer.encoding</c>) are ignored: the
-    /// serializers are the arguments.
+    /// serializers are the arguments, which the producer never configures, as Java never configures a serializer it is
+    /// given.
     /// </param>
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
@@ -59,6 +62,11 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <exception cref="ConfigException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null: Java then reads the
     /// <c>key.serializer</c> / <c>value.serializer</c> config, which .NET config cannot set.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// <see cref="ISerializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not <see cref="IDisposable"/>: the
+    /// producer would never call that method.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
@@ -70,7 +78,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to construct kafka
     /// producer", but not for a configuration the core refuses with another error, nor when this constructor throws
     /// <see cref="ArgumentNullException"/> or refuses a serializer, a value's type or a <c>null</c> with
-    /// <see cref="ConfigException"/>. So a serializer shared with another client, or used after the close, sees it
+    /// <see cref="ConfigException"/> or a serializer with <see cref="IllegalArgumentException"/>. So a serializer
+    /// shared with another client, or used after the close, sees it
     /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
     /// A serializer that is only <see cref="IAsyncDisposable"/> is not disposed.
     /// </remarks>
@@ -87,6 +96,10 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
         _keySerializer = NativeProducer.RequireSerializer(keySerializer, "key.serializer");
         _valueSerializer = NativeProducer.RequireSerializer(valueSerializer, "value.serializer");
+        SerdeGuard.Check(_keySerializer, SerdeGuard.Producer, disposes: true);
+        SerdeGuard.Check(_valueSerializer, SerdeGuard.Producer, disposes: true);
+        _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
+        _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
         _native = NativeProducer.Create(configs, serdes: new SerdeDisposal(keySerializer, valueSerializer));
     }
 
@@ -125,7 +138,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
         SerializedProducerRecord serialized;
         try
         {
-            serialized = SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: true);
+            serialized = SerializedProducerRecord.Serialize(
+                record, _keySerializer, _keyWithHeaders, _valueSerializer, _valueWithHeaders, mock: false);
         }
         catch (ApiException error)
         {

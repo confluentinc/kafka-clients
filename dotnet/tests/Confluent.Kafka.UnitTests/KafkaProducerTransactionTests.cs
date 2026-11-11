@@ -258,8 +258,8 @@ public sealed class KafkaProducerTransactionTests
                 ["group.protocol"] = "consumer",
                 ["group.id"] = "test-group",
             },
-            Serdes.ByteArray(),
-            Serdes.ByteArray());
+            Serdes.ByteArray().Deserializer(),
+            Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerGroupMetadata groupMetadata = consumer.GroupMetadata();
 
@@ -267,7 +267,7 @@ public sealed class KafkaProducerTransactionTests
         if (flavor == UnreachableProducers.SyncFlavor)
         {
             KafkaProducer<byte[], byte[]> producer =
-                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             for (int call = 0; call < 2; call++)
             {
@@ -284,7 +284,7 @@ public sealed class KafkaProducerTransactionTests
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer =
-                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             for (int call = 0; call < 2; call++)
             {
@@ -333,6 +333,6 @@ public sealed class KafkaProducerTransactionTests
     private static KafkaProducer<byte[], byte[]> Producer(Dictionary<string, object?> configs)
     {
         configs["bootstrap.servers"] = "localhost:1";
-        return new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+        return new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 }

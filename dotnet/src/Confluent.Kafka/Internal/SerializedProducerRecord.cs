@@ -54,21 +54,25 @@ internal readonly struct SerializedProducerRecord
 
     internal Headers? Headers { get; }
 
-    // wrapInvalidCast is true for KafkaProducer and AsyncKafkaProducer, whose Java doSend wraps a
-    // ClassCastException in a SerializationException, and false for the mocks: Java's MockProducer calls the
-    // serializers with no try, so every throw leaves send unchanged.
+    // mock is false for KafkaProducer and AsyncKafkaProducer, as Java's doSend: a serializer's headers form gets the
+    // record's own headers, and a ClassCastException is wrapped in a SerializationException. It is true for the mocks,
+    // as Java's MockProducer on its empty cluster: each headers form gets a new, empty Headers that is then dropped, and
+    // every throw leaves send unchanged, since the serializers are called with no try.
     internal static SerializedProducerRecord Serialize<TKey, TValue>(
         ProducerRecord<TKey, TValue> record,
         ISerializer<TKey> keySerializer,
+        ISerializerWithHeaders<TKey>? keyWithHeaders,
         ISerializer<TValue> valueSerializer,
-        bool wrapInvalidCast)
+        ISerializerWithHeaders<TValue>? valueWithHeaders,
+        bool mock)
     {
-        ReadOnlyMemory<byte>? keyBytes = wrapInvalidCast
-            ? SerializeField(keySerializer, record.Topic(), record.Key(), isKey: true)
-            : keySerializer.Serialize(record.Topic(), record.Key()!);
-        ReadOnlyMemory<byte>? valueBytes = wrapInvalidCast
-            ? SerializeField(valueSerializer, record.Topic(), record.Value(), isKey: false)
-            : valueSerializer.Serialize(record.Topic(), record.Value()!);
+        Headers headers = record.Headers();
+        ReadOnlyMemory<byte>? keyBytes = mock
+            ? SerializeOnMock(keySerializer, keyWithHeaders, record.Topic(), record.Key())
+            : SerializeField(keySerializer, keyWithHeaders, record.Topic(), headers, record.Key(), isKey: true);
+        ReadOnlyMemory<byte>? valueBytes = mock
+            ? SerializeOnMock(valueSerializer, valueWithHeaders, record.Topic(), record.Value())
+            : SerializeField(valueSerializer, valueWithHeaders, record.Topic(), headers, record.Value(), isKey: false);
 
         return new SerializedProducerRecord(
             record.Topic(),
@@ -76,15 +80,20 @@ internal readonly struct SerializedProducerRecord
             record.Timestamp(),
             keyBytes,
             valueBytes,
-            record.Headers());
+            headers);
     }
 
-    private static ReadOnlyMemory<byte>? SerializeField<T>(ISerializer<T> serializer, string topic, T? data, bool isKey)
+    // The serializer is called also for a null key or value, as Java's doSend and MockProducer.send call it.
+    private static ReadOnlyMemory<byte>? SerializeOnMock<T>(
+        ISerializer<T> serializer, ISerializerWithHeaders<T>? withHeaders, string topic, T? data) =>
+        withHeaders is null ? serializer.Serialize(topic, data) : withHeaders.Serialize(topic, new Headers(), data);
+
+    private static ReadOnlyMemory<byte>? SerializeField<T>(
+        ISerializer<T> serializer, ISerializerWithHeaders<T>? withHeaders, string topic, Headers headers, T? data, bool isKey)
     {
         try
         {
-            // The serializer is called also for a null key or value, as Java's doSend calls it.
-            return serializer.Serialize(topic, data!);
+            return withHeaders is null ? serializer.Serialize(topic, data) : withHeaders.Serialize(topic, headers, data);
         }
         catch (InvalidCastException exception)
         {
@@ -93,7 +102,7 @@ internal readonly struct SerializedProducerRecord
             string field = isKey ? "key" : "value";
             throw new SerializationException(
                 $"Can't convert {field} of class {ClassName(data?.GetType())} to class "
-                + $"{ClassName(serializer.GetType())} specified as the {field} serializer",
+                + $"{ClassName(serializer.GetType())} specified in {field}.serializer",
                 exception);
         }
     }

@@ -30,7 +30,7 @@ namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IMockConsumerOperations
 {
     private readonly AsyncMockConsumer<byte[], byte[]> _inner =
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
 
     private readonly ConsumerScript _script;
 

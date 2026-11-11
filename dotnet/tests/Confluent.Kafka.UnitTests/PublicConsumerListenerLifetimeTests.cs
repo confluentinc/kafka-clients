@@ -209,9 +209,9 @@ public sealed class PublicConsumerListenerLifetimeTests
         internal static Subject Create(string kind) => kind switch
         {
             "KafkaConsumer" => new Subject(
-                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray()), null, false),
+                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
             "MockConsumer" => new Subject(
-                new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()), null, false),
+                new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
             "AsyncKafkaConsumer" => new Subject(null, Real(), false),
             "AsyncMockConsumer" => new Subject(null, Mock(), false),
             "AsyncKafkaConsumer+async" => new Subject(null, Real(), true),
@@ -291,10 +291,10 @@ public sealed class PublicConsumerListenerLifetimeTests
         }
 
         private static AsyncKafkaConsumer<byte[], byte[]> Real() =>
-            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
         private static AsyncMockConsumer<byte[], byte[]> Mock() =>
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
         private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
         {
