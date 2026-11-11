@@ -85,10 +85,12 @@ test('a data class with readonly fields, and classes with methods, pass', () => 
   assert.ok(r.out.includes('✅ check-data-objects: 7 item(s) checked'), r.text);
 });
 
-test("the shipped list names the producer data classes, not Header (the root's list does not)", () => {
+test("the shipped list names the data classes the client translates, not Header (the root's list does not)", () => {
   assert.deepEqual([...rule.DATA_CLASSES].sort(), [
     'org.apache.kafka.clients.producer.ProducerRecord',
     'org.apache.kafka.clients.producer.RecordMetadata',
+    'org.apache.kafka.common.Node',
+    'org.apache.kafka.common.TopicPartition',
   ]);
 });
 

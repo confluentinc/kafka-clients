@@ -159,6 +159,12 @@ function thrownMessage(thrown: unknown): string {
  * when nothing holds it, so this way no pending send is cut off.)*
  */
 export class KafkaProducer implements Producer {
+  /** The name prefix of the producer's network thread. */
+  static readonly NETWORK_THREAD_PREFIX: string = 'kafka-producer-network-thread';
+
+  /** The group of the producer's metrics. */
+  static readonly PRODUCER_METRIC_GROUP_NAME: string = 'producer-metrics';
+
   #handle: ProducerHandle;
   // Sends whose hand-over completed inside the call since the event loop last
   // turned (as far as this producer saw: the deferral's setImmediate).
