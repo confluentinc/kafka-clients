@@ -53,7 +53,8 @@ internal sealed class V2TransactionalFactory : ITransactionalClientFactory
     }
 
     public ITransactionalProducer CreateProducer(string transactionalId) =>
-        new V2TransactionalProducer(V2ProducerFactory.Build(ProducerConfig(transactionalId), "txn"), _config.Producer.Async);
+        new V2TransactionalProducer(
+            V2ProducerFactory.Build(ProducerConfig(transactionalId), "txn"), _config.Producer.Async, _config.SourceTopic is not null);
 
     public ITransactionalConsumer CreateConsumer()
     {
@@ -90,11 +91,13 @@ internal sealed class V2TransactionalProducer : ITransactionalProducer
 
     private readonly IProducer<byte[], byte[]> _producer;
     private readonly bool _produceAsync;
+    private readonly bool _eos;
 
-    internal V2TransactionalProducer(IProducer<byte[], byte[]> producer, bool produceAsync)
+    internal V2TransactionalProducer(IProducer<byte[], byte[]> producer, bool produceAsync, bool eos)
     {
         _producer = producer;
         _produceAsync = produceAsync;
+        _eos = eos;
     }
 
     public ValueTask InitTransactions()
@@ -169,8 +172,8 @@ internal sealed class V2TransactionalProducer : ITransactionalProducer
             positions.Add(new TopicPartitionOffset(kv.Key.Topic, kv.Key.Partition, kv.Value));
         }
 
-        // As Python: the batch is flushed before the control calls, so an abort has nothing to purge and the
-        // idempotent sequence stays in step with the broker.
+        // As Python's EOS loop: the batch is flushed before the control calls, so an abort has nothing to purge and
+        // the idempotent sequence stays in step with the broker.
         _producer.Flush(s_controlTimeout);
         _producer.SendOffsetsToTransaction(positions, ((V2TransactionalConsumer)consumer).GroupMetadata, s_controlTimeout);
         return default;
@@ -184,14 +187,17 @@ internal sealed class V2TransactionalProducer : ITransactionalProducer
 
     public ValueTask AbortTransaction()
     {
-        // Flushed first as before the commit, so an abort after an error also has nothing in flight. A flush that
-        // fails here is left to the abort to report.
-        try
+        // As Python: only the EOS loop flushes before its control calls; the produce loop aborts directly. A flush
+        // that fails here is left to the abort to report.
+        if (_eos)
         {
-            _producer.Flush(s_controlTimeout);
-        }
-        catch (KafkaException)
-        {
+            try
+            {
+                _producer.Flush(s_controlTimeout);
+            }
+            catch (KafkaException)
+            {
+            }
         }
 
         _producer.AbortTransaction(s_controlTimeout);

@@ -3830,7 +3830,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     #[test]
     fn the_checked_in_tests_file_is_valid() {
         let tests = load_tests().unwrap();
-        for group in [Group::Rust, Group::Python] {
+        for group in [Group::Rust, Group::Python, Group::Dotnet] {
             assert!(tests.iter().any(|t| t.applies_to(group)), "no test for {}", group.name());
         }
     }

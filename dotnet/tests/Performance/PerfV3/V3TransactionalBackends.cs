@@ -91,7 +91,7 @@ internal sealed class V3TransactionalFactory : ITransactionalClientFactory
     // is answered with an abort. Of the authorization errors only these two are fatal: a topic or group one aborts.
     internal static TxnErrorKind Classify(Exception error) => error switch
     {
-        ApplicationRecoverableException or OutOfOrderSequenceException or UnsupportedVersionException
+        ProducerFencedException or InvalidPidMappingException or UnsupportedVersionException
             or TransactionalIdAuthorizationException or ClusterAuthorizationException => TxnErrorKind.Fatal,
         RetriableException => TxnErrorKind.Retriable,
         _ => TxnErrorKind.Abortable,

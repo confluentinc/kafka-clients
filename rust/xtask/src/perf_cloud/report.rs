@@ -1457,7 +1457,9 @@ mod tests {
             ..metrics(client, 1_000.0, 9.0)
         };
         let results = vec![TestResult {
-            test: test("t dotnet PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            test: test(
+                "t dotnet PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0 BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental",
+            ),
             arms: vec![
                 arm(
                     Arm::DotnetSyncRust,
@@ -1492,7 +1494,7 @@ mod tests {
         );
         assert_eq!(
             line_starting(&md, "| Buffer allocation strategy |"),
-            "| Buffer allocation strategy | incremental | – | full | – |  |  |"
+            "| Buffer allocation strategy | incremental | incremental | full | incremental |  |  |"
         );
         // Shown per client, not also as a test parameter.
         assert_eq!(md.matches("Buffer allocation strategy").count(), 1, "{md}");

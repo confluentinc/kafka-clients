@@ -248,7 +248,12 @@ public static class ProducerBenchmark
                         // Waits for acceptance only, where the client applies its backpressure.
                         await accepted.ConfigureAwait(false);
                     }
-                    else if (!accepted.IsCompletedSuccessfully)
+                    else if (accepted.IsCompleted)
+                    {
+                        // Already refused: a rejection, as a send that throws.
+                        accepted.GetAwaiter().GetResult();
+                    }
+                    else
                     {
                         // Counted as sent: a later acceptance failure is a failed delivery.
                         _ = ReportFailedAcceptance(accepted, deliveries, startTicks);

@@ -627,6 +627,13 @@ public sealed class TransactionalBenchmark
 
         if (commitError is not null)
         {
+            if (producer.Classify(commitError) == TxnErrorKind.Retriable)
+            {
+                // Still failing after the last attempt: the commit may yet complete, so it cannot be aborted either.
+                MarkRunFailed($"{who}: commit_transaction error (giving up, the producer stops): {commitError.Message}");
+                return false;
+            }
+
             return await OnControlError(producer, who, "commit_transaction", commitError, records).ConfigureAwait(false);
         }
 

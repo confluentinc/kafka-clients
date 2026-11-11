@@ -44,7 +44,7 @@ public sealed class ProducerAcceptanceModeTests
         NotAwaitingKeepsSendingAsync();
 
     [Fact]
-    public Task RunAsync_NotAwaitingAcceptance_CountsALaterFailedAcceptance_AndNotASendThatThrows() =>
+    public Task RunAsync_NotAwaitingAcceptance_CountsALaterFailedAcceptance_AndNotARejectedSend() =>
         NotAwaitingCountsFailedAcceptanceAsync();
 
     [Theory]
@@ -142,8 +142,9 @@ public sealed class ProducerAcceptanceModeTests
 
     private static async Task NotAwaitingCountsFailedAcceptanceAsync()
     {
-        // A failure reaches the loop in two shapes: a pending acceptance that fails later (counted as sent, and
-        // reported as a failed delivery), or a call that throws (never counted).
+        // A failure reaches the loop in three shapes: a pending acceptance that fails later (counted as sent, and
+        // reported as a failed delivery), or a call that throws or returns an already-failed acceptance (never
+        // counted).
         Apply(awaitAccepted: "False");
         using var cts = new CancellationTokenSource();
         TaskCompletionSource<Task<PerfRecordMetadata>>? second = null;
@@ -159,6 +160,9 @@ public sealed class ProducerAcceptanceModeTests
                     break;
                 case 4:
                     throw new InvalidOperationException(QueueFullMessage);
+                case 5:
+                    return new ValueTask<Task<PerfRecordMetadata>>(
+                        Task.FromException<Task<PerfRecordMetadata>>(new InvalidOperationException(QueueFullMessage)));
                 case 6:
                     cts.Cancel();
                     break;
@@ -169,10 +173,10 @@ public sealed class ProducerAcceptanceModeTests
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        // Sends 1, 2, 3, 5 and 6 are counted as sent (the 6th cancels the run, after it was accepted), the 2nd
-        // included although its acceptance failed; the 4th, which threw, was never counted.
+        // Sends 1, 2, 3 and 6 are counted as sent (the 6th cancels the run, after it was accepted), the 2nd
+        // included although its acceptance failed later; the 4th, which threw, and the 5th, already refused, were not.
         Assert.Equal(6, backend.SendCount);
-        Assert.Equal(5, result.MeasuredSent);
+        Assert.Equal(4, result.MeasuredSent);
     }
 
     private static void Apply(string? awaitAccepted)
