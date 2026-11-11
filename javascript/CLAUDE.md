@@ -383,8 +383,17 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   ...check: BareCheck<U>)` infers `U` from the value alone and refuses any
   other `U` through the rest parameter, which no call gives, and a member of a
   class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
-  other object goes by name there, while plain JavaScript takes it bare. The
-  serializer forms of the constructor are not translated yet.
+  other object goes by name there, while plain JavaScript takes it bare.
+- Serializers (root conventions, Serialization): `Serializer` is an object
+  type in `common/serialization`, run in JavaScript inside `send()`
+  (`src/internal/serde.ts`), key then value, after the form, closed and
+  record checks and before the pump and the hand-over; a thenable result is
+  awaited, and the producer is checked for closed again after the await, as
+  its native producer may be gone. A null serializer, or none, sends the
+  record's own bytes (a string encoded by `encodeLikeJava`, checked at
+  `send()`: a `ProducerRecord<K, V>` holds any key and value). TypeScript
+  infers `null`, not `never`, for a null key or value, so `send` takes a
+  `ProducerRecord<K | null, V | null>`.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with

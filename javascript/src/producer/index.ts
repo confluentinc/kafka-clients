@@ -15,19 +15,25 @@
 // The public classes of Java's org.apache.kafka.clients.producer this client
 // has.
 //
-// Not translated yet: KafkaProducer's constructors taking serializers
-// (Map/Properties, Serializer, Serializer), its transaction calls
+// Not translated yet: KafkaProducer's transaction calls
 // (initTransactions, beginTransaction, sendOffsetsToTransaction,
-// commitTransaction, abortTransaction), partitionsFor, metrics,
-// clientInstanceId, registerMetricForSubscription,
-// unregisterMetricFromSubscription; RecordMetadata's public constructor, whose
-// long parameters wait on how a Java long is typed (not decided yet, Q23).
+// commitTransaction, abortTransaction); partitionsFor, whose List return is
+// not decided yet (Q25); metrics, whose Map return and long values are not
+// decided yet (Q25, Q23); clientInstanceId, registerMetricForSubscription and
+// unregisterMetricFromSubscription, which have no FFI entry point;
+// RecordMetadata's public constructor, whose long parameters wait on how a
+// Java long is typed (not decided yet, Q23).
+//
+// Serializers: what a string key or value gets without a serializer is not
+// decided yet (Q24, Q27; today it is encoded as Java's StringSerializer
+// encodes it), the built-in serializer factories wait for the list of serde
+// factories (not decided yet), and whether a serializer's methods must all
+// be async is not decided yet (Q50).
 
 export { KafkaProducer } from './kafka_producer';
 export type { CloseArgs, ProducerConfigs } from './kafka_producer';
 export type { Callback } from './callback';
 export { ProducerRecord } from './producer_record';
-export type { Data } from './producer_record';
 export { RecordMetadata } from './record_metadata';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { BufferExhaustedError } from './buffer_exhausted_error';

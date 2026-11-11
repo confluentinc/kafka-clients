@@ -12,16 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// `Data` names Node's Buffer: the directive carries @types/node into the
-// compiled producer_record.d.ts (`preserve`, as tsc >= 5.5 drops it from
-// declarations otherwise), so a project whose tsconfig restricts `types`
-// still resolves it.
-/// <reference types="node" preserve="true" />
-
-// Java's ProducerRecord<K, V> over bytes: a key and a value are a Buffer, a
+// Java's ProducerRecord<K, V>: the key and the value are what the producer's
+// serializers take. A producer without a serializer takes a Buffer, a
 // Uint8Array, a string (encoded as UTF-8 at send, as Java's StringSerializer
-// encodes it: src/internal/encode.ts) or null. The headers are a Headers
-// (common/header), sealed by send().
+// encodes it: src/internal/encode.ts) or null, checked at send. The headers
+// are a Headers (common/header), sealed by send().
 
 import { JavaForms } from '../internal/args';
 import { bytesToString } from '../internal/bytes';
@@ -29,14 +24,6 @@ import { encodeLikeJava } from '../internal/encode';
 import { illegalArgument } from '../internal/errors';
 import type { Header } from '../common/header/header';
 import { Headers } from '../common/header/headers';
-
-/**
- * A key or value: bytes, or a string encoded as UTF-8.
- *
- * @remarks *(js-only)* The JavaScript types a key or value takes; Java's are
- * the serializers' generic types.
- */
-export type Data = Buffer | Uint8Array | string;
 
 // Java's constructors, in Java declaration order (src/internal/args.ts).
 const FORMS = new JavaForms(
@@ -69,20 +56,14 @@ function isBytes(value: unknown): value is Uint8Array {
   return value instanceof Uint8Array;
 }
 
-function checkData(value: unknown, what: string): Data | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value === 'string' || isBytes(value)) return value;
-  throw new TypeError(`${what} must be a Buffer, a Uint8Array, a string or null`);
-}
-
-function toBytes(value: Data | null): Uint8Array | null {
+// The bytes of a key or value a producer without a serializer sends: bytes as
+// they are, a string as Java's StringSerializer encodes it.
+function rawBytes(value: unknown, what: string): Uint8Array | null {
   if (value === null) return null;
-  return typeof value === 'string' ? encodeLikeJava(value) : value;
-}
-
-/** Which of `key` (1) and `value` (2) are strings, so their bytes are the client's own. */
-function ownedBytes(key: Data | null, value: Data | null): number {
-  return (typeof key === 'string' ? 1 : 0) | (typeof value === 'string' ? 2 : 0);
+  if (typeof value === 'string') return encodeLikeJava(value);
+  if (isBytes(value)) return value;
+  if (value === undefined) throw undefinedField(what);
+  throw new TypeError(`${what} must be a Buffer, a Uint8Array, a string or null when the producer has no ${what} serializer`);
 }
 
 // Java's `new RecordHeaders(headers)`: new headers holding the given ones.
@@ -154,7 +135,7 @@ function defined(value: unknown, name: string): unknown {
  * The record also has an associated timestamp. If the user did not provide a
  * timestamp, the producer will stamp the record with its current time.
  */
-export class ProducerRecord {
+export class ProducerRecord<out K = never, out V = never> {
   /** The topic this record is being sent to */
   readonly topic: string;
 
@@ -165,10 +146,10 @@ export class ProducerRecord {
   readonly timestamp: number | null;
 
   /** The key (or null if no key is specified) */
-  readonly key: Data | null;
+  readonly key: K | null;
 
   /** The value */
-  readonly value: Data | null;
+  readonly value: V | null;
 
   /** The headers: the record's own, which `send()` makes read-only */
   readonly headers: Headers;
@@ -207,9 +188,9 @@ export class ProducerRecord {
      */
     timestamp: number | null;
     /** The key that will be included in the record, or null. */
-    key: Data | null;
+    key: K | null;
     /** The record contents, or null (a tombstone). */
-    value: Data | null;
+    value: V | null;
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
@@ -235,9 +216,9 @@ export class ProducerRecord {
      */
     timestamp: number | null;
     /** The key that will be included in the record, or null. */
-    key: Data | null;
+    key: K | null;
     /** The record contents, or null (a tombstone). */
-    value: Data | null;
+    value: V | null;
     headers?: never;
   });
   /**
@@ -253,9 +234,9 @@ export class ProducerRecord {
     partition: number | null;
     timestamp?: never;
     /** The key that will be included in the record, or null. */
-    key: Data | null;
+    key: K | null;
     /** The record contents, or null (a tombstone). */
-    value: Data | null;
+    value: V | null;
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
@@ -276,9 +257,9 @@ export class ProducerRecord {
     partition: number | null;
     timestamp?: never;
     /** The key that will be included in the record, or null. */
-    key: Data | null;
+    key: K | null;
     /** The record contents, or null (a tombstone). */
-    value: Data | null;
+    value: V | null;
     headers?: never;
   });
   /**
@@ -293,9 +274,9 @@ export class ProducerRecord {
     partition?: never;
     timestamp?: never;
     /** The key that will be included in the record, or null. */
-    key: Data | null;
+    key: K | null;
     /** The record contents, or null (a tombstone). */
-    value: Data | null;
+    value: V | null;
     headers?: never;
   });
   /**
@@ -310,7 +291,7 @@ export class ProducerRecord {
     timestamp?: never;
     key?: never;
     /** The record contents, or null (a tombstone). */
-    value: Data | null;
+    value: V | null;
     headers?: never;
   });
   constructor(options: unknown) {
@@ -327,8 +308,8 @@ export class ProducerRecord {
     this.topic = checkedTopic;
     this.partition = checkedPartition;
     this.timestamp = checkedTimestamp;
-    this.key = checkData(key, 'key');
-    this.value = checkData(value, 'value');
+    this.key = (key === undefined ? null : key) as K | null;
+    this.value = (value === undefined ? null : value) as V | null;
     this.headers = checkHeaders(headers);
   }
 
@@ -341,12 +322,28 @@ export class ProducerRecord {
   }
 
   /**
+   * Checks the fields `send()` reads before it runs a serializer: the
+   * constructor's checks of the topic, the timestamp, the partition and the
+   * headers, in its order, with its errors. Called by the producers.
+   *
+   * @internal
+   */
+  internalCheck(): void {
+    this.#checkedHeaders();
+  }
+
+  /**
    * The arguments of the native send: topic, partition and timestamp (-1 for
    * null), key and value bytes, which of them are the client's own bytes,
    * header pairs or null; then the record's headers are made read-only, as
    * Java's `doSend` seals them (`setReadOnly`) before handing the record
-   * over. Called by `KafkaProducer`, whose `send()` rejects with what this
+   * over. Called by the producers, whose `send()` rejects with what this
    * throws (the headers are then left writable).
+   *
+   * `key` and `value` are what a serializer returned; one left out is the
+   * record's own field, sent without a serializer: bytes as they are, a
+   * string encoded as Java's StringSerializer encodes it (the client's own
+   * bytes, which the addon need not copy).
    *
    * The fields are not frozen, so plain JavaScript may have reassigned one
    * since the constructor checked it: the constructor's checks run again on
@@ -356,62 +353,53 @@ export class ProducerRecord {
    *
    * @internal
    */
-  internalToNative(): NativeRecord {
-    const { topic, partition, timestamp, key, value, headers } = this;
-    // The valid record's path: plain type and range tests, no call. Any other
-    // value goes through the constructor's checks, which throw its error (or
-    // accept it: an iterable of headers, read as the constructor reads one).
-    if (
-      typeof topic === 'string' &&
-      (partition === null || (typeof partition === 'number' && Number.isInteger(partition) && partition >= 0 && partition <= INT32_MAX)) &&
-      (timestamp === null || (typeof timestamp === 'number' && Number.isInteger(timestamp) && timestamp >= 0 && timestamp <= Number.MAX_SAFE_INTEGER)) &&
-      (key === null || typeof key === 'string' || isBytes(key)) &&
-      (value === null || typeof value === 'string' || isBytes(value)) &&
-      headers instanceof Headers
-    ) {
-      const nativeHeaders = headers.internalToNative();
-      const out: NativeRecord = [
-        topic,
-        partition === null ? -1 : partition,
-        timestamp === null ? -1 : timestamp,
-        toBytes(key),
-        toBytes(value),
-        ownedBytes(key, value),
-        nativeHeaders,
-      ];
-      headers.internalSetReadOnly();
-      return out;
-    }
-    return this.#checkedToNative();
-  }
-
-  // internalToNative for a record with a field the fast path did not accept:
-  // the constructor's checks, in its order, then the same arguments.
-  #checkedToNative(): NativeRecord {
-    const topic = checkTopic(defined(this.topic, 'topic'));
-    const timestamp = checkTimestamp(defined(this.timestamp, 'timestamp'));
-    const partition = checkPartition(defined(this.partition, 'partition'));
-    const key = checkData(defined(this.key, 'key'), 'key');
-    const value = checkData(defined(this.value, 'value'), 'value');
-    const given: unknown = defined(this.headers, 'headers');
-    const headers = given instanceof Headers ? given : checkHeaders(given);
-    const nativeHeaders = headers.internalToNative();
+  internalToNative(key?: Uint8Array | null, value?: Uint8Array | null): NativeRecord {
+    const headers = this.#checkedHeaders();
+    const keyBytes = key === undefined ? rawBytes(this.key, 'key') : key;
+    const valueBytes = value === undefined ? rawBytes(this.value, 'value') : value;
+    const owned = (key === undefined && typeof this.key === 'string' ? 1 : 0) | (value === undefined && typeof this.value === 'string' ? 2 : 0);
+    const { topic, partition, timestamp } = this;
     const out: NativeRecord = [
       topic,
       partition === null ? -1 : partition,
       timestamp === null ? -1 : timestamp,
-      toBytes(key),
-      toBytes(value),
-      ownedBytes(key, value),
-      nativeHeaders,
+      keyBytes,
+      valueBytes,
+      owned,
+      headers.internalToNative(),
     ];
     headers.internalSetReadOnly();
     return out;
   }
+
+  // The constructor's checks of the fields but the key and the value, and the
+  // headers to send. The valid record's path: plain type and range tests, no
+  // call. Any other value goes through the constructor's checks, which throw
+  // its error (or accept it: an iterable of headers, read as the constructor
+  // reads one).
+  #checkedHeaders(): Headers {
+    const { topic, partition, timestamp, headers } = this;
+    if (
+      typeof topic === 'string' &&
+      (partition === null || (typeof partition === 'number' && Number.isInteger(partition) && partition >= 0 && partition <= INT32_MAX)) &&
+      (timestamp === null || (typeof timestamp === 'number' && Number.isInteger(timestamp) && timestamp >= 0 && timestamp <= Number.MAX_SAFE_INTEGER)) &&
+      headers instanceof Headers
+    ) {
+      return headers;
+    }
+    checkTopic(defined(topic, 'topic'));
+    checkTimestamp(defined(timestamp, 'timestamp'));
+    checkPartition(defined(partition, 'partition'));
+    const given: unknown = defined(headers, 'headers');
+    return given instanceof Headers ? given : checkHeaders(given);
+  }
 }
 
-function show(value: Data | null): string {
+// Java's `key.toString()`: bytes as Arrays.toString writes them, anything
+// else as JavaScript writes it.
+function show(value: unknown): string {
   if (value === null) return 'null';
   if (isBytes(value)) return bytesToString(value);
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's toString() of a key or value of the caller's type: an object without its own toString() prints as JavaScript prints it, as Java's prints Object.toString()
   return String(value);
 }

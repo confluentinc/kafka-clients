@@ -13,7 +13,9 @@
 // limitations under the License.
 
 // Java's KafkaProducer over the C FFI's KafkaProducer with NULL serializers:
-// keys and values cross as bytes (javascript/CLAUDE.md).
+// keys and values cross as bytes (javascript/CLAUDE.md); the serializers the
+// producer is given run here, in JavaScript, inside send() (root CLAUDE.md,
+// JavaScript Binding Conventions, Serialization).
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../internal/native');
@@ -23,8 +25,10 @@ import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { illegalState } from '../internal/errors';
 import { producerClosed, producerOpened, warnPreview } from '../internal/lifecycle';
+import { checkSerializer, closeSerializer, isThenable, serializedBytes } from '../internal/serde';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Duration } from '../duration';
+import type { Serializer } from '../common/serialization/serializer';
 import type { Callback } from './callback';
 import { ProducerRecord } from './producer_record';
 import type { RecordMetadata } from './record_metadata';
@@ -71,12 +75,12 @@ const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed'
 
 // Java's forms of each method, in Java declaration order (src/internal/args.ts). The
 // constructor's Map and Properties forms are the one `configs`, which is also
-// taken bare, the configuration map itself; its forms taking serializers are
-// not translated (the client has no serializers yet).
+// taken bare, the configuration map itself, and so are its two forms taking
+// serializers.
 // A bare value picks its form by its type: the configs an object (a `Map` is
 // then refused as the configuration), the record a ProducerRecord, the timeout
 // a number or a Temporal.Duration; `null` is Java's null.
-const CONSTRUCTOR_FORMS = new JavaForms('KafkaProducer', [['configs']], {
+const CONSTRUCTOR_FORMS = new JavaForms('KafkaProducer', [['configs'], ['configs', 'keySerializer', 'valueSerializer']], {
   bareIsPlainObject: true,
   bareTypes: { configs: (value) => typeof value === 'object' },
 });
@@ -85,6 +89,9 @@ const SEND_FORMS = new JavaForms('send', [['record'], ['record', 'callback']], {
 });
 const CLOSE_FORMS = new JavaForms('close', [[], ['timeout']], { bareTypes: { timeout: isDurationOrNull } });
 const FLUSH_FORMS = new JavaForms('flush', [[]]);
+
+/** send()'s mark of a value its serializer has not run on yet. */
+const NOT_SERIALIZED: unique symbol = Symbol('not serialized');
 
 /** What the addon takes for a close with its timeout left out: Java's close(). */
 const NO_TIMEOUT = -1;
@@ -174,7 +181,7 @@ function thrownMessage(thrown: unknown): string {
  * producer, with a future of the record's metadata. No garbage collection
  * closes a producer: close every one (`close()`, or `await using`).
  */
-export class KafkaProducer {
+export class KafkaProducer<K = Uint8Array, V = Uint8Array> {
   /** The name prefix of the producer's network thread. */
   static readonly NETWORK_THREAD_PREFIX: string = 'kafka-producer-network-thread';
 
@@ -182,6 +189,10 @@ export class KafkaProducer {
   static readonly PRODUCER_METRIC_GROUP_NAME: string = 'producer-metrics';
 
   #handle: ProducerHandle;
+  // The serializers given, or null: the record's bytes cross as they are.
+  // (Typed over unknown: send() reads the record as ProducerRecord<unknown, unknown>.)
+  readonly #keySerializer: Serializer<unknown> | null;
+  readonly #valueSerializer: Serializer<unknown> | null;
   // close() was called: send refuses records from then on.
   #closed = false;
   // The native producer was destroyed by a completed close.
@@ -210,19 +221,53 @@ export class KafkaProducer {
    *   and `value.serializer` and for a `kafkaJS` block) or the producer
    *   cannot be built
    * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{configs}`, or the configs are not an object
+   *   `{configs}` or `{configs, keySerializer, valueSerializer}`, the configs
+   *   are not an object, or a serializer is a function that makes one
+   *   ("did you forget '()'?")
    * @throws `TypeError` when `configs` is null, `undefined` or not a plain
-   *   object (a `Map` included), or a config key or value holds a null byte,
-   *   which the C ABI would read as the end of the string
+   *   object (a `Map` included), a config key or value holds a null byte,
+   *   which the C ABI would read as the end of the string, or a serializer is
+   *   neither null nor an object with a `serialize` method
    *
    * @remarks Java's `Map` and `Properties` constructors are the one
-   * `configs`; the forms taking serializers are not translated yet. The first
-   * client a process builds emits one `ExperimentalWarning` while the client
-   * is in preview.
+   * `configs`. Without serializers a key or value is sent as the bytes the
+   * record holds, and the producer is a `KafkaProducer<Uint8Array,
+   * Uint8Array>`. The first client a process builds emits one
+   * `ExperimentalWarning` while the client is in preview.
    */
   constructor(options: {
     /** The producer configs: a plain object of Java's ProducerConfig keys. */
     configs: ProducerConfigs;
+    keySerializer?: never;
+    valueSerializer?: never;
+  });
+  /**
+   * A producer is instantiated by providing a set of key-value pairs as
+   * configuration, a key and a value `Serializer`. Valid configuration
+   * strings are documented in Java's ProducerConfig.
+   *
+   * @param options - the producer configs and the serializers
+   *
+   * @remarks The serializers run in JavaScript, inside `send()`; a serializer
+   * whose `serialize` returns a Promise is awaited before the record is handed
+   * over. A null serializer sends the record's bytes as they are, binding
+   * `Uint8Array`. The producer closes both serializers when it closes.
+   */
+  constructor(options: {
+    /** The producer configs: a plain object of Java's ProducerConfig keys. */
+    configs: ProducerConfigs;
+    /**
+     * The serializer for key that implements `Serializer`, or null. The
+     * configure() method won't be called in the producer when the serializer
+     * is passed in directly.
+     */
+    keySerializer: Serializer<K> | null;
+    /**
+     * The serializer for value that implements `Serializer`, or null. The
+     * configure() method won't be called in the producer when the serializer
+     * is passed in directly.
+     */
+    valueSerializer: Serializer<V> | null;
   });
   /**
    * A producer is instantiated by providing a set of key-value pairs as
@@ -233,11 +278,26 @@ export class KafkaProducer {
    */
   constructor(configs: ProducerConfigs);
   constructor(options: unknown) {
-    CONSTRUCTOR_FORMS.match(options, arguments.length);
-    this.#handle = native.producerCreate(configEntries(CONSTRUCTOR_FORMS.value(options, 'configs')));
+    const form = CONSTRUCTOR_FORMS.match(options, arguments.length);
+    const entries = configEntries(CONSTRUCTOR_FORMS.value(options, 'configs'));
+    this.#keySerializer = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'keySerializer'), 'keySerializer');
+    this.#valueSerializer = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'valueSerializer'), 'valueSerializer');
+    try {
+      this.#handle = native.producerCreate(entries);
+    } catch (error) {
+      // Java's constructor closes what it was given before it throws.
+      this.#closeSerializers();
+      throw error;
+    }
     producerOpened();
     warnPreview();
     debug('KafkaProducer created');
+  }
+
+  // Java's close closes both serializers; a failure is a process warning.
+  #closeSerializers(): void {
+    closeSerializer(this.#keySerializer, 'keySerializer');
+    closeSerializer(this.#valueSerializer, 'valueSerializer');
   }
 
   /**
@@ -260,6 +320,8 @@ export class KafkaProducer {
    *   constructor refuses (the constructor's error)
    * @throws `TypeError` rejects with it when `record` is null or not a
    *   ProducerRecord, `callback` not a function, a parameter is `undefined`,
+   *   a serializer returns neither a Uint8Array nor null, a key or value
+   *   sent without a serializer is neither bytes, a string nor null,
    *   the topic or a
    *   header key holds a null byte, which the C ABI would read as the end of
    *   the string, or a field of the record was reassigned to a value its
@@ -269,7 +331,8 @@ export class KafkaProducer {
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `SerializationError` rejects with it if the key or value are not
-   *   valid objects given the configured serializers
+   *   valid objects given the configured serializers (what a serializer
+   *   throws, or rejects with, rejects the send as it is)
    * @throws `BootstrapResolutionError` rejects with it if DNS resolution of the
    *   bootstrap servers fails within `bootstrap.resolve.timeout.ms`
    * @throws `KafkaError` rejects with it if a Kafka related error occurs that
@@ -306,10 +369,15 @@ export class KafkaProducer {
    * already due before handing its record over, so a callback may run inside
    * a `send()` call.
    *
-   * A Buffer or Uint8Array key or value is copied during the call, so it may
-   * be modified, reused or detached (transferred) as soon as `send()`
-   * returns. A string key or value is encoded to UTF-8 as Java's
-   * `StringSerializer` encodes it (a lone surrogate as `?`). The record's
+   * The serializers run inside the call, key then value, on the record's
+   * key and value (null included) with its topic and headers; one returning
+   * a Promise is awaited before the hand-over, so sends that are not awaited
+   * one by one may then reach the producer out of call order (`await
+   * send()` keeps it). What a serializer returns, and a Buffer or Uint8Array
+   * key or value sent without one, is copied during the call, so it may be
+   * modified, reused or detached (transferred) as soon as `send()` returns.
+   * Without a serializer, a string key or value is encoded to UTF-8 as
+   * Java's `StringSerializer` encodes it (a lone surrogate as `?`). The record's
    * headers become read-only once its fields are checked: a later `add` or
    * `remove` throws `IllegalStateError` "RecordHeaders has been closed.".
    * *(deviation: Java's `send()` seals them only after its metadata wait;
@@ -329,7 +397,7 @@ export class KafkaProducer {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord;
+    record: ProducerRecord<K | null, V | null>;
     /**
      * A user-supplied callback to execute when the record has been
      * acknowledged by the server (null indicates no callback).
@@ -346,7 +414,7 @@ export class KafkaProducer {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord;
+    record: ProducerRecord<K | null, V | null>;
     callback?: never;
   }): Promise<KafkaFuture<RecordMetadata>>;
   /**
@@ -357,7 +425,7 @@ export class KafkaProducer {
    * @returns resolving at hand-over to the future of the record's metadata,
    *   rejecting with the error Java's send() would throw
    */
-  send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+  send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
   send(options: unknown): Promise<KafkaFuture<RecordMetadata>> {
     try {
       return this.#send(options, arguments.length);
@@ -378,6 +446,66 @@ export class KafkaProducer {
     if (record === null) throw new TypeError('record must not be null');
     if (!(record instanceof ProducerRecord)) throw new TypeError('record must be a ProducerRecord');
     const userCallback = checkCallback(SEND_FORMS.value(options, 'callback'));
+    const keySerializer = this.#keySerializer;
+    const valueSerializer = this.#valueSerializer;
+    if (keySerializer === null && valueSerializer === null) return this.#handOver(record, userCallback, undefined, undefined);
+    // Java's doSend serializes the key, then the value, with the record's
+    // topic and headers (which a serializer may change: they are sealed only
+    // at the hand-over). A serializer that returns a plain value costs no
+    // microtask; one that returns a thenable is awaited.
+    record.internalCheck();
+    let key: unknown;
+    if (keySerializer !== null) {
+      key = keySerializer.serialize({ topic: record.topic, headers: record.headers, data: record.key });
+      if (isThenable(key)) return this.#sendAwaiting(record, userCallback, key, NOT_SERIALIZED);
+      key = serializedBytes(key, 'keySerializer');
+    }
+    let value: unknown;
+    if (valueSerializer !== null) {
+      value = valueSerializer.serialize({ topic: record.topic, headers: record.headers, data: record.value });
+      if (isThenable(value)) return this.#sendAwaiting(record, userCallback, key, value);
+      value = serializedBytes(value, 'valueSerializer');
+    }
+    return this.#handOver(record, userCallback, key as Uint8Array | null | undefined, value as Uint8Array | null | undefined);
+  }
+
+  // The rest of send() once a serializer returned a thenable: it awaits the
+  // key's, runs the value serializer if it has not run yet and awaits its
+  // result, then hands the record over unless the producer was closed in the
+  // meantime (its native producer may be gone). `key` and `value` are a
+  // thenable, bytes, or undefined without a serializer; `value` is
+  // NOT_SERIALIZED when the value serializer has not run yet.
+  async #sendAwaiting(
+    record: ProducerRecord<unknown, unknown>,
+    userCallback: Callback | null,
+    key: unknown,
+    value: unknown,
+  ): Promise<KafkaFuture<RecordMetadata>> {
+    const keyBytes = isThenable(key) ? serializedBytes(await key, 'keySerializer') : (key as Uint8Array | null | undefined);
+    let valueBytes: Uint8Array | null | undefined;
+    if (value === NOT_SERIALIZED) {
+      const valueSerializer = this.#valueSerializer;
+      if (valueSerializer !== null) {
+        const out: unknown = valueSerializer.serialize({ topic: record.topic, headers: record.headers, data: record.value });
+        valueBytes = serializedBytes(isThenable(out) ? await out : out, 'valueSerializer');
+      }
+    } else if (isThenable(value)) {
+      valueBytes = serializedBytes(await value, 'valueSerializer');
+    } else {
+      valueBytes = value as Uint8Array | null | undefined;
+    }
+    if (this.#closed) throw illegalState(CLOSED_MESSAGE);
+    return this.#handOver(record, userCallback, keyBytes, valueBytes);
+  }
+
+  // The hand-over of a checked record: its key and value bytes from the
+  // serializers, or undefined to send the record's own.
+  #handOver(
+    record: ProducerRecord<unknown, unknown>,
+    userCallback: Callback | null,
+    key: Uint8Array | null | undefined,
+    value: Uint8Array | null | undefined,
+  ): Promise<KafkaFuture<RecordMetadata>> {
     if (this.#pumpNext || this.#fastPathSends % PUMP_EVERY === 0) {
       this.#pumpNext = false;
       // A no-op inside a drain (a send from a delivery callback).
@@ -386,7 +514,7 @@ export class KafkaProducer {
       // A callback it ran may have closed the producer.
       if (this.#closed) throw illegalState(CLOSED_MESSAGE);
     }
-    const args = record.internalToNative();
+    const args = record.internalToNative(key, value);
     const future: KafkaFuture<RecordMetadata> = KafkaFuture.internalCreate(true);
     let resolve!: (future: KafkaFuture<RecordMetadata>) => void;
     let reject!: (error: unknown) => void;
@@ -630,6 +758,8 @@ export class KafkaProducer {
         this.#closing = null;
         if (destroyed) {
           this.#destroyed = true;
+          // Java's close closes the serializers last, before it returns.
+          this.#closeSerializers();
           debug('KafkaProducer closed');
         } else {
           // The core rejected the timeout and closed nothing (Java's
