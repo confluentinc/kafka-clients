@@ -14,11 +14,11 @@ Run the producer first, then the consumer: the consumer reads the records the pr
 
 ## Why a third-party registry client
 
-- This client, `confluent-kafka` 4.4.0b1, has no Schema Registry serdes yet.
+- This client, `confluent-kafka` 4.4.*, has no Schema Registry serdes yet.
 - The `confluent-kafka` 2.x releases have them (`confluent_kafka.schema_registry`), but cannot be
-  used with 4.4.0b1: they are the same PyPI package, so only one version can be installed at a time.
+  used with 4.4.*: they are the same PyPI package, so only one version can be installed at a time.
 - `python-schema-registry-client` has no Kafka client dependency, so it installs cleanly beside
-  4.4.0b1.
+  4.4.*.
 
 ## Requirements
 
