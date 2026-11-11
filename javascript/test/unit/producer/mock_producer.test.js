@@ -306,3 +306,67 @@ test("the constructor and the methods take Java's forms", async () => {
   await producer.close(0);
   await assert.rejects(producer.close('soon'), { constructor: IllegalArgumentError, message: 'close() takes one of (), (timeout); got a string' });
 });
+
+// A callback's Promise that rejects is the callback's error, as a throw is
+// (Java's Completion.complete has no try/catch): the completing call fails
+// with it, and the record's future never completes.
+
+test('send() with autoComplete rejects with what the callback Promise rejected with; the future never completes', async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(true);
+  const warnings = [];
+  const onWarning = (w) => warnings.push(w);
+  process.on('warning', onWarning);
+  try {
+    await assert.rejects(
+      producer.send({
+        record: record1,
+        callback: async () => {
+          throw boom;
+        },
+      }),
+      (e) => e === boom,
+    );
+    assert.equal(producer.history().length, 1);
+    // The record's future is not handed out, and the next send completes normally.
+    const future = await producer.send(record2);
+    assert.equal((await future.get()).offset, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(warnings, []);
+  } finally {
+    process.off('warning', onWarning);
+  }
+});
+
+test('flush() rejects with what a callback Promise rejected with, and that record future never completes', async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(false);
+  const failing = await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  const fine = await producer.send({ record: record2, callback: () => Promise.resolve() });
+  await assert.rejects(producer.flush(), (e) => e === boom);
+  assert.equal(failing.isDone(), false);
+  assert.equal(fine.isDone(), true);
+  assert.equal(producer.flushed(), true);
+});
+
+test('completeNext(): a rejected callback Promise leaves the future pending and fails the next send, flush or close, once', async () => {
+  const boom = new Error('boom');
+  for (const next of ['send', 'flush', 'close']) {
+    const producer = buildMockProducer(false);
+    const future = await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+    assert.equal(producer.completeNext(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(future.isDone(), false);
+    const call = next === 'send' ? () => producer.send(record2) : () => producer[next]();
+    await assert.rejects(call(), (e) => e === boom, next);
+    if (next === 'close') assert.equal(producer.closed(), true);
+    // Raised once: the next call goes on as usual.
+    if (next !== 'close') await call();
+  }
+  // errorNext keeps it the same way.
+  const producer = buildMockProducer(false);
+  await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  assert.equal(producer.errorNext(new Error('delivery')), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(producer.flush(), (e) => e === boom);
+});
