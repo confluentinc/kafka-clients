@@ -161,7 +161,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             producer.Flush();
             return Task.FromResult(new Proto.StatusResponse());
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
@@ -186,7 +186,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
             return Task.FromResult(response);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) });
         }
@@ -211,7 +211,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
             return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
         }
@@ -243,7 +243,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             producer.SendOffsetsToTransaction(Translate.OffsetEntriesToDictionary(request.Offsets), groupMetadata);
             return Task.FromResult(new Proto.StatusResponse());
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
@@ -295,7 +295,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             operation(producer);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -322,7 +322,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }

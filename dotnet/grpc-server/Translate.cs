@@ -179,6 +179,17 @@ internal static class Translate
         };
     }
 
+    // Whether ToProto sends the error with a code of the binding's own (a class with an id, or a .NET-only
+    // ArgumentException precondition) rather than the server-made -4 fallback. The consumer servicers return
+    // only such an error as their reply's error; any other exception is a server bug and fails the call, so the
+    // harness reports it instead of matching it as an error class, as Python's _binding_error decides.
+    internal static bool IsBindingError(Exception error)
+    {
+        Exception sent = Unwrapped(error);
+        return KafkaException.FfiIdOf(sent) is not null
+            || (sent is ArgumentException and not ArgumentNullException and not IndexOutOfBoundsException);
+    }
+
     // The error behind a future's Get failure: Java's ExecutionException wraps the cause the future
     // failed with. Any other error is itself.
     internal static Exception Unwrapped(Exception error) =>

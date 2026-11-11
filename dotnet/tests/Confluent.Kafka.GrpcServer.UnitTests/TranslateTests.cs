@@ -310,6 +310,23 @@ public sealed class TranslateTests
         Assert.Equal(TimeSpan.MinValue, Translate.DurationOfMs(long.MinValue));
     }
 
+    [Fact]
+    public void IsBindingError_IsTrueForAClassWithAnIdOrANetPrecondition()
+    {
+        Assert.True(Translate.IsBindingError(new KafkaException("bare")));
+        Assert.True(Translate.IsBindingError(new IllegalStateException("closed")));
+        Assert.True(Translate.IsBindingError(new ExecutionException(new IllegalArgumentException("inner"))));
+        Assert.True(Translate.IsBindingError(new ArgumentException("a .NET-only precondition")));
+    }
+
+    [Fact]
+    public void IsBindingError_IsFalseForTheServerMadeFallback()
+    {
+        Assert.False(Translate.IsBindingError(new InvalidOperationException("plain")));
+        Assert.False(Translate.IsBindingError(new ArgumentNullException("topic")));
+        Assert.False(Translate.IsBindingError(new NoSuchElementException("none")));
+    }
+
     private static (string, int)[] Pairs(IEnumerable<Proto.CallbackLogPartition> partitions)
     {
         List<(string, int)> pairs = new List<(string, int)>();
