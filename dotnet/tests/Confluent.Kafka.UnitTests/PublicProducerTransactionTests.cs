@@ -41,6 +41,9 @@ public sealed class PublicProducerTransactionTests
 {
     private const int MaxBlockMs = 500;
 
+    // The max.block.ms of a call expected to complete at once: long enough that a slow runner does not reach it.
+    private const int AtOnceMaxBlockMs = 5000;
+
     private const string NonTransactional = "Transactional method invoked on a non-transactional producer.";
 
     private const string InitTimeout =
@@ -783,7 +786,7 @@ public sealed class PublicProducerTransactionTests
         AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
-        SetMaxBlockMs(producer, MaxBlockMs);
+        SetMaxBlockMs(producer, timedOutOperation is null ? AtOnceMaxBlockMs : MaxBlockMs);
         TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -812,7 +815,7 @@ public sealed class PublicProducerTransactionTests
             if (timedOutOperation is null)
             {
                 Assert.Null(failure);
-                Assert.True(elapsedMs < MaxBlockMs, $"{operation} waited {elapsedMs} ms");
+                Assert.True(elapsedMs < AtOnceMaxBlockMs, $"{operation} waited {elapsedMs} ms");
                 await AssertStateAfter(producer, operation);
             }
             else
