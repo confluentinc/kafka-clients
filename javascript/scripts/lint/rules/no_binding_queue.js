@@ -17,12 +17,12 @@
 // N8 check-no-binding-queue (javascript/CLAUDE.md boundary rule 7: no
 // binding-side send queue, buffer, cap or lock). A heuristic (PLAN.md §8
 // decision 13):
-//   - no lock outside src/callback_queue.c: no `pthread_mutex` / `cond` /
+//   - no lock outside native/callback_queue.c: no `pthread_mutex` / `cond` /
 //     `rwlock` / `spin` or libuv / C11 lock declared (each declaration keyed
-//     by its declarator, `src/util.h:CallbackQueue.notify_mtx`) or called
-//     (`file:function:callee#n`) in another src/ file;
-//   - no store of records in a hand-written module of lib/ (lib/producer/,
-//     and the private helpers, `lib/_*.ts`, where one would go): no class
+//     by its declarator, `native/util.h:CallbackQueue.notify_mtx`) or called
+//     (`file:function:callee#n`) in another native/ file;
+//   - no store of records in a hand-written module of src/ (src/producer/,
+//     and the private helpers, `src/internal/*.ts`, where one would go): no class
 //     field, constructor parameter property or module variable holding an
 //     array, a `Map` or a `Set`, and no module constant naming a cap (`MAX`,
 //     `LIMIT`, `CAP`, `QUEUE`). The generated modules are not read.
@@ -61,7 +61,7 @@ function enclosingStruct(code, at) {
   return null;
 }
 
-/** The function of src file `file` whose body holds offset `at`, or `(top level)`. */
+/** The function of native file `file` whose body holds offset `at`, or `(top level)`. */
 function functionAt(ctx, file, at) {
   const { bodies } = cModel(ctx);
   for (const b of bodies.values()) if (b.file === file && at >= b.bodyStart && at < b.bodyEnd) return b.name;
@@ -75,22 +75,42 @@ const GENERATED = /GENERATED, DO NOT EDIT/;
 
 /** What is allowed, by `<file>:<identifier>` (C) or `<Class>.<field>` (TypeScript). */
 const ALLOWED = [
-  { key: 'src/util.h:CallbackQueue.notify_mtx', reason: "the callback queue's notify_mtx, which only callback_queue.c locks" },
+  { key: 'native/util.h:CallbackQueue.notify_mtx', reason: "the callback queue's notify_mtx, which only callback_queue.c locks" },
   {
-    key: 'lib/producer/producer_record.ts:INT32_MAX',
+    key: 'src/producer/producer_record.ts:INT32_MAX',
     reason: "the largest partition the C ABI's int32_t carries: a range check of one record, not a cap of records",
   },
-  { key: 'ProducerRecord.#headers', reason: "a record's own headers (Java's ProducerRecord#headers), not a store of records" },
-  { key: 'lib/_config.ts:INT_LABELS', reason: "the ConfigDef type names of Java's parseType messages, a constant table" },
-  { key: 'lib/_errors.ts:classes', reason: 'the generated error classes, loaded once: a table of classes, not records' },
-  { key: 'lib/_errors.ts:byId', reason: 'the error classes by FFI id, built once from the generated registry' },
-  { key: 'lib/_native_loader.ts:SUPPORTED_PLATFORMS', reason: 'the platform packages the loader knows, a constant list' },
-  { key: 'lib/_throwable.ts:ids', reason: 'the FFI id of each error class, keyed weakly by the class' },
-  { key: 'lib/_throwable.ts:cachedBases', reason: 'the two abstract error bases, looked up once' },
+  { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
+  {
+    key: 'src/common/header/headers.ts:EMPTY',
+    reason: 'the one frozen empty list of every Headers that has none: no array per record, not a store of records',
+  },
+  { key: 'src/internal/config.ts:INT_LABELS', reason: "the ConfigDef type names of Java's parseType messages, a constant table" },
+  { key: 'src/internal/errors.ts:classes', reason: 'the generated error classes, loaded once: a table of classes, not records' },
+  { key: 'src/internal/errors.ts:byId', reason: 'the error classes by FFI id, built once from the generated registry' },
+  { key: 'src/internal/errors.ts:roots', reason: 'the generated error classes at the top of a chain, found once' },
+  { key: 'src/internal/native_loader.ts:SUPPORTED_PLATFORMS', reason: 'the platform packages the loader knows, a constant list' },
+  { key: 'src/internal/throwable.ts:registered', reason: "the Java constructor forms of each error class, keyed weakly by the class" },
+  {
+    key: 'JavaForms.#bare',
+    reason: "a method's one-parameter Java forms, fixed when its module loads: a table of forms, not records",
+  },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
+    key: 'src/common/kafka_future.ts:MAX_TIMER_MS',
+    reason: "the longest delay a Node timer holds (2^31 - 1 ms): one get(timeout)'s wait in steps, not a cap of records",
+  },
+  {
+    key: 'src/common/kafka_future.ts:STAGES',
+    reason: "the Promise toCompletionStage() returned, keyed weakly by its future: one per future, made on first use, not a store of records",
+  },
+  {
+    key: 'src/common/kafka_future.ts:COMPLETIONS',
+    reason: "the futures completed in one call whose waiters have not run yet, emptied before the call returns: Java's postComplete loop, not a store of records",
+  },
+  {
     key: 'KafkaFuture.#waiters',
-    reason: "the get() Promises waiting on one record's future, settled once at its completion: not a store of records",
+    reason: "the get() Promises and dependants waiting on one future, run once at its completion: not a store of records",
   },
   {
     key: 'KafkaProducer.#deferred',
@@ -101,7 +121,7 @@ const ALLOWED = [
 module.exports = {
   name: 'check-no-binding-queue',
   kinds: ['lock', 'record-store', 'cap', 'queue-unused-allowance'],
-  needs: ['program', 'src'],
+  needs: ['program', 'native'],
   hint:
     'Hand every record to the core at once and hold no queue, buffer, cap or lock of records in the ' +
     'binding (javascript/CLAUDE.md boundary rule 7).',
@@ -110,8 +130,8 @@ module.exports = {
     const { ts, checker, sourceFiles } = ctx.program();
     const raw = [];
     let checked = 0;
-    for (const file of ctx.files(['src'], ['.c', '.h'])) {
-      if (file === 'src/callback_queue.c') continue;
+    for (const file of ctx.files(['native'], ['.c', '.h'])) {
+      if (file === 'native/callback_queue.c') continue;
       const { tokens, code } = scan(ctx.read(file));
       const perCallee = new Map();
       tokens.forEach((t, i) => {
@@ -126,7 +146,7 @@ module.exports = {
           raw.push({
             kind: 'lock',
             subject: `${file}:${t.line}`,
-            message: `declares the ${t.value} ${name}: no lock outside src/callback_queue.c`,
+            message: `declares the ${t.value} ${name}: no lock outside native/callback_queue.c`,
             allow: `${file}:${name}`,
           });
         } else if (next && next.value === '(') {
@@ -136,11 +156,11 @@ module.exports = {
           raw.push({
             kind: 'lock',
             subject: `${file}:${t.line}`,
-            message: `calls ${t.value} in ${fn}: no lock outside src/callback_queue.c`,
+            message: `calls ${t.value} in ${fn}: no lock outside native/callback_queue.c`,
             allow: `${file}:${fn}:${t.value}#${n}`,
           });
         } else {
-          raw.push({ kind: 'lock', subject: `${file}:${t.line}`, message: `names ${t.value}: no lock outside src/callback_queue.c`, allow: `${file}:${t.value}` });
+          raw.push({ kind: 'lock', subject: `${file}:${t.line}`, message: `names ${t.value}: no lock outside native/callback_queue.c`, allow: `${file}:${t.value}` });
         }
       });
     }
@@ -154,9 +174,9 @@ module.exports = {
     };
     for (const sf of sourceFiles) {
       const rel = ctx.rel(sf.fileName);
-      // Every hand-written module of lib/, the private helpers (`lib/_*.ts`) included:
+      // Every hand-written module of src/, the private helpers (`src/internal/*.ts`) included:
       // a generated one holds the error and config tables, never records.
-      if (!rel.startsWith('lib/') || GENERATED.test(sf.text.slice(0, 2000))) continue;
+      if (!rel.startsWith('src/') || GENERATED.test(sf.text.slice(0, 2000))) continue;
       for (const st of sf.statements) {
         if (ts.isVariableStatement(st)) {
           for (const d of st.declarationList.declarations) {

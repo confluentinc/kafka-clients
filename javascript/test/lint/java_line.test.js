@@ -104,9 +104,9 @@ const j = (...parts) => parts.join('');
 test('the rule: one finding per file, comments of TypeScript, JavaScript and C, never strings or regexes', () => {
   const root = project({
     'tsconfig.json': TSCONFIG,
-    'lib/a.ts': j('export const a = 1;\n// Java checks it (Producer', 'Record.java:69),\n// and Java 12-14.\n'),
-    'lib/clean.ts': j("export const s = 'Foo.java", ":12';\nexport const t = `Java 12-14`;\n"),
-    'src/a.c': j('/*\n * see Sender', '.java:120\n */\nconst char* s = "Foo.java', ':1"; // Java 7\n'),
+    'src/a.ts': j('export const a = 1;\n// Java checks it (Producer', 'Record.java:69),\n// and Java 12-14.\n'),
+    'src/clean.ts': j("export const s = 'Foo.java", ":12';\nexport const t = `Java 12-14`;\n"),
+    'native/a.c': j('/*\n * see Sender', '.java:120\n */\nconst char* s = "Foo.java', ':1"; // Java 7\n'),
     'test/t.test.js': j("const re = /\\/\\/ Foo.java", ":1/;\nconst x = 'a'; /* `:", "12` */\n"),
     'scripts/s.js': '// Java 4.4 is a version, not a line\n',
     'tools/x/y.js': j('/** Translated from `KafkaProducerTest.testFoo` (line\n * 73). */\n'),
@@ -117,10 +117,10 @@ test('the rule: one finding per file, comments of TypeScript, JavaScript and C, 
   const rest = ': name the Java member instead (`org.apache.kafka.…Class#member`)';
   assert.deepEqual(findings(r), [
     // ESLint's half (TypeScript and JavaScript) first, then the runner's (C).
-    j('lib/a.ts: 2 Java file:line reference(s) in comments, the first `ProducerRecord.java', ':69` at line 2', rest),
+    j('src/a.ts: 2 Java file:line reference(s) in comments, the first `ProducerRecord.java', ':69` at line 2', rest),
     j('test/t.test.js: 1 Java file:line reference(s) in comments, the first `', '`:12`', '` at line 2', rest),
     j('tools/x/y.js: 1 Java file:line reference(s) in comments, the first `line 73` at line 1', rest),
-    j('src/a.c: 2 Java file:line reference(s) in comments, the first `Sender.java', ':120` at line 2', rest),
+    j('native/a.c: 2 Java file:line reference(s) in comments, the first `Sender.java', ':120` at line 2', rest),
   ]);
   assert.ok(r.err.includes('❌ check-java-line: 4 finding(s).'), r.text);
   assert.ok(
@@ -131,15 +131,15 @@ test('the rule: one finding per file, comments of TypeScript, JavaScript and C, 
 });
 
 test('a clean project passes; a baseline line waives a file', () => {
-  let r = lint(project({ 'lib/a.ts': '// Java names `ProducerRecord#partition`.\nexport {};\n', 'src/a.c': '// fine\n' }), [RULE]);
+  let r = lint(project({ 'src/a.ts': '// Java names `ProducerRecord#partition`.\nexport {};\n', 'native/a.c': '// fine\n' }), [RULE]);
   assert.equal(r.status, 0, r.text);
   assert.ok(r.out.includes('✅ check-java-line: 2 item(s) checked'), r.text);
-  r = lint(project({ 'lib/a.ts': j('// Foo.java', ':1\n'), 'eslint-baseline.txt': 'java-line lib/a.ts\n' }), [RULE]);
+  r = lint(project({ 'src/a.ts': j('// Foo.java', ':1\n'), 'eslint-baseline.txt': 'java-line src/a.ts\n' }), [RULE]);
   assert.equal(r.status, 0, r.text);
 });
 
 test('cannot run without the typescript package', () => {
-  const r = lint(project({ 'lib/a.ts': 'export {};\n' }), [RULE], {
+  const r = lint(project({ 'src/a.ts': 'export {};\n' }), [RULE], {
     loadTypescript: () => {
       throw new Error('missing');
     },
@@ -159,14 +159,14 @@ test('nothing in scope fails: 0 items checked', () => {
 
 test('the gRPC harness is in scope', () => {
   const root = project({
-    'grpc_server.js': j('// as Sender', '.java:12 does\n'),
-    'grpc_translate.js': '// clean\n',
+    'grpc-server/grpc_server.js': j('// as Sender', '.java:12 does\n'),
+    'grpc-server/grpc_translate.js': '// clean\n',
   });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     j(
-      'grpc_server.js: 1 Java file:line reference(s) in comments, the first `Sender.java',
+      'grpc-server/grpc_server.js: 1 Java file:line reference(s) in comments, the first `Sender.java',
       ':12` at line 1: name the Java member instead (`org.apache.kafka.…Class#member`)',
     ),
   ]);

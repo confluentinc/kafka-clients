@@ -24,13 +24,17 @@
 //!   "classes": [ { "fqn", "package", "path", "kind", "visibility", "abstract",
 //!                  "functional_interface", "supertypes", "public_audience",
 //!                  "unsupported_package", "deprecated", "javadoc",
-//!                  "overloads": [ { "name", "params", "param_names", "return_type",
+//!                  "overloads": [ { "name", "params", "param_names", "param_types", "return_type",
 //!                                   "visibility", "static", "default", "deprecated",
 //!                                   "javadoc" } ],
 //!                  "fields": [ { "name", "type", "visibility", "static", "final",
 //!                                "deprecated", "javadoc" } ],
 //!                  "enum_constants" } ] }
 //! ```
+//!
+//! `params` holds the erased simple type names the form keys use
+//! (`BiConsumer`), `param_types` the types as written
+//! (`BiConsumer<? super T, ? super Throwable>`).
 //!
 //! A `javadoc` is `null` or `{ "text", "params": [{ "name", "text" }],
 //! "returns", "throws": [{ "class", "text" }], "words" }`: the text as
@@ -191,6 +195,7 @@ fn class_json(
             ("name", string(&o.name)),
             ("params", array(o.params.iter().map(|p| string(p)))),
             ("param_names", array(o.param_names.iter().map(|p| string(p)))),
+            ("param_types", array(o.param_types.iter().map(|p| string(p)))),
             ("return_type", o.return_type.as_deref().map_or_else(null, string)),
             ("visibility", string(visibility(o.visibility))),
             ("static", boolean(o.is_static)),
@@ -420,6 +425,28 @@ mod tests {
     }
 
     #[test]
+    fn param_types_keep_the_type_arguments_the_erased_params_drop() {
+        let index = index(
+            r#"
+            package org.apache.kafka.clients.producer;
+            public abstract class Fut<T> {
+                public abstract Fut<T> whenComplete(BiConsumer<? super T, ? super Throwable> action);
+                public static Fut<Void> allOf(Fut<?>... futures) { return null; }
+                public abstract T get(long timeout, final @Nullable TimeUnit unit);
+            }
+            "#,
+        );
+        let fut = index.classes.iter().find(|c| c.path == ["Fut"]).unwrap();
+        let of = |name: &str| fut.overloads.iter().find(|o| o.name == name).unwrap();
+        assert_eq!(of("whenComplete").params, ["BiConsumer"]);
+        assert_eq!(of("whenComplete").param_types, ["BiConsumer<? super T, ? super Throwable>"]);
+        assert_eq!(of("allOf").params, ["Fut[]"]);
+        assert_eq!(of("allOf").param_types, ["Fut<?>[]"]);
+        assert_eq!(of("get").param_types, ["long", "TimeUnit"]);
+        assert_eq!(of("get").param_names, ["timeout", "unit"]);
+    }
+
+    #[test]
     fn writes_the_schema_with_flags_and_tags() {
         let mut index = index(FIXTURE);
         index.merge_deprecation_list("org.apache.kafka.clients.producer.Rec#TOPIC_CONFIG\n");
@@ -448,7 +475,7 @@ mod tests {
         has(
             rec,
             concat!(
-                r#"{"name":"send","params":["Duration"],"param_names":["timeout"],"#,
+                r#"{"name":"send","params":["Duration"],"param_names":["timeout"],"param_types":["Duration"],"#,
                 r#""return_type":"Future<RecordMetadata>","visibility":"public","static":false,"default":false,"#,
                 r#""deprecated":false,"javadoc":{"text":"Sends it.\n\n@param timeout how long\n@param <T> the type\n"#,
                 r#"@return the {@code Future}\n@throws IllegalStateException if closed\n"#,
@@ -462,7 +489,7 @@ mod tests {
         has(
             rec,
             concat!(
-                r#"{"name":"all","params":["String[]"],"param_names":["names"],"#,
+                r#"{"name":"all","params":["String[]"],"param_names":["names"],"param_types":["String[]"],"#,
                 r#""return_type":"Map<String, ? extends List<T>>[]","visibility":"public","static":true,"#,
                 r#""default":false,"deprecated":true,"javadoc":null}"#
             ),
@@ -470,7 +497,7 @@ mod tests {
         has(
             rec,
             concat!(
-                r#"{"name":"Rec","params":["String"],"param_names":["topic"],"return_type":null,"#,
+                r#"{"name":"Rec","params":["String"],"param_names":["topic"],"param_types":["String"],"return_type":null,"#,
                 r#""visibility":"package-private","static":false,"default":false,"deprecated":false,"javadoc":null}"#
             ),
         );

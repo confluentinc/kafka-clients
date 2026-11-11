@@ -27,6 +27,7 @@ const assert = require('node:assert/strict');
 const { Linter } = require('eslint');
 
 const { run, evaluate, print, BASELINE: RUNNER_BASELINE } = require('../../scripts/lint_rules');
+const { Context } = require('../../scripts/lint/context');
 const { ESLINT_CHECKS, RUNNER_CHECKS, part, eslintName } = require('../../scripts/lint/checks');
 const { BASELINE, configure, projectOf } = require('../../scripts/lint/eslint/analysis');
 const { config, KAFKA_RULES } = require('../../scripts/lint/eslint/config');
@@ -34,8 +35,8 @@ const plugin = require('../../scripts/lint/eslint/plugin');
 
 /** A tsconfig.json like the client's, for the rules that build the TypeScript program. */
 const TSCONFIG = JSON.stringify({
-  compilerOptions: { strict: true, target: 'es2022', lib: ['es2022'], module: 'node16', rootDir: 'lib', noEmit: true },
-  include: ['lib/**/*.ts'],
+  compilerOptions: { strict: true, target: 'es2022', lib: ['es2022'], module: 'node16', rootDir: 'src', noEmit: true },
+  include: ['src/**/*.ts'],
 });
 
 /** The unfinished-work markers, spelt in pieces so the test sources do not carry them. */
@@ -72,15 +73,16 @@ function copy(from, to, rel) {
 const ORDER = [
   'check-no-todo',
   'check-exception-word',
-  'check-private-members',
+  'check-internal-members',
   'check-java-line',
   'check-java-name',
   'check-java-members',
   'check-java-completeness',
   'check-public-audience',
   'check-no-deprecated-translation',
-  'check-getters-readonly',
-  'check-java-tags',
+  'check-data-objects',
+  'check-invented-names',
+  'check-module-exports',
   'check-overload-shape',
   'check-type-mapping',
   'check-waiting-call-promise',
@@ -91,10 +93,9 @@ const ORDER = [
   'check-single-drainer',
   'check-completion-order',
   'check-ownership',
-  'check-zero-copy',
+  'check-one-copy',
+  'check-string-encoding',
   'check-no-binding-queue',
-  'check-tsdoc-present',
-  'check-tsdoc-tags',
   'check-directives',
   'check-config',
 ];
@@ -262,7 +263,7 @@ function lint(root, args = [], options = {}) {
   // The rules turned off, as ESLint's config turns a rule off: the others run as usual.
   const disabled = opts.disable || [];
   // ESLint's half first: a rule split by file type lists its TypeScript and
-  // JavaScript findings before the runner's (lib/ before src/).
+  // JavaScript findings before the runner's (src/ before native/).
   const bySide = [];
   if ((only === undefined && eslintChecks.length > 0) || inEslint) {
     const selected = eslintChecks.filter((c) => (only === undefined || c.name === only) && !disabled.includes(c.name));
@@ -321,4 +322,52 @@ function lintRunner(root, args = [], options = {}) {
   return { status, out, err, text: all.join('\n') };
 }
 
-module.exports = { TSCONFIG, TODO_MARK, FIXME_MARK, CLAUDE_MD, project, copy, lint, lintRunner, eslintMessages, findings, failedRules };
+/**
+ * Adds every finding both tools report on `root` now, and their baselines
+ * do not list, to its copy of those baselines (eslint-baseline.txt, lint-baseline.txt), so that a copy of the
+ * real tree starts clean while the real tree still has findings the rules
+ * report on code that does not follow them yet: a test on the copy then sees
+ * only what it changes. Never used on the real tree. Returns the lines added.
+ */
+function baselineCurrent(root) {
+  const header = path.join(root, 'confluent_kafka_bindings.h');
+  const ctx = new Context({ root, headerPath: fs.existsSync(header) ? header : undefined });
+  const keys = (checks) => {
+    const out = new Set();
+    for (const c of checks) {
+      if ((c.needs || []).some((n) => ctx.missing(n) !== null)) continue;
+      for (const f of c.check(ctx).findings) out.add(`${f.kind} ${f.subject}`);
+    }
+    return [...out];
+  };
+  const added = {};
+  for (const [file, checks] of [
+    ['eslint-baseline.txt', ESLINT_CHECKS],
+    ['lint-baseline.txt', RUNNER_CHECKS],
+  ]) {
+    const listed = fs.existsSync(path.join(root, file))
+      ? new Set(fs.readFileSync(path.join(root, file), 'utf8').split('\n').map((l) => l.trim()))
+      : new Set();
+    const lines = keys(checks).filter((l) => !listed.has(l));
+    added[file] = lines;
+    if (lines.length > 0) {
+      fs.appendFileSync(path.join(root, file), `\n# The real tree's findings when the copy was made.\n${lines.join('\n')}\n`);
+    }
+  }
+  return added;
+}
+
+module.exports = {
+  TSCONFIG,
+  TODO_MARK,
+  FIXME_MARK,
+  CLAUDE_MD,
+  project,
+  copy,
+  lint,
+  lintRunner,
+  eslintMessages,
+  findings,
+  failedRules,
+  baselineCurrent,
+};

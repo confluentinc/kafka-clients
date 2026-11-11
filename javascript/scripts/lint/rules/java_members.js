@@ -21,8 +21,9 @@
 // `static readonly` as a `public static final` field, the constructor as
 // Java's constructors (scripts/lint/java_ts.js), each of its own static-ness
 // (a mismatch is a `static-mismatch`). An exported interface or object type
-// mapped to a Java class is checked as a class is. A member tagged `@jsOnly`
-// is exempt, one tagged `@java <fqn>#<member>` maps to that member. An error class keeps the
+// mapped to a Java class is checked as a class is. A member on the list of
+// invented names (lint-mapping.json's `invented`) is exempt, one in its
+// `javaTargets` maps to the `<fqn>#<member>` listed. An error class keeps the
 // fields javascript/CLAUDE.md "Errors" lists instead of Java's members; a
 // function type (`Callback`) has none to map.
 
@@ -37,7 +38,7 @@ const {
   unGet,
   shortName,
   functionType,
-  tagsOf,
+  memberTags,
 } = require('../java_ts');
 
 /** `member` as the lint names it: `Class.member`, `Class.constructor`. */
@@ -45,7 +46,7 @@ function memberName(item, m) {
   return `${item.name}.${m.name}`;
 }
 
-/** The Java member a TypeScript member's `@java <fqn>#<member>` tag names, or null (check-java-tags reports a bad one). */
+/** The Java member a `javaTargets` entry `<fqn>#<member>` names, or null (check-invented-names reports a bad one). */
 function taggedMember(index, tag) {
   const [fqn, member] = tag.split('#');
   const cls = index.resolve(fqn);
@@ -59,7 +60,7 @@ function taggedMember(index, tag) {
 /**
  * Every public member of every exported class with a Java class, for the
  * member rules: `{item, java, m, jm}`, `jm` the Java member or null. Error
- * classes, function types and `@jsOnly` classes are left out.
+ * classes, function types and invented classes are left out.
  */
 function mappedMembers(ctx) {
   return ctx.once('mappedMembers', () => {
@@ -69,7 +70,7 @@ function mappedMembers(ctx) {
     for (const { item, java, isError } of mappedItems(ctx)) {
       if (item.tags.jsOnly || isError || java === null || !java.cls || functionType(java.cls)) continue;
       for (const m of itemMembers(ts, item)) {
-        const tags = tagsOf(ts, m.node);
+        const tags = memberTags(ctx, item, m);
         if (tags.jsOnly) continue;
         const jm = tags.java ? taggedMember(index, tags.java.text) : javaMember(index, java.cls, m);
         out.push({ item, java, m, jm });
@@ -84,9 +85,10 @@ module.exports = {
   kinds: ['no-java-member', 'static-mismatch', 'not-static-final', 'error-member'],
   needs: ['program', 'java'],
   hint:
-    'Give the member its Java member\'s name (a Java getter is a get accessor named without `get`, a ' +
-    '`public static final` a `static readonly`), or tag it `@jsOnly <reason>` (javascript/CLAUDE.md ' +
-    '"Java shape, JS idiom").',
+    'Give the member its Java member\'s name (a Java getter is a readonly field on a data class and a method ' +
+    'of Java\'s name elsewhere, a `public static final` a `static readonly`), or list it with its reason in ' +
+    'lint-mapping.json\'s `invented`, the list of invented names ' +
+    '(javascript/CLAUDE.md "Java shape, JS idiom").',
   mappedMembers,
   check(ctx) {
     const { ts } = ctx.program();

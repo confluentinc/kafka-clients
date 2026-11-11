@@ -32,12 +32,12 @@ test('no lock outside the queue, no store of records', () => {
 
 test('each finding kind, with its exact text', () => {
   const r = runN(RULE, {
-    'src/producer.c': `static pthread_mutex_t producer_lock;\n${PRODUCER_C}`,
-    'lib/producer/producer.ts': PRODUCER_TS.replace('export class Producer {', 'const MAX_RECORDS = 10;\nvoid MAX_RECORDS;\nexport class Producer {\n  #pending: unknown[] = [];\n  #byTopic = new Map<string, number>();'),
+    'native/producer.c': `static pthread_mutex_t producer_lock;\n${PRODUCER_C}`,
+    'src/producer/producer.ts': PRODUCER_TS.replace('export class Producer {', 'const MAX_RECORDS = 10;\nvoid MAX_RECORDS;\nexport class Producer {\n  #pending: unknown[] = [];\n  #byTopic = new Map<string, number>();'),
   });
   assert.deepEqual(findings(r), [
-    'src/producer.c:1: declares the pthread_mutex_t producer_lock: no lock outside src/callback_queue.c',
-    'lib/producer/producer.ts:MAX_RECORDS: names a cap: the binding caps no records',
+    'native/producer.c:1: declares the pthread_mutex_t producer_lock: no lock outside native/callback_queue.c',
+    'src/producer/producer.ts:MAX_RECORDS: names a cap: the binding caps no records',
     'Producer.#pending: holds a unknown[]: the binding keeps no records',
     'Producer.#byTopic: holds a Map<string, number>: the binding keeps no records',
   ]);
@@ -46,37 +46,37 @@ test('each finding kind, with its exact text', () => {
 test('the lock entry allows its one declaration; a module store and a parameter property are stores too', () => {
   const { UTIL_H } = require('./_c_fixture');
   const r = runN(RULE, {
-    'src/util.h': UTIL_H.replace('    pthread_mutex_t notify_mtx;', '    pthread_mutex_t notify_mtx;\n    pthread_mutex_t record_mtx;'),
-    'lib/producer/producer.ts': PRODUCER_TS.replace(
+    'native/util.h': UTIL_H.replace('    pthread_mutex_t notify_mtx;', '    pthread_mutex_t notify_mtx;\n    pthread_mutex_t record_mtx;'),
+    'src/producer/producer.ts': PRODUCER_TS.replace(
       'export class Producer {',
       'const pendingRecords: string[] = [];\nvoid pendingRecords;\nexport class Producer {\n  constructor(private readonly records: string[] = []) {}',
     ),
   });
   assert.deepEqual(findings(r), [
-    'src/util.h:7: declares the pthread_mutex_t CallbackQueue.record_mtx: no lock outside src/callback_queue.c',
-    'lib/producer/producer.ts:pendingRecords: holds a string[] at module level: the binding keeps no records',
+    'native/util.h:7: declares the pthread_mutex_t CallbackQueue.record_mtx: no lock outside native/callback_queue.c',
+    'src/producer/producer.ts:pendingRecords: holds a string[] at module level: the binding keeps no records',
     'Producer.records: holds a string[]: the binding keeps no records',
   ]);
 });
 
-test('a private helper of lib/ is read too; a generated module is not', () => {
+test('a private helper of src/ is read too; a generated module is not', () => {
   const queue = 'export class SendQueue {\n  private readonly records: unknown[] = [];\n  push(r: unknown): void {\n    if (this.records.length < SEND_QUEUE_LIMIT) this.records.push(r);\n  }\n}\n';
   const r = runN(RULE, {
-    'lib/_send_queue.ts': `const SEND_QUEUE_LIMIT = 10000;\n${queue}`,
-    'lib/common/errors/_table.ts': '// GENERATED, DO NOT EDIT: by the test.\nexport const TABLE: string[] = [];\n',
+    'src/internal/send_queue.ts': `const SEND_QUEUE_LIMIT = 10000;\n${queue}`,
+    'src/common/errors/_table.ts': '// GENERATED, DO NOT EDIT: by the test.\nexport const TABLE: string[] = [];\n',
   });
   assert.deepEqual(findings(r), [
-    'lib/_send_queue.ts:SEND_QUEUE_LIMIT: names a cap: the binding caps no records',
+    'src/internal/send_queue.ts:SEND_QUEUE_LIMIT: names a cap: the binding caps no records',
     'SendQueue.records: holds a unknown[]: the binding keeps no records',
   ]);
 });
 
 test('an allowlist entry that matches nothing is a finding', () => {
-  const r = runN(RULE, {}, { ALLOWED: [{ key: 'src/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }, { key: 'Producer.#gone', reason: 'the test' }] });
+  const r = runN(RULE, {}, { ALLOWED: [{ key: 'native/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }, { key: 'Producer.#gone', reason: 'the test' }] });
   assert.deepEqual(findings(r), ['Producer.#gone: is allowed as the test, but nothing matches it any more: delete the entry']);
 });
 
 test('cannot run without the C sources', () => {
-  const r = runN(RULE, { 'src/producer.c': undefined, 'src/callback_queue.c': undefined, 'src/record.c': undefined });
-  assert.equal(r.err[1], '❌ check-no-binding-queue: cannot run, no C sources under src/');
+  const r = runN(RULE, { 'native/producer.c': undefined, 'native/callback_queue.c': undefined, 'native/record.c': undefined });
+  assert.equal(r.err[1], '❌ check-no-binding-queue: cannot run, no C sources under native/');
 });

@@ -21,12 +21,12 @@
 // a Promise, and one whose native path reaches none does not. The path is
 // followed:
 //   1. the method's `native.<fn>` uses (the handle under any name, by its
-//      type), in its body or in the body of any lib/ function or method it
+//      type), in its body or in the body of any src/ function or method it
 //      calls, transitively, as the type checker resolves the calls (a module
 //      helper, a private method, another class's `x['_m']()`);
-//   2. each `<fn>`'s registration in src/addon.c (`{"<fn>", ..., Impl}`);
+//   2. each `<fn>`'s registration in native/addon.c (`{"<fn>", ..., Impl}`);
 //   3. the `kafka_*` functions `Impl` calls, directly or through the
-//      functions of src/*.c it calls.
+//      functions of native/*.c it calls.
 // A use that leads nowhere (no registration, no C definition) is a finding of
 // its own: an unresolved path never passes. A method with no native use is
 // not checked.
@@ -36,11 +36,11 @@ const { functionBodies, callSites, propertyDescriptors, prototypes } = require('
 const { exportedItems, publicMembers } = require('../java_ts');
 const { nativeUses, reachedBodies } = require('../native_uses');
 
-/** The C call graph of src/*.c: function name -> the names it calls. */
+/** The C call graph of native/*.c: function name -> the names it calls. */
 function callGraph(ctx) {
   return ctx.once('cCallGraph', () => {
     const graph = new Map();
-    for (const rel of ctx.files(['src'], ['.c'])) {
+    for (const rel of ctx.files(['native'], ['.c'])) {
       const text = ctx.read(rel);
       for (const name of functionBodies(text).keys()) graph.set(name, new Set());
       for (const call of callSites(text)) {
@@ -51,7 +51,7 @@ function callGraph(ctx) {
   });
 }
 
-/** The `kafka_*` functions C function `start` reaches, through the functions of src/*.c. */
+/** The `kafka_*` functions C function `start` reaches, through the functions of native/*.c. */
 function reachedKafka(graph, start) {
   const out = new Set();
   const seen = new Set([start]);
@@ -75,8 +75,8 @@ function reachedKafka(graph, start) {
 function analyse(ctx) {
   return ctx.once('waitingAnalysis', () => {
     const { ts, checker } = ctx.program();
-    if (!ctx.files(['src'], ['addon.c']).includes('src/addon.c')) throw new Error('no src/addon.c');
-    const registrations = new Map(propertyDescriptors(ctx.read('src/addon.c')).map((r) => [r.name, r]));
+    if (!ctx.files(['native'], ['addon.c']).includes('native/addon.c')) throw new Error('no native/addon.c');
+    const registrations = new Map(propertyDescriptors(ctx.read('native/addon.c')).map((r) => [r.name, r]));
     const graph = callGraph(ctx);
     const header = prototypes(ctx.header());
     const isTwin = (name) => name.endsWith('_cb') && header.has(name) && header.has(name.slice(0, -'_cb'.length));
@@ -92,8 +92,8 @@ function analyse(ctx) {
         for (const name of [...new Set(uses.map((u) => u.name))]) {
           const r = registrations.get(name);
           const impl = r && (r.method || r.getter);
-          if (!impl) unresolved.push(`native.${name} is registered by no napi_property_descriptor of src/addon.c`);
-          else if (!graph.has(impl)) unresolved.push(`native.${name}'s implementation ${impl} is defined in no src/*.c`);
+          if (!impl) unresolved.push(`native.${name} is registered by no napi_property_descriptor of native/addon.c`);
+          else if (!graph.has(impl)) unresolved.push(`native.${name}'s implementation ${impl} is defined in no native/*.c`);
           else for (const k of reachedKafka(graph, impl)) if (isTwin(k)) twins.add(k);
         }
         const signature = checker.getSignatureFromDeclaration(m.node);
@@ -115,7 +115,7 @@ function waitingMembers(ctx) {
 module.exports = {
   name: 'check-waiting-call-promise',
   kinds: ['not-promise', 'promise-not-waiting', 'unresolved-native'],
-  needs: ['program', 'src', 'header'],
+  needs: ['program', 'native', 'header'],
   hint:
     'A method whose native call waits on a _cb twin returns a Promise settled by that completion; one ' +
     'that waits on none returns its value (javascript/CLAUDE.md boundary rule 4).',

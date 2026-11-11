@@ -15,16 +15,16 @@
 'use strict';
 
 // A2 check-native-registry (javascript/CLAUDE.md "Files and layout"):
-//   - every function src/addon.c registers (its napi_property_descriptor
-//     table) is used from lib/ through the handle lib/_native.ts exports
-//     (under any name: by its type), and every function lib/ uses is
+//   - every function native/addon.c registers (its napi_property_descriptor
+//     table) is used from src/ through the handle src/internal/native.ts exports
+//     (under any name: by its type), and every function src/ uses is
 //     registered; a test-only registration is allowed unused, listed with
 //     its reason (`TEST_ONLY`);
-//   - only lib/_native_loader.ts names a `.node` file (the platform package's
-//     addon, then build/Release/);
-//   - only lib/_native.ts imports the loader and does the one-time setup
+//   - only src/internal/native_loader.ts names a `.node` file (the platform package's
+//     addon, then native/build/Release/);
+//   - only src/internal/native.ts imports the loader and does the one-time setup
 //     (`setFactories`);
-//   - no index.ts imports lib/_native.ts: the addon is never loaded by a
+//   - no index.ts imports src/internal/native.ts: the addon is never loaded by a
 //     module folder.
 
 const { atText } = require('../location');
@@ -33,18 +33,18 @@ const path = require('node:path');
 const { propertyDescriptors } = require('../c_source');
 const { nativeSymbol, nativeUses } = require('../native_uses');
 
-const NATIVE = 'lib/_native.ts';
-const LOADER = 'lib/_native_loader.ts';
+const NATIVE = 'src/internal/native.ts';
+const LOADER = 'src/internal/native_loader.ts';
 const SETUP = new Set(['setFactories']);
 
 /**
- * The registrations lib/ does not use, by the user's decision of 2026-11-05
+ * The registrations src/ does not use, by the user's decision of 2026-11-05
  * (design/current/javascript-rule-linter/PLAN.md §8 decision 12), each with
- * its reason. An entry that is not a registration lib/ leaves unused any more
+ * its reason. An entry that is not a registration src/ leaves unused any more
  * is a finding, so the list cannot grow stale.
  */
 const TEST_ONLY = new Map([
-  ['probe', { test: 'test/unit/_native.test.js', reason: 'a test-only registration: the load check test/unit/_native.test.js calls' }],
+  ['probe', { test: 'test/unit/internal/native.test.js', reason: 'a test-only registration: the load check test/unit/internal/native.test.js calls' }],
 ]);
 
 /** The module specifiers `sf` imports or requires, with their lines. */
@@ -70,7 +70,7 @@ function moduleSpecifiers(ts, sf) {
   return out;
 }
 
-/** Whether module specifier `spec`, written in `rel`, names lib file `target` (`lib/_native.ts`). */
+/** Whether module specifier `spec`, written in `rel`, names src/ file `target` (`src/internal/native.ts`). */
 function names(rel, spec, target) {
   if (!spec.startsWith('.')) return false;
   const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(rel), spec));
@@ -81,15 +81,15 @@ module.exports = {
   name: 'check-native-registry',
   TEST_ONLY,
   kinds: ['registered-unused', 'used-unregistered', 'unused-allowance', 'node-path', 'loader-import', 'setup-outside', 'index-native'],
-  needs: ['program', 'src'],
+  needs: ['program', 'native'],
   hint:
-    'Register in src/addon.c exactly the functions lib/ calls; leave finding the addon to ' +
-    'lib/_native_loader.ts and loading it to lib/_native.ts (javascript/CLAUDE.md "Files and layout").',
+    'Register in native/addon.c exactly the functions src/ calls; leave finding the addon to ' +
+    'src/internal/native_loader.ts and loading it to src/internal/native.ts (javascript/CLAUDE.md "Files and layout").',
   check(ctx) {
     const { ts, sourceFiles } = ctx.program();
-    if (!ctx.files(['src'], ['addon.c']).includes('src/addon.c')) throw new Error('no src/addon.c');
+    if (!ctx.files(['native'], ['addon.c']).includes('native/addon.c')) throw new Error('no native/addon.c');
     if (nativeSymbol(ctx) === null) throw new Error(`${NATIVE} exports no handle (\`export = <handle>\`)`);
-    const registered = propertyDescriptors(ctx.read('src/addon.c'));
+    const registered = propertyDescriptors(ctx.read('native/addon.c'));
     const uses = nativeUses(ctx);
     const findings = [];
     let checked = 0;
@@ -97,8 +97,8 @@ module.exports = {
     const registeredNames = new Set(registered.map((r) => r.name));
     for (const [name, { test, reason }] of this.TEST_ONLY) {
       let why = null;
-      if (!registeredNames.has(name)) why = 'src/addon.c does not register it';
-      else if (usedNames.has(name)) why = 'lib/ uses it';
+      if (!registeredNames.has(name)) why = 'native/addon.c does not register it';
+      else if (usedNames.has(name)) why = 'src/ uses it';
       else {
         let text = '';
         try {
@@ -117,10 +117,10 @@ module.exports = {
       if (!usedNames.has(r.name) && !this.TEST_ONLY.has(r.name)) {
         findings.push({
           kind: 'registered-unused',
-          subject: `src/addon.c:${r.name}`,
+          subject: `native/addon.c:${r.name}`,
           // On the TypeScript side (ESLint reads no C): the native module's interface.
-          at: atText(ctx, 'lib/_native.ts', 'interface Native'),
-          message: `registers ${r.name} (${r.method || r.getter}), which lib/ never uses`,
+          at: atText(ctx, 'src/internal/native.ts', 'interface Native'),
+          message: `registers ${r.name} (${r.method || r.getter}), which src/ never uses`,
         });
       }
     }
@@ -130,7 +130,7 @@ module.exports = {
         findings.push({
           kind: 'used-unregistered',
           subject: `${u.rel}:${u.line}`,
-          message: `native.${u.name} is registered by no napi_property_descriptor of src/addon.c`,
+          message: `native.${u.name} is registered by no napi_property_descriptor of native/addon.c`,
         });
       }
       if (SETUP.has(u.name) && u.rel !== NATIVE) {

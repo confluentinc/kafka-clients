@@ -28,8 +28,8 @@ const RULE = 'check-no-todo';
 test('a clean project passes, every file counted', () => {
   const root = project({
     ...CLAUDE_MD,
-    'lib/a.ts': 'export const a = 1;\n',
-    'src/a.c': 'int a;\n',
+    'src/a.ts': 'export const a = 1;\n',
+    'native/a.c': 'int a;\n',
     'Makefile': 'all:\n',
     'release/notes.txt': 'done\n',
     'node_modules/x/y.js': `// ${TODO_MARK} in a dependency\n`,
@@ -42,7 +42,7 @@ test('a clean project passes, every file counted', () => {
 test('each marker is a finding with its file and line, in code, comments and strings', () => {
   const root = project({
     ...CLAUDE_MD,
-    'lib/a.ts': `export const a = 1;\n// ${TODO_MARK}: later\nconst s = '${FIXME_MARK}';\n`,
+    'src/a.ts': `export const a = 1;\n// ${TODO_MARK}: later\nconst s = '${FIXME_MARK}';\n`,
     'tools/t.js': `x(); /* ${FIXME_MARK} */\n`,
     'examples/e.js': `// ${TODO_MARK}S and ${TODO_MARK}x are not the marker; a${TODO_MARK} neither\n`,
     'Makefile': `# ${TODO_MARK}\n`,
@@ -51,8 +51,8 @@ test('each marker is a finding with its file and line, in code, comments and str
   assert.equal(r.status, 1);
   // ESLint's half (TypeScript and JavaScript) first, then the runner's.
   assert.deepEqual(findings(r), [
-    `lib/a.ts:2: \`${TODO_MARK}\` marker: finish the work or delete the note`,
-    `lib/a.ts:3: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
+    `src/a.ts:2: \`${TODO_MARK}\` marker: finish the work or delete the note`,
+    `src/a.ts:3: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
     `tools/t.js:1: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
     `Makefile:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
   ]);
@@ -69,23 +69,23 @@ test('each marker is a finding with its file and line, in code, comments and str
 test('a baseline line waives a marker', () => {
   const root = project({
     ...CLAUDE_MD,
-    'lib/a.ts': `// ${TODO_MARK}\n`,
-    'eslint-baseline.txt': '# waived\ntodo lib/a.ts:1\n',
+    'src/a.ts': `// ${TODO_MARK}\n`,
+    'eslint-baseline.txt': '# waived\ntodo src/a.ts:1\n',
   });
   assert.equal(lint(root, [RULE]).status, 0);
   assert.equal(lint(root, [RULE, '--no-baseline']).status, 1);
 });
 
 test('a binary file is not read', () => {
-  const root = project({ ...CLAUDE_MD, 'lib/a.ts': 'export {};\n', 'src/blob.bin': `\u0000${TODO_MARK}` });
+  const root = project({ ...CLAUDE_MD, 'src/a.ts': 'export {};\n', 'native/blob.bin': `\u0000${TODO_MARK}` });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 0, r.text);
   assert.ok(r.out.includes('✅ check-no-todo: 2 item(s) checked'));
 });
 
 test("git's environment and index change nothing: every file is read, an unstaged new one too", () => {
-  const files = { ...CLAUDE_MD, 'lib/a.ts': 'export {};\n', 'lib/new.ts': `// ${TODO_MARK}\n`, '.claude/notes.md': `${TODO_MARK}\n` };
-  const expected = [`lib/new.ts:1: \`${TODO_MARK}\` marker: finish the work or delete the note`];
+  const files = { ...CLAUDE_MD, 'src/a.ts': 'export {};\n', 'src/new.ts': `// ${TODO_MARK}\n`, '.claude/notes.md': `${TODO_MARK}\n` };
+  const expected = [`src/new.ts:1: \`${TODO_MARK}\` marker: finish the work or delete the note`];
   const plain = lint(project(files), [RULE]);
   assert.deepEqual(findings(plain), expected);
   assert.ok(plain.err.includes('❌ check-no-todo: 1 finding(s).'), plain.text);
@@ -124,15 +124,15 @@ test('the rule needs no input, so it always runs', () => {
 
 test("CLAUDE.md's rule sentence is exempt, wherever it wraps; any other marker of the file is a finding", () => {
   const claude = `# Rules\n\n- Every file carries the header. No ${TODO_MARK}\n  or ${FIXME_MARK}.\n`;
-  let r = lint(project({ 'CLAUDE.md': claude, 'lib/a.ts': 'export {};\n' }), [RULE]);
+  let r = lint(project({ 'CLAUDE.md': claude, 'src/a.ts': 'export {};\n' }), [RULE]);
   assert.equal(r.status, 0, r.text);
   assert.ok(r.out.includes('✅ check-no-todo: 2 item(s) checked'), r.text);
-  r = lint(project({ 'CLAUDE.md': `${claude}\n${TODO_MARK}: write this section.\n`, 'lib/CLAUDE.md': `No ${TODO_MARK} or ${FIXME_MARK}.\n` }), [RULE]);
+  r = lint(project({ 'CLAUDE.md': `${claude}\n${TODO_MARK}: write this section.\n`, 'src/CLAUDE.md': `No ${TODO_MARK} or ${FIXME_MARK}.\n` }), [RULE]);
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     `CLAUDE.md:6: \`${TODO_MARK}\` marker: finish the work or delete the note`,
-    `lib/CLAUDE.md:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
-    `lib/CLAUDE.md:1: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
+    `src/CLAUDE.md:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
+    `src/CLAUDE.md:1: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
   ]);
 });
 
@@ -141,28 +141,29 @@ test('an exemption whose sentence is gone is a finding: reworded, or the file mi
   let r = lint(project({ 'CLAUDE.md': 'Nothing is left unfinished.\n' }), [RULE]);
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [unused]);
-  r = lint(project({ 'lib/a.ts': 'export {};\n' }), [RULE]);
+  r = lint(project({ 'src/a.ts': 'export {};\n' }), [RULE]);
   assert.deepEqual(findings(r), [unused]);
 });
 
 test('every file is read: the gRPC harness, build files and docs too; package-lock.json and outputs are not', () => {
   const root = project({
     ...CLAUDE_MD,
-    'grpc_server.js': `// ${TODO_MARK}\n`,
-    'binding.gyp': `# ${FIXME_MARK}\n`,
+    'grpc-server/grpc_server.js': `// ${TODO_MARK}\n`,
+    'native/binding.gyp': `# ${FIXME_MARK}\n`,
     'Dockerfile.grpc': `# ${TODO_MARK}\n`,
     'README.md': `${TODO_MARK}\n`,
     'package-lock.json': `"${TODO_MARK}"\n`,
     'dist/index.js': `// ${TODO_MARK}\n`,
     'build/x.js': `// ${TODO_MARK}\n`,
+    'native/build/Makefile': `# ${TODO_MARK}\n`,
   });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 1);
   // ESLint's half (the gRPC harness's JavaScript) first, then the runner's.
   assert.deepEqual(findings(r), [
-    `grpc_server.js:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
+    `grpc-server/grpc_server.js:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
     `Dockerfile.grpc:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
     `README.md:1: \`${TODO_MARK}\` marker: finish the work or delete the note`,
-    `binding.gyp:1: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
+    `native/binding.gyp:1: \`${FIXME_MARK}\` marker: finish the work or delete the note`,
   ]);
 });

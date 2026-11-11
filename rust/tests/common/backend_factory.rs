@@ -698,8 +698,8 @@ mod grpc_backends {
         }
     }
 
-    /// Backend that drives the Node.js producer (`javascript/lib/producer`)
-    /// through `javascript/grpc_server.js`, natively or in the
+    /// Backend that drives the Node.js producer (`javascript/src/producer`)
+    /// through `javascript/grpc-server/grpc_server.js`, natively or in the
     /// `confluent-kafka-rust/javascript-grpc-server:dev` Docker image.
     ///
     /// Producer only. The JavaScript binding has no consumer or admin client

@@ -24,12 +24,13 @@
 #       Prints each version of <package> on the registry, one per line, and nothing if the
 #       registry has no such package. Fails if the registry cannot be read.
 #   check-published-npm.py check <version>
-#       Checks that the main package and the three platform packages are on the registry at
-#       <version>; that the `preview` dist-tag of each points at it or at a later version (npm's
-#       semver precedence), so the check can be rerun once a newer pre-release is out; that the
-#       main package's `latest`, and its `rc` and `alpha` when present, stay on the earlier
-#       client (a major version below 4); that the main package's optionalDependencies name
-#       exactly the three platform packages at <version>; then downloads the four tarballs,
+#       Checks that the main package and the two platform packages are on the registry at
+#       <version>; that the dist-tag of each (`preview` for a pre-release, `latest` for a release,
+#       as check-npm.py dist-tag gives it) points at it or at a later version (npm's semver
+#       precedence), so the check can be rerun once a newer version is out; that, for a
+#       pre-release, the main package's `latest`, and its `rc` and `alpha` when present, stay on
+#       the earlier client (a major version below 4); that the main package's optionalDependencies name
+#       exactly the two platform packages at <version>; then downloads the three tarballs,
 #       checks each against the sha512 integrity the registry states, and runs check-npm.py's
 #       package checks on them (--published).
 #   check-published-npm.py self-test
@@ -55,7 +56,9 @@ import urllib.parse
 import urllib.request
 
 MAIN_PACKAGE = "@confluentinc/kafka-javascript"
-PLATFORMS = ("linux-x64-gnu", "linux-arm64-gnu", "darwin-arm64")
+# The platform packages of the preview (javascript/npm/).
+PLATFORMS = ("linux-x64-gnu", "darwin-arm64")
+# A pre-release's dist-tag (check-npm.py dist-tag); a release's is `latest`.
 DIST_TAG = "preview"
 # The main package's dist-tags that the earlier, librdkafka-based client holds with its 0.x and
 # 1.x releases: a version of this client (MIN_MAJOR or above, check-npm.py's) must never move them.
@@ -143,15 +146,22 @@ def semver_key(version):
     return release, (0, identifiers)
 
 
+def expected_dist_tag(version):
+    """The dist-tag `version` goes out under, as check-npm.py dist-tag gives it for this client:
+    `preview` for a pre-release, `latest` for a release."""
+    return DIST_TAG if "-" in version else "latest"
+
+
 def dist_tag_problems(name, tags, version):
-    """What is wrong with the dist-tags `tags` of package `name` once `version` is published:
-    `preview` must be at `version` or later, and the main package's earlier-client tags below
-    MIN_MAJOR."""
+    """What is wrong with the dist-tags `tags` of package `name` once `version` is published: its
+    dist-tag must be at `version` or later, and, for a pre-release, the main package's
+    earlier-client tags below MIN_MAJOR."""
     problems = []
-    tagged = tags.get(DIST_TAG)
+    dist_tag = expected_dist_tag(version)
+    tagged = tags.get(dist_tag)
     if semver_key(tagged) is None or semver_key(tagged) < semver_key(version):
-        problems.append(f"the {DIST_TAG} dist-tag of {name} is {tagged!r}, not {version} or a later version")
-    if name == MAIN_PACKAGE:
+        problems.append(f"the {dist_tag} dist-tag of {name} is {tagged!r}, not {version} or a later version")
+    if name == MAIN_PACKAGE and dist_tag == DIST_TAG:
         for tag in EARLIER_CLIENT_TAGS:
             if tag not in tags:
                 continue
@@ -194,6 +204,10 @@ def self_test():
          [f"the preview dist-tag of {MAIN_PACKAGE} is None, not 4.4.0-beta.1 or a later version"]),
         # The registry sets `latest` on a platform package's first publish: harmless.
         (platform, {"latest": "4.4.0-beta.1", "preview": "4.4.0-beta.1"}, "4.4.0-beta.1", []),
+        # A release goes out under latest, which then leaves the earlier client.
+        (MAIN_PACKAGE, {"latest": "4.5.0", "preview": "4.5.0-preview.2"}, "4.5.0", []),
+        (MAIN_PACKAGE, {"latest": "1.6.0", "preview": "4.5.0"}, "4.5.0",
+         [f"the latest dist-tag of {MAIN_PACKAGE} is '1.6.0', not 4.5.0 or a later version"]),
     ]
     for name, tags, version, expected in cases:
         actual = dist_tag_problems(name, tags, version)
@@ -242,7 +256,7 @@ def check(version):
                                  "package", directory, "--version", version, "--published"])
         if result.returncode != 0:
             sys.exit(f"check-published-npm: the tarballs of {version} on {registry()} do not pass check-npm.py")
-    print(f"{', '.join(names)} {version} are on {registry()}, {DIST_TAG} at it or later, with the tarballs "
+    print(f"{', '.join(names)} {version} are on {registry()}, {expected_dist_tag(version)} at it or later, with the tarballs "
           "check-npm.py accepts")
 
 

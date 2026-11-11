@@ -15,8 +15,8 @@
 'use strict';
 
 // D4 check-java-line (.claude/rules/documentation.md §7): no comment of
-// lib/, src/, test/, scripts/, tools/ or the gRPC harness (grpc_server.js,
-// grpc_translate.js) cites a Java source line; it names the Java member
+// src/, native/, test/, scripts/, tools/ or the gRPC harness (grpc-server/)
+// cites a Java source line; it names the Java member
 // instead. The forms are the Rust lint's (scripts/lint/java_line.js). One finding per file, as the Rust lint
 // reports it, keyed by the file.
 
@@ -24,7 +24,7 @@ const { scan } = require('../c_source');
 const { sourceComments } = require('../comments');
 const { javaLineRefsOfComments } = require('../java_line');
 
-const SCOPE = ['lib', 'src', 'test', 'scripts', 'tools', 'grpc_server.js', 'grpc_translate.js'];
+const SCOPE = ['src', 'native', 'test', 'scripts', 'tools', 'grpc-server'];
 const TS_LIKE = ['.ts', '.js', '.cjs', '.mjs'];
 const C_LIKE = ['.c', '.h'];
 

@@ -16,6 +16,15 @@
 
 // SslConfigs, SaslConfigs and SecurityConfig, as
 // python/test/unit/test_config_classes.py checks the Python ones.
+//
+// Java's SaslConfigsTest (Apache Kafka 4.4.0), 11 tests
+// (testSaslLoginRefreshDefaults, testSaslLoginRefreshMinValuesAreValid,
+// testSaslLoginRefreshMaxValuesAreValid and the eight
+// testSaslLoginRefresh*IsReallyMinimum / *IsReallyMaximum): skipped, as in
+// python/test/unit/test_config_class_ports.py: each parses a ConfigDef built by
+// SaslConfigs.addClientSaslSupport(ConfigDef), which is not translated (root
+// conventions, Scope: the ConfigDef machinery); core: none. SslConfigs and
+// SecurityConfig have no Java test class.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -48,11 +57,18 @@ test('evaluated constants are evaluated as Java does', () => {
   assert.equal(SaslConfigs.DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS, 60);
   assert.equal(SslConfigs.DEFAULT_SSL_KEYMANGER_ALGORITHM, 'SunX509');
   assert.equal(SslConfigs.DEFAULT_SSL_TRUSTMANAGER_ALGORITHM, 'PKIX');
-  // A Set constant is a frozen array, in Java's order.
-  assert.ok(Array.isArray(SslConfigs.RECONFIGURABLE_CONFIGS));
-  assert.ok(Object.isFrozen(SslConfigs.RECONFIGURABLE_CONFIGS));
-  assert.ok(SslConfigs.RECONFIGURABLE_CONFIGS.includes('ssl.keystore.type'));
-  assert.ok(SslConfigs.NON_RECONFIGURABLE_CONFIGS.includes('ssl.client.auth'));
+  // A Set constant is a read-only set, in Java's order: add, delete and clear
+  // throw, as Java's unmodifiable set's do.
+  for (const set of [SslConfigs.RECONFIGURABLE_CONFIGS, SslConfigs.NON_RECONFIGURABLE_CONFIGS]) {
+    assert.ok(set instanceof Set);
+    for (const change of [() => set.add('x'), () => set.delete('ssl.client.auth'), () => set.clear()]) {
+      assert.throws(change, { name: 'UnsupportedOperationError', message: '' });
+    }
+  }
+  assert.equal([...SslConfigs.RECONFIGURABLE_CONFIGS][0], 'ssl.keystore.type');
+  assert.ok(SslConfigs.RECONFIGURABLE_CONFIGS.has('ssl.keystore.type'));
+  assert.ok(SslConfigs.NON_RECONFIGURABLE_CONFIGS.has('ssl.client.auth'));
+  assert.equal(SslConfigs.NON_RECONFIGURABLE_CONFIGS.size, 10);
 });
 
 test("the store type defaults are Java's, not the core's", () => {

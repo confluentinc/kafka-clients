@@ -147,7 +147,7 @@ macro_rules! multilanguage_test {
             async fn [<$name __ grpc_js>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
-                    $crate::common::backend_pool::BackendKind::Javascript,
+                    $crate::common::backend_pool::BackendKind::Js,
                     ctx.broker_network_name(),
                 )
                 .await;

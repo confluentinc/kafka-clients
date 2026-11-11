@@ -16,7 +16,9 @@
 #
 #
 # Packs the npm packages of the Node.js client: one platform package per platform,
-# @confluentinc/kafka-javascript-<platform>, carrying the addon of that platform, and the main
+# @confluentinc/kafka-javascript-<platform>, built from its folder javascript/npm/<platform>/ (its
+# committed package.json and README) with the addon of that platform, the LICENSE, the NOTICE and
+# the third-party licence file, and the main
 # package, @confluentinc/kafka-javascript, carrying the compiled library (javascript/dist/),
 # whose optionalDependencies name the platform packages at its exact version, so that npm
 # installs the one of the user's platform. Then checks them with check-npm.py. Used by the
@@ -25,26 +27,31 @@
 # and python3.
 #
 # Usage, from the repository root:
-#   .semaphore/pack-npm.sh <natives-dir> <out-dir> [<platform> ...]
+#   .semaphore/pack-npm.sh [--licenses <file>] <natives-dir> <out-dir> [<platform> ...]
 #       <natives-dir> holds <platform>/confluent-kafka-javascript.node for each platform and
-#       nothing else; the platforms default to linux-x64-gnu linux-arm64-gnu darwin-arm64. Each
+#       nothing else; the platforms default to the preview's, linux-x64-gnu darwin-arm64. Each
 #       addon must pass check-npm.py's native checks, platform floors included. The package
 #       sources (javascript/) must be those of HEAD. Writes the tarballs `npm pack` names,
 #       confluentinc-kafka-javascript-<version>.tgz and
 #       confluentinc-kafka-javascript-<platform>-<version>.tgz, into <out-dir>, which must not
 #       exist or be empty, and prints their SHA-256.
-#   .semaphore/pack-npm.sh --dev <out-dir>
-#       Packs this machine's own static build (javascript/build/Release/, from `make -C
+#   .semaphore/pack-npm.sh [--licenses <file>] --dev <out-dir>
+#       Packs this machine's own static build (javascript/native/build/Release/, from `make -C
 #       javascript build-addon CONFLUENT_KAFKA_LINK=static`) as the one platform package of this
 #       machine, without the platform floor checks: packages to test the packaging, never ones to
-#       release. The main package still names all three platform packages.
+#       release. The main package still names every platform package.
+#
+# --licenses names the third-party licence file every platform package ships as
+# THIRD_PARTY_LICENSES.txt, which the "Release (JavaScript): third-party licences" block builds
+# with .semaphore/third-party-licenses.sh; without it, this script runs that script itself, which
+# needs cargo.
 #
 # The version is "version" in javascript/package.json. The repository's package.json stays
 # private; the published one is written by check-npm.py manifest.
 
 set -eu
 
-ALL_PLATFORMS="linux-x64-gnu linux-arm64-gnu darwin-arm64"
+ALL_PLATFORMS="linux-x64-gnu darwin-arm64"
 ADDON=confluent-kafka-javascript.node
 
 die() {
@@ -53,8 +60,8 @@ die() {
 }
 
 usage() {
-    echo "Usage: $0 <natives-dir> <out-dir> [<platform> ...]" >&2
-    echo "       $0 --dev <out-dir>" >&2
+    echo "Usage: $0 [--licenses <file>] <natives-dir> <out-dir> [<platform> ...]" >&2
+    echo "       $0 [--licenses <file>] --dev <out-dir>" >&2
     exit 2
 }
 
@@ -62,7 +69,6 @@ usage() {
 host_platform() {
     case "$(uname -s)-$(uname -m)" in
         Linux-x86_64) echo linux-x64-gnu ;;
-        Linux-aarch64|Linux-arm64) echo linux-arm64-gnu ;;
         Darwin-arm64) echo darwin-arm64 ;;
         *) die "no platform package for $(uname -s) $(uname -m)" ;;
     esac
@@ -82,15 +88,23 @@ command -v npm >/dev/null 2>&1 || die "npm is not on PATH"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT INT TERM
 
+licenses=""
+if [ "${1:-}" = "--licenses" ]; then
+    [ $# -ge 2 ] || usage
+    licenses="$2"
+    shift 2
+    [ -f "$licenses" ] || die "$licenses does not exist"
+fi
+
 if [ "${1:-}" = "--dev" ]; then
     [ $# -eq 2 ] || usage
     out="$2"
     dev="--dev"
     platforms=$(host_platform)
-    [ -f "javascript/build/Release/$ADDON" ] \
-        || die "javascript/build/Release/$ADDON does not exist; run \`make -C javascript build-addon CONFLUENT_KAFKA_LINK=static\` first"
+    [ -f "javascript/native/build/Release/$ADDON" ] \
+        || die "javascript/native/build/Release/$ADDON does not exist; run \`make -C javascript build-addon CONFLUENT_KAFKA_LINK=static\` first"
     mkdir -p "$stage/natives/$platforms"
-    cp "javascript/build/Release/$ADDON" "$stage/natives/$platforms/"
+    cp "javascript/native/build/Release/$ADDON" "$stage/natives/$platforms/"
 else
     [ $# -ge 2 ] || usage
     natives="$1"
@@ -132,34 +146,41 @@ version=$(python3 .semaphore/check-npm.py version)
 commit=$(git rev-parse HEAD)
 # A release is packed only from the files of the commit it is tagged at: no uncommitted change
 # and no untracked file among the sources the pack reads. The build outputs (build/, dist/,
-# node_modules/) are ignored, so they do not count.
+# native/build/, node_modules/) are ignored, so they do not count.
 if [ -z "$dev" ]; then
     changes=$(git status --porcelain -- javascript LICENSE)
     [ -z "$changes" ] || die "the package sources differ from $commit: $(printf "%s" "$changes" | tr "\n" " ")"
 fi
 echo "Packing @confluentinc/kafka-javascript $version at $commit with the addons of: $platforms"
 
+# The third-party licence file of the platform packages, checked either way.
+if [ -z "$licenses" ]; then
+    sh .semaphore/third-party-licenses.sh "$stage/THIRD_PARTY_LICENSES.txt"
+else
+    python3 .semaphore/check-npm.py licenses "$licenses"
+    cp "$licenses" "$stage/THIRD_PARTY_LICENSES.txt"
+fi
+
 # The compiled library, from a clean dist/ (javascript/Makefile's build-ts).
 make -C javascript build-ts
 
-# The main package: what its package.json's "files" lists, the LICENSE, and the package.json to
-# publish.
+# The main package: what its package.json's "files" lists (the NOTICE with Apache Kafka's credit
+# line among them), the LICENSE, and the package.json to publish.
 mkdir "$stage/main"
 cp -R javascript/dist "$stage/main/dist"
-cp javascript/README.md javascript/CHANGELOG.md LICENSE "$stage/main/"
+cp javascript/README.md javascript/CHANGELOG.md javascript/MIGRATION.md javascript/NOTICE LICENSE "$stage/main/"
 python3 .semaphore/check-npm.py manifest main --version "$version" > "$stage/main/package.json"
+# The folders behind the import paths (producer/package.json, common/config/package.json, ...),
+# for TypeScript setups that do not read `exports`; the main package's "files" names them.
+python3 .semaphore/check-npm.py path-folders "$stage/main"
 
-# A platform package per platform: its addon, a README pointing at the main package, the LICENSE
-# and its package.json.
+# A platform package per platform: its committed folder (javascript/npm/<platform>/: the README
+# pointing at the main package, and the package.json), its addon, the LICENSE, the NOTICE and the
+# third-party licence file, the last two named by its "files".
 for platform in $platforms; do
     mkdir "$stage/$platform"
-    cp "$stage/natives/$platform/$ADDON" LICENSE "$stage/$platform/"
-    cat > "$stage/$platform/README.md" <<EOF
-# @confluentinc/kafka-javascript-$platform
-
-The $platform native binary of @confluentinc/kafka-javascript. Install that package instead: npm
-installs this one with it, on $platform, as one of its optional dependencies.
-EOF
+    cp "javascript/npm/$platform/README.md" "$stage/natives/$platform/$ADDON" LICENSE javascript/NOTICE \
+        "$stage/THIRD_PARTY_LICENSES.txt" "$stage/$platform/"
     python3 .semaphore/check-npm.py manifest "$platform" --version "$version" > "$stage/$platform/package.json"
 done
 

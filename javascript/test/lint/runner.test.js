@@ -62,27 +62,27 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-single-drainer',
     'check-completion-order',
     'check-ownership',
-    'check-zero-copy',
+    'check-one-copy',
+    'check-string-encoding',
     'check-no-binding-queue',
   ]);
   assert.deepEqual(shape(ESLINT_CHECKS), [
     'check-no-todo',
     'check-exception-word',
-    'check-private-members',
+    'check-internal-members',
     'check-java-line',
     'check-java-name',
     'check-java-members',
     'check-java-completeness',
     'check-public-audience',
     'check-no-deprecated-translation',
-    'check-getters-readonly',
-    'check-java-tags',
+    'check-data-objects',
+    'check-invented-names',
+    'check-module-exports',
     'check-overload-shape',
     'check-type-mapping',
     'check-waiting-call-promise',
     'check-native-registry',
-    'check-tsdoc-present',
-    'check-tsdoc-tags',
     'check-directives',
     'check-config',
   ]);
@@ -142,10 +142,10 @@ test('a rule that reports no positive item count fails', () => {
 });
 
 test('a rule that cannot run leaves the prefix and unknown-kind lines unjudged', () => {
-  const root = project({ 'lib/a.ts': 'export class A { _x = 1; }\n', 'eslint-baseline.txt': 'prefix:lib/a.ts:A.\nother x\n' });
-  const r = lint(root, [], { set: [require('../../scripts/lint/rules/private_members')] });
+  const root = project({ 'src/a.ts': 'export class A { _x = 1; }\n', 'eslint-baseline.txt': 'prefix:src/a.ts:A.\nother x\n' });
+  const r = lint(root, [], { set: [require('../../scripts/lint/rules/internal_members')] });
   assert.equal(r.status, 1);
-  assert.deepEqual(r.err, ['', '❌ check-private-members: cannot run, no tsconfig.json', '', '❌ 1 rule-lint finding(s)']);
+  assert.deepEqual(r.err, ['', '❌ check-internal-members: cannot run, no tsconfig.json', '', '❌ 1 rule-lint finding(s)']);
 });
 
 test('the inputs a later rule needs: a missing Java index or header is a reason, never a skip', () => {
@@ -156,8 +156,8 @@ test('the inputs a later rule needs: a missing Java index or header is a reason,
     ctx.missing('header'),
     `no bindings header at ${path.join(root, 'none.h')} (build the Rust library first: \`make build-javascript\` from the repository root)`,
   );
-  assert.equal(ctx.missing('lib'), 'no TypeScript sources under lib/');
-  assert.equal(ctx.missing('src'), 'no C sources under src/');
+  assert.equal(ctx.missing('src'), 'no TypeScript sources under src/');
+  assert.equal(ctx.missing('native'), 'no C sources under native/');
   assert.throws(() => ctx.missing('nothing'), /unknown lint input `nothing`/);
   const needy = { name: 'check-needy', kinds: ['n'], needs: ['java', 'header'], hint: '', check: () => ({ findings: [], checked: 1 }) };
   const r = lintRunner(root, [], { rules: [needy], headerPath: path.join(root, 'none.h') });
@@ -185,7 +185,7 @@ test('a present Java index and header load once', () => {
 
 test('the TypeScript program is built only for a rule that needs it', () => {
   const ctx = new Context({ root: ROOT });
-  ctx.files(['lib'], ['.ts']);
+  ctx.files(['src'], ['.ts']);
   ctx.typescript();
   assert.ok(!ctx.cache.has('program'));
   assert.ok(ctx.program().sourceFiles.length > 0);

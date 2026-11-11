@@ -2,23 +2,24 @@ version: v1.0
 name: javascript-post-install
 
 # Run as a Semaphore Task (the `javascript-post-install` task in service.yml), by hand, after a
-# release of the Node.js client has been published to npmjs.com with the publish.sh of its
-# release bundle (javascript/release/README.txt). It reads npmjs.com anonymously, as a user does,
-# and publishes nothing: no job holds a token.
+# release of the Node.js client has been published to npmjs.com by the "Publish to npm" promotion
+# of its tag build (publish-npm.yml). It reads npmjs.com anonymously, as a user does, and
+# publishes nothing: no job holds a token.
 #
 # Required Task parameter:
 #   JAVASCRIPT_VERSION -- the published version, X.Y.Z or X.Y.Z-alpha.N / -beta.N / -dev.N /
-#                         -rc.N (e.g. 4.4.0-beta.2).
+#                         -preview.N / -rc.N (e.g. 4.4.0-preview.1).
 #
 # "Registry" checks the registry (.semaphore/check-published-npm.py check): the main package and
-# the three platform packages are there at JAVASCRIPT_VERSION, the `preview` dist-tag of each
-# points at it or at a later version (so a rerun after the next pre-release still passes), the main
-# package's `latest` (and `rc` / `alpha`, when present) stays on the earlier client, a version
-# below 4, the main package's optionalDependencies name the three at that version, and each
+# the two platform packages are there at JAVASCRIPT_VERSION, the dist-tag of each (`preview`
+# for a pre-release, `latest` for a release) points at it or at a later version (so a rerun after
+# the next version still passes), for a pre-release the main package's `latest` (and `rc` /
+# `alpha`, when present) stays on the earlier client, a version below 4, the main package's
+# optionalDependencies name the two at that version, and each
 # tarball matches the sha512 integrity the registry states and passes check-npm.py's package
 # checks. The task runs from master rather than from the tag build, so it cannot compare the
-# registry with the recorded bundle; publish.sh does that instead, reading each package back from
-# npmjs.com after publishing and checking the registry serves exactly the bundle's tarball.
+# registry with the recorded tarballs; publish-npm.sh does that instead, reading each package back
+# from npmjs.com after publishing and checking the registry serves exactly the recorded tarball.
 #
 # The install blocks install the package from npmjs.com into an empty project, with
 # `--ignore-scripts`, and run the smoke program (javascript/tools/package-smoke, from this
@@ -47,7 +48,7 @@ blocks:
               : "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}"
             # The parameter is free text: only a release version is passed on.
             - |
-              if ! [[ "${JAVASCRIPT_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+              if ! [[ "${JAVASCRIPT_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?$ ]]; then
                 echo "Refusing to check: '${JAVASCRIPT_VERSION}' is not a release version" >&2
                 exit 1
               fi
@@ -68,26 +69,7 @@ blocks:
             - env_var: DOCKER_IMAGE
               values: ["almalinux:8", "almalinux:9", "rockylinux:9", "debian:bookworm", "debian:trixie", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
             - env_var: NODE_VERSION
-              values: ["18", "20", "22", "24"]
-          commands:
-            - checkout
-            - sh .semaphore/test-published-npm.sh "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}" "${DOCKER_IMAGE}" "${NODE_VERSION}"
-
-  - name: "Install (Linux arm64)"
-    dependencies: []
-    execution_time_limit:
-      minutes: 30
-    task:
-      agent:
-        machine:
-          type: s1-prod-ubuntu24-04-arm64-1
-      jobs:
-        - name: "Install (Linux arm64)"
-          matrix:
-            - env_var: DOCKER_IMAGE
-              values: ["almalinux:8", "almalinux:9", "rockylinux:9", "debian:bookworm", "debian:trixie", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
-            - env_var: NODE_VERSION
-              values: ["18", "20", "22", "24"]
+              values: ["22", "24", "26"]
           commands:
             - checkout
             - sh .semaphore/test-published-npm.sh "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}" "${DOCKER_IMAGE}" "${NODE_VERSION}"
@@ -104,7 +86,7 @@ blocks:
         - name: "Install (macOS arm64)"
           matrix:
             - env_var: NODE_VERSION
-              values: ["18", "20", "22", "24"]
+              values: ["22", "24", "26"]
           commands:
             - checkout
             - sem-version node "${NODE_VERSION}"

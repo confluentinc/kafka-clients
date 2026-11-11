@@ -15,7 +15,7 @@
 'use strict';
 
 // N3 check-notify-hook (javascript/CLAUDE.md boundary rule 2: the notify hook
-// only signals): every function src/ installs as a client's notify hook (the
+// only signals): every function native/ installs as a client's notify hook (the
 // second argument of a `__set_callbacks_notify_err` call) is, statement for
 // statement,
 //
@@ -98,7 +98,7 @@ function statementAt(code, source, at) {
 module.exports = {
   name: 'check-notify-hook',
   kinds: ['notify-call', 'notify-blocking', 'notify-unguarded', 'notify-unlocked', 'notify-body', 'notify-hook-missing'],
-  needs: ['src', 'header'],
+  needs: ['native', 'header'],
   hint:
     'Keep the notify hook to its signal: lock notify_mtx, call the threadsafe function nonblocking while ' +
     'notify_open, unlock (javascript/CLAUDE.md boundary rule 2).',
@@ -115,7 +115,7 @@ module.exports = {
     for (const [, { hook, body }] of [...hooks].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       checked += 1;
       if (!body) {
-        findings.push({ kind: 'notify-hook-missing', subject: hook, message: 'is installed as a notify hook but defined in no src/*.c' });
+        findings.push({ kind: 'notify-hook-missing', subject: hook, message: 'is installed as a notify hook but defined in no native/*.c' });
         continue;
       }
       const own = calls.filter((c) => c.file === body.file && c.function === hook);

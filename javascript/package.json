@@ -1,6 +1,6 @@
 {
   "name": "@confluentinc/kafka-javascript",
-  "version": "4.4.0-beta.1",
+  "version": "4.4.0-preview.1",
   "private": true,
   "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
   "license": "Apache-2.0",
@@ -27,6 +27,10 @@
     "./common/errors": {
       "types": "./dist/common/errors/index.d.ts",
       "default": "./dist/common/errors/index.js"
+    },
+    "./common/header": {
+      "types": "./dist/common/header/index.d.ts",
+      "default": "./dist/common/header/index.js"
     },
     "./common/metrics": {
       "types": "./dist/common/metrics/index.d.ts",
@@ -76,6 +80,9 @@
       "common/errors": [
         "dist/common/errors/index.d.ts"
       ],
+      "common/header": [
+        "dist/common/header/index.d.ts"
+      ],
       "common/metrics": [
         "dist/common/metrics/index.d.ts"
       ],
@@ -106,7 +113,7 @@
     }
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.14.0"
   },
   "gypfile": false,
   "scripts": {
@@ -119,14 +126,22 @@
   },
   "files": [
     "dist/",
+    "common/",
+    "consumer/",
+    "producer/",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "MIGRATION.md",
+    "NOTICE"
   ],
   "devDependencies": {
     "@grpc/grpc-js": "1.14.4",
     "@grpc/proto-loader": "0.8.1",
+    "@js-temporal/polyfill": "0.5.1",
+    "@microsoft/api-extractor": "7.60.1",
     "@types/node": "20.19.41",
     "eslint": "10.14.0",
+    "expect-type": "1.4.0",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1"
   }

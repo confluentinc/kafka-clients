@@ -18,24 +18,28 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+const { errorFfiId } = require('../../../dist/internal/errors');
 
 test('an invalid config is a KafkaError with the core message', () => {
-  assert.throws(() => new KafkaProducer({ 'bootstrap.servers': 'localhost:9092', acks: 'bogus' }), (e) => {
+  assert.throws(() => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:9092', acks: 'bogus' } }), (e) => {
+    assert.ok(e instanceof ConfigError);
     assert.ok(e instanceof KafkaError);
     assert.ok(e instanceof Error);
-    assert.equal(e.code, -10);
     assert.equal(e.name, 'ConfigError');
-    assert.equal(e.errorName, 'CONFIG');
     assert.equal(e.message, 'Invalid value bogus for configuration acks: String must be one of: all, -1, 0, 1');
-    assert.equal(e.retriable, false);
-    assert.equal(e.apiError, false);
     assert.equal(e.cause, undefined);
+    // The FFI id is private (`_ffiId`, left out of the declarations): only
+    // `name`, `message` and `cause` are public.
+    assert.equal(errorFfiId(e), -10);
+    assert.equal(ConfigError._ffiId, -10);
+    assert.ok(!Object.keys(e).includes('_ffiId'));
+    assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
     return true;
   });
-  assert.throws(() => new KafkaProducer({}), {
+  assert.throws(() => new KafkaProducer({ configs: {} }), {
     name: 'ConfigError',
-    errorName: 'CONFIG',
     message: 'Missing required configuration "bootstrap.servers" which has no default value.',
   });
 });
@@ -44,22 +48,21 @@ test('the cause chain follows Error_source', () => {
   assert.throws(
     () =>
       new KafkaProducer({
-        'bootstrap.servers': 'localhost:9092',
-        'security.protocol': 'SSL',
-        'ssl.truststore.location': '/nonexistent/truststore.jks',
+        configs: {
+          'bootstrap.servers': 'localhost:9092',
+          'security.protocol': 'SSL',
+          'ssl.truststore.location': '/nonexistent/truststore.jks',
+        },
       }),
     (e) => {
       // A bare KafkaException: reported as UNKNOWN_SERVER_ERROR, but not an
       // ApiException, so not UnknownServerError.
       assert.equal(e.constructor, KafkaError);
       assert.equal(e.name, 'KafkaError');
-      assert.equal(e.errorName, 'UNKNOWN_SERVER_ERROR');
-      assert.equal(e.apiError, false);
-      assert.equal(e.code, -1);
+      assert.equal(errorFfiId(e), -1);
       assert.equal(e.message, 'Failed to construct kafka producer');
-      assert.ok(e.cause instanceof KafkaError);
+      assert.ok(e.cause instanceof ConfigError);
       assert.equal(e.cause.name, 'ConfigError');
-      assert.equal(e.cause.errorName, 'CONFIG');
       assert.equal(
         e.cause.message,
         "Failed to create channel builder: Failed to open truststore file '/nonexistent/truststore.jks': " +

@@ -14,16 +14,18 @@
 
 'use strict';
 
-// H2 check-exception-word (root CLAUDE.md §2, §4): no identifier of lib/ or
-// src/ contains the word "exception", in any case. Comments and string
+// H2 check-exception-word (root CLAUDE.md §2, §4): no identifier of src/ or
+// native/ contains the word "exception", in any case. Comments and string
 // literals may name the Java classes, so only identifiers are read: the
 // TypeScript sources through the TypeScript parser, the C sources through
 // scripts/lint/c_source.js's tokenizer.
 //
 // Names the client does not choose are exempt: Node-API's own functions
 // (`napi_` / `node_api_`), which the addon calls, and the Java member names
-// the JavaScript rules keep, listed below with their reason. A listed name
-// that no longer appears is a finding, so the list cannot grow stale.
+// the JavaScript rules keep, listed below with their reason and, where the
+// name is exempt only in some positions, the positions. A listed name that no
+// longer appears (in an exempt position) is a finding, so the list cannot
+// grow stale.
 
 const { scan } = require('../c_source');
 
@@ -32,11 +34,44 @@ const WORD = /exception/i;
 /** The C prefixes of Node-API, whose names the addon calls but does not choose. */
 const NODE_API_PREFIXES = ['napi_', 'node_api_'];
 
-/** The TypeScript names kept from Java, and why. */
+/**
+ * Whether identifier `node` names a property of an object: a type-literal or
+ * interface member, an object-literal key (a shorthand one included), a
+ * property of an object binding pattern, or the name read by a property
+ * access. A local variable, a parameter or a `catch` binding is not.
+ */
+function isPropertyName(ts, node) {
+  const parent = node.parent;
+  if (parent === undefined) return false;
+  if (ts.isPropertySignature(parent) || ts.isPropertyAssignment(parent)) return parent.name === node;
+  if (ts.isShorthandPropertyAssignment(parent)) return parent.name === node;
+  if (ts.isPropertyAccessExpression(parent)) return parent.name === node;
+  if (ts.isBindingElement(parent) && ts.isObjectBindingPattern(parent.parent)) {
+    return parent.propertyName === node || (parent.propertyName === undefined && parent.name === node);
+  }
+  return false;
+}
+
+/**
+ * The TypeScript names kept from Java: why, and in which positions (`where`,
+ * absent for every position).
+ */
 const JAVA_NAMES = new Map([
   [
     'isCompletedExceptionally',
-    "Java's KafkaFuture#isCompletedExceptionally, which javascript/CLAUDE.md keeps (\"KafkaFuture is Java's\")",
+    {
+      reason: "Java's KafkaFuture#isCompletedExceptionally, which javascript/CLAUDE.md keeps (\"KafkaFuture is Java's\")",
+    },
+  ],
+  [
+    'exception',
+    {
+      reason:
+        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object " +
+        '(javascript/CLAUDE.md "Java shape, JS idiom": parameters are named as Java names them, as the Python client\'s are), ' +
+        'as a property name only',
+      where: isPropertyName,
+    },
   ],
 ]);
 
@@ -45,7 +80,7 @@ function tsIdentifiers(ts, sf) {
   const out = [];
   const visit = (node) => {
     if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
-      out.push({ name: node.text, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 });
+      out.push({ name: node.text, node, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 });
     }
     ts.forEachChild(node, visit);
   };
@@ -57,13 +92,13 @@ module.exports = {
   name: 'check-exception-word',
   kinds: ['exception-word', 'unused-exemption'],
   /**
-   * The sources this instance reads (PLAN.md §3): `all`, `ts` (lib/'s
+   * The sources this instance reads (PLAN.md §3): `all`, `ts` (src/'s
    * TypeScript, ESLint's `kafka/exception-word`, with the Java names) or `c`
-   * (src/'s C, the runner's, with Node-API's prefixes).
+   * (native/'s C, the runner's, with Node-API's prefixes).
    */
   PART: 'all',
   get needs() {
-    return { all: ['typescript', 'lib', 'src'], ts: ['typescript', 'lib'], c: ['src'] }[this.PART];
+    return { all: ['typescript', 'src', 'native'], ts: ['typescript', 'src'], c: ['native'] }[this.PART];
   },
   hint:
     'Rename it after the Error: the word "exception" appears only in comments and strings about the Java ' +
@@ -80,15 +115,16 @@ module.exports = {
         message: `identifier \`${name}\` contains "exception"`,
       });
     const used = new Set();
-    for (const rel of readTs ? ctx.files(['lib'], ['.ts']) : []) {
+    for (const rel of readTs ? ctx.files(['src'], ['.ts']) : []) {
       for (const id of tsIdentifiers(ctx.typescript(), ctx.sourceFile(rel))) {
         checked += 1;
         if (!WORD.test(id.name)) continue;
-        if (JAVA_NAMES.has(id.name)) used.add(id.name);
+        const kept = JAVA_NAMES.get(id.name);
+        if (kept !== undefined && (kept.where === undefined || kept.where(ctx.typescript(), id.node))) used.add(id.name);
         else report(rel, id.line, id.name);
       }
     }
-    for (const rel of readC ? ctx.files(['src'], ['.c', '.h']) : []) {
+    for (const rel of readC ? ctx.files(['native'], ['.c', '.h']) : []) {
       for (const token of scan(ctx.read(rel)).tokens) {
         if (token.type !== 'ident') continue;
         checked += 1;
@@ -96,13 +132,13 @@ module.exports = {
         if (WORD.test(token.value) && !nodeApi) report(rel, token.line, token.value);
       }
     }
-    for (const [name, reason] of readTs ? JAVA_NAMES : []) {
+    for (const [name, { reason }] of readTs ? JAVA_NAMES : []) {
       if (!used.has(name)) {
         findings.push({
           kind: 'unused-exemption',
           subject: name,
           unusedEntry: name,
-          message: `exempt as ${reason}, but no lib/ identifier is named so: delete the exemption`,
+          message: `exempt as ${reason}, but no src/ identifier is named so: delete the exemption`,
         });
       }
     }

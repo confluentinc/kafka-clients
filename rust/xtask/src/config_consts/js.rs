@@ -14,7 +14,7 @@
 
 //! The Node.js client's config classes: the constants of the Python ones
 //! ([`super::SPECS`]) that a producer reaches, each a class of static
-//! properties in the lib/ folder of its Java package.
+//! properties in the src/ folder of its Java package.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +28,7 @@ type Res<T> = anyhow::Result<T>;
 /// The producer's Java config class, whose `ConfigDef` documents its keys.
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
-/// The config classes of the Node.js client: Java class and lib/ folder. The
+/// The config classes of the Node.js client: Java class and src/ folder. The
 /// others the Python client generates (`ConsumerConfig`, `AdminClientConfig`,
 /// `TopicConfig`, `LogLevelConfig`) wait for a consumer and an admin client.
 const JS_SPECS: &[(&str, &str)] = &[
@@ -131,7 +131,8 @@ fn js_value(v: &Value) -> Res<(String, String)> {
         Value::Double(d) => (format!("{d:?}"), "number".into()),
         Value::Bool(b) => (b.to_string(), "boolean".into()),
         Value::Null => ("null".into(), "null".into()),
-        // A constant `List` or `Set` is a frozen array, in Java's order.
+        // A constant `List` is a frozen array, and a constant `Set` a read-only
+        // set whose `add`, `delete` and `clear` throw, both in Java's order.
         Value::List(items) | Value::Set(items) => {
             let mut parts = Vec::new();
             let mut ty: Option<String> = None;
@@ -144,7 +145,11 @@ fn js_value(v: &Value) -> Res<(String, String)> {
                 parts.push(p);
             }
             let ty = ty.unwrap_or_else(|| "string".into());
-            (format!("Object.freeze([{}])", parts.join(", ")), format!("ReadonlyArray<{ty}>"))
+            if matches!(v, Value::Set(_)) {
+                (format!("readOnlySet([{}])", parts.join(", ")), format!("ReadonlySet<{ty}>"))
+            } else {
+                (format!("Object.freeze([{}])", parts.join(", ")), format!("ReadonlyArray<{ty}>"))
+            }
         },
         other => anyhow::bail!("config constants: no JavaScript form for {other:?}"),
     })
@@ -190,8 +195,9 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         skipped.dedup();
         let mut about = format!(
             "The constants of Java's `{}`: every `public static final` field, evaluated from the Java \
-             source, is a static property of the same name; a deprecated one is left out. A `List` or \
-             `Set` constant is a frozen array in Java's order.",
+             source, is a static property of the same name; a deprecated one is left out. A `List` \
+             constant is a frozen array and a `Set` constant a read-only set whose `add`, `delete` and \
+             `clear` throw `UnsupportedOperationError`, both in Java's order.",
             spec.java
         );
         if !spec.flatten.is_empty() {
@@ -217,6 +223,12 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         about.push_str(&format!("\n\nJava: `{}`.", spec.java));
         let mut text = header(&format!("Java's `{}`", spec.java));
         text.push('\n');
+        if consts.iter().any(|(_, v, _)| matches!(v, Value::Set(_))) {
+            text.push_str(&format!(
+                "import {{ readOnlySet }} from '{}';\n\n",
+                crate::javascript_gen::rel_import(dir, "internal/read_only_set")
+            ));
+        }
         text.push_str(&tsdoc(&about, ""));
         text.push_str(&format!("\nexport class {name} {{\n"));
         for (n, v, owner) in &consts {
@@ -283,7 +295,7 @@ mod tests {
             .content
             .contains("   * Translation note: Java's value. The Rust core's default `ssl.keystore.type`\n"));
         assert!(ssl.content.contains(
-            "  static readonly RECONFIGURABLE_CONFIGS: ReadonlyArray<string> = Object.freeze(['ssl.keystore.type',"
+            "  static readonly RECONFIGURABLE_CONFIGS: ReadonlySet<string> = readOnlySet(['ssl.keystore.type',"
         ));
         let producer = modules.iter().find(|m| m.name == "ProducerConfig").unwrap();
         assert_eq!((producer.dir.as_str(), producer.stem.as_str()), ("producer", "producer_config"));

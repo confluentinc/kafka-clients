@@ -16,7 +16,7 @@
 
 // A small client for the native rules' fixture projects: a header with a
 // waiting call and its `_cb` twin, an addon registering four functions, and
-// a lib/ calling them through the handle lib/_native.ts exports.
+// a src/ calling them through the handle src/internal/native.ts exports.
 
 const HEADER = `void kafka_x_Producer_flush(const kafka_x_Producer_t *self_, kafka_common_Error_t **out_err);
 
@@ -75,7 +75,7 @@ native.setFactories();
 export = native;
 `;
 
-const PRODUCER_TS = `import native = require('../_native');
+const PRODUCER_TS = `import native = require('../internal/native');
 export class Producer {
   flush(): Promise<void> {
     return new Promise((resolve) => this.#start(resolve));
@@ -89,14 +89,14 @@ export class Producer {
 }
 `;
 
-/** The fixture's files: header, addon, lib/, all passing the native rules. */
+/** The fixture's files: header, addon, src/, all passing the native rules. */
 const FILES = {
   'confluent_kafka_bindings.h': HEADER,
-  'src/addon.c': ADDON,
-  'src/producer.c': PRODUCER_C,
-  'lib/_native.ts': NATIVE_TS,
-  'lib/producer/producer.ts': PRODUCER_TS,
-  'test/unit/_native.test.js': "const native = require('../../dist/_native');\nnative.probe();\n",
+  'native/addon.c': ADDON,
+  'native/producer.c': PRODUCER_C,
+  'src/internal/native.ts': NATIVE_TS,
+  'src/producer/producer.ts': PRODUCER_TS,
+  'test/unit/internal/native.test.js': "const native = require('../../../dist/internal/native');\nnative.probe();\n",
 };
 
 module.exports = { FILES, ADDON, PRODUCER_C, NATIVE_TS, PRODUCER_TS };

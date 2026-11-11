@@ -15,7 +15,7 @@
 'use strict';
 
 // What every rule of the rule linter reads, loaded once and only when a rule
-// asks for it: the TypeScript program over lib/ with its type checker, the
+// asks for it: the TypeScript program over src/ with its type checker, the
 // Java index (`cargo xtask java-index --json`), the addon's C sources and the
 // bindings header. A rule names the inputs it needs (`needs`); one that is
 // missing makes the rule fail with the reason, never skip.
@@ -51,10 +51,10 @@ function walk(dir, base) {
 
 /** The inputs a rule may need, each with what checks it is there. */
 const INPUTS = {
-  /** lib/ with at least one `.ts` source. */
-  lib: (ctx) => (ctx.files(['lib'], ['.ts']).length > 0 ? null : `no TypeScript sources under ${ctx.rel(ctx.libDir)}/`),
-  /** src/ with at least one `.c` source. */
-  src: (ctx) => (ctx.files(['src'], ['.c']).length > 0 ? null : `no C sources under ${ctx.rel(ctx.srcDir)}/`),
+  /** src/ with at least one `.ts` source. */
+  src: (ctx) => (ctx.files(['src'], ['.ts']).length > 0 ? null : `no TypeScript sources under ${ctx.rel(ctx.srcDir)}/`),
+  /** native/ with at least one `.c` source. */
+  native: (ctx) => (ctx.files(['native'], ['.c']).length > 0 ? null : `no C sources under ${ctx.rel(ctx.nativeDir)}/`),
   /** The `typescript` package (a devDependency). */
   typescript: (ctx) => {
     try {
@@ -64,7 +64,7 @@ const INPUTS = {
       return `cannot load the typescript package (${e.message.split('\n')[0]}): run \`npm ci\` in javascript/`;
     }
   },
-  /** The TypeScript program over lib/ (tsconfig.json). */
+  /** The TypeScript program over src/ (tsconfig.json). */
   program: (ctx) => {
     const ts = INPUTS.typescript(ctx);
     if (ts !== null) return ts;
@@ -112,8 +112,8 @@ class Context {
    */
   constructor({ root, javaIndexPath, headerPath: header, loadTypescript } = {}) {
     this.root = path.resolve(root || path.join(__dirname, '..', '..'));
-    this.libDir = path.join(this.root, 'lib');
     this.srcDir = path.join(this.root, 'src');
+    this.nativeDir = path.join(this.root, 'native');
     this.tsconfigPath = path.join(this.root, 'tsconfig.json');
     this.javaIndexPath = javaIndexPath || path.join(this.root, 'build', 'java-index.json');
     this.headerPath = header || headerPath();
@@ -170,7 +170,7 @@ class Context {
     return this.once('typescript', () => this.loadTypescript());
   }
 
-  /** `{program, checker, sourceFiles}`: the program of tsconfig.json, its type checker, and its lib/ sources. */
+  /** `{program, checker, sourceFiles}`: the program of tsconfig.json, its type checker, and its src/ sources. */
   program() {
     return this.once('program', () => {
       const ts = this.typescript();
@@ -181,7 +181,7 @@ class Context {
         throw new Error(parsed.errors.map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('; '));
       }
       const program = ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options });
-      const lib = this.libDir + path.sep;
+      const lib = this.srcDir + path.sep;
       const sourceFiles = program
         .getSourceFiles()
         .filter((sf) => path.resolve(sf.fileName).startsWith(lib))

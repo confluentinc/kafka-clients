@@ -15,7 +15,7 @@
 'use strict';
 
 // The addon's C sources as the N rules read them, built once per run: every
-// function definition of src/*.c and src/*.h with its file, every call site
+// function definition of native/*.c and native/*.h with its file, every call site
 // with its file, and the bindings header's prototypes. Allowlists, which the
 // heuristic rules use (PLAN.md §8 decision 13), are judged here too: an entry
 // that waives nothing is a finding.
@@ -36,7 +36,7 @@ function cModel(ctx) {
   return ctx.once('cModel', () => {
     const bodies = new Map();
     const calls = [];
-    for (const file of ctx.files(['src'], ['.c', '.h'])) {
+    for (const file of ctx.files(['native'], ['.c', '.h'])) {
       const text = ctx.read(file);
       for (const [name, b] of functionBodies(text)) {
         bodies.set(`${file}:${name}`, { ...b, file, params: signatureParams(b.signature), isStatic: /^static\b/.test(b.signature) });

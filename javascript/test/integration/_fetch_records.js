@@ -112,7 +112,8 @@ class Reader {
 }
 
 // The records of an uncompressed record set: [{offset, timestamp, key, value,
-// headers}], `headers` an array of {key, value} and `timestamp` the batch's base
+// headers}], `headers` an array of {key, value, keyBytes} (the key decoded as
+// UTF-8, and its raw bytes) and `timestamp` the batch's base
 // timestamp plus the record's delta (the record's CreateTime on a CreateTime
 // topic).
 function parseRecords(buf) {
@@ -147,8 +148,8 @@ function parseRecords(buf) {
       const headerCount = r.varlong();
       const headers = [];
       for (let h = 0; h < headerCount; h++) {
-        const headerKey = r.bytes(r.varlong()).toString('utf8');
-        headers.push({ key: headerKey, value: r.nullableVarBytes() });
+        const keyBytes = Buffer.from(r.bytes(r.varlong()));
+        headers.push({ key: keyBytes.toString('utf8'), value: r.nullableVarBytes(), keyBytes });
       }
       if (!control) {
         out.push({ offset: baseOffset + offsetDelta, timestamp: baseTimestamp + timestampDelta, key, value, headers });

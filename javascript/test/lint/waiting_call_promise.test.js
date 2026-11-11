@@ -35,7 +35,7 @@ test('a method reaching a _cb twin, through a private method and a C helper, ret
 test('each finding kind, with its exact text', () => {
   const r = lint(
     fixture({
-      'lib/producer/producer.ts': PRODUCER_TS.replace('flush(): Promise<void> {\n    return new Promise((resolve) => this.#start(resolve));', 'flush(): void {\n    this.#start(() => {});')
+      'src/producer/producer.ts': PRODUCER_TS.replace('flush(): Promise<void> {\n    return new Promise((resolve) => this.#start(resolve));', 'flush(): void {\n    this.#start(() => {});')
         .replace('pump(): void {\n    native.pump();', 'pump(): Promise<void> {\n    native.pump();\n    return Promise.resolve();'),
     }),
     [RULE],
@@ -48,7 +48,7 @@ test('each finding kind, with its exact text', () => {
 });
 
 test('the path is followed through a module helper, another class and an alias of the handle', () => {
-  const helper = `import native = require('../_native');
+  const helper = `import native = require('../internal/native');
 function startFlush(done: () => void): void {
   reallyStart(done);
 }
@@ -73,7 +73,7 @@ export class Producer {
   }
 }
 `;
-  const r = lint(fixture({ 'lib/producer/producer.ts': helper }), [RULE]);
+  const r = lint(fixture({ 'src/producer/producer.ts': helper }), [RULE]);
   assert.deepEqual(findings(r), [
     'Producer.flush: reaches kafka_x_Producer_flush_cb but returns void',
     'Producer.close: reaches kafka_x_Producer_flush_cb but returns void',
@@ -83,15 +83,15 @@ export class Producer {
 test('a native function with no registration, or no C definition, is unresolved', () => {
   const r = lint(
     fixture({
-      'lib/_native.ts': "interface Native {\n  flush(done: () => void): void;\n  pump(): void;\n  gone(): void;\n  setFactories(): void;\n}\ndeclare const loaded: Native;\nconst native: Native = loaded;\nexport = native;\n",
-      'lib/producer/producer.ts': PRODUCER_TS.replace('native.pump();', 'native.gone();'),
-      'src/producer.c': FILES['src/producer.c'].replace('napi_value js_flush(', 'napi_value js_flush_renamed('),
+      'src/internal/native.ts': "interface Native {\n  flush(done: () => void): void;\n  pump(): void;\n  gone(): void;\n  setFactories(): void;\n}\ndeclare const loaded: Native;\nconst native: Native = loaded;\nexport = native;\n",
+      'src/producer/producer.ts': PRODUCER_TS.replace('native.pump();', 'native.gone();'),
+      'native/producer.c': FILES['native/producer.c'].replace('napi_value js_flush(', 'napi_value js_flush_renamed('),
     }),
     [RULE],
   );
   assert.deepEqual(findings(r), [
-    "Producer.flush: native.flush's implementation js_flush is defined in no src/*.c",
-    'Producer.pump: native.gone is registered by no napi_property_descriptor of src/addon.c',
+    "Producer.flush: native.flush's implementation js_flush is defined in no native/*.c",
+    'Producer.pump: native.gone is registered by no napi_property_descriptor of native/addon.c',
   ]);
 });
 
@@ -99,13 +99,13 @@ test('cannot run without the header, or the C sources', () => {
   let r = lint(project({ 'tsconfig.json': TSCONFIG, ...FILES, 'confluent_kafka_bindings.h': undefined }), [RULE]);
   assert.match(r.err[1], /^❌ check-waiting-call-promise: cannot run, no bindings header at /);
   const files = { ...FILES };
-  delete files['src/addon.c'];
-  delete files['src/producer.c'];
+  delete files['native/addon.c'];
+  delete files['native/producer.c'];
   r = lint(project({ 'tsconfig.json': TSCONFIG, ...files }), [RULE]);
-  assert.equal(r.err[1], '❌ check-waiting-call-promise: cannot run, no C sources under src/');
+  assert.equal(r.err[1], '❌ check-waiting-call-promise: cannot run, no C sources under native/');
 });
 
 test('no method with a native call fails: 0 items checked', () => {
-  const r = lint(fixture({ 'lib/producer/producer.ts': 'export class Producer {\n  ready(): boolean { return true; }\n}\n' }), [RULE]);
+  const r = lint(fixture({ 'src/producer/producer.ts': 'export class Producer {\n  ready(): boolean { return true; }\n}\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-waiting-call-promise: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

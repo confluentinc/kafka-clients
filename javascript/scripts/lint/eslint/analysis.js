@@ -16,13 +16,13 @@
 
 // The project-wide analysis behind the ESLint rules (`kafka/<name>`,
 // design/current/javascript-rule-linter/PLAN.md §3.5). The checks read the
-// whole client at once (the Java index, the TypeScript program over lib/,
+// whole client at once (the Java index, the TypeScript program over src/,
 // the addon's C sources and the bindings header), so each check runs once per
 // state of those inputs, and each ESLint rule reports, while ESLint lints a
 // file, what concerns that file:
 //
 //   - a finding with a place: at the place the check gives (`at`), or the
-//     file and line its subject names (`lib/x.ts:12`, `lib/x.ts:Name`), only
+//     file and line its subject names (`src/x.ts:12`, `src/x.ts:Name`), only
 //     there;
 //   - a finding about the project, on every file the rule visits, so any run,
 //     of the whole directory or of one file, fails while it stands: a check

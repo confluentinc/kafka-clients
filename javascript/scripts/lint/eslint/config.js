@@ -18,7 +18,7 @@
 // (design/current/javascript-rule-linter/PLAN.md §3), for the client
 // directory `root` (eslint.config.cjs passes its own): the `kafka` rules on
 // every TypeScript and JavaScript file, typescript-eslint's
-// recommended type-checked rules on lib/, typed through tsconfig.json.
+// recommended type-checked rules on src/, typed through tsconfig.json.
 
 const tseslint = require('typescript-eslint');
 
@@ -36,9 +36,9 @@ function config(root, { typed = true } = {}) {
   const typedConfigs = !typed
     ? []
     : [
-        ...tseslint.configs.recommendedTypeChecked.map((c) => ({ ...c, files: ['lib/**/*.ts'] })),
+        ...tseslint.configs.recommendedTypeChecked.map((c) => ({ ...c, files: ['src/**/*.ts'] })),
         {
-          files: ['lib/**/*.ts'],
+          files: ['src/**/*.ts'],
           languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: root } },
         },
       ];

@@ -30,16 +30,16 @@ const f = (kind, subject) => ({ kind, subject, message: 'm' });
 const subjects = (list) => list.map((x) => `${x.kind} ${x.subject}: ${x.message}`);
 
 test('a key line waives its finding; comments and blank lines are ignored', () => {
-  const b = Baseline.parse('b.txt', '# header\n\n  todo lib/a.ts:1  \n');
-  assert.deepEqual(b.apply([f('todo', 'lib/a.ts:1'), f('todo', 'lib/a.ts:2')]), [f('todo', 'lib/a.ts:2')]);
+  const b = Baseline.parse('b.txt', '# header\n\n  todo src/a.ts:1  \n');
+  assert.deepEqual(b.apply([f('todo', 'src/a.ts:1'), f('todo', 'src/a.ts:2')]), [f('todo', 'src/a.ts:2')]);
   assert.equal(key(f('todo', 'x')), 'todo x');
 });
 
 test('a prefix line waives every finding whose subject starts with it', () => {
-  const b = Baseline.parse('b.txt', 'prefix:lib/producer/\n');
+  const b = Baseline.parse('b.txt', 'prefix:src/producer/\n');
   assert.deepEqual(
-    b.apply([f('todo', 'lib/producer/a.ts:1'), f('java-line', 'lib/producer/b.ts'), f('todo', 'lib/c.ts:1')]),
-    [f('todo', 'lib/c.ts:1')],
+    b.apply([f('todo', 'src/producer/a.ts:1'), f('java-line', 'src/producer/b.ts'), f('todo', 'src/c.ts:1')]),
+    [f('todo', 'src/c.ts:1')],
   );
 });
 
@@ -106,18 +106,18 @@ test('through ESLint: a stale line fails its rule; an unknown kind and a stale p
   const noTodo = require('../../scripts/lint/rules/no_todo');
   const root = project({
     ...CLAUDE_MD,
-    'lib/a.ts': 'export {};\n',
-    'eslint-baseline.txt': 'todo lib/a.ts:9\nprefix:nowhere/\nno-such-kind x\n',
+    'src/a.ts': 'export {};\n',
+    'eslint-baseline.txt': 'todo src/a.ts:9\nprefix:nowhere/\nno-such-kind x\n',
   });
   let r = lint(root, ['check-no-todo'], { set: [noTodo] });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'eslint-baseline.txt: todo lib/a.ts:9: stale entry: no finding matches it any more; delete the line',
+    'eslint-baseline.txt: todo src/a.ts:9: stale entry: no finding matches it any more; delete the line',
   ]);
   r = lint(root, [], { set: [noTodo] });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'eslint-baseline.txt: todo lib/a.ts:9: stale entry: no finding matches it any more; delete the line',
+    'eslint-baseline.txt: todo src/a.ts:9: stale entry: no finding matches it any more; delete the line',
     'eslint-baseline.txt: no-such-kind x: stale entry: no finding matches it any more; delete the line',
     'eslint-baseline.txt: prefix:nowhere/: stale entry: no finding starts with it any more; delete the line',
   ]);
@@ -128,7 +128,7 @@ test('through ESLint: a stale line fails its rule; an unknown kind and a stale p
 
 test('through ESLint: a prefix line waives findings', () => {
   const noTodo = require('../../scripts/lint/rules/no_todo');
-  const root = project({ ...CLAUDE_MD, 'lib/a.ts': `// ${TODO_MARK}\n`, 'eslint-baseline.txt': 'prefix:lib/\n' });
+  const root = project({ ...CLAUDE_MD, 'src/a.ts': `// ${TODO_MARK}\n`, 'eslint-baseline.txt': 'prefix:src/\n' });
   const r = lint(root, [], { set: [noTodo] });
   assert.equal(r.status, 0, r.text);
 });

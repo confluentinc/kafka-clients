@@ -14,12 +14,12 @@
 
 'use strict';
 
-// The release scripts' registry checks, without the registry:
-// .semaphore/check-published-npm.py's own self-test (its version ordering and
-// dist-tag rules), and release/publish.sh's read-back of the dist-tags, run
-// from a fake bundle against a stub `npm` whose packages are all published
-// already (the path a rerun takes; publishing itself asks for a one-time
-// password on a terminal).
+// The release scripts, without the registry: .semaphore/check-published-npm.py's
+// own self-test (its version ordering and dist-tag rules), check-npm.py's
+// dist-tag rule (a pre-release under preview only, never latest; 1.x fixes
+// under legacy), and .semaphore/publish-npm.sh, the Semaphore publish job, run
+// over a fake recorded release against a stub `npm`: a first publish, a rerun,
+// and its read-back of the dist-tags.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -42,17 +42,44 @@ test("check-published-npm.py's version ordering and dist-tag rules", () => {
 });
 
 const MAIN = '@confluentinc/kafka-javascript';
-const VERSION = '4.4.0-beta.1';
-const PLATFORMS = ['linux-x64-gnu', 'linux-arm64-gnu', 'darwin-arm64'];
+const VERSION = '4.4.0-preview.1';
+const PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
 
-// The stub: `npm whoami`, `npm view <pkg>@<v> dist.integrity` and `npm view
-// <pkg> dist-tags --json`, answered from files under $STUB_NPM_STATE; any
-// other call (a publish) fails. `sleep` returns at once, so the read-back's
-// retries take no time.
+test("check-npm.py dist-tag: preview for a pre-release, never latest; latest for a release; legacy for 1.x", () => {
+  const run = (...args) =>
+    spawnSync(PYTHON, [path.join(REPO, '.semaphore', 'check-npm.py'), 'dist-tag', ...args], { encoding: 'utf8', cwd: REPO });
+  for (const [version, tag] of [['4.4.0-preview.1', 'preview'], ['4.4.0-rc.1', 'preview'], ['4.5.0', 'latest'], ['1.6.1', 'legacy']]) {
+    const r = run(version);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `${tag}\n`, version);
+    assert.equal(run(version, '--tag', tag).status, 0, `${version} --tag ${tag}`);
+  }
+  const latest = run('4.4.0-preview.1', '--tag', 'latest');
+  assert.equal(latest.status, 1);
+  assert.equal(
+    latest.stderr,
+    "check-npm: refusing the dist-tag 'latest': 4.4.0-preview.1 is a pre-release, which goes out under preview only, never latest\n",
+  );
+  const legacy = run('1.6.1', '--tag', 'latest');
+  assert.equal(legacy.status, 1);
+  assert.match(legacy.stderr, /1\.6\.1 is a fix of the earlier client \(below 4\.0\.0\), which goes out under legacy/);
+  assert.equal(run('4.4', '--tag', 'preview').status, 1);
+});
+
+// The stub: `npm whoami`, `npm view <pkg>@<v> dist.integrity`, `npm view <pkg>
+// dist-tags --json` and `npm publish <tarball> ...`, answered from files
+// under $STUB_NPM_STATE. A publish of a tarball moves its package's
+// `.pending-*` files into place, as the registry would, and logs its
+// arguments; it fails without --provenance=false or without a token in the
+// user config. `sleep` returns at once, so the read-back's retries take no
+// time.
 const STUB_NPM = `#!/bin/sh
 state="$STUB_NPM_STATE"
 case "$1" in
-  whoami) echo tester ;;
+  whoami)
+    grep -q '_authToken=\${NPM_TOKEN}' "$NPM_CONFIG_USERCONFIG" || { echo "npm error code ENEEDAUTH" >&2; exit 1; }
+    [ -n "$NPM_TOKEN" ] || { echo "npm error code ENEEDAUTH" >&2; exit 1; }
+    echo tester ;;
   view)
     case "$2" in ?*@*) pkg="\${2%@*}" ;; *) pkg="$2" ;; esac
     file="$state/$(printf %s "$pkg" | tr '/@' '__')"
@@ -61,37 +88,57 @@ case "$1" in
       dist-tags) cat "$file.tags" ;;
       *) echo "stub npm: view $3" >&2; exit 1 ;;
     esac ;;
+  publish)
+    echo "$*" >> "$state/calls"
+    case " $* " in *" --provenance=false "*) ;; *) echo "stub npm: publish without --provenance=false" >&2; exit 1 ;; esac
+    key="$(cat "$state/tarball_$(basename "$2")")"
+    mv "$key.pending-integrity" "$key.integrity" && mv "$key.pending-tags" "$key.tags" ;;
   *) echo "stub npm: $1 not expected" >&2; exit 1 ;;
 esac
 `;
 
-/** Runs publish.sh in a fresh bundle whose packages are published with `tags(name)`. */
-function runPublish(tags) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-sh-'));
+/**
+ * Runs publish-npm.sh over a fresh recorded release of `version`, whose
+ * packages are published with `tags(name)` (`published` true) or published by
+ * the run, ending with those tags (`published` false). Returns the result and
+ * the stub's logged publish calls.
+ */
+function runPublish(tags, { version = VERSION, published = true, token = 'npm_token', check = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-npm-'));
   try {
-    const bundle = path.join(dir, 'bundle');
+    const release = path.join(dir, 'release');
     const bin = path.join(dir, 'bin');
     const state = path.join(dir, 'state');
-    for (const d of [bundle, bin, state]) fs.mkdirSync(d);
-    fs.copyFileSync(path.join(__dirname, '..', '..', 'release', 'publish.sh'), path.join(bundle, 'publish.sh'));
+    for (const d of [release, bin, state]) fs.mkdirSync(d);
     const sums = [];
-    const packages = [...PLATFORMS.map((p) => [`${MAIN}-${p}`, `confluentinc-kafka-javascript-${p}-${VERSION}.tgz`]),
-      [MAIN, `confluentinc-kafka-javascript-${VERSION}.tgz`]];
+    const packages = [...PLATFORMS.map((p) => [`${MAIN}-${p}`, `confluentinc-kafka-javascript-${p}-${version}.tgz`]),
+      [MAIN, `confluentinc-kafka-javascript-${version}.tgz`]];
     for (const [name, file] of packages) {
       const data = Buffer.from(`tarball of ${name}`);
-      fs.writeFileSync(path.join(bundle, file), data);
+      fs.writeFileSync(path.join(release, file), data);
       sums.push(`${crypto.createHash('sha256').update(data).digest('hex')}  ${file}`);
       const key = path.join(state, name.replace(/[/@]/g, '_'));
-      fs.writeFileSync(`${key}.integrity`, `sha512-${crypto.createHash('sha512').update(data).digest('base64')}`);
-      fs.writeFileSync(`${key}.tags`, JSON.stringify(tags(name)));
+      const suffix = published ? '' : '.pending-';
+      fs.writeFileSync(`${key}${suffix || '.'}integrity`, `sha512-${crypto.createHash('sha512').update(data).digest('base64')}`);
+      fs.writeFileSync(`${key}${suffix || '.'}tags`, JSON.stringify(tags(name)));
+      fs.writeFileSync(path.join(state, `tarball_${file}`), key);
     }
-    fs.writeFileSync(path.join(bundle, 'SHA256SUMS'), `${sums.join('\n')}\n`);
+    fs.writeFileSync(path.join(release, 'SHA256SUMS'), `${sums.sort((a, b) => (a.split('  ')[1] < b.split('  ')[1] ? -1 : 1)).join('\n')}\n`);
     fs.writeFileSync(path.join(bin, 'npm'), STUB_NPM, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\n', { mode: 0o755 });
-    return spawnSync('bash', [path.join(bundle, 'publish.sh')], {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, STUB_NPM_STATE: state },
-    });
+    const env = {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      STUB_NPM_STATE: state,
+      SEMAPHORE_GIT_TAG_NAME: `javascript/v${version}`,
+    };
+    if (token === undefined) delete env.NPM_TOKEN;
+    else env.NPM_TOKEN = token;
+    const args = [path.join(REPO, '.semaphore', 'publish-npm.sh'), ...(check ? ['--check'] : []), release];
+    const r = spawnSync('bash', args, { encoding: 'utf8', cwd: REPO, env });
+    const callsFile = path.join(state, 'calls');
+    const calls = fs.existsSync(callsFile) ? fs.readFileSync(callsFile, 'utf8').trim().split('\n') : [];
+    return { ...r, calls };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -99,33 +146,77 @@ function runPublish(tags) {
 
 const GOOD = (name) => (name === MAIN ? { latest: '1.6.0', alpha: '1.0.0-alpha.1', preview: VERSION } : { latest: VERSION, preview: VERSION });
 
-test('publish.sh accepts a rerun whose dist-tags are right', () => {
-  const r = runPublish(GOOD);
+test('publish-npm.sh publishes the platform packages, then the main package, under preview, with no provenance', () => {
+  const r = runPublish(GOOD, { published: false });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /Every package of 4\.4\.0-beta\.1 is already published\./);
+  assert.deepEqual(
+    r.calls.map((c) => c.split(' ')[1]),
+    [...PLATFORMS.map((p) => `confluentinc-kafka-javascript-${p}-${VERSION}.tgz`), `confluentinc-kafka-javascript-${VERSION}.tgz`],
+  );
+  for (const call of r.calls) {
+    assert.match(call, / --access public --tag preview --provenance=false --registry https:\/\/registry\.npmjs\.org\/ /);
+    assert.doesNotMatch(call, /--provenance( |$)|--otp/);
+  }
   assert.match(r.stdout, new RegExp(`${MAIN}: preview is ${VERSION.replace(/\./g, '\\.')}\n`));
-  assert.match(r.stdout, /is published under the preview dist-tag, and latest is on the earlier client/);
+  assert.match(r.stdout, /is published under the preview dist-tag\.\n$/);
 });
 
-test('publish.sh refuses when latest moved to this client', () => {
+test('publish-npm.sh accepts a rerun whose dist-tags are right, and publishes nothing again', () => {
+  const r = runPublish(GOOD);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.calls, []);
+  assert.match(r.stdout, /Every package of 4\.4\.0-preview\.1 is already published\./);
+});
+
+test('publish-npm.sh refuses when latest moved to this client', () => {
   const r = runPublish((name) => (name === MAIN ? { latest: VERSION, preview: VERSION } : GOOD(name)));
   assert.equal(r.status, 1);
   assert.equal(
     r.stderr,
-    `publish.sh: the latest dist-tag of ${MAIN} is ${VERSION}, but it must stay on the earlier client, below 4.0.0: ` +
+    `publish-npm: the latest dist-tag of ${MAIN} is ${VERSION}, but it must stay on the earlier client, below 4.0.0: ` +
       `point it back with \`npm dist-tag add ${MAIN}@<its version> latest\`\n`,
   );
 });
 
-test('publish.sh refuses when rc or alpha moved to this client', () => {
+test('publish-npm.sh refuses when rc or alpha moved to this client', () => {
   const r = runPublish((name) => (name === MAIN ? { latest: '1.6.0', rc: '4.4.0-rc.1', preview: VERSION } : GOOD(name)));
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^publish\.sh: the rc dist-tag of @confluentinc\/kafka-javascript is 4\.4\.0-rc\.1, but it must stay/);
+  assert.match(r.stderr, /^publish-npm: the rc dist-tag of @confluentinc\/kafka-javascript is 4\.4\.0-rc\.1, but it must stay/);
 });
 
-test('publish.sh refuses when a package was published without the preview tag', () => {
+test('publish-npm.sh refuses when a package was published without the preview tag', () => {
   const platform = `${MAIN}-${PLATFORMS[1]}`;
   const r = runPublish((name) => (name === platform ? { latest: VERSION } : GOOD(name)));
   assert.equal(r.status, 1);
-  assert.equal(r.stderr, `publish.sh: the preview dist-tag of ${platform} is not set, not ${VERSION}\n`);
+  assert.equal(r.stderr, `publish-npm: the preview dist-tag of ${platform} is not set, not ${VERSION}\n`);
+});
+
+test('publish-npm.sh puts a release on latest', () => {
+  const r = runPublish((name) => ({ latest: '4.5.0' }), { version: '4.5.0', published: false });
+  assert.equal(r.status, 0, r.stderr);
+  for (const call of r.calls) assert.match(call, / --tag latest --provenance=false /);
+});
+
+test('publish-npm.sh refuses a 1.x version, whose fixes go out under legacy from the earlier client', () => {
+  const r = runPublish(GOOD, { version: '1.6.1' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^publish-npm: 1\.6\.1 is below 4\.0\.0; the versions of @confluentinc\/kafka-javascript below 4 are the earlier client's/);
+  assert.deepEqual(r.calls, []);
+});
+
+test('publish-npm.sh --check makes every token-free check, reading the registry anonymously, and stops before the token', () => {
+  const r = runPublish(GOOD, { token: undefined, check: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /OK\n/);
+  assert.match(r.stdout, /already published with this tarball; skipping it\n/);
+  assert.match(r.stdout, /Every check that needs no token passed\.\n$/);
+  assert.doesNotMatch(r.stdout, /Checking the token/);
+  assert.deepEqual(r.calls, []);
+});
+
+test('publish-npm.sh needs the token, and checks it only after the tarballs', () => {
+  const r = runPublish(GOOD, { token: undefined });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^publish-npm: NPM_TOKEN is not set/);
+  assert.match(r.stdout, /OK\n/);
 });

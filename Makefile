@@ -14,7 +14,7 @@
 .PHONY: build build-all devel-build build-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
 	select-tests pre-push-test-selection clean-test-selection clean \
-	build-javascript test-javascript lint-javascript verify-javascript \
+	build-javascript test-javascript test-javascript-unit lint-javascript verify-javascript \
 	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
@@ -67,11 +67,13 @@ init-hooks:
 	@chmod +x .githooks/pre-commit .githooks/pre-push
 
 # The Rust tests with every feature compiled (the native-Rust ones; the gRPC
-# arms run with their binding), then the C and Python tests.
+# arms run with their binding), then the C and Python tests, and the Node.js
+# client's tests that need no broker (test-javascript-unit).
 test: submodules
 	$(MAKE) -C rust test-all-features
 	$(MAKE) -C c test
 	$(MAKE) -C python test
+	$(MAKE) test-javascript-unit
 
 # The Rust, Python and .NET performance suites, one after the other: they
 # assert latency budgets, so each needs the machine to itself. The .NET arm is
@@ -81,13 +83,15 @@ test-integration-perf:
 	$(MAKE) -C python test-performance
 	$(MAKE) -C dotnet test-integration-perf-dotnet
 
-# The whole gate: the release builds, the Rust checks, the tests, and the
-# Python binding's checks (mypy --strict and the static checks). It runs no
-# .NET target: `make -C dotnet verify` is the .NET gate.
+# The whole gate: the release builds, the Rust checks, the tests, the Python
+# binding's checks (mypy --strict and the static checks) and the Node.js
+# client's rule linter (lint-javascript). It runs no .NET target: `make -C
+# dotnet verify` is the .NET gate.
 verify: build
 	$(MAKE) -C rust format-check check-generated lint
 	$(MAKE) test
 	$(MAKE) -C python check
+	$(MAKE) lint-javascript
 
 # The pre-commit hook's verification. It first selects the tests the changes
 # since the last commit can affect into its own .test-selection-commit.json
@@ -109,12 +113,14 @@ verify-commit-checks: submodules
 
 # ── The Node.js client ───────────────────────────────────────────────────
 #
-# The Node.js client (javascript/): standalone for now, not part of `build`,
-# `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
-# (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
-# Its build is the addon and the TypeScript library, which needs `npm ci` in
-# javascript/ first (typescript is a devDependency). javascript/Makefile expects
-# the Rust library already built, so these targets build it first.
+# The Node.js client (javascript/). `verify` runs its build, its rule linter,
+# its type check and its unit tests (test-javascript-unit, through `test`, and
+# lint-javascript), so it needs Node.js 22.14 or newer and `npm ci` in
+# javascript/ first (typescript and eslint are devDependencies); its
+# broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
+# verify-javascript-macos-docker, in .semaphore/semaphore.yml). Its build is the
+# addon and the TypeScript library. javascript/Makefile expects the Rust library
+# already built, so these targets build it first.
 build-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript build
@@ -132,9 +138,18 @@ build-grpc-images-javascript:
 # when set), then the container gRPC multilanguage arm (Linux only; see
 # test-integration-javascript), as python/'s and c/'s `test` end with theirs. The
 # build needs the devDependencies (`npm ci` in javascript/): typescript compiles
-# the library (javascript/lib/*.ts -> javascript/dist/).
+# the library (javascript/src/**/*.ts -> javascript/dist/).
 test-javascript: build-javascript
 	$(MAKE) -C javascript test
+
+# The Node.js client's tests that need no broker, the part of `test` (and so
+# of `verify`): the static tests (header conformance, the package layout, the
+# release scripts), the unit tests, and the type check, `tsc --strict` over
+# the sources (the build) and over the type tests (test-typing, against the
+# compiled declarations), with the interface check of the declarations and the
+# exports map against the committed API report (check-api).
+test-javascript-unit: build-javascript
+	$(MAKE) -C javascript test-static test-unit test-typing check-api
 
 # macOS variant of test-javascript: the unit tests only, as python/'s
 # `verify-macos` runs pytest test/unit only. On macOS the gRPC multilanguage arm

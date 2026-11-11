@@ -2,6 +2,16 @@
 
 Status: **approved 2026-11-05** (revision 3 of the design: publishing to npm and the post-publish install test are manual steps). It mirrors the .NET release flow (`.semaphore/build-dotnet-native.sh`, `pack-nupkg.sh`, `test-nupkg.sh`, `release-nupkg.sh`): build per platform, pack, test on clean machines, record, then publish by hand.
 
+**Revision 4 (the root conventions, Build, packaging and release):** Semaphore now publishes.
+The record block records the tested tarballs under `npm/release/` (no bundle, no `publish.sh`),
+and the manual "Publish to npm" promotion (`.semaphore/publish-npm.yml`,
+`.semaphore/publish-npm.sh`) publishes them with a granular npm token from Vault and no
+provenance, under the dist-tag `check-npm.py dist-tag` gives (`preview` for a pre-release, never
+`latest`; `legacy` for 1.x fixes). The preview has two platform packages, `linux-x64-gnu` and
+`darwin-arm64`, each a committed folder of `javascript/npm/` and shipping `NOTICE` and
+`THIRD_PARTY_LICENSES.txt` (cargo-about). The sections below describe revision 3 where they
+differ.
+
 ## 1. Summary
 
 A `javascript/v<version>` tag starts a tag build that
@@ -38,7 +48,7 @@ The release blocks run only on tags, so they are not in `REQUIRED_CI_JOBS`. On e
 ## 4. Publishing and after
 
 - `publish.sh`, on the publisher's machine: checks `SHA256SUMS`, `npm whoami` and that the version is a pre-release; skips a package already published with the same tarball (so a rerun completes an interrupted one) and stops on one published with another; dry-runs; then publishes the three platform packages and the main package, in that order, with `--access public --tag preview`, asking for a one-time password before each. It publishes the tarball files, so npm uploads exactly the tested bytes.
-- `javascript-post-install` (service.yml task on master, parameter `JAVASCRIPT_VERSION`): `check-published-npm.py check` verifies the four packages, the `preview` dist-tag, the optional dependencies and each tarball against the registry's integrity and `check-npm.py package --published`; install jobs run `npm install @confluentinc/kafka-javascript@<version> --ignore-scripts` and the smoke program on Linux amd64 and arm64 in almalinux 8 and 9, rockylinux 9, debian bookworm and trixie, ubuntu 20.04, 22.04 and 24.04, with Node.js 18, 20, 22 and 24 (official tarballs checked against nodejs.org's `SHASUMS256.txt`), and on macOS arm64 with the same Node.js versions. It runs from master, so it cannot compare with the recorded bundle; `publish.sh` does, by reading each package back from npmjs.com after publishing and checking the registry serves exactly the bundle's tarball.
+- `javascript-post-install` (service.yml task on master, parameter `JAVASCRIPT_VERSION`): `check-published-npm.py check` verifies the four packages, the `preview` dist-tag, the optional dependencies and each tarball against the registry's integrity and `check-npm.py package --published`; install jobs run `npm install @confluentinc/kafka-javascript@<version> --ignore-scripts` and the smoke program on Linux amd64 and arm64 in almalinux 8 and 9, rockylinux 9, debian bookworm and trixie, ubuntu 20.04, 22.04 and 24.04, with Node.js 22, 24 and 26 (official tarballs checked against nodejs.org's `SHASUMS256.txt`), and on macOS arm64 with the same Node.js versions. It runs from master, so it cannot compare with the recorded bundle; `publish.sh` does, by reading each package back from npmjs.com after publishing and checking the registry serves exactly the bundle's tarball.
 
 ## 5. Versioning and tagging
 

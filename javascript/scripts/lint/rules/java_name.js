@@ -15,15 +15,17 @@
 'use strict';
 
 // J1 check-java-name (javascript/CLAUDE.md "Files and layout", root CLAUDE.md
-// §2): every class, interface and type a public module of lib/ exports
-// translates a Java class of its folder's package, by name, or carries a tag
-// (`@jsOnly`, `@java`, scripts/lint/java_ts.js); its file is the Java class's
+// §2): every class, interface and type a public module of src/ exports
+// translates a Java class of its folder's package, by name, or is listed
+// (lint-mapping.json's `invented` and `javaTargets`); its file is the Java class's
 // name snake_cased; a file holds one public Java type; a Java exception's
 // class is named `...Error`. An error class takes its Java class from
-// lib/_error_registry.ts, the generated hierarchy's list. One file holds a
+// src/internal/error_registry.ts, the generated hierarchy's list. One file holds a
 // second type by decision (`SECOND_TYPES`). A function or
-// constant export is tagged `@jsOnly`; an enum or namespace export is a form
-// the translation does not use. The exports are the type checker's, so a
+// constant export is on the list of invented names; an enum, or a namespace
+// that does not merge with its class (root CLAUDE.md, JavaScript Binding
+// Conventions, Names: a namespace with the class's name holds its types), is a
+// form the translation does not use. The exports are the type checker's, so a
 // re-export (`export { X }`) and an ambient one (`export declare class`) count.
 
 const { atNode } = require('../location');
@@ -38,7 +40,7 @@ const { PREFIX, javaIndexOf, exportedItems, mappedItems, snakeCase, shortName } 
  * in producer_record.ts only. Any other second type there, or `Header` beside
  * another type elsewhere, is still a finding.
  */
-const SECOND_TYPES = new Map([['lib/producer/producer_record.ts', { main: 'ProducerRecord', second: 'Header' }]]);
+const SECOND_TYPES = new Map([['src/producer/producer_record.ts', { main: 'ProducerRecord', second: 'Header' }]]);
 
 module.exports = {
   name: 'check-java-name',
@@ -46,8 +48,8 @@ module.exports = {
   needs: ['program', 'java'],
   hint:
     'Name the export as its Java class, in the file of that name snake_cased under the folder of its Java ' +
-    'package, one per file; tag an export with no Java class `@jsOnly <reason>`, and one the convention does ' +
-    'not find `@java <fqn>` (javascript/CLAUDE.md "Files and layout").',
+    'package, one per file; list an export with no Java class in lint-mapping.json\'s `invented` with its reason, and one ' +
+    'the convention does not find in its `javaTargets` (javascript/CLAUDE.md "Files and layout").',
   check(ctx) {
     const index = javaIndexOf(ctx);
     const findings = [];
@@ -64,7 +66,7 @@ module.exports = {
         findings.push({
           kind: 'no-java-class',
           subject, at: atNode(ctx, item.node),
-          message: `exports ${item.name}, which names no Java class of ${pkg === null ? 'java.*' : pkg}: tag it @jsOnly <reason>, or @java <fqn>`,
+          message: `exports ${item.name}, which names no Java class of ${pkg === null ? 'java.*' : pkg}: list it in lint-mapping.json's invented, or javaTargets`,
         });
         continue;
       }
@@ -96,13 +98,13 @@ module.exports = {
           findings.push({
             kind: 'java-package',
             subject, at: atNode(ctx, item.node),
-            message: `translates ${javaShort}, of ${javaPkg === null ? 'java.*' : javaPkg}: its file belongs in lib/${expected === '' ? '' : `${expected}/`}`,
+            message: `translates ${javaShort}, of ${javaPkg === null ? 'java.*' : javaPkg}: its file belongs in src/${expected === '' ? '' : `${expected}/`}`,
           });
         }
       }
     }
     // The exports no Java class translates by form: a function or a constant
-    // is the client's own (tagged), an enum or a namespace a form the
+    // is the client's own (listed), an enum or a namespace a form the
     // translation does not use (a Java enum is a class of static readonly
     // constants, javascript/CLAUDE.md "Java shape, JS idiom").
     for (const item of exportedItems(ctx)) {
@@ -119,7 +121,7 @@ module.exports = {
         findings.push({
           kind: 'jsonly-required',
           subject, at: atNode(ctx, item.node),
-          message: `exports the ${item.kind} ${item.name}, which no Java class translates to: tag it @jsOnly <reason>`,
+          message: `exports the ${item.kind} ${item.name}, which no Java class translates to: list it in lint-mapping.json's invented`,
         });
       }
     }

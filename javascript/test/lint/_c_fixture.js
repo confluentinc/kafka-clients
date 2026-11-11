@@ -16,7 +16,7 @@
 
 // A small addon for the N rules' fixture projects: a header, the out_err
 // macros, a callback queue, a producer and a record reader that pass every N
-// rule under the test allowlists below, and a lib/ whose delivery completion
+// rule under the test allowlists below, and a src/ whose delivery completion
 // runs the user callback before it completes the future.
 
 const HEADER = `void kafka_x_P_flush(const kafka_x_P_t *self_, kafka_common_Error_t **out_err);
@@ -156,9 +156,17 @@ int js_bytes(void* env, void* value, JsBytes* out) {
     out->bytes.len = (int32_t)length;
     return 0;
 }
+
+int js_bytes_copy(JsBytes* key, JsBytes* value, uint8_t** copy) {
+    uint8_t* bytes = (uint8_t*)malloc(8);
+    memcpy(bytes, key->bytes.data, 4);
+    memcpy(bytes + 4, value->bytes.data, 4);
+    *copy = bytes;
+    return 0;
+}
 `;
 
-const NATIVE_TS = `import type { RecordMetadata } from './producer/record_metadata';
+const NATIVE_TS = `import type { RecordMetadata } from '../producer/record_metadata';
 interface Native {
   send(onComplete: (m: RecordMetadata, e: unknown) => void): void;
 }
@@ -167,10 +175,10 @@ const native: Native = loaded;
 export = native;
 `;
 
-const PRODUCER_TS = `import native = require('../_native');
+const PRODUCER_TS = `import native = require('../internal/native');
 import type { Callback } from './callback';
 class Future {
-  private _complete(v: unknown): void {
+  /** @internal */ internalComplete(v: unknown): void {
     void v;
   }
 }
@@ -179,7 +187,7 @@ export class Producer {
     const future = new Future();
     const onComplete = (m: unknown, e: unknown): void => {
       callback(m, e);
-      future['_complete'](m);
+      future.internalComplete(m);
     };
     native.send(onComplete);
   }
@@ -188,14 +196,16 @@ export class Producer {
 
 const FILES = {
   'confluent_kafka_bindings.h': HEADER,
-  'src/util.h': UTIL_H,
-  'src/callback_queue.c': QUEUE_C,
-  'src/producer.c': PRODUCER_C,
-  'src/record.c': RECORD_C,
-  'lib/_native.ts': NATIVE_TS,
-  'lib/producer/callback.ts': 'export type Callback = (m: unknown, e: unknown) => void;\n',
-  'lib/producer/record_metadata.ts': 'export class RecordMetadata {}\n',
-  'lib/producer/producer.ts': PRODUCER_TS,
+  'native/util.h': UTIL_H,
+  'native/callback_queue.c': QUEUE_C,
+  'native/producer.c': PRODUCER_C,
+  'native/record.c': RECORD_C,
+  'src/internal/native.ts': NATIVE_TS,
+  'src/producer/callback.ts': 'export type Callback = (m: unknown, e: unknown) => void;\n',
+  'src/producer/record_metadata.ts': 'export class RecordMetadata {}\n',
+  'src/producer/producer.ts': PRODUCER_TS,
+  'src/internal/encode.ts':
+    '// The one place a string becomes bytes (its body is no concern of the C rules).\nexport function encodeLikeJava(s: string): string {\n  return s;\n}\n',
 };
 
 /** The rule with the fixture's allowlists in place of the real tree's. */
@@ -215,8 +225,15 @@ const LISTS = {
     ],
   },
   'check-completion-order': { COMPLETIONS: [{ key: 'send_on_completion', reason: 'the record callback' }] },
-  'check-zero-copy': { ALLOWED: [{ key: 'src/producer.c:js_send:calloc#1', reason: "the send's context" }] },
-  'check-no-binding-queue': { ALLOWED: [{ key: 'src/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }] },
+  'check-one-copy': {
+    ALLOWED: [
+      { key: 'native/producer.c:js_send:calloc#1', reason: "the send's context" },
+      { key: 'native/record.c:js_bytes_copy:malloc#1', reason: 'the copy' },
+      { key: 'native/record.c:js_bytes_copy:memcpy#1', reason: 'the key' },
+      { key: 'native/record.c:js_bytes_copy:memcpy#2', reason: 'the value' },
+    ],
+  },
+  'check-no-binding-queue': { ALLOWED: [{ key: 'native/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }] },
 };
 
 module.exports = { FILES, HEADER, UTIL_H, QUEUE_C, PRODUCER_C, RECORD_C, PRODUCER_TS, LISTS, withLists };

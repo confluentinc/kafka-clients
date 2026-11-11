@@ -16,16 +16,16 @@
 
 // N2 check-cb-twin-only (javascript/CLAUDE.md boundary rule 4: waiting calls
 // use the `_cb` twin): for every header function `f` with an `f_cb` twin,
-// src/ calls `f_cb`, never `f` or its `_err` twin, which would block the
+// native/ calls `f_cb`, never `f` or its `_err` twin, which would block the
 // event loop and run callbacks on the caller's thread. This generalises
 // test/static/header_conformance.test.js's fixed producer list to every
-// client, in function bodies and in the bodies of `#define`s (src/*.c and
-// src/*.h), a macro's call checked once, at its definition. The one
+// client, in function bodies and in the bodies of `#define`s (native/*.c and
+// native/*.h), a macro's call checked once, at its definition. The one
 // exception is listed with its reason and the exact call it allows; an entry
 // that allows nothing is a finding.
 //
 // It also owns javascript/CLAUDE.md boundary rule 5 (never read the future):
-// no function named by `FORBIDDEN` is called in src/, its `_cb` twins
+// no function named by `FORBIDDEN` is called in native/, its `_cb` twins
 // included (`kafka_common_KafkaFuture_get_cb`), which read the future too.
 
 const { cModel, applyAllowlist } = require('../c_model');
@@ -33,14 +33,14 @@ const { cModel, applyAllowlist } = require('../c_model');
 /** The blocking calls allowed: `<file>:<function>:<callee>(<args>)`. */
 const ALLOWED = [
   {
-    key: 'src/producer.c:producer_force_close:kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)',
+    key: 'native/producer.c:producer_force_close:kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)',
     reason:
       "the finalizer's force-close (javascript/CLAUDE.md rule 4's exception, pinned by " +
       'test/static/header_conformance.test.js): it runs only while the handle is finalized, where no JS runs',
   },
 ];
 
-/** The header functions src/ never calls, whatever their form: each prefix with its reason. */
+/** The header functions native/ never calls, whatever their form: each prefix with its reason. */
 const FORBIDDEN = [
   {
     prefix: 'kafka_common_KafkaFuture_get',
@@ -54,7 +54,7 @@ module.exports = {
   name: 'check-cb-twin-only',
   kinds: ['blocking-call', 'forbidden-call', 'cb-unused-allowance'],
   FORBIDDEN,
-  needs: ['src', 'header'],
+  needs: ['native', 'header'],
   hint: 'Call the _cb twin and complete in its callback (javascript/CLAUDE.md boundary rule 4).',
   ALLOWED,
   check(ctx) {
