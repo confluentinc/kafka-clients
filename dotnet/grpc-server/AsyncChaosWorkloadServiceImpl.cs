@@ -43,8 +43,8 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
 
     public AsyncChaosWorkloadServiceImpl()
         : this(
-            static config => new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray()),
-            static config => new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray()))
+            static config => new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+            static config => new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()))
     {
     }
 

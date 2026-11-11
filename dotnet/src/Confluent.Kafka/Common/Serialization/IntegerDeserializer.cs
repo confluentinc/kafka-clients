@@ -1,4 +1,4 @@
-// Copyright 2025 Confluent Inc.
+// Copyright 2026 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,32 +13,22 @@
 // limitations under the License.
 
 using System;
-using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Common.Serialization;
 
-namespace Confluent.Kafka.Internal.Serialization;
+using Confluent.Kafka.Common.Errors;
+
+namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Integer()"/>: 4 big-endian bytes, as Java's <c>IntegerSerializer</c> and
-/// <c>IntegerDeserializer</c>.
+/// Java's <c>IntegerDeserializer</c>: 4 big-endian bytes as an <see cref="int"/>, Java's nullable <c>Integer</c>.
 /// </summary>
-internal sealed class Int32Serde : ISerde<int>
+public sealed class IntegerDeserializer : IDeserializer<int?>
 {
-    public ReadOnlyMemory<byte>? Serialize(string topic, int data) =>
-        new[]
-        {
-            (byte)(data >> 24),
-            (byte)(data >> 16),
-            (byte)(data >> 8),
-            (byte)data,
-        };
-
-    public int Deserialize(string topic, ReadOnlySpan<byte> data)
+    /// <inheritdoc/>
+    public int? Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         if (data.Length != 4)
         {
-            throw new SerializationException(
-                "Size of data received by IntegerDeserializer is not 4");
+            throw new SerializationException("Size of data received by IntegerDeserializer is not 4");
         }
 
         int value = 0;

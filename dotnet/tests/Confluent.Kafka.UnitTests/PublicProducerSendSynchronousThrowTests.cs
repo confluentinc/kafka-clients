@@ -158,11 +158,11 @@ public sealed class PublicProducerSendSynchronousThrowTests
 
     private static IAsyncProducer<byte[], byte[]> Create(string client, ISerializer<byte[]>? valueSerializer = null) =>
         client == Mock
-            ? new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), valueSerializer ?? Serdes.ByteArray())
+            ? new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), valueSerializer ?? Serdes.ByteArray().Serializer())
             : new AsyncKafkaProducer<byte[], byte[]>(
                 new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1" },
-                Serdes.ByteArray(),
-                valueSerializer ?? Serdes.ByteArray());
+                Serdes.ByteArray().Serializer(),
+                valueSerializer ?? Serdes.ByteArray().Serializer());
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (OperationCanceledException Error, WeakReference Value) SendCanceled(

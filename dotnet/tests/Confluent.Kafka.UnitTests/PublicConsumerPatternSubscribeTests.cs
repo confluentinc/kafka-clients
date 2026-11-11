@@ -283,10 +283,10 @@ public sealed class PublicConsumerPatternSubscribeTests
 
     private static object Create(string kind, bool groupId) => kind switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
+        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)

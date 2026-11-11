@@ -41,7 +41,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_OnAutoCompleteMock_ResolvesWithMetadata()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(
@@ -58,7 +58,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_SequentialToSamePartition_OffsetsIncrement()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 5; i++)
@@ -74,7 +74,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ErrorNext_FaultsWithKafkaException()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -93,7 +93,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ErrorNext_FaultsWithTheSameInstance()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -110,7 +110,7 @@ public sealed class PublicProducerSendTests
     public async Task Send_AbsentKeyAndValue_Resolves()
     {
         // Absent key and value: no key, and a tombstone.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, value: null, key: null, partition: 1));
@@ -123,7 +123,7 @@ public sealed class PublicProducerSendTests
     public async Task Send_EmptyKeyAndValue_Resolves()
     {
         // Empty key and value: a non-null pointer with length 0, distinct from absent.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(
@@ -139,7 +139,7 @@ public sealed class PublicProducerSendTests
     {
         // The async send borrows the caller's buffers until the hand-over, so a mutation before then may reach the wire,
         // and must stay memory-safe. The mock cannot read the sent bytes back, so the test asserts the send resolves.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         byte[] key = Enumerable.Repeat((byte)0xAB, 32).ToArray();
@@ -160,7 +160,7 @@ public sealed class PublicProducerSendTests
     public async Task Send_NonAsciiTopic_RoundTripsToMetadataTopic()
     {
         const string nonAsciiTopic = "témás-topic-日本語-🚀";
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = await SendOf(
@@ -173,7 +173,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ManyThreadsConcurrently_AllResolve()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         const int threadCount = 8;
@@ -205,7 +205,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_NullRecord_ThrowsArgumentNull()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
@@ -217,7 +217,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         await TestTimeout.DisposeAsync(producer);
 
         await Assert.ThrowsAsync<IllegalStateException>(
@@ -227,7 +227,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -247,7 +247,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Get_TokenCancelsOnlyTheWait_TheSendStillCompletes()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
 
@@ -271,7 +271,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Dispose_WithSendsInFlight_Returns()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         for (int i = 0; i < 16; i++)
         {
@@ -284,7 +284,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public void Dispose_WithSendsInFlight_SyncDispose_Returns()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         for (int i = 0; i < 16; i++)
         {
@@ -300,7 +300,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Dispose_WithUncompletedManualSendInFlight_CompletesTheSend()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Delivery();
@@ -313,7 +313,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task DisposeAsync_WithUncompletedManualSendInFlight_CompletesTheSend()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Delivery();
@@ -326,7 +326,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Close_WithUncompletedManualSendInFlight_Returns_AndTheSendStaysPending()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Delivery();
@@ -339,7 +339,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task CloseWithTimeout_WithUncompletedManualSendInFlight_Returns_AndTheSendStaysPending()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Delivery();
@@ -352,7 +352,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Dispose_AfterClose_DoesNotFlush_AndDoesNotThrow()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Delivery();
@@ -366,7 +366,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task DisposeAsync_AfterClose_DoesNotFlush_AndDoesNotThrow()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Delivery();
@@ -381,7 +381,7 @@ public sealed class PublicProducerSendTests
     public void Dispose_WithManyUncompletedManualSendsInFlight_Returns()
     {
         // The teardown flush completes every pending send, so Dispose returns.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
 
         for (int i = 0; i < 16; i++)
         {
@@ -398,7 +398,7 @@ public sealed class PublicProducerSendTests
         // use-after-free would crash here. A racing send may throw IllegalStateException.
         for (int iteration = 0; iteration < 40; iteration++)
         {
-            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
             TestTimeout.Run(
                 () =>
@@ -440,7 +440,7 @@ public sealed class PublicProducerSendTests
             TestTimeout.Run(
                 () =>
                 {
-                    AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                    AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
                     using IDisposable producerDisposal = TestTimeout.Disposal(producer);
                     Task<RecordMetadata>[] sends = new Task<RecordMetadata>[8];
                     for (int i = 0; i < sends.Length; i++)
@@ -468,7 +468,7 @@ public sealed class PublicProducerSendTests
         for (int iteration = 0; iteration < 25; iteration++)
         {
             AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(
-                Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+                Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
 
             using CountdownEvent hot = new CountdownEvent(4);
             Thread[] senders = new Thread[4];

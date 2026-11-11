@@ -35,11 +35,14 @@ internal static class ConsumerRecordsMarshal
         Array.Empty<KeyValuePair<TopicPartition, long>>();
 
     // On a failure, the records before the failing one are returned, and rewind holds each partition's first
-    // record not returned: the failing one, and the first record of every later partition in the batch.
+    // record not returned: the failing one, and the first record of every later partition in the batch. A
+    // deserializer's headers form, given when it has one, is called with the headers the record then carries.
     internal static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue>(
         IntPtr records,
         IDeserializer<TKey> keyDeserializer,
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
         IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders,
         out RecordDeserializationException? error,
         out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
     {
@@ -80,7 +83,8 @@ internal static class ConsumerRecordsMarshal
                     for (int i = 0; i < size; i++)
                     {
                         IntPtr record = Get(partitionRecords, i);
-                        error = reader.Copy(record, topic, partitionId, keyDeserializer, valueDeserializer, list);
+                        error = reader.Copy(
+                            record, topic, partitionId, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, list);
                         if (error is not null)
                         {
                             rewind = Rewind(records, partitions, p, error);
@@ -271,10 +275,12 @@ internal static class ConsumerRecordsMarshal
     private static unsafe byte[]? CopyBytes(IntPtr bytes) =>
         bytes == IntPtr.Zero ? null : CopyBytes(*(KafkaBytes*)bytes);
 
-    private static unsafe T Deserialize<T>(IDeserializer<T> deserializer, string topic, IntPtr bytes)
+    private static unsafe T? Deserialize<T>(
+        IDeserializer<T> deserializer, IDeserializerWithHeaders<T>? withHeaders, string topic, Headers headers, IntPtr bytes)
     {
         KafkaBytes* view = (KafkaBytes*)bytes;
-        return deserializer.Deserialize(topic, new ReadOnlySpan<byte>((void*)view->Data, Math.Max(view->Length, 0)));
+        ReadOnlySpan<byte> data = new ReadOnlySpan<byte>((void*)view->Data, Math.Max(view->Length, 0));
+        return withHeaders is null ? deserializer.Deserialize(topic, data) : withHeaders.Deserialize(topic, headers, data);
     }
 
     private static RecordDeserializationException NewError(
@@ -338,7 +344,9 @@ internal static class ConsumerRecordsMarshal
             string topic,
             int partition,
             IDeserializer<TKey> keyDeserializer,
+            IDeserializerWithHeaders<TKey>? keyWithHeaders,
             IDeserializer<TValue> valueDeserializer,
+            IDeserializerWithHeaders<TValue>? valueWithHeaders,
             List<ConsumerRecord<TKey, TValue>> records)
         {
             IntPtr outErr = IntPtr.Zero;
@@ -353,12 +361,12 @@ internal static class ConsumerRecordsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             Headers headers = CopyHeaders(record);
 
-            TKey deserializedKey = default!;
+            TKey? deserializedKey = default;
             if (key != IntPtr.Zero)
             {
                 try
                 {
-                    deserializedKey = Deserialize(keyDeserializer, topic, key);
+                    deserializedKey = Deserialize(keyDeserializer, keyWithHeaders, topic, headers, key);
                 }
                 catch (Exception cause)
                 {
@@ -368,12 +376,12 @@ internal static class ConsumerRecordsMarshal
                 }
             }
 
-            TValue deserializedValue = default!;
+            TValue? deserializedValue = default;
             if (value != IntPtr.Zero)
             {
                 try
                 {
-                    deserializedValue = Deserialize(valueDeserializer, topic, value);
+                    deserializedValue = Deserialize(valueDeserializer, valueWithHeaders, topic, headers, value);
                 }
                 catch (Exception cause)
                 {

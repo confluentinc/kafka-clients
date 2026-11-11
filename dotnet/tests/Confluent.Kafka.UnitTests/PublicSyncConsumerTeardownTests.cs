@@ -37,21 +37,21 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Dispose_ReturnsWithoutHang()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
 
     [Fact]
     public void Close_ReturnsWithoutHang()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
     public void DoubleDispose_IsSafe()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
         TestTimeout.Dispose(consumer);
     }
@@ -59,7 +59,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Close_ThenDispose_IsIdempotent()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Teardown(consumer, () => consumer.Close());
         TestTimeout.Dispose(consumer);
     }
@@ -67,7 +67,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Dispose_ThenClose_IsIdempotent()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
         TestTimeout.Teardown(consumer, () => consumer.Close());
     }
@@ -75,7 +75,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Close_OnMock_DoesNotHang_AfterSubscribe()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         consumer.Subscribe(ProofTopic());
 
         TestTimeout.Run(() => consumer.Close(), s_deadline);
@@ -84,7 +84,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void UseAfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.Poll(s_pollTimeout));
@@ -106,7 +106,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void UseAfterClose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Teardown(consumer, () => consumer.Close());
 
         Assert.Throws<IllegalStateException>(() => consumer.Subscribe(ProofTopic()));
@@ -121,7 +121,7 @@ public sealed class PublicSyncConsumerTeardownTests
             {
                 for (int i = 0; i < 100; i++)
                 {
-                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                     consumer.Subscribe(ProofTopic());
                     consumer.Dispose();
                 }
@@ -137,7 +137,7 @@ public sealed class PublicSyncConsumerTeardownTests
             {
                 for (int i = 0; i < 100; i++)
                 {
-                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                     consumer.Subscribe(ProofTopic());
                     consumer.Close();
                 }

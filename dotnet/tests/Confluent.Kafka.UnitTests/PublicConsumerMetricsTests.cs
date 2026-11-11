@@ -43,7 +43,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_AsyncMock_IsEmpty()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IReadOnlyDictionary<MetricName, IMetric> metrics = consumer.Metrics();
         Assert.NotNull(metrics);
@@ -53,7 +53,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_SyncMock_IsEmpty()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Assert.Empty(consumer.Metrics());
     }
@@ -62,7 +62,7 @@ public sealed class PublicConsumerMetricsTests
     public void Metrics_AsyncRealConsumer_IsPopulatedAndWellFormed()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-async"), Serdes.ByteArray(), Serdes.ByteArray());
+            RealConfig("metrics-async"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         AssertPopulatedAndWellFormed(consumer.Metrics());
@@ -72,7 +72,7 @@ public sealed class PublicConsumerMetricsTests
     public void Metrics_SyncRealConsumer_IsPopulatedAndWellFormed()
     {
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-sync"), Serdes.ByteArray(), Serdes.ByteArray());
+            RealConfig("metrics-sync"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         AssertPopulatedAndWellFormed(consumer.Metrics());
@@ -83,7 +83,7 @@ public sealed class PublicConsumerMetricsTests
     {
         // A key rebuilt with another description finds the same entry: MetricName equality ignores the description.
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-key-identity"), Serdes.ByteArray(), Serdes.ByteArray());
+            RealConfig("metrics-key-identity"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<MetricName, IMetric> metrics = consumer.Metrics();
@@ -107,7 +107,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
         Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
@@ -115,7 +115,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public async Task Metrics_AfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
         Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
@@ -123,7 +123,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIConsumerCommon()
     {
-        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IConsumerCommon consumer = mock;
         Assert.Empty(consumer.Metrics());
@@ -133,7 +133,7 @@ public sealed class PublicConsumerMetricsTests
     public async Task Metrics_ConcurrentWithInFlightPoll_AnswersWhileThePollHoldsTheConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-concurrent"), Serdes.ByteArray(), Serdes.ByteArray());
+            RealConfig("metrics-concurrent"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         // Subscribe completes without a broker, so the poll that follows waits.

@@ -45,7 +45,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncQueryFamily_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
@@ -62,7 +62,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncStateReads_AfterDispose_ThrowIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.Assignment());
@@ -83,7 +83,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void MockDriverHelpers_AfterDispose_ThrowIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.AddRecord("h1-topic", 0, 0L, null, null));
@@ -98,7 +98,7 @@ public sealed class PublicConsumerHandleProtectionTests
     public async Task AsyncQueryFamily_AfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
@@ -117,7 +117,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void Wakeup_AfterDispose_IsANoOp_DoesNotThrow()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         consumer.Wakeup();
@@ -128,7 +128,7 @@ public sealed class PublicConsumerHandleProtectionTests
     public async Task Wakeup_AfterDisposeAsync_IsANoOp_DoesNotThrow()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         consumer.Wakeup();
@@ -143,7 +143,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 200; i++)
                 {
                     MockConsumer<byte[], byte[]> consumer =
-                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
                     using ManualResetEventSlim ready = new ManualResetEventSlim(false);
                     Exception? waker = null;
@@ -183,7 +183,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     MockConsumer<byte[], byte[]> consumer =
-                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                     consumer.Assign(new[] { Tp() });
 
                     using ManualResetEventSlim ready = new ManualResetEventSlim(false);
@@ -235,7 +235,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     MockConsumer<byte[], byte[]> consumer =
-                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                     consumer.Assign(new[] { Tp() });
                     consumer.AddRecord("h1-topic", 0, 0L, null, new byte[] { 1, 2, 3 });
                     consumer.Dispose();
@@ -253,7 +253,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     AsyncMockConsumer<byte[], byte[]> consumer =
-                        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                     _ = consumer.Subscribe(ProofTopic());
                     await consumer.DisposeAsync();
                 }
@@ -282,7 +282,7 @@ public sealed class PublicConsumerHandleProtectionTests
                             {
                                 AsyncMockConsumer<byte[], byte[]> consumer =
                                     new AsyncMockConsumer<byte[], byte[]>(
-                                        Serdes.ByteArray(), Serdes.ByteArray());
+                                        Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                                 _ = consumer.Subscribe(ProofTopic());
                                 consumer.Dispose();
                             }

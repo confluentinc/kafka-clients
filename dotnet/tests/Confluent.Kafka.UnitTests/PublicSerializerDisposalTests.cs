@@ -844,7 +844,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int Disposals => Volatile.Read(ref _disposals);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => throw new RecordTooLargeException("too large");
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) => throw new RecordTooLargeException("too large");
 
         public void Dispose()
         {
@@ -1028,7 +1028,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int DestroysSeen { get; set; } = -1;
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => data;
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) => data;
 
         public void Dispose()
         {
@@ -1058,7 +1058,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int Disposals => Volatile.Read(ref _disposals);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => data;
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) => data;
 
         public ValueTask DisposeAsync()
         {
