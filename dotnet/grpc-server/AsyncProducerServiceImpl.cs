@@ -173,7 +173,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             await producer.Flush().ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -198,7 +198,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
             return response;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) };
         }
@@ -223,7 +223,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
             return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
         }
@@ -256,7 +256,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
                 .ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -287,7 +287,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             await operation(producer).ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -306,7 +306,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             await (timeout.HasValue ? producer.Close(timeout.Value) : producer.Close()).ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }

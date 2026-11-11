@@ -86,7 +86,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
                 consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = 0, Error = Translate.ToProto(ex) });
         }
@@ -151,7 +151,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.PollResponse { Records = records });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.PollResponse { Error = Translate.ToProto(ex) });
         }
@@ -242,7 +242,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.CommittedResponse { Offsets = map });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.CommittedResponse { Error = Translate.ToProto(ex) });
         }
@@ -270,7 +270,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.PositionResponse { Offset = offset });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.PositionResponse { Error = Translate.ToProto(ex) });
         }
@@ -347,7 +347,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.OffsetAndTimestampResponse { Offsets = map });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.OffsetAndTimestampResponse { Error = Translate.ToProto(ex) });
         }
@@ -375,7 +375,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(response);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) });
         }
@@ -409,7 +409,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.ListTopicsResponse { Topics = listing });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.ListTopicsResponse { Error = Translate.ToProto(ex) });
         }
@@ -442,7 +442,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
         }
@@ -469,7 +469,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.SubscriptionResponse { Topics = topics });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.SubscriptionResponse { Error = Translate.ToProto(ex) });
         }
@@ -497,7 +497,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
                 GroupMetadata = Translate.GroupMetadataToProto(groupMetadata),
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.GroupMetadataResponse { Error = Translate.ToProto(ex) });
         }
@@ -560,6 +560,11 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             }
 
             _consumers.TryRemove(request.ConsumerId, out _);
+            if (!Translate.IsBindingError(ex))
+            {
+                throw;
+            }
+
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
     }
@@ -582,7 +587,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(Translate.CurrentLagResponse(lag));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.CurrentLagResponse { Error = Translate.ToProto(ex) });
         }
@@ -607,7 +612,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         {
             action = ListenerAction.FromRequest(request);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
@@ -685,7 +690,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.StatusResponse());
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
@@ -717,7 +722,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.LongOffsetsResponse { Offsets = map });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.LongOffsetsResponse { Error = Translate.ToProto(ex) });
         }
@@ -746,7 +751,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
             return Task.FromResult(new Proto.TopicPartitionListResponse { Partitions = list });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.TopicPartitionListResponse { Error = Translate.ToProto(ex) });
         }
