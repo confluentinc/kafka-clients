@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -188,6 +189,28 @@ public sealed class PublicMockConsumerOwnerWaitTests
         {
             await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
         }
+    }
+
+    // .NET gives a new thread the ManagedThreadId of a thread that has exited. The thread that started the rebalance
+    // exits while the rebalance still holds the consumer; a new thread that gets its ID is another thread all the same.
+    // The call is Commit(null): only the binding's owner check refuses it, since passing that check ends in the null
+    // check before the core is reached. Each attempt has a new exited thread, so an ID that a thread the test does not
+    // own took first is not looked for again.
+    [Fact]
+    public async Task AsyncMock_ANewThreadWithTheIdOfTheExitedThreadThatStartedTheRebalance_IsRefused()
+    {
+        const int Attempts = 5;
+        for (int attempt = 0; attempt < Attempts; attempt++)
+        {
+            (bool called, Exception? seen) = await CommitOnANewThreadWithTheIdOfTheRebalanceStarter();
+            if (called)
+            {
+                AssertRefused(seen);
+                return;
+            }
+        }
+
+        Assert.Fail($"no new thread got the ID of the exited thread that started the rebalance, in {Attempts} attempts");
     }
 
     [Fact]
@@ -638,12 +661,154 @@ public sealed class PublicMockConsumerOwnerWaitTests
         Assert.Equal(ConcurrentMessage, refused.Message);
     }
 
-    private static Thread StartThread(Action body)
+    private static Thread StartThread(Action body, int maxStackSize = 0)
     {
-        Thread thread = new Thread(() => body());
+        Thread thread = new Thread(() => body(), maxStackSize);
         thread.IsBackground = true;
         thread.Start();
         return thread;
+    }
+
+    // Subscribes a fresh consumer with a listener that holds the rebalance, starts the rebalance on a thread that ends,
+    // and makes Commit(null) on a new thread with that thread's ID, if one gets it.
+    private static async Task<(bool Called, Exception? Thrown)> CommitOnANewThreadWithTheIdOfTheRebalanceStarter()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        try
+        {
+            using ManualResetEventSlim entered = new ManualResetEventSlim();
+            TaskCompletionSource<bool> release =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await TestTimeout.Run(
+                () => consumer.Subscribe(
+                    new[] { Topic },
+                    new AsyncListener(async () =>
+                    {
+                        entered.Set();
+                        await release.Task.ConfigureAwait(false);
+                    })),
+                s_deadline);
+            (int starterId, Task rebalance) = RebalanceOnAThreadThatEnds(consumer, new[] { s_tp0 });
+            (bool Called, Exception? Thrown) result;
+            try
+            {
+                Assert.True(entered.Wait(s_deadline), "the listener never ran");
+                Assert.False(rebalance.IsCompleted, "the rebalance ended before the async listener did");
+                result = CallOnANewThreadWithTheId(starterId, () => consumer.Commit(null!).GetAwaiter().GetResult());
+            }
+            finally
+            {
+                release.TrySetResult(true);
+            }
+
+            await TestTimeout.Run(() => rebalance, s_deadline);
+            Assert.Equal(new[] { s_tp0 }, consumer.Assignment());
+            return result;
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
+    // Starts the rebalance on a new thread and returns once that thread has ended. No reference to the thread is kept
+    // (an async caller would keep its locals), so .NET can give its ID to a later thread.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (int ThreadId, Task Rebalance) RebalanceOnAThreadThatEnds(
+        AsyncMockConsumer<byte[], byte[]> consumer,
+        IReadOnlyCollection<TopicPartition> newAssignment)
+    {
+        int threadId = 0;
+        Task? rebalance = null;
+        RunOnAnotherThread(() =>
+        {
+            threadId = Environment.CurrentManagedThreadId;
+            rebalance = consumer.Rebalance(newAssignment);
+        });
+        return (threadId, rebalance!);
+    }
+
+    // Starts new threads, keeping each alive so that its ID stays taken, until one gets the given ID, and makes the call
+    // there. .NET hands the ID of an exited thread to a later one once its thread object is cleaned up; a thread the
+    // test does not own may take it first, and then no call is made.
+    private static (bool Called, Exception? Thrown) CallOnANewThreadWithTheId(int id, Action call)
+    {
+        const int MaxThreads = 256;
+        // A small stack, so that the threads kept alive fit in the address space of a 32-bit process.
+        const int StackSize = 256 * 1024;
+        List<Thread> started = new List<Thread>();
+        SemaphoreSlim ready = new SemaphoreSlim(0);
+        ManualResetEventSlim done = new ManualResetEventSlim();
+        Exception? thrown = null;
+        Exception? failure = null;
+        bool called = false;
+        bool stalled = false;
+        int notEnded = 0;
+        try
+        {
+            for (int i = 0; i < MaxThreads && !called; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                started.Add(StartThread(
+                    () =>
+                    {
+                        try
+                        {
+                            if (Environment.CurrentManagedThreadId == id)
+                            {
+                                thrown = Record.Exception(call);
+                                called = true;
+                            }
+
+                            ready.Release();
+                            if (!called)
+                            {
+                                done.Wait();
+                            }
+                        }
+                        catch (Exception e)
+                        {
+                            failure = e;
+                        }
+                    },
+                    StackSize));
+                if (!ready.Wait(s_bound))
+                {
+                    stalled = true;
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            done.Set();
+            Stopwatch joining = Stopwatch.StartNew();
+            foreach (Thread thread in started)
+            {
+                TimeSpan left = s_bound - joining.Elapsed;
+                if (!thread.Join(left > TimeSpan.Zero ? left : TimeSpan.Zero))
+                {
+                    notEnded++;
+                }
+            }
+
+            // A thread that has not ended may still use them.
+            if (notEnded == 0)
+            {
+                ready.Dispose();
+                done.Dispose();
+            }
+        }
+
+        Assert.True(notEnded == 0, $"{notEnded} new threads did not end");
+        if (failure is not null)
+        {
+            throw new InvalidOperationException("a new thread failed", failure);
+        }
+
+        Assert.False(stalled, "a new thread did not start, or its call did not return");
+        return (called, thrown);
     }
 
     private static void RunOnAnotherThread(Action action)
