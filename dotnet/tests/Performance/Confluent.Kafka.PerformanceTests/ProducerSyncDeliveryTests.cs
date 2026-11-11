@@ -64,7 +64,7 @@ public sealed class ProducerSyncDeliveryTests
     public Task RunSync_WarmupFailure_FailsTheRun() => WarmupFailureAsync();
 
     [Fact]
-    public Task RunSync_CancelledBeforeTheWarmup_RunsTheWarmupToItsEnd() => CancelledWarmupAsync();
+    public Task RunSync_CancelledBeforeTheWarmup_SkipsTheWarmup() => CancelledWarmupAsync();
 
     [Theory]
     [InlineData("3", "dotnet-rust")]
@@ -243,7 +243,7 @@ public sealed class ProducerSyncDeliveryTests
 
     private static async Task CancelledWarmupAsync()
     {
-        // Each warmup send sleeps 0.1 s after it, so a 1 s warmup makes about ten sends.
+        // A signal ends the warmup, as in Python, so a token cancelled before it sends nothing.
         Apply(numMessages: 0, warmupSeconds: 1);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
@@ -253,8 +253,8 @@ public sealed class ProducerSyncDeliveryTests
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend, cts.Token).ConfigureAwait(false);
 
-        Assert.InRange(result.WarmupSent, 2, 15);
-        Assert.Equal(result.WarmupSent, backend.SendCount);
+        Assert.Equal(0, result.WarmupSent);
+        Assert.Equal(0, backend.SendCount);
         Assert.Equal(0, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
         Assert.Equal(1, Occurrences(output, "Warming up for 1 seconds ..."));
