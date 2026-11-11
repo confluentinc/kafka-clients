@@ -9,7 +9,7 @@
 
 # Multi-stage Docker build for the JavaScript (Node.js) gRPC server image used
 # by the multilanguage integration test harness (the `__grpc_js` producer arm;
-# see javascript/grpc_server.js and rust/tests/common/backend_pool.rs).
+# see javascript/grpc-server/grpc_server.js and rust/tests/common/backend_pool.rs).
 #
 # Build context MUST be the repo root because we copy from rust/target/,
 # rust/multilanguage-test-server/ and javascript/. The Makefile target sets this
@@ -29,7 +29,7 @@
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build confluent-kafka-javascript.node against the prebuilt Rust shared lib,
-# compile the TypeScript library (lib/ -> dist/) and install the gRPC packages.
+# compile the TypeScript library (src/ -> dist/) and install the gRPC packages.
 # ---------------------------------------------------------------------------
 FROM node:22-trixie AS builder
 
@@ -38,14 +38,14 @@ FROM node:22-trixie AS builder
 # so node-gyp downloads nothing.
 WORKDIR /workspace
 
-# Recreate the layout binding.gyp expects: javascript/ beside rust/target/, with
+# Recreate the layout native/binding.gyp expects: javascript/ beside rust/target/, with
 # the library under rust/target/release and the header under rust/target/include
 # (CONFLUENT_KAFKA_LIB_DIR / CONFLUENT_KAFKA_INCLUDE_DIR are set explicitly
 # below anyway). The addon includes confluent_kafka_bindings.h, the header of
 # `_err` twins for language bindings, as the Python extension does.
 COPY rust/target/release/libconfluent_kafka.so /workspace/rust/target/release/libconfluent_kafka.so
 COPY rust/target/include/confluent_kafka_bindings.h /workspace/rust/target/include/confluent_kafka_bindings.h
-COPY javascript/binding.gyp javascript/package.json javascript/package-lock.json javascript/tsconfig.json \
+COPY javascript/package.json javascript/package-lock.json javascript/tsconfig.json \
      javascript/Makefile /workspace/javascript/
 
 # The devDependencies, from package-lock.json: typescript and @types/node
@@ -67,18 +67,18 @@ RUN mkdir -p /workspace/grpc-deps && \
             .filter(([name]) => name.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')") && \
     test -d node_modules/@grpc/grpc-js && test -d node_modules/@grpc/proto-loader
 
-COPY javascript/src /workspace/javascript/src
+COPY javascript/native /workspace/javascript/native
 COPY javascript/scripts /workspace/javascript/scripts
-COPY javascript/lib /workspace/javascript/lib
-COPY javascript/grpc_server.js javascript/grpc_translate.js /workspace/javascript/
+COPY javascript/src /workspace/javascript/src
+COPY javascript/grpc-server /workspace/javascript/grpc-server
 
 # `make build`: the addon (node-gyp, npm's bundled copy, against the headers
 # the official image installs under /usr/local/include/node) and the library
-# (tsc, lib/ -> dist/), as on a host.
+# (tsc, src/ -> dist/), as on a host.
 ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/rust/target/release \
     CONFLUENT_KAFKA_INCLUDE_DIR=/workspace/rust/target/include
 RUN make -C /workspace/javascript build && \
-    test -f /workspace/javascript/build/Release/confluent-kafka-javascript.node && \
+    test -f /workspace/javascript/native/build/Release/confluent-kafka-javascript.node && \
     test -f /workspace/javascript/dist/producer/index.js
 
 # ---------------------------------------------------------------------------
@@ -91,11 +91,16 @@ WORKDIR /app
 # The Rust shared library at /app; LD_LIBRARY_PATH below makes the loader find
 # it there, since the addon's rpath names the builder's directory.
 COPY --from=builder /workspace/rust/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
-# dist/_native.js loads the addon from ../build/Release relative to dist/.
-COPY --from=builder /workspace/javascript/build/Release/confluent-kafka-javascript.node /app/javascript/build/Release/confluent-kafka-javascript.node
+# dist/internal/native.js loads the addon from native/build/Release beside dist/.
+COPY --from=builder /workspace/javascript/native/build/Release/confluent-kafka-javascript.node /app/javascript/native/build/Release/confluent-kafka-javascript.node
 COPY --from=builder /workspace/javascript/dist /app/javascript/dist
-COPY --from=builder /workspace/javascript/grpc_server.js /workspace/javascript/grpc_translate.js /app/javascript/
-# Beside the server, so `require('@grpc/grpc-js')` resolves without NODE_PATH.
+COPY --from=builder /workspace/javascript/grpc-server /app/javascript/grpc-server
+# The chaos workload service grpc_server.js registers, and the package.json
+# whose `exports` it imports the client through (Node's self-reference).
+COPY javascript/verifiable_clients/chaos_workload.js /app/javascript/verifiable_clients/chaos_workload.js
+COPY javascript/package.json /app/javascript/package.json
+# In the server's parent directory, so `require('@grpc/grpc-js')` resolves
+# without NODE_PATH (Node walks up from grpc-server/).
 COPY --from=builder /workspace/grpc-deps/node_modules /app/javascript/node_modules
 
 # Single source of truth for the wire schema: the proto crate. The server loads
@@ -113,6 +118,6 @@ ENV GRPC_HOST=0.0.0.0
 
 EXPOSE 50054
 
-# The Rust BackendPool waits for "listening" on stderr — keep grpc_server.js
+# The Rust BackendPool waits for "listening" on stderr — keep grpc-server/grpc_server.js
 # in sync with the BackendPool's WaitFor::message_on_stderr setting.
-CMD ["node", "/app/javascript/grpc_server.js"]
+CMD ["node", "/app/javascript/grpc-server/grpc_server.js"]

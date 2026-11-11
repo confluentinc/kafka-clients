@@ -18,20 +18,24 @@
 // `Callback_t` per record; the user callback, then the future, then one
 // `__set_callback_result_err`). Lexical, not path-sensitive (PLAN.md §8
 // decision 13):
-//   - C: a delivery-completion function (one src/ hands to an interface's
+//   - C: a delivery-completion function (one native/ hands to an interface's
 //     constructor, a header `..._new` / `..._new_err`, as an `..._fn_t`
 //     method, such as
 //     `kafka_producer_Callback_new_err`'s `on_completion`) calls the JS side
 //     (`call_ref`) at one site, and `__set_callback_result_err` at one site,
 //     after it, as the statement an `if (!…destroying)` guards or inside its
 //     braced block (no report once destroy has begun);
-//   - TypeScript: the function lib/ hands the native send as its delivery
+//   - TypeScript: the function src/ hands the native send as its delivery
 //     completion (an argument for a native parameter whose function type
 //     takes a `RecordMetadata`, and any function argument of a `native.<fn>`
-//     call that completes a future, `future['_complete'](...)`) runs the user
+//     call that completes a future, `future.internalComplete(...)`) runs the user
 //     callback (a value of the `Callback` type) before it completes the
-//     future, each once, the functions it calls in lib/ followed; a delivery
-//     callback the rule cannot resolve to a function is a finding.
+//     future, each once, the functions it calls in src/ followed; a delivery
+//     callback the rule cannot resolve to a function is a finding. A
+//     completion site is counted once however many calls reach it: a
+//     callback that returns a Promise completes the future at the same site
+//     once the Promise settled, a function both paths call
+//     (`completeRecord`).
 // The completion functions are listed with what they run; an entry that
 // matches nothing is a finding.
 
@@ -76,7 +80,7 @@ const COMPLETIONS = [
 module.exports = {
   name: 'check-completion-order',
   kinds: ['completion-order', 'completion-count', 'completion-unlisted', 'completion-unresolved', 'report-unguarded', 'order-unused-allowance'],
-  needs: ['program', 'src', 'header'],
+  needs: ['program', 'native', 'header'],
   COMPLETIONS,
   hint:
     'Run the user callback, then complete the future, then report __set_callback_result once ' +
@@ -86,7 +90,7 @@ module.exports = {
     const { calls, header, resolve } = cModel(ctx);
     const findings = [];
     let checked = 0;
-    // The C completion functions: src functions passed for an `_fn_t` parameter.
+    // The C completion functions: native functions passed for an `_fn_t` parameter.
     const completions = new Map();
     for (const c of calls) {
       const proto = header.get(c.name);
@@ -139,7 +143,7 @@ module.exports = {
     // completes a future, and every delivery callback (an argument for a
     // native parameter whose function type takes a `RecordMetadata`), which
     // must be a function the rule can follow: a function literal, or a
-    // `const` / `readonly` / module function of lib/ naming one. Calls to such
+    // `const` / `readonly` / module function of src/ naming one. Calls to such
     // functions inside it are followed, in call order, so a body moved into a
     // helper is still read.
     const isConst = (d) =>
@@ -164,20 +168,25 @@ module.exports = {
       );
     // A value of the `Callback` type itself (not a function taking one).
     const isCallback = (t) => (t.aliasSymbol && t.aliasSymbol.name === 'Callback') || checker.typeToString(t) === 'Callback';
-    /** The user-callback runs and future completions of function `fn`, in call order. */
-    const events = (fn, stack = [fn]) => {
+    /**
+     * The user-callback runs and future completions of function `fn`, in call
+     * order, each completion site once (`sites`, shared by the functions followed).
+     */
+    const events = (fn, stack = [fn], sites = new Set()) => {
       const out = [];
       const visit = (n) => {
         ts.forEachChild(n, visit);
         if (!ts.isCallExpression(n)) return;
         const e = n.expression;
-        if (ts.isElementAccessExpression(e) && ts.isStringLiteralLike(e.argumentExpression) && e.argumentExpression.text === '_complete') {
+        if (ts.isPropertyAccessExpression(e) && e.name.text === 'internalComplete') {
+          if (sites.has(n)) return;
+          sites.add(n);
           out.push({ what: 'complete', node: n });
         } else if (isCallback(checker.getNonNullableType(checker.getTypeAtLocation(e)))) {
           out.push({ what: 'user', node: n });
         } else {
           const callee = fnOf(e);
-          if (callee && !stack.includes(callee)) out.push(...events(callee, [...stack, callee]));
+          if (callee && !stack.includes(callee)) out.push(...events(callee, [...stack, callee], sites));
         }
       };
       visit(fn.body);
@@ -200,7 +209,7 @@ module.exports = {
             findings.push({
               kind: 'completion-unresolved',
               subject: where(arg),
-              message: `hands native.${u.name} a delivery callback the rule cannot follow: a function literal, or a const, readonly or module function of lib/`,
+              message: `hands native.${u.name} a delivery callback the rule cannot follow: a function literal, or a const, readonly or module function of src/`,
             });
           }
           continue;

@@ -34,15 +34,15 @@ test('live API passes; a name with a live overload is live', () => {
   const r = lint(fixture({}, classes), [RULE]);
   assert.equal(r.status, 0, r.text);
   // 7 exported types, the error included, and 22 mapped members.
-  assert.ok(r.out.includes('✅ check-no-deprecated-translation: 29 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-no-deprecated-translation: 31 item(s) checked'), r.text);
 });
 
 test('a deprecated class, method and constant are findings', () => {
   const r = lint(
     fixture({
-      'lib/producer/old.ts': 'export class Old {}\n',
-      'lib/producer/stopper.ts': 'export class Stopper {\n  start(): void {}\n  stop(): void {}\n}\n',
-      'lib/producer/rec.ts': LIB['lib/producer/rec.ts'].replace(
+      'src/producer/old.ts': 'export class Old {}\n',
+      'src/producer/stopper.ts': 'export class Stopper {\n  start(): void {}\n  stop(): void {}\n}\n',
+      'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace(
         'extra(): void {}',
         'extra(): void {}\n  old(): void {}\n  static readonly LEGACY: string = "l";',
       ),
@@ -51,7 +51,7 @@ test('a deprecated class, method and constant are findings', () => {
   );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'lib/producer/old.ts:Old: translates clients.producer.Old, deprecated in Kafka 4.3.1 + 4.4.0-rc3',
+    'src/producer/old.ts:Old: translates clients.producer.Old, deprecated in Kafka 4.3.1 + 4.4.0-rc3',
     'Rec.old: translates clients.producer.Rec#old, deprecated in Kafka 4.3.1 + 4.4.0-rc3',
     'Rec.LEGACY: translates clients.producer.Rec#LEGACY, deprecated in Kafka 4.3.1 + 4.4.0-rc3',
     // Declared by a deprecated supertype of a live class.
@@ -66,7 +66,7 @@ test('cannot run without the Java index', () => {
 
 test('nothing translated fails: 0 items checked', () => {
   const r = lint(
-    project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex([javaClass('clients.producer.Rec')]), 'lib/a.ts': 'export const a = 1;\n' }),
+    project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex([javaClass('clients.producer.Rec')]), 'src/a.ts': 'export const a = 1;\n' }),
     [RULE],
   );
   assert.ok(r.err.includes('❌ check-no-deprecated-translation: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);

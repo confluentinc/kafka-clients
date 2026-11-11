@@ -17,7 +17,7 @@
 // How the TypeScript library maps to the Java client
 // (design/current/javascript-rule-linter/PLAN.md §3.4), shared by the J rules.
 // JavaScript keeps Java's names, so the mapping is derived, not marked:
-//   - a public module `lib/<dir>/<file>.ts` exports types of the Java package
+//   - a public module `src/<dir>/<file>.ts` exports types of the Java package
 //     of `<dir>` (`producer` -> `clients.producer`, `common/config` ->
 //     `common.config`; the root is Java's `java.*`, which the index does not
 //     hold), each named as its Java class (an `...Error` class for a Java
@@ -26,14 +26,17 @@
 //     `x()`, `getX()`, `isX()` or `hasX()` (no parameters), or Java's field
 //     `x`; a `static readonly X` is Java's `public static final X`; the
 //     constructor is Java's constructors.
-// Two TSDoc tags cover the exceptions: `@jsOnly <reason>` on an item with no
-// Java counterpart, `@java <fqn>[#member]` where the convention does not find
-// the Java one (check-java-tags reports a tag that is malformed or not
-// needed).
+// Two lists of lint-mapping.json cover the exceptions, not TSDoc tags (the
+// root CLAUDE.md's JavaScript Binding Conventions allow only `@param`,
+// `@returns`, `@throws`, `@defaultValue`, `@deprecated`, `@remarks` and, for
+// library-only members, `@internal`): `invented`, the list of invented names,
+// and `javaTargets`, where the convention does not find the Java one
+// (check-invented-names reports an entry that matches nothing, is not needed
+// or does not resolve).
 //
 // The error classes follow the generated hierarchy instead
 // (javascript/CLAUDE.md "Errors"): one class per Java exception the FFI enum
-// names, listed with its Java class in lib/_error_registry.ts.
+// names, listed with its Java class in src/internal/error_registry.ts.
 
 const path = require('node:path');
 
@@ -42,12 +45,14 @@ const PREFIX = 'org.apache.kafka.';
 /**
  * The error classes javascript/CLAUDE.md "Errors" describes, which the Java
  * members rules do not map member by member: what they keep on every class
- * instead of Java's members (Java's constructor forms, payload getters and
- * `INSTANCE` singletons are not generated).
+ * instead of Java's members (`getMessage()` and `getCause()` as `message` and
+ * `cause`; the payload getters and `INSTANCE` singletons are not generated).
+ * No other public member: the FFI id is private, and an error is classified
+ * with `instanceof`, so there is no `code`, `retriable` or `apiError`.
  */
 const ERROR_ALLOWANCE = {
-  members: new Set(['constructor', 'name', 'code', 'errorName', 'retriable', 'apiError', 'message', 'cause']),
-  reason: 'an error class keeps the fields javascript/CLAUDE.md "Errors" lists, not Java\'s members',
+  members: new Set(['constructor', 'name', 'message', 'cause']),
+  reason: 'an error class keeps the fields javascript/CLAUDE.md "Errors" lists (classify with instanceof), not Java\'s members',
 };
 
 /**
@@ -61,6 +66,24 @@ const CONSTANTS_ONLY = new Set([
   'org.apache.kafka.common.config.SslConfigs',
   'org.apache.kafka.common.config.SaslConfigs',
   'org.apache.kafka.common.config.SecurityConfig',
+]);
+
+/**
+ * The data classes (javascript/CLAUDE.md "Java shape, JS idiom"): the classes
+ * whose Java getters are public `readonly` fields set once in the
+ * constructor, so spread, `JSON.stringify` and `structuredClone` keep them.
+ * A class belongs here when reading a getter twice always gives the same
+ * answer, costs no work and cannot fail; a client, a future and every other
+ * class keep Java's getters as methods. check-data-objects enforces both.
+ * The list is the root CLAUDE.md's (JavaScript Binding Conventions, Class
+ * family: the records, `TopicPartition`, `OffsetAndMetadata`,
+ * `RecordMetadata`, `Node` and the admin description classes), limited to the
+ * classes the client translates: `Header` is not on it, so it keeps Java's
+ * `key()` and `value()`.
+ */
+const DATA_CLASSES = new Set([
+  'org.apache.kafka.clients.producer.ProducerRecord',
+  'org.apache.kafka.clients.producer.RecordMetadata',
 ]);
 
 /**
@@ -104,7 +127,7 @@ class JavaIndex {
     return undefined;
   }
 
-  /** The Java package of lib/ directory `dir` (`producer` -> `clients.producer`), or null for the root. */
+  /** The Java package of src/ directory `dir` (`producer` -> `clients.producer`), or null for the root. */
   packageOf(dir) {
     if (dir === '') return null;
     const dotted = dir.split('/').join('.');
@@ -147,31 +170,73 @@ function shortName(cls) {
   return cls.fqn.startsWith(PREFIX) ? cls.fqn.slice(PREFIX.length) : cls.fqn;
 }
 
-/** The text of a JSDoc tag's comment, `''` when it has none. */
-function tagText(ts, tag) {
-  const c = tag.comment;
-  if (c === undefined) return '';
-  return (typeof c === 'string' ? c : ts.getTextOfJSDocComment(c) || '').trim();
+/** The file of the mapping lists, at the client's root. */
+const MAPPING_FILE = 'lint-mapping.json';
+
+/**
+ * The mapping lists of `ctx`'s client, read once from `lint-mapping.json`
+ * (both empty when the file is missing): `{invented, javaTargets}`, each a
+ * `Map` from a key to its text, the order of the file kept.
+ *   - `invented`: the names JavaScript invents (root CLAUDE.md, JavaScript
+ *     Binding Conventions, Scope and "Layout and modules": every addition
+ *     Java lacks is *(js-only)* and on the list of invented names, which is
+ *     kept once released), for the exported items and public members the
+ *     lint reads, each with the reason it has no Java counterpart. An
+ *     invented options type is named `...Args` (check-invented-names).
+ *   - `javaTargets`: the Java class, or member, of an item the convention
+ *     does not find, `<fqn>` or `<fqn>#<member>`.
+ * An export is keyed `src/<module>.ts:<Name>`, a member `<Class>.<member>`; a
+ * member with a computed name (`[Symbol.asyncDispose]`) is not read, so not
+ * listed.
+ */
+function mappingLists(ctx) {
+  return ctx.once('mappingLists', () => {
+    let text;
+    try {
+      text = ctx.read(MAPPING_FILE);
+    } catch (e) {
+      if (e.code === 'ENOENT') return { invented: new Map(), javaTargets: new Map() };
+      throw e;
+    }
+    const json = JSON.parse(text);
+    return {
+      invented: new Map(Object.entries(json.invented || {})),
+      javaTargets: new Map(Object.entries(json.javaTargets || {})),
+    };
+  });
 }
 
 /**
- * The `@jsOnly` and `@java` tags of declaration `node`: `{jsOnly, java}`,
- * each `{text, node}` or null (the text is the tag's comment: the reason, or
- * the Java name).
+ * The mapping of the item or member keyed `key` (declared at `node`):
+ * `{jsOnly, java}`, each `{text, node}` or null, `text` the reason or the
+ * Java name, from the lists of `mappingLists`.
  */
-function tagsOf(ts, node) {
-  const out = { jsOnly: null, java: null };
-  for (const tag of ts.getJSDocTags(node)) {
-    const name = tag.tagName.text;
-    if (name === 'jsOnly' || name === 'java') {
-      const text = tagText(ts, tag);
-      // `@java org.apache.kafka.x.Y#m` is read by the parser as a name and a
-      // link-like comment; the raw text after the tag name is the target.
-      const raw = tag.getText().replace(/^@\w+/, '').replace(/\s*\*\/\s*$/, '').split('\n')[0].trim();
-      out[name] = { text: name === 'java' ? raw || text : text, node: tag };
-    }
-  }
-  return out;
+function mappingOf(ctx, key, node) {
+  const { invented, javaTargets } = mappingLists(ctx);
+  return {
+    jsOnly: invented.has(key) ? { text: invented.get(key), node } : null,
+    java: javaTargets.has(key) ? { text: javaTargets.get(key), node } : null,
+  };
+}
+
+/** The key of exported item `item` in the lists: `src/<module>.ts:<Name>`. */
+function itemKey(item) {
+  return `${item.rel}:${item.name}`;
+}
+
+/** The key of public member `m` of exported item `item` in the lists: `<Class>.<member>`. */
+function memberKey(item, m) {
+  return `${item.name}.${m.name}`;
+}
+
+/** The mapping of public member `m` of exported item `item` (`mappingOf`). */
+function memberTags(ctx, item, m) {
+  return mappingOf(ctx, memberKey(item, m), m.node);
+}
+
+/** Whether declaration `node`'s TSDoc carries `@internal`. */
+function isInternal(ts, node) {
+  return ts.getJSDocTags(node).some((t) => t.tagName.text === 'internal');
 }
 
 /** Whether `node` has modifier flag `flag`. */
@@ -182,18 +247,28 @@ function hasFlag(ts, node, flag) {
 /**
  * The public members of class declaration `cls`: `{name, kind, isStatic,
  * isReadonly, node}`, `kind` one of `constructor`, `method`, `get`, `set` and
- * `property`. A `private` / `protected` member, an ES `#` member and a `_`
- * member are not public.
+ * `property`. A `private` / `protected` member, an ES `#` member, a `_`
+ * member and an `@internal` one (the library's own, which `stripInternal`
+ * leaves out of the declarations) are not public.
  */
 function publicMembers(ts, cls) {
   const out = [];
   for (const m of cls.members) {
     if (hasFlag(ts, m, ts.ModifierFlags.Private | ts.ModifierFlags.Protected)) continue;
+    if (isInternal(ts, m)) continue;
     const isStatic = hasFlag(ts, m, ts.ModifierFlags.Static);
     const isReadonly = hasFlag(ts, m, ts.ModifierFlags.Readonly);
     if (ts.isConstructorDeclaration(m)) {
-      if (m.body === undefined && cls.members.some((o) => o !== m && ts.isConstructorDeclaration(o) && o.body)) continue;
-      out.push({ name: 'constructor', kind: 'constructor', isStatic: false, isReadonly: false, node: m });
+      // Overload signatures stand for the constructor: the first one (whose
+      // TSDoc the declarations keep; an implementation's is not emitted), the
+      // implementation only when there are none. The parameter properties are
+      // the implementation's.
+      const impl = m.body !== undefined;
+      const overloads = cls.members.filter((o) => ts.isConstructorDeclaration(o) && o.body === undefined);
+      if (overloads.length > 0 ? m !== overloads[0] && !impl : false) continue;
+      if (overloads.length === 0 || m === overloads[0]) {
+        out.push({ name: 'constructor', kind: 'constructor', isStatic: false, isReadonly: false, node: m });
+      }
       for (const p of m.parameters) {
         const property = ts.getEffectiveModifierFlags(p) & ts.ModifierFlags.ParameterPropertyModifier;
         const hidden = hasFlag(ts, p, ts.ModifierFlags.Private | ts.ModifierFlags.Protected);
@@ -231,6 +306,46 @@ function publicMembers(ts, cls) {
     seen.add(k);
     return true;
   });
+}
+
+/**
+ * The signatures of the function `node` is the first declaration of: its
+ * overload signatures, or the implementation when it has none.
+ */
+function signaturesOf(ts, node) {
+  const members = node.parent && node.parent.members ? [...node.parent.members] : [node];
+  const same = members.filter((o) =>
+    ts.isConstructorDeclaration(node)
+      ? ts.isConstructorDeclaration(o)
+      : ts.isMethodDeclaration(o) && o.name && node.name && o.name.getText() === node.name.getText() && (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
+  );
+  const overloads = same.filter((o) => o.body === undefined);
+  return overloads.length > 0 ? overloads : same.length > 0 ? same : [node];
+}
+
+/**
+ * The parameters of signature `sig` that translate Java's: all of them but a
+ * trailing rest parameter typed `BareCheck<...>`, the type-level check a bare-value
+ * overload makes of its value's type (KafkaFuture's
+ * `completedFuture(value, ...check: BareCheck<U>)`), which no call gives.
+ */
+function formParameters(ts, sig) {
+  const ps = [...(sig.parameters || [])];
+  const last = ps[ps.length - 1];
+  // Only the type-level check: a rest parameter typed `BareCheck<...>`, whatever
+  // its name; any other trailing rest parameter, a Java parameter named `check`
+  // included, is compared as written.
+  if (
+    last &&
+    last.dotDotDotToken &&
+    last.type &&
+    ts.isTypeReferenceNode(last.type) &&
+    ts.isIdentifier(last.type.typeName) &&
+    last.type.typeName.text === 'BareCheck'
+  ) {
+    ps.pop();
+  }
+  return ps;
 }
 
 /** `getX` -> `x`; null when `name` is not `get` + an upper-case letter. */
@@ -345,15 +460,15 @@ function declarationKind(ts, d) {
 }
 
 /**
- * The exported items of the public modules of lib/, as the type checker
+ * The exported items of the public modules of src/, as the type checker
  * lists each module's exports (an `export` declaration, an
  * `export { X }` / `export { X } from` re-export, an `export declare` one):
- * `{rel, dir, sf, name, node, kind, tags}`, `kind` one of `class`,
+ * `{rel, dir, sf, name, node, kind, tags}` (`tags`: the lists' mapping,
+ * `mappingOf`), `kind` one of `class`,
  * `interface`, `type`, `function`, `variable`, `enum` and `namespace`. A
- * public module is a lib/ file no part of whose path starts with `_`, other
+ * public module is a src/ file outside src/internal/, other
  * than an `index.ts`. An exported symbol is one item (an overloaded
- * function's signatures included, its tags taken from whichever declaration
- * carries them), listed under the public module that declares it when that
+ * function's signatures included), listed under the public module that declares it when that
  * module exports it, else under the first public module exporting it.
  */
 function exportedItems(ctx) {
@@ -362,16 +477,16 @@ function exportedItems(ctx) {
     const modules = [];
     for (const sf of sourceFiles) {
       const rel = ctx.rel(sf.fileName);
-      const inLib = rel.slice('lib/'.length);
-      if (inLib.split('/').some((s) => s.startsWith('_')) || path.posix.basename(rel) === 'index.ts') continue;
+      const inLib = rel.slice('src/'.length);
+      if (inLib.split('/')[0] === 'internal' || path.posix.basename(rel) === 'index.ts') continue;
       const dir = path.posix.dirname(inLib) === '.' ? '' : path.posix.dirname(inLib);
       const symbol = checker.getSymbolAtLocation(sf);
       const exports = symbol ? checker.getExportsOfModule(symbol) : [];
       modules.push({ rel, dir, sf, exports });
     }
     // One item per exported symbol: its declarations (a function's overload
-    // signatures and implementation) are one item, tagged by whichever
-    // declaration carries a tag.
+    // signatures and implementation) are one item, its mapping read from the
+    // lists by the module and name it is listed under.
     const bySymbol = new Map();
     for (const { rel, dir, sf, exports } of modules) {
       for (const exported of exports) {
@@ -383,12 +498,7 @@ function exportedItems(ctx) {
         if (known && (known.declaredHere || !declaredHere)) continue;
         const node = declarations.find((d) => !ts.isFunctionDeclaration(d) || d.body) || declarations[0];
         const kind = declarationKind(ts, node);
-        const tags = { jsOnly: null, java: null };
-        for (const d of declarations) {
-          const own = tagsOf(ts, ts.isVariableDeclaration(d) ? d.parent.parent : d);
-          tags.jsOnly = tags.jsOnly || own.jsOnly;
-          tags.java = tags.java || own.java;
-        }
+        const tags = mappingOf(ctx, `${rel}:${exported.name}`, node);
         bySymbol.set(target, { rel, dir, sf, name: exported.name, node, kind, tags, declaredHere });
       }
     }
@@ -398,19 +508,19 @@ function exportedItems(ctx) {
   });
 }
 
-/** The rows of lib/_error_registry.ts: a map from `lib/<module>.ts` to `{name, java}`. */
+/** The rows of src/internal/error_registry.ts: a map from `src/<module>.ts` to `{name, java}`. */
 function errorRegistry(ctx) {
   return ctx.once('errorRegistry', () => {
     const out = new Map();
     let text;
     try {
-      text = ctx.read('lib/_error_registry.ts');
+      text = ctx.read('src/internal/error_registry.ts');
     } catch (e) {
       if (e.code === 'ENOENT') return out;
       throw e;
     }
-    for (const m of text.matchAll(/\[\s*'\.\/([\w/]+)',\s*'(\w+)',\s*'([\w.$]+)'\s*\]/g)) {
-      out.set(`lib/${m[1]}.ts`, { name: m[2], java: m[3] });
+    for (const m of text.matchAll(/\[\s*'\.\.\/([\w/]+)',\s*'(\w+)',\s*'([\w.$]+)'\s*\]/g)) {
+      out.set(`src/${m[1]}.ts`, { name: m[2], java: m[3] });
     }
     return out;
   });
@@ -441,7 +551,7 @@ function conventionClass(ctx, index, item) {
 /**
  * The Java class of every exported class, interface and type alias, as the
  * J rules see it: `{item, java, isError, jsOnly}`, `java` the convention's
- * class or the `@java` tag's (`{fqn, cls, via: 'tag'}`), null when neither
+ * class or `javaTargets`' (`{fqn, cls, via: 'tag'}`), null when neither
  * finds one.
  */
 function mappedItems(ctx) {
@@ -480,13 +590,22 @@ function functionType(cls) {
 module.exports = {
   PREFIX,
   ERROR_ALLOWANCE,
+  DATA_CLASSES,
   ENUM_IMPLICIT,
   JavaIndex,
   javaIndexOf,
   snakeCase,
   shortName,
-  tagsOf,
+  MAPPING_FILE,
+  mappingLists,
+  mappingOf,
+  itemKey,
+  memberKey,
+  memberTags,
   publicMembers,
+  isInternal,
+  signaturesOf,
+  formParameters,
   shapeMembers,
   itemMembers,
   javaMember,

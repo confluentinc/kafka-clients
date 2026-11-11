@@ -1106,7 +1106,8 @@ only once (except --workload).
                          exactly its signature is labelled KNOWN DEFECT
   --unclean              SIGKILL instead of SIGTERM for broker roll
   --workload role:backend  repeatable; role=producer|consumer,
-                           backend=rust|python|python-async|c|dotnet|dotnet-async
+                           backend=rust|python|python-async|c|dotnet|dotnet-async|
+                           javascript (producer only)
                            (default: producer:rust,consumer:rust)
   --consumers N          shorthand for 1 rust producer + N rust consumers
                          (librdkafka's --consumers; not usable with --workload)
@@ -1206,10 +1207,9 @@ fn scenario_test_args(raw: &[String]) -> anyhow::Result<(Vec<String>, String)> {
 /// picked whenever such a workload is requested and the user does not have to.
 /// `:dotnet` also covers `dotnet-async`.
 fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
-    let needs_grpc = env_vars
-        .iter()
-        .find(|(k, _)| k == "CHAOS_WORKLOADS")
-        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c") || v.contains(":dotnet"));
+    let needs_grpc = env_vars.iter().find(|(k, _)| k == "CHAOS_WORKLOADS").is_some_and(|(_, v)| {
+        v.contains(":python") || v.contains(":c") || v.contains(":dotnet") || v.contains(":javascript")
+    });
     if needs_grpc {
         "multilanguage-tests"
     } else {
@@ -3320,6 +3320,10 @@ version = "0.1.0"
         );
         assert_eq!(
             chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:dotnet-async"])),
+            "multilanguage-tests"
+        );
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:javascript", "--workload", "consumer:rust"])),
             "multilanguage-tests"
         );
     }

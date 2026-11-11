@@ -12,22 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The library build (`make -C javascript build`): lib/**/*.ts -> dist/, as
+// The library build (`make -C javascript build`): src/**/*.ts -> dist/, as
 // CommonJS (the package has no "type", so `module: node16` emits CommonJS,
 // which `require` loads and an ES module `import`s through Node's CommonJS
-// interop), with declarations and source maps. ES2022 is what Node 18 runs.
+// interop), with declarations and source maps. ES2022, and ES2024's string
+// methods (`isWellFormed`), are what Node 22.14, the oldest supported, runs.
+// `stripInternal` leaves the members TSDoc marks `@internal` (the library's
+// own factories and methods, named `internal...`) out of the declarations.
 {
   "compilerOptions": {
     "strict": true,
     "target": "es2022",
-    "lib": ["es2022"],
+    "lib": ["es2022", "es2024.string"],
     "module": "node16",
     "moduleResolution": "node16",
     "types": ["node"],
-    "rootDir": "lib",
+    "rootDir": "src",
     "outDir": "dist",
     "declaration": true,
     "declarationMap": true,
+    "stripInternal": true,
     "sourceMap": true,
     "inlineSources": true,
     "newLine": "lf",
@@ -37,5 +41,5 @@
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["lib/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }

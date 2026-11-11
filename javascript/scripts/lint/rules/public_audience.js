@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J4 check-public-audience (root CLAUDE.md §2, §3): what lib/ exports is
+// J4 check-public-audience (root CLAUDE.md §2, §3): what src/ exports is
 // public in Java.
 //   - An exported class, interface or type translates a class annotated
 //     `@InterfaceAudience.Public` at the Kafka version the Rust lint reads
@@ -25,7 +25,8 @@
 //     public overload, a public field, a public constructor.
 // The error classes are exempt from the audience: there is one per Java
 // exception the FFI enum names, Public or not (javascript/CLAUDE.md "Errors",
-// as the Python client's errors). `@jsOnly` items translate nothing.
+// as the Python client's errors). Invented items (lint-mapping.json's
+// `invented`) translate nothing.
 
 const { atNode } = require('../location');
 const { javaIndexOf, mappedItems, shortName } = require('../java_ts');

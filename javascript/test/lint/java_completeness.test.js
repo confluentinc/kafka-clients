@@ -30,21 +30,44 @@ test('a class translating every public, live Java member passes', () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
   // Rec: UNKNOWN, Rec, topic, offset, getSize, isOpen, hasKey, close, toString (not old, hidden,
-  // mode, LEGACY, SECRET, nor equals / hashCode, which the client does not translate); Mode: ON, OFF, forName (not java.lang.Enum's members);
+  // mode, LEGACY, SECRET, nor equals / hashCode, which the client does not translate); Mode: ON, OFF, forName, java.lang.Enum's values, valueOf, name, ordinal, and toJSON;
   // ProducerConfig: A_CONFIG (its constants only); the interface Header: key, value; the abstract
   // Future: get, not its constructor. The error and the function type ask nothing.
-  assert.ok(r.out.includes('✅ check-java-completeness: 16 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-java-completeness: 21 item(s) checked'), r.text);
+});
+
+test("an enum missing java.lang.Enum's members, or toJSON, is a finding, listed or not in the Java index", () => {
+  const mode = LIB['src/producer/mode.ts']
+    .replace('  static valueOf(n: string): Mode { void n; return Mode.ON; }\n', '')
+    .replace('  name(): string { return this.tag; }\n', '');
+  let r = lint(fixture({ 'src/producer/mode.ts': mode }), [RULE]);
+  assert.deepEqual(findings(r), [
+    'clients.producer.Mode#valueOf: Mode does not translate it',
+    'clients.producer.Mode#name: Mode does not translate it',
+  ]);
+  r = lint(fixture({ 'src/producer/mode.ts': LIB['src/producer/mode.ts'].replace('  toJSON(): string { return this.tag; }\n', '') }), [RULE]);
+  assert.deepEqual(findings(r), ['clients.producer.Mode#toJSON: Mode does not translate it']);
+  // An index that lists none of them asks for them all the same.
+  const bare = CLASSES.map((c) =>
+    c.fqn.endsWith('.Mode') ? { ...c, overloads: c.overloads.filter((o) => !['values', 'valueOf', 'name', 'ordinal'].includes(o.name)) } : c,
+  );
+  r = lint(fixture({ 'build/java-index.json': javaIndex(bare), 'src/producer/mode.ts': mode.replace('  ordinal(): number { return 0; }\n', '') }), [RULE]);
+  assert.deepEqual(findings(r), [
+    'clients.producer.Mode#valueOf: Mode does not translate it',
+    'clients.producer.Mode#name: Mode does not translate it',
+    'clients.producer.Mode#ordinal: Mode does not translate it',
+  ]);
 });
 
 test('a member, the constructor and a constant left out are each a finding', () => {
   const r = lint(
     fixture({
-      'lib/producer/rec.ts': LIB['lib/producer/rec.ts']
+      'src/producer/rec.ts': LIB['src/producer/rec.ts']
         .replace('  static readonly UNKNOWN: number = -1;\n', '')
-        .replace('  constructor(options: { p0: string; p1?: number }) { void options; }\n', '  private constructor() {}\n')
+        .replace('  constructor(options: { p0: string; p1?: number });\n  constructor(p0: string);\n  constructor(options: unknown) { void options; }\n', '  private constructor() {}\n')
         .replace('  get size(): number { return 0; }\n', ''),
-      'lib/producer/producer_config.ts': 'export class ProducerConfig {}\n',
-      'lib/common/header/header.ts': 'export type Header = { readonly key: string };\n',
+      'src/producer/producer_config.ts': 'export class ProducerConfig {}\n',
+      'src/common/header/header.ts': 'export type Header = { readonly key: string };\n',
     }),
     [RULE],
   );
@@ -60,7 +83,7 @@ test('a member, the constructor and a constant left out are each a finding', () 
 
 test('the baseline lists what is not translated yet', () => {
   const root = fixture({
-    'lib/producer/rec.ts': LIB['lib/producer/rec.ts'].replace('  close(options?: { p0Ms?: number }): void { void options; }\n', ''),
+    'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  close(options?: { p0?: number }): void;\n  close(p0: number): void;\n  close(options?: unknown): void { void options; }\n', ''),
     'eslint-baseline.txt': '# not yet\nmissing clients.producer.Rec#close\n',
   });
   assert.equal(lint(root, [RULE]).status, 0);
@@ -73,7 +96,7 @@ test('cannot run without the Java index', () => {
 });
 
 test('no class to complete fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), 'lib/producer/callback.ts': LIB['lib/producer/callback.ts'] }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), 'src/producer/callback.ts': LIB['src/producer/callback.ts'] }), [RULE]);
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-completeness: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

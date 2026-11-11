@@ -35,7 +35,7 @@ VENV = . venv/bin/activate
 	consumer-perf-test-python producer-perf-test-python \
 	transactional-producer-perf-test-python \
 	producer-perf-test-dotnet consumer-perf-test-dotnet \
-	build-javascript test-javascript lint-javascript verify-javascript \
+	build-javascript test-javascript test-javascript-unit lint-javascript verify-javascript \
 	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
@@ -89,11 +89,13 @@ init-venv-librdkafka:
 build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
-# The Node.js client (javascript/): standalone for now, not part of `build`,
-# `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
-# (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
-# Its build is the addon and the TypeScript library, which needs `npm ci` in
-# javascript/ first (typescript is a devDependency).
+# The Node.js client (javascript/). `verify` runs its build, its rule linter,
+# its type check and its unit tests (test-javascript-unit, through `test`, and
+# lint-javascript), so it needs Node.js 22.14 or newer and `npm ci` in
+# javascript/ first (typescript and eslint are devDependencies); its
+# broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
+# verify-javascript-macos-docker, in .semaphore/semaphore.yml). Its build is the
+# addon and the TypeScript library.
 build-javascript: build-rust-all-features
 	$(MAKE) -C javascript $(ROOTS) build
 
@@ -160,7 +162,7 @@ build-grpc-images-javascript: build-rust-all-features
 init: submodules init-venv
 	@($(VENV) && $(MAKE) -C python $(ROOTS) init)
 
-test: test-rust-all-features test-c test-python
+test: test-rust-all-features test-c test-python test-javascript-unit
 
 test-rust:
 	$(MAKE) -C rust test
@@ -413,16 +415,25 @@ package-check-javascript: build-rust-all-features
 test-python-macos-docker: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-unit)
 
-verify: build format-check check-generated lint test check-bindings
+verify: build format-check check-generated lint test check-bindings lint-javascript
 
 # The Node.js client's static, unit and typing tests, its broker-backed test
 # against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
 # when set), then the container gRPC multilanguage arm (Linux only; see
 # test-integration-javascript), as test-python and test-c end with theirs. The
 # build needs the devDependencies (`npm ci` in javascript/): typescript compiles
-# the library (javascript/lib/*.ts -> javascript/dist/).
+# the library (javascript/src/**/*.ts -> javascript/dist/).
 test-javascript: build-javascript
 	$(MAKE) -C javascript $(ROOTS) test
+
+# The Node.js client's tests that need no broker, the part of `test` (and so
+# of `verify`): the static tests (header conformance, the package layout, the
+# release scripts), the unit tests, and the type check, `tsc --strict` over
+# the sources (the build) and over the type tests (test-typing, against the
+# compiled declarations), with the interface check of the declarations and the
+# exports map against the committed API report (check-api).
+test-javascript-unit: build-javascript
+	$(MAKE) -C javascript $(ROOTS) test-static test-unit test-typing check-api
 
 # macOS variant of test-javascript: the unit tests only, as
 # test-python-macos-docker runs pytest test/unit only. On macOS the gRPC

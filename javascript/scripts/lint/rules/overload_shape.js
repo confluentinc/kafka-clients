@@ -15,56 +15,98 @@
 'use strict';
 
 // J6 check-overload-shape (javascript/CLAUDE.md "Java shape, JS idiom": one
-// Java overload set is one function, overloaded constructors take one options
-// object, `close()` / `close(Duration)` is `close({timeoutMs}?)`):
+// Java overload set is one function taking one object of named parameters,
+// a one-parameter form also takes the value on its own, and src/internal/args.ts
+// checks a call against the Java forms). Read over the function's TypeScript
+// signatures (its overload signatures, else the implementation):
 //   - no two TypeScript members translate one Java member;
-//   - a Java overload set with more than one public, live form is one function
-//     taking one options object, whose properties are the union of the forms'
-//     parameter names (a `Duration x` as `xMs`, PLAN.md §8 decision 8;
-//     parameters at one position whose Java types map to one host type are
-//     one, named after the earliest-declared form), each required exactly
-//     when every form takes it, unless its Java parameter may be null
-//     (decision 10: omission means null), and the object itself required
-//     exactly when every form takes a parameter;
-//   - or, when the forms differ only by trailing parameters, one function
-//     taking the longest form's parameters, those the shorter forms lack
-//     optional (decision 9, `send(record, callback?)`);
-//   - a function taking positional parameters translates the forms whose
-//     parameters it takes by name, the shorter ones' left optional: each
-//     other form is its own `overload-missing` finding, keyed by that form
-//     (`KafkaFuture.get/get(long,TimeUnit)`), so a form not translated yet
-//     can be baselined without hiding a wrong shape of the forms that are,
-//     and a parameter no translated form takes is `not-options`.
+//   - a Java overload set with more than one public, live form takes one
+//     options object, whose properties are the union of the forms' parameter
+//     names, Java's own (a `Duration timeout` is `timeout`; parameters at one
+//     position whose Java types map to one host type are one, named after the
+//     earliest-declared form), each required exactly when every form takes it
+//     (a form is given whole: a parameter Java may take as null is given as
+//     `null`), and the object itself required exactly when every form takes a
+//     parameter, unless a signature takes no parameter;
+//     and, as each Java form has one TypeScript overload signature (root
+//     CLAUDE.md, JavaScript Binding Conventions, Signatures), one options
+//     signature translates one form (forms whose parameters have the same
+//     names, `KafkaProducer(Map)` / `(Properties)`, being one), a form of no
+//     parameter having a signature of none (`signature-per-form` otherwise);
+//   - or one signature per Java form (`ProducerRecord`): each names
+//     exactly its form's parameters, required (`signature-form` otherwise),
+//     and closes every name of the other forms with a property typed `never`
+//     (`option-unclosed` otherwise);
+//   - a signature taking one parameter named as a one-parameter form's is that
+//     form's bare value (`send(record)`, `close(timeout)`); a set with a
+//     one-parameter form and no such signature is `bare-missing`;
+//   - a form no signature translates is its own `overload-missing` finding,
+//     keyed by that form (`KafkaProducer.constructor/KafkaProducer(Map,Serializer,Serializer)`),
+//     so a form not translated yet can be baselined without hiding a wrong
+//     shape of the forms that are, and the options are checked against the
+//     translated forms (against every form when none is translated);
+//   - a function taking no parameter translates the forms that take none,
+//     each other form being `overload-missing` the same way
+//     (`KafkaFuture.get/get(long,TimeUnit)`); positional parameters other
+//     than a bare value, or a bare value with no options object, are
+//     `not-options`.
 // The checker gives the options type's properties and their optionality. A
 // config class (its constants only) is not asked.
 
 const { atNode } = require('../location');
 const { mappedMembers } = require('./java_members');
-const { shortName, constantsOnly } = require('../java_ts');
+const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 
-/** The public, live forms of an overload set, one per parameter list. */
-function liveForms(overloads) {
-  const seen = new Set();
-  return overloads.filter((o) => {
-    const key = o.params.join(',');
-    if (o.visibility !== 'public' || o.deprecated || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+/**
+ * A form with Java's `long x, TimeUnit unit` pair as the one `Duration x` it
+ * translates to (javascript/CLAUDE.md "Java shape, JS idiom": a `TimeUnit` is
+ * merged with the `long` it qualifies, `get(long timeout, TimeUnit unit)` ->
+ * `get({timeout})`); `java` keeps the Java form for the findings' text.
+ */
+function mergeTimeUnit(o) {
+  // `types`: the parameter types as written, type arguments kept (the index's
+  // `param_types`), for the rules that read types; `params` stays erased.
+  const types = Array.isArray(o.param_types) && o.param_types.length === o.params.length ? o.param_types : o.params;
+  const i = o.params.findIndex((t, k) => t === 'long' && o.params[k + 1] === 'TimeUnit');
+  if (i < 0) return { ...o, types };
+  const names = o.param_names || [];
+  return {
+    ...o,
+    java: o,
+    params: [...o.params.slice(0, i), 'Duration', ...o.params.slice(i + 2)],
+    types: [...types.slice(0, i), 'Duration', ...types.slice(i + 2)],
+    param_names: [...names.slice(0, i), names[i], ...names.slice(i + 2)],
+  };
 }
 
-/** The name a Java parameter takes in an options object: a `Duration x` is `xMs`. */
+/** The public, live forms of an overload set, one per parameter list, a `TimeUnit` merged (`mergeTimeUnit`). */
+function liveForms(overloads) {
+  const seen = new Set();
+  return overloads
+    .filter((o) => {
+      const key = o.params.join(',');
+      if (o.visibility !== 'public' || o.deprecated || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(mergeTimeUnit);
+}
+
+/** The name a Java parameter takes in an options object: its Java name, a `Duration timeout` included. */
 function optionName(type, name) {
-  return type === 'Duration' ? `${name}Ms` : name;
+  void type;
+  return name;
 }
 
 /** A form as a finding's subject names it: `get(long,TimeUnit)`, the types erased. */
-function formKey(o) {
+function formKey(form) {
+  const o = form.java || form;
   return `${o.name}(${o.params.map((t) => t.replace(/<.*>$/, '')).join(',')})`;
 }
 
 /** A form as the findings print it: `close(Duration timeout)`. */
-function formText(o) {
+function formText(form) {
+  const o = form.java || form;
   return `${o.name}(${o.params.map((t, i) => `${t} ${o.param_names[i] || ''}`.trim()).join(', ')})`;
 }
 
@@ -89,7 +131,7 @@ function hostKind(type) {
 
 /**
  * The option names of each form of an overload set, in declaration order: a
- * parameter's Java name (a `Duration x` as `xMs`, PLAN.md decision 8), except
+ * parameter's Java name, except
  * that a parameter at the position of an earlier form's whose Java type maps
  * to the same host type takes that earlier name (the Python conventions'
  * "same position, Java types mapping to the same host type -> one parameter
@@ -109,42 +151,6 @@ function formOptionNames(forms) {
   return out;
 }
 
-/** Boxed Java types, which hold null. */
-const BOXED = new Set(['Byte', 'Short', 'Integer', 'Long', 'Float', 'Double', 'Boolean', 'Character']);
-
-/** A positive statement that a parameter may be null (PLAN.md §8 decision 10). */
-const NULLABLE = /\b(may be null|can be null|if null|null means|null for|or null|null indicates|nullable)\b/i;
-/** A statement that it may not. */
-const NOT_NULL = /\b(not null|non-null|may not be null|must not be null|cannot be null|can not be null|not be null)\b/i;
-
-/**
- * Whether Java parameter `i` of form `f` may be null, as PLAN.md §8 decision
- * 10 (the user's, 2026-11-05) reads it: its type is a boxed primitive or a
- * key / value type variable (`K`, `V`), or the form's Javadoc `@param` for it
- * says so positively ("may be null", "can be null", "if null", "null means",
- * "null for", "or null", "null indicates", "nullable", read after `{@code x}`
- * is rendered as `x`) and denies it nowhere ("not null",
- * "non-null", "may not be null", "must not be null", "cannot be null").
- */
-function mayBeNull(f, i) {
-  const type = f.params[i];
-  if (BOXED.has(type) || type === 'K' || type === 'V') return true;
-  const tag = f.javadoc && f.javadoc.params.find((p) => p.name === f.param_names[i]);
-  if (!tag) return false;
-  // Read as the Javadoc renders: `{@code null}` and `{@link x}` as their text.
-  const text = tag.text.replace(/\{@(?:code|literal|link|linkplain)\s+([^}]*)\}/g, '$1').replace(/\s+/g, ' ');
-  return NULLABLE.test(text) && !NOT_NULL.test(text);
-}
-
-/**
- * Whether forms `forms` differ only by trailing parameters: each one's
- * option names are a prefix of the longest's.
- */
-function trailingOnly(forms, names) {
-  const longest = names.reduce((a, b) => (b.length > a.length ? b : a), []);
-  return names.every((n) => n.every((x, i) => longest[i] === x));
-}
-
 module.exports = {
   name: 'check-overload-shape',
   kinds: [
@@ -157,16 +163,20 @@ module.exports = {
     'option-required',
     'options-optional',
     'options-required',
+    'bare-missing',
+    'signature-form',
+    'option-unclosed',
+    'signature-per-form',
   ],
   needs: ['program', 'java'],
   hint:
     'Translate a Java overload set as one function taking one options object named after the overloads\' ' +
-    'parameters (a Duration x as xMs), required as every overload requires it (javascript/CLAUDE.md "Java ' +
-    'shape, JS idiom").',
+    'parameters, with one TypeScript overload signature per Java form (root CLAUDE.md, JavaScript Binding ' +
+    'Conventions, Signatures).',
   liveForms,
   optionName,
   formOptionNames,
-  mayBeNull,
+  signaturesOf,
   check(ctx) {
     const { ts, checker } = ctx.program();
     const findings = [];
@@ -191,76 +201,159 @@ module.exports = {
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
       const forms = liveForms(jm.overloads);
       if (forms.length < 2) continue;
-      const params = m.node.parameters ? [...m.node.parameters] : [];
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
-      const optionsType = params.length === 1 ? checker.getNonNullableType(checker.getTypeAtLocation(params[0])) : null;
-      const isOptions =
-        optionsType !== null &&
-        !params[0].dotDotDotToken &&
-        optionsType.flags & ts.TypeFlags.Object &&
-        !(optionsType.isUnion && optionsType.isUnion()) &&
-        !checker.isArrayType(optionsType) &&
-        optionsType.getCallSignatures().length === 0 &&
-        !(optionsType.symbol && optionsType.symbol.flags & ts.SymbolFlags.Class);
-      const names = formOptionNames(forms);
-      if (!isOptions && trailingOnly(forms, names)) {
-        // Decision 9 (the user's, 2026-11-05): forms differing only by
-        // trailing parameters may be one function with those parameters
-        // optional (`send(record, callback?)`).
-        const min = Math.min(...names.map((n) => n.length));
-        const max = Math.max(...names.map((n) => n.length));
-        const optional = (p) => !!(p.questionToken || p.initializer);
-        if (params.length === max && params.every((p, i) => optional(p) === i >= min) && !params.some((p) => p.dotDotDotToken)) {
-          continue;
-        }
-      }
-      if (!isOptions) {
-        const written = params.map((p) => p.getText().replace(/\s+/g, ' ')).join(', ');
-        // The forms the positional parameters translate: each of its names in
-        // place, the parameters past it optional.
-        const tsNames = params.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ''));
-        const optionalAt = params.map((p) => !!(p.questionToken || p.initializer));
-        const prefix = (k) => names[k].length <= params.length && names[k].every((n, i) => tsNames[i] === n);
-        const covered = forms.filter(
-          (f, k) => !params.some((p) => p.dotDotDotToken) && prefix(k) && optionalAt.every((o, i) => i < names[k].length || o),
+      const allNames = formOptionNames(forms);
+      const written = (sig) => formParameters(ts, sig).map((p) => p.getText().replace(/\s+/g, ' ')).join(', ');
+      const missingForm = (f) => ({
+        at,
+        kind: 'overload-missing',
+        subject: `${subject}/${formKey(f)}`,
+        message: `${javaName}'s form ${formText(f)} has no translation: ${subject} takes (${written(m.node)})`,
+      });
+      // The one-parameter forms' names: a signature taking that one parameter,
+      // by that name, is the bare value (`send(record)`, `close(timeout)`).
+      const bareNames = new Set(forms.map((f, k) => (f.params.length === 1 ? allNames[k][0] : null)).filter((n) => n !== null));
+      // One-parameter forms of several names would be told apart by type,
+      // which src/internal/args.ts does not do: none takes a bare value.
+      if (bareNames.size > 1) bareNames.clear();
+      const isOptionsParam = (p) => {
+        const t = checker.getNonNullableType(checker.getTypeAtLocation(p));
+        return (
+          !p.dotDotDotToken &&
+          (t.flags & ts.TypeFlags.Object) !== 0 &&
+          !(t.isUnion && t.isUnion()) &&
+          !checker.isArrayType(t) &&
+          t.getCallSignatures().length === 0 &&
+          !(t.symbol && t.symbol.flags & ts.SymbolFlags.Class)
         );
-        // A form whose parameters it takes but leaves required is its shape's error, not a missing form.
-        const misshapen = forms.some((f, k) => !covered.includes(f) && prefix(k));
-        if (covered.length > 0) {
-          for (const f of forms.filter((g, k) => !covered.includes(g) && !prefix(k))) {
-            findings.push({
-              at,
-              kind: 'overload-missing',
-              subject: `${subject}/${formKey(f)}`,
-              message: `${javaName}'s form ${formText(f)} has no translation: ${subject} takes (${written})`,
-            });
-          }
-          const widest = Math.max(...covered.map((f) => names[forms.indexOf(f)].length));
-          const shortest = Math.min(...covered.map((f) => names[forms.indexOf(f)].length));
-          // Every positional parameter belongs to a translated form, required exactly when all of them take it.
-          if (!misshapen && params.length === widest && optionalAt.every((o, i) => o === i >= shortest)) continue;
+      };
+      const optionSigs = [];
+      const bareSigs = [];
+      let zeroSig = false;
+      let positional = null;
+      for (const sig of signaturesOf(ts, m.node)) {
+        const ps = formParameters(ts, sig);
+        if (ps.length === 0) zeroSig = true;
+        else if (ps.length === 1 && !ps[0].dotDotDotToken && ts.isIdentifier(ps[0].name) && bareNames.has(ps[0].name.text)) bareSigs.push(sig);
+        else if (ps.length === 1 && isOptionsParam(ps[0])) optionSigs.push(sig);
+        else if (positional === null) positional = sig;
+      }
+      if (positional !== null || (optionSigs.length === 0 && bareSigs.length > 0)) {
+        const sig = positional ?? bareSigs[0];
+        findings.push({
+          at,
+          kind: 'not-options',
+          subject,
+          message: `translates ${forms.length} Java forms of ${javaName} (${forms.map(formText).join('; ')}) but takes (${written(sig)}), not one options object`,
+        });
+        continue;
+      }
+      // The forms a signature with no parameter or a bare value translates.
+      const coveredBy = (k) => (zeroSig && forms[k].params.length === 0) || (bareSigs.length > 0 && forms[k].params.length === 1);
+      if (optionSigs.length === 0) {
+        // A function taking no parameter translates the forms that take none.
+        if (zeroSig && forms.some((f) => f.params.length === 0)) {
+          for (const [k, f] of forms.entries()) if (!coveredBy(k)) findings.push(missingForm(f));
+          continue;
         }
         findings.push({
           at,
           kind: 'not-options',
           subject,
-          message: `translates ${forms.length} Java forms of ${javaName} (${forms.map(formText).join('; ')}) but takes (${written}), not one options object`,
+          message: `translates ${forms.length} Java forms of ${javaName} (${forms.map(formText).join('; ')}) but takes (${written(m.node)}), not one options object`,
         });
         continue;
       }
-      const typeName = checker.typeToString(optionsType);
-      // Each option: whether every form takes it, and whether a form's Java
-      // parameter of that name may be null (then it may be left out).
-      const expected = new Map();
-      forms.forEach((f, k) => {
-        names[k].forEach((name, i) => {
-          if (!expected.has(name)) expected.set(name, { inAll: names.every((n) => n.includes(name)), nullable: false });
-          if (mayBeNull(f, i)) expected.get(name).nullable = true;
+      if (bareNames.size > 0 && bareSigs.length === 0) {
+        const f = forms.find((g) => g.params.length === 1);
+        findings.push({
+          at,
+          kind: 'bare-missing',
+          subject,
+          message: `takes no bare value, though ${javaName}'s form ${formText(f)} has one parameter: add a signature taking ${[...bareNames][0]} on its own`,
         });
-      });
-      const union = [...expected.keys()].join(', ');
+      }
+      const neverProp = (prop, sig) =>
+        (checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(prop, sig.parameters[0])).flags & ts.TypeFlags.Never) !== 0;
+      if (optionSigs.length > 1) {
+        // One signature per Java form, so that the declarations accept a
+        // form's parameters only: each names exactly its form's parameters,
+        // required, and closes the others with a property typed `never`.
+        const union = [...new Set(allNames.flat())];
+        const covered = new Set();
+        for (const sig of optionSigs) {
+          const p0 = sig.parameters[0];
+          const type = checker.getNonNullableType(checker.getTypeAtLocation(p0));
+          const typeName = checker.typeToString(type);
+          const sigAt = atNode(ctx, sig);
+          const required = [];
+          const closed = [];
+          for (const prop of checker.getPropertiesOfType(type)) {
+            const decl = prop.declarations && prop.declarations.length > 0 ? atNode(ctx, prop.declarations[0]) : sigAt;
+            if (!union.includes(prop.name)) {
+              findings.push({ at: decl, kind: 'option-extra', subject: `${typeName}.${prop.name}`, message: `no Java form of ${javaName} names it (${union.join(', ')})` });
+            } else if (neverProp(prop, sig)) {
+              closed.push(prop.name);
+            } else if ((prop.flags & ts.SymbolFlags.Optional) !== 0) {
+              // Reported as optional; not again as unclosed below.
+              closed.push(prop.name);
+              findings.push({ at: decl, kind: 'option-optional', subject: `${typeName}.${prop.name}`, message: `is optional, but a signature of one Java form of ${javaName} takes its form's parameters` });
+            } else {
+              required.push(prop.name);
+            }
+          }
+          const k = allNames.findIndex((n) => n.length === required.length && n.every((x) => required.includes(x)));
+          // The other forms' names closed with `never`, so that a value
+          // holding one (a variable, which no excess-property check reads)
+          // matches no signature it does not belong to.
+          for (const name of union) {
+            if (required.includes(name) || closed.includes(name)) continue;
+            findings.push({
+              at: sigAt,
+              kind: 'option-unclosed',
+              subject: `${typeName}.${name}`,
+              message: `neither takes nor closes ${name} (\`${name}?: never\`), which another Java form of ${javaName} takes`,
+            });
+          }
+          if (k < 0) {
+            findings.push({ at: sigAt, kind: 'signature-form', subject: `${subject}/(${required.join(',')})`, message: `takes (${required.join(', ')}), which is no Java form of ${javaName}` });
+          } else {
+            covered.add(k);
+          }
+        }
+        for (const [k, f] of forms.entries()) if (!covered.has(k) && !coveredBy(k)) findings.push(missingForm(f));
+        continue;
+      }
+      const sig = optionSigs[0];
+      const optionsType = checker.getNonNullableType(checker.getTypeAtLocation(sig.parameters[0]));
+      const typeName = checker.typeToString(optionsType);
       const props = new Map(checker.getPropertiesOfType(optionsType).map((p) => [p.name, p]));
-      for (const [name, { inAll, nullable }] of expected) {
+      // The forms the options translate: those whose every parameter is an
+      // option. The others are each a missing form, unless none is translated,
+      // when the options are checked against every form.
+      // A form of no parameter that a signature of none translates is not the
+      // options signature's.
+      let kept = forms.map((f, k) => k).filter((k) => allNames[k].every((n) => props.has(n)) && !(zeroSig && forms[k].params.length === 0));
+      if (kept.length === 0) kept = forms.map((f, k) => k);
+      else for (const [k, f] of forms.entries()) if (!kept.includes(k) && !coveredBy(k)) findings.push(missingForm(f));
+      const translated = kept.map((k) => forms[k]);
+      const names = kept.map((k) => allNames[k]);
+      // One signature per Java form: the one options signature stands for one
+      // form, the forms of no parameter having a signature of their own.
+      const standsFor = new Set(kept.map((k) => [...allNames[k]].sort().join(',')));
+      if (standsFor.size > 1) {
+        findings.push({
+          at,
+          kind: 'signature-per-form',
+          subject,
+          message: `translates ${standsFor.size} Java forms of ${javaName} (${kept.map((k) => formText(forms[k])).join('; ')}) with one options signature: give each form its own overload signature`,
+        });
+      }
+      // Each option, and whether every translated form takes it.
+      const expected = new Map();
+      for (const n of names) for (const name of n) if (!expected.has(name)) expected.set(name, names.every((x) => x.includes(name)));
+      const union = [...expected.keys()].join(', ');
+      for (const [name, inAll] of expected) {
         const prop = props.get(name);
         if (!prop) {
           findings.push({ at, kind: 'option-missing', subject: `${typeName}.${name}`, message: `is missing, though ${javaName} names it (${union})` });
@@ -268,10 +361,10 @@ module.exports = {
         }
         const optional = (prop.flags & ts.SymbolFlags.Optional) !== 0;
         const propAt = prop.declarations && prop.declarations.length > 0 ? atNode(ctx, prop.declarations[0]) : at;
-        if (inAll && optional && !nullable) {
+        if (inAll && optional) {
           findings.push({ at: propAt, kind: 'option-optional', subject: `${typeName}.${name}`, message: `is optional but every Java form of ${javaName} takes ${name}` });
         } else if (!inAll && !optional) {
-          const without = forms.find((g, k) => !names[k].includes(name));
+          const without = translated.find((g, k) => !names[k].includes(name));
           findings.push({ at: propAt, kind: 'option-required', subject: `${typeName}.${name}`, message: `is required but ${formText(without)} does not take it` });
         }
       }
@@ -281,9 +374,9 @@ module.exports = {
           findings.push({ at: decl && decl.length > 0 ? atNode(ctx, decl[0]) : at, kind: 'option-extra', subject: `${typeName}.${name}`, message: `no Java form of ${javaName} names it (${union})` });
         }
       }
-      const optionalParam = !!(params[0].questionToken || params[0].initializer);
-      const someEmpty = forms.some((f) => f.params.length === 0);
-      if (someEmpty && !optionalParam) {
+      const optionalParam = !!(sig.parameters[0].questionToken || sig.parameters[0].initializer);
+      const someEmpty = translated.some((f) => f.params.length === 0);
+      if (someEmpty && !optionalParam && !zeroSig) {
         findings.push({ at, kind: 'options-required', subject, message: `requires its options, but ${javaName}() takes none` });
       } else if (!someEmpty && optionalParam) {
         findings.push({ at, kind: 'options-optional', subject, message: `takes its options as optional, but every Java form of ${javaName} takes a parameter` });

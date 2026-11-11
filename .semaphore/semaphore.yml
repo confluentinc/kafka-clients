@@ -105,14 +105,14 @@ name: build-test-release
 #     with confluent-kafka-dotnet, the librdkafka-based client, whose versions
 #     are 2.x.
 #   - javascript/v<version> releases the Node.js client's npm packages,
-#     @confluentinc/kafka-javascript and its three platform packages. The
+#     @confluentinc/kafka-javascript and its two platform packages. The
 #     version is "version" in javascript/package.json, and may carry an
-#     -alpha.N, -beta.N, -rc.N or -dev.N suffix. The tag build builds and
-#     tests the packages and records them in the workflow's artifacts as a
-#     release bundle, but publishes nothing: they are published to npmjs.com
-#     by hand, with the bundle's publish.sh. The name is shared with
+#     -alpha.N, -beta.N, -preview.N, -rc.N or -dev.N suffix. The tag build builds and
+#     tests the packages and records them in the workflow's artifacts; its
+#     manual "Publish to npm" promotion (publish-npm.yml) publishes them, a
+#     pre-release under the preview dist-tag only. The name is shared with
 #     confluent-kafka-javascript, the librdkafka-based client, whose versions
-#     are 1.x.
+#     are 1.x and whose fixes go out under the legacy dist-tag.
 #   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
 #     runs CI and the blocks that package and test the crate (recorded in the
 #     workflow's artifacts), and skips every publish block.
@@ -146,15 +146,14 @@ name: build-test-release
 #      upload, compare its SHA-256 with the one the "Package the tested
 #      package" job printed in its log, which no later job can change.
 #   7. For the npm packages, once the record block of that tag build has
-#      passed, download
-#      npm/release/confluent-kafka-javascript-<version>-release.zip from the
-#      workflow's artifacts, compare its SHA-256 and those of its tarballs with
-#      the ones the "Record the tested packages" job printed in its log, and
-#      run its publish.sh, which publishes the four packages under the preview
-#      dist-tag, asking for an npm one-time password before each
-#      (javascript/release/README.txt). Then run the javascript-post-install
-#      task (service.yml) with that version, which installs it from npmjs.com
-#      on every supported distribution and Node.js version.
+#      passed, run the manual "Publish to npm" promotion (publish-npm.yml) on
+#      that tag build. It publishes the recorded tarballs with a granular npm
+#      token and no provenance (.semaphore/publish-npm.sh): a pre-release under
+#      the preview dist-tag, which check-npm.py refuses to put on latest, and a
+#      release under latest, and then checks the registry. Then run the
+#      javascript-post-install task (service.yml) with that version, which
+#      installs it from npmjs.com on every supported distribution and Node.js
+#      version.
 # A release tag pushed by other means follows the same path from step 3. The
 # release blocks are skipped on every other build, and the Python promotions
 # publish nothing there, so the crate is the only package published without a
@@ -311,7 +310,7 @@ blocks:
     #     builds the addon inside the node:22 image, and the harness is Rust.
     #
     # Node.js comes from `sem-version node 22`, as confluent-kafka-javascript's
-    # CI installs it. npm packages come from the public npm registry, as pip's
+    # CI installs it; Node 24 and 26 run the tests that need no broker. npm packages come from the public npm registry, as pip's
     # come from public PyPI: NPM_CONFIG_REGISTRY overrides any registry the
     # agent's npm config names, and package-lock.json resolves every package
     # there.
@@ -322,7 +321,7 @@ blocks:
     # timing out, move the .NET jobs to a block of their own with a longer limit
     # (see the note at the top of this file).
     #
-    # Each job is a separate VM with its own broker, so the twelve jobs do not
+    # Each job is a separate VM with its own broker, so the jobs do not
     # contend for Docker resources.
     dependencies: []
     execution_time_limit:
@@ -376,7 +375,7 @@ blocks:
             - sem-version node 22
             - node --version && npm --version
             # The devDependencies, from package-lock.json: typescript and
-            # @types/node, which compile the library (lib/*.ts -> dist/) and
+            # @types/node, which compile the library (src/**/*.ts -> dist/) and
             # run the typing tests.
             - (cd javascript && npm ci --no-audit --no-fund)
             # The submodule is a shallow clone; the rule linter's Java index
@@ -384,7 +383,7 @@ blocks:
             # Kafka tags pinned in xtask and fails without them.
             - (cd rust && cargo xtask fetch-java-refs)
             - make verify-javascript
-            # The static link of the release addon (binding.gyp's Linux
+            # The static link of the release addon (native/binding.gyp's Linux
             # branch: the .a, --gc-sections, --as-needed, addon.exports.map)
             # is otherwise built only by the tag build: pack it with this
             # machine's addon linked statically and install it into a fresh
@@ -397,6 +396,31 @@ blocks:
         - name: "verify-javascript (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-javascript-sasl-ssl
+        # The supported Node.js versions besides 22 (package.json's engines,
+        # >=22.14.0): the static, unit and typing tests, which need no broker,
+        # on Node 24 and 26 (the broker-backed and gRPC arms run on 22 above).
+        # Two jobs with fixed names rather than a matrix, so that
+        # REQUIRED_CI_JOBS in create-release-tag.yml can name them exactly.
+        - name: "verify-javascript (Linux amd64) — node 24"
+          env_vars:
+            - name: NPM_CONFIG_REGISTRY
+              value: https://registry.npmjs.org/
+          commands:
+            - sem-version node 24
+            - node --version && npm --version
+            - (cd javascript && npm ci --no-audit --no-fund)
+            - make build-javascript
+            - make -C javascript test-static test-unit test-typing
+        - name: "verify-javascript (Linux amd64) — node 26"
+          env_vars:
+            - name: NPM_CONFIG_REGISTRY
+              value: https://registry.npmjs.org/
+          commands:
+            - sem-version node 26
+            - node --version && npm --version
+            - (cd javascript && npm ci --no-audit --no-fund)
+            - make build-javascript
+            - make -C javascript test-static test-unit test-typing
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
@@ -527,7 +551,7 @@ blocks:
             - sem-version node 22
             - node --version && npm --version
             # typescript and @types/node, from package-lock.json: the build
-            # compiles the library (lib/*.ts -> dist/) with them.
+            # compiles the library (src/**/*.ts -> dist/) with them.
             - (cd javascript && npm ci --no-audit --no-fund)
             - make verify-javascript-macos-docker
             # The release blocks test the release packages; this checks, on
@@ -1848,7 +1872,7 @@ blocks:
 
   # JavaScript release blocks. They run only on the build of a JavaScript
   # release tag, javascript/v<version> with an optional -alpha.N, -beta.N,
-  # -dev.N or -rc.N suffix, and are skipped on every other build. The pattern
+  # -dev.N, -preview.N or -rc.N suffix, and are skipped on every other build. The pattern
   # must stay identical in all of the blocks that use it, and in the scripts
   # that check it: release-npm.sh (release_version) and create-release-tag.yml
   # for the tag, and, for the version without its javascript/v prefix,
@@ -1857,11 +1881,12 @@ blocks:
   # shared with confluent-kafka-javascript, the librdkafka-based client, whose
   # versions are 1.x.
   #
-  # The release is four npm packages: one per platform,
-  # @confluentinc/kafka-javascript-<platform> (linux-x64-gnu, linux-arm64-gnu,
-  # darwin-arm64), carrying the addon with the Rust core linked statically, and
+  # The release is three npm packages: one per platform of the preview,
+  # @confluentinc/kafka-javascript-<platform> (linux-x64-gnu, darwin-arm64),
+  # built from javascript/npm/<platform>/ and carrying the addon with the Rust
+  # core linked statically, the NOTICE and the third-party licence file, and
   # the main package, @confluentinc/kafka-javascript, whose
-  # optionalDependencies name the three at its exact version, so that npm
+  # optionalDependencies pin the two at its exact version, so that npm
   # installs the one of the user's platform.
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (JavaScript): native addon (<platform>)" builds the addon of
@@ -1871,9 +1896,12 @@ blocks:
   #      Linux, so that it needs glibc 2.28 at most, and for macOS 11.0 on
   #      macOS. check-npm.py checks that it loads only system libraries and
   #      exports only the two Node-API entry points. It records the addon.
-  #   2. "Release (JavaScript): pack" packs the three platform packages and the
+  #   1b. "Release (JavaScript): third-party licences" builds the licence file
+  #      of the platform packages with cargo-about
+  #      (.semaphore/third-party-licenses.sh) and records it.
+  #   2. "Release (JavaScript): pack" packs the two platform packages and the
   #      main package (.semaphore/pack-npm.sh), checks them (check-npm.py) and
-  #      records the four tarballs under npm/built.
+  #      records the three tarballs under npm/built.
   #   3. "Release (JavaScript): package verification (<platform>)" installs the
   #      main package and the platform's package from those tarballs into a
   #      project outside the repository, on a VM that built nothing, with no
@@ -1881,25 +1909,27 @@ blocks:
   #      (.semaphore/test-npm.sh). It records the SHA-256 of the tested
   #      tarballs.
   #   4. "Release (JavaScript): record" depends on "Release: CI passed" and on
-  #      the three verification blocks, so it starts only when every CI block
+  #      the two verification blocks, so it starts only when every CI block
   #      and all of them have passed. It checks the tag, the version and that
   #      npmjs.com does not have the version yet, and records the tested
-  #      tarballs as the release: the bundle
-  #      npm/release/confluent-kafka-javascript-<version>-release.zip, holding
-  #      them with their SHA256SUMS, publish.sh and README.txt
-  #      (javascript/release/), with their checksums in npm/release/SHA256SUMS
-  #      (.semaphore/release-npm.sh). The tag build ends here.
-  # The pipeline publishes nothing, and no VM of it holds an npm token: the
-  # bundle is downloaded from the tag build's artifacts and published to
-  # npmjs.com by hand with its publish.sh, under the preview dist-tag; the
-  # javascript-post-install task (.semaphore/javascript-post-install.yml) then
-  # checks the published packages (javascript/release/README.txt).
+  #      tarballs as the release, under npm/release/ with their checksums in
+  #      npm/release/SHA256SUMS (.semaphore/release-npm.sh). The tag build ends
+  #      here, and no VM of it holds an npm token.
+  #   5. The manual "Publish to npm" promotion (publish-npm.yml) publishes the
+  #      recorded tarballs from Semaphore, with a granular npm token loaded
+  #      from Vault in its publish job only and no provenance
+  #      (.semaphore/publish-npm.sh): the platform packages, then the main
+  #      package; a pre-release under the preview dist-tag only, which
+  #      check-npm.py dist-tag refuses to put on latest. Its post-publish block
+  #      checks the registry, and the javascript-post-install task
+  #      (.semaphore/javascript-post-install.yml) then installs the published
+  #      packages on every distribution and Node.js version.
   #
   # To resume an interrupted release, rerun the failed blocks of the tag build.
   - name: "Release (JavaScript): native addon (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1918,32 +1948,10 @@ blocks:
             - sh .semaphore/build-javascript-native.sh /tmp/native
             - artifact push workflow "/tmp/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --destination "npm/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --force
 
-  - name: "Release (JavaScript): native addon (Linux arm64)"
-    dependencies: []
-    run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 60
-    task:
-      agent:
-        machine:
-          type: s1-prod-ubuntu24-04-arm64-1
-      env_vars:
-        - name: NPM_PLATFORM
-          value: linux-arm64-gnu
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "Build the native addon (Linux arm64)"
-          commands:
-            - sh .semaphore/build-javascript-native.sh /tmp/native
-            - artifact push workflow "/tmp/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --destination "npm/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --force
-
   - name: "Release (JavaScript): native addon (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1969,13 +1977,35 @@ blocks:
             - sh .semaphore/build-javascript-native.sh /tmp/native
             - artifact push workflow "/tmp/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --destination "npm/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --force
 
+  - name: "Release (JavaScript): third-party licences"
+    # The one third-party licence file every platform package ships
+    # (THIRD_PARTY_LICENSES.txt): the licences of the crates the addon links,
+    # from rust/Cargo.lock, built with cargo-about (javascript/npm/about.toml)
+    # and checked (check-npm.py licenses). A crate under a licence about.toml
+    # does not accept fails the release here.
+    dependencies: []
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Build the third-party licence file"
+          commands:
+            - ./.semaphore/dependencies.sh
+            - sh .semaphore/third-party-licenses.sh /tmp/THIRD_PARTY_LICENSES.txt
+            - artifact push workflow /tmp/THIRD_PARTY_LICENSES.txt --destination npm/licenses/THIRD_PARTY_LICENSES.txt --force
+
   - name: "Release (JavaScript): pack"
     dependencies:
       - "Release (JavaScript): native addon (Linux amd64)"
-      - "Release (JavaScript): native addon (Linux arm64)"
       - "Release (JavaScript): native addon (macOS arm64)"
+      - "Release (JavaScript): third-party licences"
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1997,7 +2027,7 @@ blocks:
             # pack-npm.sh takes a directory that holds <platform>/<addon> for
             # each platform and nothing else.
             - |
-              for platform in linux-x64-gnu linux-arm64-gnu darwin-arm64; do
+              for platform in linux-x64-gnu darwin-arm64; do
                 mkdir -p "/tmp/natives/${platform}" \
                   && artifact pull workflow "npm/native/${platform}/confluent-kafka-javascript.node" --destination "/tmp/natives/${platform}/confluent-kafka-javascript.node" \
                   || exit 1
@@ -2007,8 +2037,11 @@ blocks:
             # anything is released.
             - NPM_VERSION=$(python3 .semaphore/check-npm.py version) && export NPM_VERSION
             - test "${SEMAPHORE_GIT_TAG_NAME#javascript/v}" = "${NPM_VERSION}"
-            - sh .semaphore/pack-npm.sh /tmp/natives /tmp/packages
-            # The four tarballs, and nothing else, under npm/built.
+            # The third-party licence file of the platform packages, which the
+            # licences block built and checked.
+            - artifact pull workflow npm/licenses/THIRD_PARTY_LICENSES.txt --destination /tmp/THIRD_PARTY_LICENSES.txt
+            - sh .semaphore/pack-npm.sh --licenses /tmp/THIRD_PARTY_LICENSES.txt /tmp/natives /tmp/packages
+            # The three tarballs, and nothing else, under npm/built.
             - |
               for file in /tmp/packages/*.tgz; do
                 artifact push workflow "${file}" --destination "npm/built/$(basename "${file}")" --force || exit 1
@@ -2017,7 +2050,7 @@ blocks:
   - name: "Release (JavaScript): package verification (Linux amd64)"
     dependencies: ["Release (JavaScript): pack"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -2039,35 +2072,10 @@ blocks:
             - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
 
-  - name: "Release (JavaScript): package verification (Linux arm64)"
-    dependencies: ["Release (JavaScript): pack"]
-    run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 30
-    task:
-      agent:
-        machine:
-          type: s1-prod-ubuntu24-04-arm64-1
-      env_vars:
-        - name: NPM_PLATFORM
-          value: linux-arm64-gnu
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "Test the packages (Linux arm64)"
-          commands:
-            - sem-version node 22
-            # test-npm.sh takes a directory that holds the tarballs and nothing else.
-            - artifact pull workflow npm/built --destination /tmp/packages
-            - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
-            - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
-
   - name: "Release (JavaScript): package verification (macOS arm64)"
     dependencies: ["Release (JavaScript): pack"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -2096,10 +2104,9 @@ blocks:
     dependencies:
       - "Release: CI passed"
       - "Release (JavaScript): package verification (Linux amd64)"
-      - "Release (JavaScript): package verification (Linux arm64)"
       - "Release (JavaScript): package verification (macOS arm64)"
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -2107,7 +2114,7 @@ blocks:
         # The platforms of the verification blocks above, whose checksums are
         # recorded under npm/tested/<platform>.
         - name: NPM_PLATFORMS
-          value: linux-x64-gnu linux-arm64-gnu darwin-arm64
+          value: linux-x64-gnu darwin-arm64
       prologue:
         commands:
           - . .semaphore/job-start.sh
@@ -2158,10 +2165,18 @@ promotions:
           required: false
           description: "The version of the @confluentinc/kafka-javascript npm
             packages to release: \"version\" in javascript/package.json at
-            this commit (for example 4.4.0-beta.2). The tag build builds and
-            tests the packages and records them in its artifacts as a release
-            bundle, whose publish.sh publishes them to npmjs.com by hand.
+            this commit (for example 4.4.0-preview.2). The tag build builds and
+            tests the packages and records them in its artifacts; its
+            \"Publish to npm\" promotion publishes them to npmjs.com.
             Leave empty to not release them."
+  # Manual. Publishes a release of the Node.js client to npmjs.com from the
+  # tarballs the build of its javascript/v<version> tag recorded
+  # (publish-npm.yml). Run it on that tag build once "Release (JavaScript):
+  # record" has passed. Its blocks are skipped on any other build, and its
+  # publish job refuses unless the recorded tarballs match their recorded
+  # checksums.
+  - name: Publish to npm
+    pipeline_file: publish-npm.yml
   # Manual. Publishes a Python version to Test PyPI and checks it there
   # (publish-testpypi.yml). Run it on the build of its python/v<version> tag
   # once "Release (Python): packaging" has passed. Its blocks are skipped on

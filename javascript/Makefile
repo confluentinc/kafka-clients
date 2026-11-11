@@ -17,7 +17,7 @@ RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 PROFILE ?= release
 CONFLUENT_KAFKA_LIB_DIR ?= $(RUST_PROJECT_ROOT)/target/$(PROFILE)
 CONFLUENT_KAFKA_INCLUDE_DIR ?= $(RUST_PROJECT_ROOT)/target/include
-# How the addon links libconfluent_kafka (binding.gyp): dynamic, the default,
+# How the addon links libconfluent_kafka (native/binding.gyp): dynamic, the default,
 # for development, the tests and the gRPC image; static for a release, whose
 # addon carries the library (.semaphore/build-javascript-native.sh), e.g.
 # `make -C javascript build CONFLUENT_KAFKA_LINK=static`.
@@ -42,7 +42,7 @@ NODE_PREFIX ?= $(realpath $(dir $(realpath $(shell command -v $(NODE))))..)
 NODEDIR_FLAG = $(if $(wildcard $(NODE_PREFIX)/include/node/node_api.h),--nodedir=$(NODE_PREFIX),)
 
 # TypeScript (a devDependency, with @types/node: `npm ci` installs them). The
-# library is written in TypeScript, lib/**/*.ts, and `build` compiles it into
+# library is written in TypeScript, src/**/*.ts, and `build` compiles it into
 # dist/ (tsconfig.json), the package's entry points; test-typing type-checks
 # test/typing/usage.ts against dist/'s declarations. TSC is the command that
 # runs tsc, TS_TYPE_ROOTS the directory holding @types/node for the typing
@@ -52,12 +52,15 @@ TS_TYPE_ROOTS ?= node_modules/@types
 export TSC TS_TYPE_ROOTS
 
 # node --test takes files: the unit test directories up to four levels deep
-# (test/unit/common/security/auth/), as lib/'s folders are.
+# (test/unit/common/security/auth/), as src/'s folders are.
 UNIT_TESTS = $(wildcard test/unit/*.test.js test/unit/*/*.test.js test/unit/*/*/*.test.js test/unit/*/*/*/*.test.js)
 STATIC_TESTS = test/static/*.test.js
 LINT_TESTS = test/lint/*.test.js
 TYPING_TESTS = test/typing/*.test.js
 INTEGRATION_TESTS = test/integration/*.test.js
+# The verifiable producer's, the chaos workload's and the producer soak's tests
+# (verifiable_clients/README.md): no broker.
+VERIFIABLE_CLIENTS_TESTS = verifiable_clients/test/*.test.js
 
 # The integration test's scratch broker (test-integration starts one unless
 # KAFKA_BOOTSTRAP_SERVERS is already set).
@@ -70,7 +73,7 @@ KAFKA_PORT ?= 39092
 # the repository root's Makefile orders that (`build-javascript` depends on the
 # Rust build); run standalone, build it first.
 # The gRPC server of the Rust multilanguage harness's `__grpc_js` producer arm
-# (grpc_server.js; see rust/tests/common/backend_pool.rs). Its two packages are
+# (grpc-server/grpc_server.js; see rust/tests/common/backend_pool.rs). Its two packages are
 # pinned once, in package.json's devDependencies: `npm ci` installs them in
 # node_modules/, where the server finds them natively, and Dockerfile.grpc
 # reads the same pins for the image.
@@ -87,17 +90,21 @@ PACK_DIR ?= $(CURDIR)/build/pack
 HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (process.platform === 'linux' ? '-gnu' : '')")
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
-	grpc-image grpc-native test-integration-grpc pack pack-check clean java-index lint-rules test-lint
+	grpc-image grpc-native test-integration-grpc pack pack-check clean java-index lint-rules test-lint \
+	test-verifiable-clients check-api update-api
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
 
+# The addon: node-gyp runs in native/, beside binding.gyp, and builds
+# native/build/Release/confluent-kafka-javascript.node. The package root has no
+# binding.gyp, so npm never compiles on install.
 build-addon:
-	$(NODE_GYP) rebuild $(NODEDIR_FLAG)
+	cd native && $(NODE_GYP) rebuild $(NODEDIR_FLAG)
 
-# lib/**/*.ts -> dist/ (.js, .d.ts and their maps), from a clean dist/ so a
-# removed source leaves no stale output. The private modules (lib/_*.ts) are
-# never declared: their .d.ts are removed, so nothing can type against them
+# src/**/*.ts -> dist/ (.js, .d.ts and their maps), from a clean dist/ so a
+# removed source leaves no stale output. The private modules (src/internal/)
+# are never declared: their .d.ts are removed, so nothing can type against them
 # (test/typing checks no public declaration refers to one).
 build-ts:
 	@$(TSC) --version >/dev/null 2>&1 || { \
@@ -105,14 +112,14 @@ build-ts:
 	  exit 1; }
 	rm -rf dist
 	$(TSC) -p tsconfig.json
-	find dist \( -name '_*.d.ts' -o -name '_*.d.ts.map' \) -delete
+	find dist/internal \( -name '*.d.ts' -o -name '*.d.ts.map' \) -delete
 
 # Then the container gRPC arm of the Rust multilanguage suite, as python/'s and
 # c/'s `test` end with theirs: a recipe line, so it runs after the broker-backed
 # test and the two never hold a broker at once. It self-skips off Linux (see
 # test-integration-grpc); the root `verify-javascript-macos-docker` runs the
 # native arm there instead.
-test: test-static test-unit test-typing test-integration
+test: test-static test-unit test-typing check-api test-verifiable-clients test-integration
 	$(MAKE) test-integration-grpc
 
 # Header conformance and the package layout: no build needed.
@@ -123,7 +130,7 @@ test-static:
 # CLAUDE.md checked from the sources, as `cargo xtask lint-custom` checks the
 # Rust crate's, in two halves: ESLint (eslint.config.cjs) runs the rules that
 # read TypeScript (`kafka/...`, with eslint-baseline.txt) and
-# typescript-eslint's recommended type-checked rules on lib/; the runner
+# typescript-eslint's recommended type-checked rules on src/; the runner
 # (scripts/lint_rules.js, with lint-baseline.txt) runs the addon's C rules and
 # the other files. Both run; the target fails if either fails. The Java index
 # comes first: `cargo xtask java-index` writes the Java client's classes into
@@ -155,10 +162,24 @@ test-lint: java-index
 test-unit: build
 	$(NODE) --test $(UNIT_TESTS)
 
+test-verifiable-clients: build
+	$(NODE) --test $(VERIFIABLE_CLIENTS_TESTS)
+
 # The compiled declarations (dist/) type-check under --strict in a consumer's
 # configurations; needs only the compiled library, not the addon.
 test-typing: build-ts
 	$(NODE) --test $(TYPING_TESTS)
+
+# The interface check (root conventions, Stability; scripts/api_report.js):
+# api-extractor's report of each import path's compiled declarations and the
+# exports map of package.json, against the committed baseline in api/. A change
+# warns in a pre-release or a major release and fails in any other release;
+# `update-api` records a meant change (and, at a release, the new baseline).
+check-api: build-ts
+	$(NODE) scripts/api_report.js check
+
+update-api: build-ts
+	$(NODE) scripts/api_report.js update
 
 # Against KAFKA_BOOTSTRAP_SERVERS when set; otherwise against a scratch broker
 # this target starts with `docker run` and removes afterwards.
@@ -194,7 +215,7 @@ grpc-image:
 		$(REPO_ROOT)
 
 # The native (host-process) arm loads its gRPC packages from node_modules/,
-# beside grpc_server.js, where `npm ci` installs them with the other
+# which grpc-server/grpc_server.js resolves, where `npm ci` installs them with the other
 # devDependencies; this only checks they are there (the addon itself is
 # `build`, which the root `build-grpc-native-javascript` runs first).
 grpc-native:
@@ -223,7 +244,7 @@ test-integration-grpc:
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-js; \
 	fi
 
-# build-addon first: node-gyp's rebuild empties build/, which holds $(PACK_DIR).
+# build-addon first: the pack carries its static addon, native/build/Release/.
 pack:
 	$(MAKE) build-addon CONFLUENT_KAFKA_LINK=static
 	rm -rf $(PACK_DIR)
@@ -233,4 +254,4 @@ pack-check: pack
 	cd $(REPO_ROOT) && sh .semaphore/test-npm.sh $(PACK_DIR) $(HOST_PLATFORM)
 
 clean:
-	rm -rf build dist
+	rm -rf build dist native/build

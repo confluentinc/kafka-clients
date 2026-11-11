@@ -627,6 +627,7 @@ mod tests {
             is_static,
             is_default: false,
             param_names: params.iter().map(|_| "o".to_string()).collect(),
+            param_types: params.iter().map(|p| p.to_string()).collect(),
             returns_class: false,
             return_type: None,
             javadoc: None,

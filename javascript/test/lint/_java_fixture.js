@@ -25,6 +25,9 @@ function method(name, params = [], extra = {}) {
     name,
     params,
     param_names: params.map((_, i) => `p${i}`),
+    // As cargo xtask java-index writes them: `params` erased, `param_types`
+    // as written (a test giving generic types sets both).
+    param_types: params,
     // The type the tests of the type rule give it; none (as a constructor has) otherwise.
     return_type: null,
     visibility: 'public',
@@ -144,50 +147,67 @@ const CLASSES = [
   }),
 ];
 
-/** The fixture's lib/: a translation of every class above that the rules accept. */
+/** The fixture's invented members, on the list of invented names. */
+const INVENTED = { 'Rec.extraJs': 'A JavaScript addition.', 'Mode.toJSON': "JavaScript's JSON protocol." };
+
+/** The fixture's src/: a translation of every class above that the rules accept. */
 const LIB = {
-  'lib/producer/rec.ts': `export class Rec {
+  'src/producer/rec.ts': `export class Rec {
   static readonly UNKNOWN: number = -1;
-  constructor(options: { p0: string; p1?: number }) { void options; }
+  constructor(options: { p0: string; p1?: number });
+  constructor(p0: string);
+  constructor(options: unknown) { void options; }
   get topic(): string { return ''; }
   get offset(): number { return 0; }
   get size(): number { return 0; }
   get isOpen(): boolean { return true; }
   get hasKey(): boolean { return false; }
-  close(options?: { p0Ms?: number }): void { void options; }
+  close(options?: { p0?: number }): void;
+  close(p0: number): void;
+  close(options?: unknown): void { void options; }
   flush(): void {}
   extra(): void {}
   toString(): string { return ''; }
-  /** @jsOnly A JavaScript addition. */
+  /** A JavaScript addition, on the list of invented names. */
   extraJs(): void {}
   private _native(): void {}
   #state = 1;
 }
 `,
-  'lib/producer/mode.ts': `export class Mode {
+  'src/producer/mode.ts': `export class Mode {
   private constructor(readonly tag: string) {}
   static readonly ON: Mode = new Mode('ON');
   static readonly OFF: Mode = new Mode('OFF');
   static forName(n: string): Mode { void n; return Mode.ON; }
   static values(): Mode[] { return [Mode.ON, Mode.OFF]; }
-  get name(): string { return this.tag; }
+  static valueOf(n: string): Mode { void n; return Mode.ON; }
+  name(): string { return this.tag; }
+  ordinal(): number { return 0; }
   toString(): string { return this.tag; }
+  toJSON(): string { return this.tag; }
 }
 `.replace('private constructor(readonly tag: string) {}', 'private constructor(private readonly tag: string) {}'),
-  'lib/producer/producer_config.ts': `export class ProducerConfig {
+  'src/producer/producer_config.ts': `export class ProducerConfig {
   static readonly A_CONFIG: string = 'a';
   constructor(...args: unknown[]) { void args; throw new TypeError('not instantiable'); }
 }
 `,
-  'lib/producer/callback.ts': 'export type Callback = (metadata: unknown) => void;\n',
-  'lib/common/header/header.ts': 'export interface Header {\n  readonly key: string;\n  value(): unknown;\n}\n',
-  'lib/common/future.ts': 'export class Future {\n  private constructor() {}\n  get(): unknown { return null; }\n}\n',
-  'lib/common/errors/foo_error.ts': `export class FooError extends Error {
-  readonly code!: number;
-  readonly retriable!: boolean;
+  'src/producer/callback.ts': 'export type Callback = (metadata: unknown) => void;\n',
+  'src/common/header/header.ts': 'export interface Header {\n  readonly key: string;\n  value(): unknown;\n}\n',
+  'src/common/future.ts': 'export class Future {\n  private constructor() {}\n  get(): unknown { return null; }\n}\n',
+  'src/common/errors/foo_error.ts': `export class FooError extends Error {
+  declare readonly cause: unknown;
+  constructor(message: string) { super(message); }
 }
 `,
-  'lib/_error_registry.ts': "export const ERRORS = [\n  ['./common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
+  'src/internal/error_registry.ts': "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
+  // The mapping lists (scripts/lint/java_ts.js mappingLists): Rec.extraJs and Mode.toJSON are invented.
+  'lint-mapping.json': mapping({ invented: INVENTED }),
 };
 
-module.exports = { method, field, javaClass, javaIndex, CLASSES, LIB };
+/** The text of a lint-mapping.json holding `lists` (`invented`, `javaTargets`: key to text). */
+function mapping(lists) {
+  return `${JSON.stringify({ invented: {}, javaTargets: {}, ...lists }, null, 2)}\n`;
+}
+
+module.exports = { method, field, javaClass, javaIndex, mapping, INVENTED, CLASSES, LIB };

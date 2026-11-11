@@ -62,7 +62,6 @@ sha256_of() {
 host_platform() {
     case "$(uname -s)-$(uname -m)" in
         Linux-x86_64) echo linux-x64-gnu ;;
-        Linux-aarch64|Linux-arm64) echo linux-arm64-gnu ;;
         Darwin-arm64) echo darwin-arm64 ;;
         *) die "no platform package for $(uname -s) $(uname -m)" ;;
     esac

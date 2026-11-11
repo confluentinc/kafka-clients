@@ -14,16 +14,16 @@
 
 'use strict';
 
-// The native addon as lib/ reaches it, for check-native-registry and
-// check-waiting-call-promise: the handle lib/_native.ts exports (`export =
+// The native addon as src/ reaches it, for check-native-registry and
+// check-waiting-call-promise: the handle src/internal/native.ts exports (`export =
 // native`), and every `<handle>.<fn>` use of it, found through the type
 // checker, so an import under another name counts.
 
-/** The symbol of the handle lib/_native.ts exports, or null. */
+/** The symbol of the handle src/internal/native.ts exports, or null. */
 function nativeSymbol(ctx) {
   return ctx.once('nativeSymbol', () => {
     const { ts, checker, sourceFiles } = ctx.program();
-    const sf = sourceFiles.find((s) => ctx.rel(s.fileName) === 'lib/_native.ts');
+    const sf = sourceFiles.find((s) => ctx.rel(s.fileName) === 'src/internal/native.ts');
     if (!sf) return null;
     for (const st of sf.statements) {
       if (ts.isExportAssignment(st) && st.isExportEquals && ts.isIdentifier(st.expression)) {
@@ -58,7 +58,7 @@ function isNative(ctx, e) {
 }
 
 /**
- * The `<handle>.<fn>` uses under `node` (default: every lib/ source):
+ * The `<handle>.<fn>` uses under `node` (default: every src/ source):
  * `{rel, line, name, node}`, `node` the property access.
  */
 function nativeUses(ctx, node) {
@@ -79,7 +79,7 @@ function nativeUses(ctx, node) {
   return out;
 }
 
-/** The body a declaration runs, if it is a lib/ function, method, accessor or constructor with one. */
+/** The body a declaration runs, if it is a src/ function, method, accessor or constructor with one. */
 function bodyOf(ts, d) {
   if ((ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d) || ts.isGetAccessorDeclaration(d) ||
        ts.isSetAccessorDeclaration(d) || ts.isConstructorDeclaration(d) || ts.isFunctionExpression(d) ||
@@ -96,13 +96,23 @@ function bodyOf(ts, d) {
 }
 
 /**
- * `root` and every lib/ function, method or constructor it calls, as the
+ * `root` and every src/ function, method or constructor it calls, as the
  * type checker resolves the calls (a module helper, another class's method,
  * `x['_m']()`, `this.#m()`, `new X()`), transitively, each once.
  */
 function reachedBodies(ctx, root) {
   const { ts, checker } = ctx.program();
-  const libDir = ctx.libDir;
+  // An overload signature has no body: its implementation is what runs.
+  if (root.body === undefined && root.parent && root.parent.members) {
+    const impl = root.parent.members.find(
+      (o) =>
+        o.body !== undefined &&
+        o.kind === root.kind &&
+        (ts.isConstructorDeclaration(root) || (o.name && root.name && o.name.getText() === root.name.getText())),
+    );
+    if (impl) root = impl;
+  }
+  const srcDir = ctx.srcDir;
   const out = [root];
   const seen = new Set([root]);
   for (let i = 0; i < out.length; i++) {
@@ -116,7 +126,7 @@ function reachedBodies(ctx, root) {
           const decls = ts.isClassDeclaration(d) ? d.members.filter((m) => ts.isConstructorDeclaration(m)) : [d];
           for (const x of decls) {
             const body = bodyOf(ts, x);
-            if (body && !seen.has(body) && body.getSourceFile().fileName.startsWith(libDir)) {
+            if (body && !seen.has(body) && body.getSourceFile().fileName.startsWith(srcDir)) {
               seen.add(body);
               out.push(body);
             }

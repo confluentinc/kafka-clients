@@ -14,7 +14,7 @@
 
 'use strict';
 
-// Reads the addon's C sources (src/*.c, src/*.h) and the bindings header for
+// Reads the addon's C sources (native/*.c, native/*.h) and the bindings header for
 // the rule linter (scripts/lint_rules.js) and the header-conformance test. A
 // tokenizer, not a C parser: the sources are written in one plain style, and
 // what the rules need (comments, identifiers, function bodies, call sites and

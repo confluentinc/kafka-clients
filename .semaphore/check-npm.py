@@ -23,7 +23,8 @@
 # Usage, from the repository root:
 #   check-npm.py version
 #       Prints "version" from javascript/package.json, after checking that it is a release version
-#       (see release_version_problem) and that javascript/package-lock.json has the same one.
+#       (see release_version_problem) and that javascript/package-lock.json and every platform
+#       package of javascript/npm/ have the same one (cargo xtask bump-version writes them all).
 #   check-npm.py native <platform> <file> [--dev]
 #       Checks that <file> is the statically linked addon of <platform>: its binary format and
 #       architecture, the system libraries it loads (no libconfluent_kafka: the Rust core is
@@ -31,7 +32,21 @@
 #       its platform floor (glibc 2.28 on Linux, macOS 11.0 on macOS).
 #   check-npm.py manifest <main|platform> [--version <v>]
 #       Prints the package.json of the main package, or of the platform package of <platform>, as
-#       pack-npm.sh publishes it. The version defaults to `version`'s.
+#       pack-npm.sh publishes it: the main package's is the repository's without what is not
+#       published, with each platform package of javascript/npm/ pinned at exactly the version in
+#       its optionalDependencies; a platform package's is javascript/npm/<platform>/package.json,
+#       committed as it is published. The version defaults to `version`'s.
+#   check-npm.py dist-tag <version> [--tag <tag>]
+#       Prints the npm dist-tag <version> is published under: `preview` for a pre-release, which a
+#       check refuses to put on `latest`; `latest` for a release; `legacy` for a 1.x version, the
+#       earlier client's fixes. With --tag, checks that <tag> is that dist-tag and prints it.
+#   check-npm.py path-folders <dir>
+#       Writes, into the staged main package <dir>, the folders behind its import paths: for each
+#       path of `exports` but the root, <path>/package.json pointing at the path's compiled module
+#       and declarations under dist/, for TypeScript setups and tools that do not read `exports`.
+#   check-npm.py licenses <file>
+#       Checks that <file> is the third-party licence file third-party-licenses.sh builds, which
+#       every platform package ships as THIRD_PARTY_LICENSES.txt.
 #   check-npm.py package <dir> [--version <v>] [--platforms "<platform> ..."] [--dev] [--published]
 #       Checks the tarballs in <dir>, which must hold the main package and the platform package of
 #       each platform (all of them by default) and nothing else: their file names, the exact list of
@@ -57,23 +72,30 @@ import tarfile
 MAIN_PACKAGE = "@confluentinc/kafka-javascript"
 PACKAGE_JSON = "javascript/package.json"
 PACKAGE_LOCK = "javascript/package-lock.json"
-LIB = "javascript/lib"
+SRC = "javascript/src"
+# One folder per platform package, each holding its published package.json and README.md.
+PLATFORM_DIR = "javascript/npm"
 ADDON = "confluent-kafka-javascript.node"
+# The third-party licence file of every platform package (third-party-licenses.sh), and the first
+# line of the template it is built from (javascript/npm/about.hbs).
+LICENSES = "THIRD_PARTY_LICENSES.txt"
+LICENSES_TITLE = "Third-party licences of the native addon of @confluentinc/kafka-javascript"
 
-# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N. The
+# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or
+# -rc.N. The
 # javascript/v<version> tag pattern of semaphore.yml is this pattern after its prefix.
-VERSION_PATTERN = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?"
+VERSION_PATTERN = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?"
 # The package name is shared with confluent-kafka-javascript, whose versions are 1.x: this
 # client's versions start at 4, the Apache Kafka line, so that none can be taken for one of those.
 MIN_MAJOR = 4
 
-# The platform packages: npm's os, cpu and libc of each, and the binary the addon must be.
+# The platform packages of the preview, linux-x64 (glibc) and darwin-arm64: npm's os, cpu and libc
+# of each, and the binary the addon must be. Each has its folder in javascript/npm/.
 PLATFORMS = {
     "linux-x64-gnu": {"os": ["linux"], "cpu": ["x64"], "libc": ["glibc"]},
-    "linux-arm64-gnu": {"os": ["linux"], "cpu": ["arm64"], "libc": ["glibc"]},
     "darwin-arm64": {"os": ["darwin"], "cpu": ["arm64"]},
 }
-ELF_MACHINES = {"linux-x64-gnu": 62, "linux-arm64-gnu": 183}  # EM_X86_64, EM_AARCH64
+ELF_MACHINES = {"linux-x64-gnu": 62}  # EM_X86_64
 
 # The only symbols the addon exports: Node looks up these two (node_api.h).
 ENTRY_POINTS = {"napi_register_module_v1", "node_api_module_get_api_version_v1"}
@@ -83,20 +105,32 @@ MACOS_FLOOR = (11, 0, 0)
 # supported distribution. libgcc_s.so.1 is GCC's, whose version nodes are GCC_x.y[.z]: RHEL 8's
 # GCC 8 provides up to GCC_7.0.0.
 GLIBC_LIBRARIES = {"libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1",
-                   "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+                   "ld-linux-x86-64.so.2"}
 LIBGCC_FLOOR = (7, 0, 0)
 # The directories of the libraries a macOS addon may load: the system's.
 MACOS_SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
 # The Rust core is in the addon: below this size it cannot be.
 MIN_ADDON_BYTES = 1024 * 1024
 REPOSITORY = {"type": "git", "url": "git+https://github.com/confluentinc/kafka-clients.git", "directory": "javascript"}
+
+
+def platform_repository(platform):
+    """The repository field of a platform package: its folder of javascript/npm/."""
+    return {**REPOSITORY, "directory": f"{PLATFORM_DIR}/{platform}"}
 # The fields of the repository's package.json that are not published, and the scripts npm runs
 # when a package is installed, none of which a published package may have.
 UNPUBLISHED_FIELDS = ("private", "devDependencies", "scripts")
 INSTALL_SCRIPTS = ("preinstall", "install", "postinstall", "prepare", "preprepare", "postprepare")
-# The files of the main package besides dist/, and of a platform package.
-MAIN_FILES = {"package.json", "README.md", "CHANGELOG.md", "LICENSE"}
-PLATFORM_FILES = {"package.json", "README.md", "LICENSE", ADDON}
+# The files of the main package besides dist/, and of a platform package. NOTICE carries Apache
+# Kafka's credit line (javascript/NOTICE); every package ships it, as its "files" names it (npm
+# adds the README and the LICENSE itself, but not a NOTICE). A platform package also ships the
+# third-party licence file of the crates linked into its addon.
+MAIN_FILES = {"package.json", "README.md", "CHANGELOG.md", "MIGRATION.md", "LICENSE", "NOTICE"}
+PLATFORM_FILES = {"package.json", "README.md", "LICENSE", "NOTICE", LICENSES, ADDON}
+# The "files" of a platform package's package.json: the root conventions' `dist/` and `NOTICE`,
+# which every JavaScript package's "files" names (a platform package has no dist/, so that entry
+# matches nothing), then the addon and the third-party licence file.
+PLATFORM_FILES_FIELD = ["dist/", "NOTICE", ADDON, LICENSES]
 
 
 def fail(message):
@@ -106,11 +140,58 @@ def fail(message):
 def release_version_problem(version):
     """Why `version` is not a release version of the package, or None."""
     if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
-        return f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|rc).N"
+        return f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|preview|rc).N"
     if int(version.split(".")[0]) < MIN_MAJOR:
         return (f"'{version}' is below {MIN_MAJOR}.0.0; the versions of {MAIN_PACKAGE} below {MIN_MAJOR} are "
                 "confluent-kafka-javascript's")
     return None
+
+
+def path_folders(manifest):
+    """{<path>/package.json: its content} for each import path of `exports` but the root: the
+    folders behind the import paths, which a resolver that does not read `exports` (TypeScript's
+    node10 resolution, an older bundler) finds as a directory with a package.json."""
+    folders = {}
+    for subpath, entry in (manifest.get("exports") or {}).items():
+        if subpath == ".":
+            continue
+        folder = subpath[2:]
+        up = "../" * (folder.count("/") + 1)
+        if not isinstance(entry, dict) or not isinstance(entry.get("default"), str) or not isinstance(entry.get("types"), str):
+            fail(f"the export {subpath} has no types and default targets")
+        stub = {
+            "main": up + entry["default"].removeprefix("./"),
+            "types": up + entry["types"].removeprefix("./"),
+        }
+        folders[f"{folder}/package.json"] = json.dumps(stub, indent=2) + "\n"
+    return folders
+
+
+def path_folder_tops(manifest):
+    """The top-level folders of the import paths, which the main package's "files" must name."""
+    return sorted({subpath[2:].split("/")[0] + "/" for subpath in (manifest.get("exports") or {}) if subpath != "."})
+
+
+def dist_tag(version, requested=None):
+    """The dist-tag `version` is published under (see the usage above), after checking that
+    `requested`, when given, is that one."""
+    if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
+        fail(f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|preview|rc).N")
+    major = int(version.split(".")[0])
+    prerelease = "-" in version
+    if major < MIN_MAJOR:
+        # The earlier client's line, whose fixes keep the name's 1.x users off this client.
+        expected = "legacy"
+        why = f"{version} is a fix of the earlier client (below {MIN_MAJOR}.0.0), which goes out under legacy"
+    elif prerelease:
+        expected = "preview"
+        why = f"{version} is a pre-release, which goes out under preview only, never latest"
+    else:
+        expected = "latest"
+        why = f"{version} is a release, which goes out under latest"
+    if requested is not None and requested != expected:
+        fail(f"refusing the dist-tag {requested!r}: {why}")
+    return expected
 
 
 def read_json(path):
@@ -134,7 +215,46 @@ def repo_version():
     if lock.get("version") != version or root.get("version") != version:
         fail(f"{PACKAGE_LOCK} has the versions {lock.get('version')!r} and {root.get('version')!r}, not {version}; "
              "run `npm install --package-lock-only` in javascript/, or `make bump-version`")
+    for platform in PLATFORMS:
+        committed = committed_platform_manifest(platform)
+        if committed.get("version") != version:
+            fail(f"{PLATFORM_DIR}/{platform}/package.json has the version {committed.get('version')!r}, not {version}; "
+                 "`make bump-version` writes them together")
     return version
+
+
+def committed_platform_manifest(platform):
+    """javascript/npm/<platform>/package.json, after checking that javascript/npm/ holds exactly
+    the folders of PLATFORMS and that the manifest is a platform package's."""
+    try:
+        folders = sorted(entry for entry in os.listdir(PLATFORM_DIR) if os.path.isdir(os.path.join(PLATFORM_DIR, entry)))
+    except OSError as error:
+        fail(f"could not list {PLATFORM_DIR}: {error}")
+    if folders != sorted(PLATFORMS):
+        fail(f"{PLATFORM_DIR} has the folders {', '.join(folders)}, not one per platform package: {', '.join(sorted(PLATFORMS))}")
+    path = f"{PLATFORM_DIR}/{platform}/package.json"
+    manifest = read_json(path)
+    if not isinstance(manifest, dict):
+        fail(f"{path} is not an object")
+    package = read_json(PACKAGE_JSON)
+    expected = {
+        "name": f"{MAIN_PACKAGE}-{platform}",
+        "license": package.get("license"),
+        "repository": platform_repository(platform),
+        "main": ADDON,
+        "files": PLATFORM_FILES_FIELD,
+        "engines": package.get("engines"),
+        **PLATFORMS[platform],
+    }
+    for field, value in expected.items():
+        if manifest.get(field) != value:
+            fail(f"{path} has {field} {manifest.get(field)!r}, not {value!r}")
+    allowed = set(expected) | {"version", "description"}
+    for field in sorted(set(manifest) - allowed):
+        fail(f"{path} has {field!r}, which a platform package has none of (no scripts, no dependencies)")
+    if not os.path.isfile(f"{PLATFORM_DIR}/{platform}/README.md"):
+        fail(f"{PLATFORM_DIR}/{platform} has no README.md")
+    return manifest
 
 
 def main_manifest(version):
@@ -142,22 +262,17 @@ def main_manifest(version):
     the platform packages as optional dependencies at exactly this version."""
     manifest = {key: value for key, value in read_json(PACKAGE_JSON).items() if key not in UNPUBLISHED_FIELDS}
     manifest["version"] = version
-    manifest["optionalDependencies"] = {f"{MAIN_PACKAGE}-{platform}": version for platform in PLATFORMS}
+    # The pins: each platform package at exactly this version, with no download fallback. They are
+    # written here, not committed in javascript/package.json: there, `npm ci` would fail once the
+    # version is on the registry, since the lockfile cannot lock a package not yet published.
+    manifest["optionalDependencies"] = {committed_platform_manifest(platform)["name"]: version for platform in PLATFORMS}
     return manifest
 
 
 def platform_manifest(platform, version):
-    """The package.json of the platform package of `platform`."""
-    package = read_json(PACKAGE_JSON)
-    manifest = {
-        "name": f"{MAIN_PACKAGE}-{platform}",
-        "version": version,
-        "description": f"The {platform} native binary of {MAIN_PACKAGE}",
-        "license": package["license"],
-        "repository": package["repository"],
-    }
-    manifest.update(PLATFORMS[platform])
-    manifest.update({"main": ADDON, "files": [ADDON], "engines": package["engines"]})
+    """The package.json of the platform package of `platform`: the committed one, at `version`."""
+    manifest = dict(committed_platform_manifest(platform))
+    manifest["version"] = version
     return manifest
 
 
@@ -491,31 +606,31 @@ def read_tarball(path):
 
 
 def dist_problems(dist, manifest, compare_sources):
-    """Checks the files under package/dist/ of the main package: compiled from javascript/lib/
+    """Checks the files under package/dist/ of the main package: compiled from javascript/src/
     when `compare_sources`, otherwise for what every release has."""
     problems = []
     if compare_sources:
         expected = set()
-        for folder, _dirs, names in os.walk(LIB):
+        for folder, _dirs, names in os.walk(SRC):
             for source in names:
                 if not source.endswith(".ts"):
                     continue
-                stem = os.path.relpath(os.path.join(folder, source), LIB)[:-3].replace(os.sep, "/")
+                stem = os.path.relpath(os.path.join(folder, source), SRC)[:-3].replace(os.sep, "/")
                 expected |= {f"{stem}.js", f"{stem}.js.map"}
-                # tsc's declarations of a private module (lib/_*.ts) are not shipped (javascript/Makefile).
-                if not os.path.basename(stem).startswith("_"):
+                # tsc's declarations of a private module (src/internal/) are not shipped (javascript/Makefile).
+                if not stem.startswith("internal/"):
                     expected |= {f"{stem}.d.ts", f"{stem}.d.ts.map"}
         if not expected:
-            fail(f"{LIB} holds no TypeScript source; run from the repository root")
+            fail(f"{SRC} holds no TypeScript source; run from the repository root")
         for extra in sorted(set(dist) - expected):
-            problems.append(f"the main package has dist/{extra}, which javascript/lib/ does not compile to")
+            problems.append(f"the main package has dist/{extra}, which javascript/src/ does not compile to")
         for missing in sorted(expected - set(dist)):
             problems.append(f"the main package has no dist/{missing}")
     else:
         for name in sorted(dist):
             if not re.fullmatch(r"[a-z0-9_/]+\.(js|js\.map|d\.ts|d\.ts\.map)", name):
                 problems.append(f"the main package has dist/{name}, which is not compiled TypeScript")
-            elif os.path.basename(name).startswith("_") and ".d.ts" in name:
+            elif name.startswith("internal/") and ".d.ts" in name:
                 problems.append(f"the main package has dist/{name}, the declaration of a private module")
     targets = [manifest.get("main"), manifest.get("types")]
     for entry in (manifest.get("exports") or {}).values():
@@ -533,7 +648,7 @@ def differing(actual, expected):
     return ", ".join(sorted(key for key in set(actual) | set(expected) if actual.get(key) != expected.get(key)))
 
 
-def manifest_problems(label, manifest, version):
+def manifest_problems(label, manifest, version, repository=REPOSITORY):
     """What no published package.json may have, whatever its content."""
     problems = []
     if manifest.get("version") != version:
@@ -549,8 +664,8 @@ def manifest_problems(label, manifest, version):
             problems.append(f"{label} has {field}, which this package has none of")
     if manifest.get("license") != "Apache-2.0":
         problems.append(f"{label} has the license {manifest.get('license')!r}, not Apache-2.0")
-    if manifest.get("repository") != REPOSITORY:
-        problems.append(f"{label} has the repository {manifest.get('repository')!r}, not {REPOSITORY}")
+    if manifest.get("repository") != repository:
+        problems.append(f"{label} has the repository {manifest.get('repository')!r}, not {repository}")
     return problems
 
 
@@ -575,13 +690,28 @@ def check_main(files, version, published):
         problems.append(f"{label} is not the one pack-npm.sh writes; it differs in {differing(manifest, main_manifest(version))}")
     names = {name[len("package/"):] for name in files}
     dist = {name[len("dist/"):] for name in names if name.startswith("dist/")}
-    for extra in sorted(names - MAIN_FILES - {f"dist/{d}" for d in dist}):
+    folders = path_folders(manifest)
+    for folder, content in sorted(folders.items()):
+        if folder not in names:
+            problems.append(f"the main package has no {folder}, the folder behind the import path {folder[:-len('/package.json')]}")
+        elif files[f"package/{folder}"].decode("utf-8", "replace") != content:
+            problems.append(f"the main package's {folder} is not the one check-npm.py path-folders writes")
+        else:
+            stub = json.loads(content)
+            for field in ("main", "types"):
+                target = os.path.normpath(os.path.join(os.path.dirname(folder), stub[field])).replace(os.sep, "/")
+                if target not in names:
+                    problems.append(f"the main package's {folder} points its {field} at {stub[field]}, which it does not hold")
+    for top in path_folder_tops(manifest):
+        if top not in (manifest.get("files") or []):
+            problems.append(f'{label} has no "{top}" in its files, so npm leaves out the folders behind its import paths')
+    for extra in sorted(names - MAIN_FILES - set(folders) - {f"dist/{d}" for d in dist}):
         why = " (a build input, a test or the gRPC harness)" if re.match(
-            r"(binding\.gyp|src/|lib/|test/|scripts/|tools/|build/|examples/|grpc|tsconfig|Makefile|.*\.node$)", extra) else ""
+            r"(binding\.gyp|native/|src/|test/|npm/|api/|verifiable_clients/|scripts/|tools/|build/|examples/|grpc|tsconfig|Makefile|.*\.node$)", extra) else ""
         problems.append(f"the main package has {extra}{why}, which it must not carry")
     for missing in sorted(MAIN_FILES - names):
         problems.append(f"the main package has no {missing}")
-    for name in ("README.md", "CHANGELOG.md", "LICENSE"):
+    for name in ("README.md", "CHANGELOG.md", "MIGRATION.md", "LICENSE", "NOTICE"):
         if name in names and not files[f"package/{name}"].strip():
             problems.append(f"the main package's {name} is empty")
     return problems + dist_problems(dist, manifest, not published)
@@ -596,8 +726,8 @@ def check_platform(platform, files, version, dev, published):
         return [f"{label} is not JSON: {error}"]
     if not isinstance(manifest, dict):
         return [f"{label} is not an object"]
-    problems += manifest_problems(label, manifest, version)
-    expected = {"name": f"{MAIN_PACKAGE}-{platform}", "main": ADDON, "files": [ADDON], **PLATFORMS[platform]}
+    problems += manifest_problems(label, manifest, version, platform_repository(platform))
+    expected = {"name": f"{MAIN_PACKAGE}-{platform}", "main": ADDON, "files": PLATFORM_FILES_FIELD, **PLATFORMS[platform]}
     for field, value in expected.items():
         if manifest.get(field) != value:
             problems.append(f"{label} has {field} {manifest.get(field)!r}, not {value!r}")
@@ -611,8 +741,32 @@ def check_platform(platform, files, version, dev, published):
         problems.append(f"{MAIN_PACKAGE}-{platform} has {extra}, which it must not carry")
     for missing in sorted(PLATFORM_FILES - names):
         problems.append(f"{MAIN_PACKAGE}-{platform} has no {missing}")
+    if "NOTICE" in names and not files["package/NOTICE"].strip():
+        problems.append(f"{MAIN_PACKAGE}-{platform}'s NOTICE is empty")
+    if LICENSES in names:
+        problems += [f"{MAIN_PACKAGE}-{platform}: {problem}" for problem in licenses_problems(files[f"package/{LICENSES}"])]
     if ADDON in names:
         problems += check_native(platform, ADDON, files[f"package/{ADDON}"], dev)
+    return problems
+
+
+def licenses_problems(data):
+    """What is wrong with a third-party licence file (third-party-licenses.sh), or nothing."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return [f"{LICENSES} is not UTF-8"]
+    problems = []
+    if text.splitlines()[:1] != [LICENSES_TITLE]:
+        problems.append(f"{LICENSES} does not start with {LICENSES_TITLE!r}: it is not the file about.hbs makes")
+    # Every crate linked in is listed under a licence ("  - <crate> <version>"); the core alone
+    # links dozens, so a file listing none was built from an empty dependency graph.
+    if not re.search(r"^  - [A-Za-z0-9_-]+ [0-9]", text, re.MULTILINE):
+        problems.append(f"{LICENSES} lists no crate")
+    if "Apache License" not in text:
+        problems.append(f"{LICENSES} carries no Apache License text")
+    if "&quot;" in text or "&amp;" in text or "&lt;" in text:
+        problems.append(f"{LICENSES} holds HTML entities: about.hbs must use triple braces")
     return problems
 
 
@@ -645,6 +799,13 @@ def main():
     parser = argparse.ArgumentParser(description="Checks the npm packages of the Node.js client.")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("version")
+    folders = commands.add_parser("path-folders")
+    folders.add_argument("directory")
+    tag = commands.add_parser("dist-tag")
+    tag.add_argument("version")
+    tag.add_argument("--tag")
+    licenses = commands.add_parser("licenses")
+    licenses.add_argument("file")
     native = commands.add_parser("native")
     native.add_argument("platform")
     native.add_argument("file")
@@ -662,6 +823,30 @@ def main():
 
     if args.command == "version":
         print(repo_version())
+        return
+    if args.command == "path-folders":
+        manifest = read_json(os.path.join(args.directory, "package.json"))
+        for folder, content in path_folders(manifest).items():
+            target = os.path.join(args.directory, folder)
+            if os.path.exists(target):
+                fail(f"{target} exists already")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(content)
+        return
+    if args.command == "dist-tag":
+        print(dist_tag(args.version, args.tag))
+        return
+    if args.command == "licenses":
+        try:
+            with open(args.file, "rb") as f:
+                data = f.read()
+        except OSError as error:
+            fail(f"could not read {args.file}: {error}")
+        problems = licenses_problems(data)
+        if problems:
+            fail("\n".join(f"{args.file}: {problem}" for problem in problems))
+        print(f"{args.file} is the third-party licence file")
         return
     if args.command == "native":
         try:

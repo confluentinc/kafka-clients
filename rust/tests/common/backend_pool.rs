@@ -119,9 +119,9 @@ pub enum BackendKind {
     /// (since the producer M12/P1 work) and `AdminService` (since M15/P14, over the
     /// binding's `IAsyncAdmin`).
     DotnetAsync,
-    /// The Node.js producer (`javascript/grpc_server.js`). Serves only
+    /// The Node.js producer (`javascript/grpc-server/grpc_server.js`). Serves only
     /// `ProducerService`; see that file for the RPCs it leaves unimplemented.
-    Javascript,
+    Js,
 }
 
 impl BackendKind {
@@ -132,7 +132,7 @@ impl BackendKind {
             BackendKind::C => "confluent-kafka-rust/c-grpc-server",
             BackendKind::Dotnet => "confluent-kafka-rust/dotnet-grpc-server",
             BackendKind::DotnetAsync => "confluent-kafka-rust/dotnet-async-grpc-server",
-            BackendKind::Javascript => "confluent-kafka-rust/javascript-grpc-server",
+            BackendKind::Js => "confluent-kafka-rust/javascript-grpc-server",
         }
     }
 
@@ -150,7 +150,7 @@ impl BackendKind {
             // Mirror Python: the async .NET server binds the same 50053 as the sync one —
             // they run in separate containers, so the internal ports don't collide.
             BackendKind::DotnetAsync => 50053,
-            BackendKind::Javascript => 50054,
+            BackendKind::Js => 50054,
         }
     }
 
@@ -165,7 +165,7 @@ impl BackendKind {
             | BackendKind::C
             | BackendKind::Dotnet
             | BackendKind::DotnetAsync => "build-grpc-images",
-            BackendKind::Javascript => "build-grpc-images-javascript",
+            BackendKind::Js => "build-grpc-images-javascript",
         }
     }
 
@@ -176,7 +176,7 @@ impl BackendKind {
             BackendKind::C => "c",
             BackendKind::Dotnet => "dotnet",
             BackendKind::DotnetAsync => "dotnet_async",
-            BackendKind::Javascript => "javascript",
+            BackendKind::Js => "javascript",
         }
     }
 
@@ -194,13 +194,13 @@ impl BackendKind {
     /// same assembly, and `CONSUMER_FLAVOR` is set explicitly to pick the sync
     /// or async servicers, so a value inherited from the test process cannot
     /// change the flavor.
-    /// JavaScript runs the checked-in `javascript/grpc_server.js` with `node`
+    /// JavaScript runs the checked-in `javascript/grpc-server/grpc_server.js` with `node`
     /// (`MULTILANG_NODE` overrides it) against the addon built in
-    /// `javascript/build/Release` and the library compiled into
+    /// `javascript/native/build/Release` and the library compiled into
     /// `javascript/dist` (both `make -C javascript build`); the gRPC packages
     /// (`@grpc/grpc-js`, `@grpc/proto-loader`) are the devDependencies `npm ci`
-    /// installs in `javascript/node_modules`, which Node resolves from the
-    /// server's own directory. The server loads the `.proto` files at runtime
+    /// installs in `javascript/node_modules`, which Node finds by walking up
+    /// from the server's directory. The server loads the `.proto` files at runtime
     /// from `GRPC_PROTO_DIR`.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -249,7 +249,7 @@ impl BackendKind {
                 command.arg(server).env("CONSUMER_FLAVOR", flavor);
                 (command, "build-grpc-native-dotnet")
             },
-            BackendKind::Javascript => {
+            BackendKind::Js => {
                 const TARGET: &str = "build-grpc-native-javascript";
                 let node = std::env::var_os("MULTILANG_NODE")
                     .map(PathBuf::from)
@@ -258,13 +258,13 @@ impl BackendKind {
                 require_native_artifact(self, &node, TARGET);
                 require_native_artifact(
                     self,
-                    &javascript.join("build/Release/confluent-kafka-javascript.node"),
+                    &javascript.join("native/build/Release/confluent-kafka-javascript.node"),
                     TARGET,
                 );
                 require_native_artifact(self, &javascript.join("dist/producer/index.js"), TARGET);
-                // What grpc_server.js loads: Node resolves `require` from the
-                // server's directory, javascript/node_modules, before any
-                // NODE_PATH.
+                // What grpc_server.js loads: Node resolves `require` by walking
+                // up from the server's directory (javascript/grpc-server) to
+                // javascript/node_modules, before any NODE_PATH.
                 for package in ["@grpc/grpc-js", "@grpc/proto-loader"] {
                     let path = javascript.join("node_modules").join(package);
                     assert!(
@@ -277,7 +277,7 @@ impl BackendKind {
 
                 let mut command = Command::new(node);
                 command
-                    .arg(javascript.join("grpc_server.js"))
+                    .arg(javascript.join("grpc-server/grpc_server.js"))
                     .env("GRPC_PROTO_DIR", root.join("multilanguage-test-server/proto"));
                 (command, TARGET)
             },

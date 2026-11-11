@@ -46,8 +46,13 @@ tools/java-perf-test/bin/
 # package.json, lockfile and tsconfig.json are tracked despite the `*.json`
 # rule above.
 /javascript/build/
+/javascript/native/build/
 /javascript/dist/
 /javascript/node_modules/
 !/javascript/package.json
 !/javascript/package-lock.json
 !/javascript/tsconfig.json
+# The platform packages' manifests (javascript/npm/README.md), published as committed.
+!/javascript/npm/*/package.json
+# The interface check's baseline (javascript/scripts/api_report.js).
+!/javascript/api/*.json

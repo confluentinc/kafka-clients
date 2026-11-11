@@ -277,8 +277,8 @@ test-integration-grpc-dotnet-native:
 # `npm ci` installs in javascript/node_modules, where the server loads them.
 #
 # The binding is producer-only, so only `multilanguage_test!` has a `__grpc_js`
-# arm (the consumer and admin macros do not), and javascript/grpc_server.js
-# registers ProducerService alone.
+# arm (the consumer and admin macros do not), and
+# javascript/grpc-server/grpc_server.js registers ProducerService alone.
 #
 # NINE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
 # JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
@@ -286,21 +286,22 @@ test-integration-grpc-dotnet-native:
 #
 # The producer transaction tests. The JS producer has no transaction surface
 # (initTransactions / beginTransaction / sendOffsetsToTransaction /
-# commitTransaction / abortTransaction), so grpc_server.js leaves the five
-# transaction RPCs out and they answer gRPC UNIMPLEMENTED.
+# commitTransaction / abortTransaction), so grpc-server/grpc_server.js leaves
+# the five transaction RPCs out and they answer gRPC UNIMPLEMENTED.
 # test_consume_transform_produce_with_offsets also needs ConsumerService.
 # REMOVE these three when the JS producer implements transactions (and, for the
-# third, a JS consumer with a ConsumerService in grpc_server.js).
+# third, a JS consumer with a ConsumerService in grpc-server/grpc_server.js).
 #
 # The metrics tests. The JS producer has no metrics() yet, so the Metrics RPC is
 # left out. REMOVE test_produce_and_check_metrics and
 # test_metrics_follow_configuration_and_traffic when the JS producer implements
-# metrics() and grpc_server.js serves the Metrics RPC.
+# metrics() and grpc-server/grpc_server.js serves the Metrics RPC.
 #
 # The partitionsFor tests. The JS producer has no partitionsFor() yet, so the
 # PartitionsFor RPC is left out; test_produce_invalid_partition reads the
 # partition count back through it. REMOVE these four when the JS producer
-# implements partitionsFor() and grpc_server.js serves the PartitionsFor RPC.
+# implements partitionsFor() and grpc-server/grpc_server.js serves the
+# PartitionsFor RPC.
 #
 # With all nine gone, remove JS_GRPC_SKIPS (the definition below and its uses in
 # test-integration-grpc-js and test-integration-grpc-js-native).
