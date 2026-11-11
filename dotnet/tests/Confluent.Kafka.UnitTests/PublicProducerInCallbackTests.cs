@@ -41,7 +41,12 @@ public sealed class PublicProducerInCallbackTests
 {
     private const int MaxBlockMs = 500;
 
-    // How long a call that returns at once may take: well under the 5 s close timeout, with room for a slow runner.
+    // The max.block.ms of the cases whose call returns at once: above AtOnceMs, so a call that waits for max.block.ms
+    // fails the bound.
+    private const int AtOnceMaxBlockMs = 2500;
+
+    // How long a call that returns at once may take: below AtOnceMaxBlockMs and the 5 s close timeout, with room for a
+    // slow runner.
     private const int AtOnceMs = 2000;
 
     private const string FlushMessage =
@@ -65,22 +70,26 @@ public sealed class PublicProducerInCallbackTests
     {
         Exception? refused = null;
         bool faultedInCall = false;
-        await Run(flavor, "in-callback-flush", producer =>
-        {
-            Stopwatch elapsed = Stopwatch.StartNew();
-            if (producer is KafkaProducer<byte[], byte[]> sync)
+        await Run(
+            flavor,
+            "in-callback-flush",
+            producer =>
             {
-                refused = Record(() => sync.Flush());
-            }
-            else
-            {
-                Task flush = ((AsyncKafkaProducer<byte[], byte[]>)producer).Flush();
-                faultedInCall = flush.IsFaulted;
-                refused = flush.Exception?.InnerException;
-            }
+                Stopwatch elapsed = Stopwatch.StartNew();
+                if (producer is KafkaProducer<byte[], byte[]> sync)
+                {
+                    refused = Record(() => sync.Flush());
+                }
+                else
+                {
+                    Task flush = ((AsyncKafkaProducer<byte[], byte[]>)producer).Flush();
+                    faultedInCall = flush.IsFaulted;
+                    refused = flush.Exception?.InnerException;
+                }
 
-            Assert.True(elapsed.ElapsedMilliseconds < AtOnceMs, $"Flush waited {elapsed.ElapsedMilliseconds} ms");
-        });
+                Assert.True(elapsed.ElapsedMilliseconds < AtOnceMs, $"Flush waited {elapsed.ElapsedMilliseconds} ms");
+            },
+            maxBlockMs: AtOnceMaxBlockMs);
 
         KafkaException error = Assert.IsType<KafkaException>(refused);
         Assert.Equal(FlushMessage, error.Message);
@@ -201,7 +210,8 @@ public sealed class PublicProducerInCallbackTests
             {
                 producerSeen = producer;
                 destroys = WatchDestroy(producer);
-            });
+            },
+            AtOnceMaxBlockMs);
 
         Assert.True(closeTaskDone, "Close from the callback did not return a completed close");
         Assert.InRange(closeMs, 0, AtOnceMs);
