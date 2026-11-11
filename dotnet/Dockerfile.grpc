@@ -16,7 +16,7 @@
 # rust/multilanguage-test-server/ and dotnet/. Use the Makefile target:
 #   make -C dotnet grpc-image
 #
-# Tags the result as confluent-kafka-rust/dotnet-grpc-server:dev.
+# Tags the result as confluent-kafka-rust/dotnet-grpc-server:$MULTILANG_IMAGE_TAG, `dev` by default.
 #
 # The image serves ProducerService + ConsumerService + AdminService (Admin over
 # IAdmin; the async image serves it over IAsyncAdmin, M15/P14 — see Program.cs);
