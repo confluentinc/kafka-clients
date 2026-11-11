@@ -13,13 +13,14 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// The v3 perf executable: <c>MODE</c> selects the producer or the consumer benchmark, and the exit code carries the
-/// verdict the launcher and the perf smoke gate on.
+/// The v3 perf executable: <c>MODE</c> selects the producer, consumer or transactional benchmark, or the version
+/// report, and the exit code carries the verdict the launcher and the perf smoke gate on.
 /// </summary>
 internal static class Program
 {
@@ -31,6 +32,10 @@ internal static class Program
 
     private static async Task<int> Main()
     {
+        // This exe is client version 3: results.json's client_version and the default group.id derive from it, as
+        // Python.
+        Environment.SetEnvironmentVariable("CLIENT_VERSION", "3");
+
         PerfSignals.Install();
 
         string mode = PerfEnv.GetString("MODE", "producer");
@@ -42,8 +47,13 @@ internal static class Program
                     return await ProducerMain.Run().ConfigureAwait(false);
                 case "consumer":
                     return await ConsumerMain.Run().ConfigureAwait(false);
+                case "transactional":
+                    return await TransactionalMain.Run().ConfigureAwait(false);
+                case "version":
+                    PrintVersion();
+                    return 0;
                 default:
-                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer' or 'consumer')");
+                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer', 'consumer', 'transactional' or 'version')");
                     return UsageExitCode;
             }
         }
@@ -54,4 +64,13 @@ internal static class Program
             return InterruptedExitCode;
         }
     }
+
+    // The C ABI has no version entry point, so the native core is identified by the binding it is built and shipped
+    // with: the binding's informational version carries the source commit both come from.
+    private static void PrintVersion() =>
+        RuntimeInfo.Print(new Dictionary<string, string>
+        {
+            ["client"] = RuntimeInfo.ProducerClient("dotnet-rust"),
+            ["confluent_kafka_version"] = RuntimeInfo.AssemblyVersion(typeof(Confluent.Kafka.Producer.KafkaProducer<,>).Assembly),
+        });
 }

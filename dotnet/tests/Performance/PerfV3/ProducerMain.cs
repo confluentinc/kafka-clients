@@ -41,6 +41,8 @@ internal static class ProducerMain
 
         Dictionary<string, string> producerConfig = V3Config.BuildProducerConfig();
         V3Config.PrintProducerConfiguration(producerConfig, config.KeySize, config.ValueSize, config.DoVerify);
+        config.BufferMemoryAllocationStrategy = V3Config.EffectiveAllocationStrategy(producerConfig);
+        Console.WriteLine($"Effective buffer.memory.allocation.strategy: {config.BufferMemoryAllocationStrategy}");
 
         PrintProducingBanner(config);
 

@@ -20,7 +20,8 @@
 //!
 //! A running client's numbers come from what its harness writes as it goes:
 //!
-//! - the producer and transactional harnesses and the Python consumer write
+//! - the producer and transactional harnesses and the Python and .NET
+//!   consumers write
 //!   one line per window (about a second) to `metrics.jsonl` in the arm's
 //!   directory: JSON whose leaves are numbers as strings, with the window's
 //!   messages, bytes, latency total, count and max, one CPU and one RSS
@@ -749,12 +750,20 @@ warmup complete (100 msgs); measuring 600s now
         for arm in [Arm::Rust, Arm::Librdkafka, Arm::Java] {
             assert_eq!(source(consumer, arm), (dir.join("run.log"), Some(512.0)), "{arm:?}");
         }
-        assert_eq!(source(consumer, Arm::PythonAsyncRust), (dir.join("metrics.jsonl"), None));
+        for arm in [Arm::PythonAsyncRust, Arm::DotnetSyncRust, Arm::DotnetAsyncLibrdkafka] {
+            assert_eq!(source(consumer, arm), (dir.join("metrics.jsonl"), None), "{arm:?}");
+        }
         for line in [
             "p rust PARTITIONS=1 VALUE_SIZE=512 LIMIT_RPS=1",
             "t rust WORKLOAD=transactional TXN_MODE=eos PARTITIONS=1 VALUE_SIZE=512 LIMIT_RPS=1",
         ] {
-            for arm in [Arm::Rust, Arm::Librdkafka, Arm::Java, Arm::PythonSyncLibrdkafka] {
+            for arm in [
+                Arm::Rust,
+                Arm::Librdkafka,
+                Arm::Java,
+                Arm::PythonSyncLibrdkafka,
+                Arm::DotnetAsyncRust,
+            ] {
                 assert_eq!(source(line, arm), (dir.join("metrics.jsonl"), None), "{line} {arm:?}");
             }
         }

@@ -91,18 +91,18 @@ internal sealed class V2SyncProducerBackend : IProducerBackend
         return new PerfSendHandle(s_get, fut);
     }
 
-    public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+    public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks)
     {
         Action<DeliveryReport<byte[], byte[]>> deliveryReport = report =>
         {
             if (report.Error.IsError)
             {
-                callback.OnCompletion(sendStartMs, default, new KafkaException(report.Error));
+                callback.OnCompletion(sendStartTicks, default, new KafkaException(report.Error));
             }
             else
             {
                 callback.OnCompletion(
-                    sendStartMs,
+                    sendStartTicks,
                     new PerfRecordMetadata(report.Topic, report.Partition.Value, report.Offset.Value, report.Message.Timestamp.UnixTimestampMs),
                     null);
             }
@@ -193,20 +193,18 @@ internal sealed class V2AsyncProducerBackend : IAsyncProducerBackend
         var s = (DeliveryState)state!;
         if (delivery.IsCanceled)
         {
-            s.Callback.OnCompletion(s.SendStartMs, default, new OperationCanceledException());
+            s.Callback.OnCompletion(s.SendStartTicks, default, new OperationCanceledException());
         }
         else if (delivery.IsFaulted)
         {
-            // A full queue lands here too, as a ProduceException whose message ("Local: Queue full") the
-            // engine's QUEUE_FULL check matches.
             Exception e = delivery.Exception!;
-            s.Callback.OnCompletion(s.SendStartMs, default, e.InnerException ?? e);
+            s.Callback.OnCompletion(s.SendStartTicks, default, e.InnerException ?? e);
         }
         else
         {
             DeliveryResult<byte[], byte[]> result = delivery.Result;
             s.Callback.OnCompletion(
-                s.SendStartMs,
+                s.SendStartTicks,
                 new PerfRecordMetadata(result.Topic, result.Partition.Value, result.Offset.Value, result.Message.Timestamp.UnixTimestampMs),
                 null);
         }
@@ -234,12 +232,48 @@ internal sealed class V2AsyncProducerBackend : IAsyncProducerBackend
             result.Topic, result.Partition.Value, result.Offset.Value, result.Message.Timestamp.UnixTimestampMs);
     }
 
-    public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+    // A full queue faults ProduceAsync's task before it returns, so the record was never accepted: the send waits 1 ms
+    // and retries, as the sync backend and Python's v2 producers do, and completes only once the record is accepted.
+    // The usual path stays synchronous and allocates no state machine.
+    public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks)
     {
-        _producer
-            .ProduceAsync(topic, new Message<byte[], byte[]> { Key = key!, Value = value! })
-            .ContinueWith(s_report, new DeliveryState(callback, sendStartMs), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        var message = new Message<byte[], byte[]> { Key = key!, Value = value! };
+        Task<DeliveryResult<byte[], byte[]>> delivery = _producer.ProduceAsync(topic, message);
+        if (IsQueueFull(delivery))
+        {
+            return RetryQueueFull(topic, message, callback, sendStartTicks);
+        }
+
+        Report(delivery, callback, sendStartTicks);
         return default;
+    }
+
+    private static bool IsQueueFull(Task<DeliveryResult<byte[], byte[]>> delivery) =>
+        delivery.IsFaulted
+        && delivery.Exception!.InnerException is ProduceException<byte[], byte[]> ex
+        && ex.Error.Code == ErrorCode.Local_QueueFull;
+
+    private static void Report(Task<DeliveryResult<byte[], byte[]>> delivery, IPerfDeliveryCallback callback, long sendStartTicks) =>
+        delivery.ContinueWith(s_report, new DeliveryState(callback, sendStartTicks), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+    private async ValueTask RetryQueueFull(string topic, Message<byte[], byte[]> message, IPerfDeliveryCallback callback, long sendStartTicks)
+    {
+        while (true)
+        {
+            // Checked on each attempt, so a shutdown ends a sustained full queue; no delivery report will come.
+            if (PerfSignals.Terminating)
+            {
+                throw new OperationCanceledException("Terminated before the producer accepted the record.");
+            }
+
+            await Task.Delay(1).ConfigureAwait(false);
+            Task<DeliveryResult<byte[], byte[]>> delivery = _producer.ProduceAsync(topic, message);
+            if (!IsQueueFull(delivery))
+            {
+                Report(delivery, callback, sendStartTicks);
+                return;
+            }
+        }
     }
 
     public Task Flush(CancellationToken cancellationToken)
@@ -266,13 +300,13 @@ internal sealed class V2AsyncProducerBackend : IAsyncProducerBackend
 /// <summary>The engine's callback and the send's start time, carried to the delivery continuation.</summary>
 internal sealed class DeliveryState
 {
-    internal DeliveryState(IPerfDeliveryCallback callback, long sendStartMs)
+    internal DeliveryState(IPerfDeliveryCallback callback, long sendStartTicks)
     {
         Callback = callback;
-        SendStartMs = sendStartMs;
+        SendStartTicks = sendStartTicks;
     }
 
     internal IPerfDeliveryCallback Callback { get; }
 
-    internal long SendStartMs { get; }
+    internal long SendStartTicks { get; }
 }

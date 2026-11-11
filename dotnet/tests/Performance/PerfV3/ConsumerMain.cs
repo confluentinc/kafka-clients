@@ -35,7 +35,7 @@ internal static class ConsumerMain
 
         Dictionary<string, string> consumerConfig = V3Config.BuildConsumerConfig(config);
 
-        using var metrics = new Metrics();
+        using Metrics metrics = Metrics.ForConsumer();
         ConsumerBenchmarkResult result;
         if (config.AsyncMode)
         {
@@ -63,7 +63,7 @@ internal static class ConsumerMain
             return ConsumerBenchmarkResult.SetupNotReadyExitCode;
         }
 
-        if (result.AssignmentFailed)
+        if (result.AssignmentFailed || result.ResultsWriteFailed)
         {
             return 1;
         }

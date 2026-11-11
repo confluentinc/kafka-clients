@@ -15,6 +15,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,8 +25,8 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// Covers <c>ConsumerBenchmark</c>'s readiness gate against scripted backends, with no broker; every case runs both the
-/// sync (<c>Run</c>) and the async (<c>RunAsync</c>) engine.
+/// Covers <c>ConsumerBenchmark</c>'s readiness gate and measurement against scripted backends, with no broker; every
+/// case runs both the sync (<c>Run</c>) and the async (<c>RunAsync</c>) engine.
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class ConsumerReadinessGateTests
@@ -55,23 +57,40 @@ public sealed class ConsumerReadinessGateTests
     public Task Gate_CountsOnlyMeasurableRecords(bool asyncMode) =>
         GateCountsOnlyMeasurableRecordsAsync(asyncMode);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task Measure_CountsEveryRecordAndWritesResults(bool asyncMode) =>
+        MeasureCountsEveryRecordAndWritesResultsAsync(asyncMode);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task Measure_WhenResultsFileUnwritable_Fails(bool asyncMode) =>
+        MeasureWhenResultsFileUnwritableFailsAsync(asyncMode);
+
     private static async Task GateWhenEnoughMeasurableRecordsMeasuresAsync(bool asyncMode)
     {
-        // The gate's 20 records are warmup: they must not be counted in MessagesMeasured.
+        // The gate's 20 records are warmup. The run is unbounded and timed, so counted they would make the total 45.
         var script = new List<IReadOnlyList<PolledRecord>>
         {
             Array.Empty<PolledRecord>(),
             Array.Empty<PolledRecord>(),
             Fresh(20),
-            Fresh(5),
+            Fresh(25),
         };
 
         (ConsumerBenchmarkResult result, PollScript driver) = await RunEngineAsync(
-            asyncMode, script, readinessMinRecords: 20, readinessTimeoutSeconds: 5, numMessages: 5).ConfigureAwait(false);
+            asyncMode,
+            script,
+            readinessMinRecords: 20,
+            readinessTimeoutSeconds: 5,
+            numMessages: 0,
+            extraEnv: new Dictionary<string, string>(StringComparer.Ordinal) { ["TEST_DURATION_SECONDS"] = "1" }).ConfigureAwait(false);
 
         Assert.False(result.SetupNotReady);
         Assert.False(result.AssignmentFailed);
-        Assert.Equal(5, result.MessagesMeasured);
+        Assert.Equal(25, result.MessagesMeasured);
         Assert.Equal(1, driver.CloseCount);
     }
 
@@ -129,14 +148,85 @@ public sealed class ConsumerReadinessGateTests
         Assert.Equal(0, result.MessagesMeasured);
     }
 
+    private static async Task MeasureCountsEveryRecordAndWritesResultsAsync(bool asyncMode)
+    {
+        // Measured: 2 records 60 s in the future (a negative latency, clamped into bucket 0), 2 with no CreateTime
+        // (throughput only) and 2 a second old.
+        long now = NowMs();
+        var script = new List<IReadOnlyList<PolledRecord>>
+        {
+            Array.Empty<PolledRecord>(),
+            Array.Empty<PolledRecord>(),
+            Fresh(20),
+            WithTimestamp(2, now + 60_000),
+            WithTimestamp(2, -1),
+            WithTimestamp(2, now - 1_000),
+        };
+        string path = Path.Combine(Directory.GetCurrentDirectory(), "consumer-results-" + Guid.NewGuid().ToString("N") + ".json");
+
+        (ConsumerBenchmarkResult result, _) = await RunEngineAsync(
+            asyncMode,
+            script,
+            readinessMinRecords: 20,
+            readinessTimeoutSeconds: 5,
+            numMessages: 6,
+            extraEnv: new Dictionary<string, string>(StringComparer.Ordinal) { ["RESULTS_FILE"] = path }).ConfigureAwait(false);
+
+        Assert.False(result.SetupNotReady);
+        Assert.False(result.ResultsWriteFailed);
+        Assert.Equal(6, result.MessagesMeasured);
+
+        using JsonDocument results = JsonDocument.Parse(File.ReadAllText(path));
+        JsonElement root = results.RootElement;
+        Assert.Equal("consumer", root.GetProperty("test").GetString());
+        Assert.Equal(asyncMode ? "dotnet-rust-async-consumer" : "dotnet-rust-consumer", root.GetProperty("client").GetString());
+        Assert.Equal(6, root.GetProperty("messages_measured").GetInt64());
+
+        // min and max are exact: the negative latency is kept in min, while its bucket is 0.
+        JsonElement latency = root.GetProperty("latency_ms");
+        Assert.True(latency.GetProperty("min").GetInt64() <= -59_000);
+        Assert.True(latency.GetProperty("max").GetInt64() >= 1_000);
+        Assert.Equal(0, latency.GetProperty("p50").GetInt64());
+        Assert.True(latency.GetProperty("p99").GetInt64() >= 1_000);
+
+        foreach (string key in new[] { "rss_avg_mb", "cpu_avg_pct", "rss_avg_kib" })
+        {
+            Assert.Equal(JsonValueKind.Number, root.GetProperty(key).ValueKind);
+        }
+    }
+
+    private static async Task MeasureWhenResultsFileUnwritableFailsAsync(bool asyncMode)
+    {
+        var script = new List<IReadOnlyList<PolledRecord>>
+        {
+            Array.Empty<PolledRecord>(),
+            Array.Empty<PolledRecord>(),
+            Fresh(20),
+            Fresh(5),
+        };
+        string path = Path.Combine("no-such-directory", "results.json");
+
+        (ConsumerBenchmarkResult result, _) = await RunEngineAsync(
+            asyncMode,
+            script,
+            readinessMinRecords: 20,
+            readinessTimeoutSeconds: 5,
+            numMessages: 5,
+            extraEnv: new Dictionary<string, string>(StringComparer.Ordinal) { ["RESULTS_FILE"] = path }).ConfigureAwait(false);
+
+        Assert.Equal(5, result.MessagesMeasured);
+        Assert.True(result.ResultsWriteFailed);
+    }
+
     private static async Task<(ConsumerBenchmarkResult Result, PollScript Driver)> RunEngineAsync(
         bool asyncMode,
         IReadOnlyList<IReadOnlyList<PolledRecord>> script,
         int readinessMinRecords,
         int readinessTimeoutSeconds,
-        long numMessages)
+        long numMessages,
+        IReadOnlyDictionary<string, string>? extraEnv = null)
     {
-        PerfEngineFixture.Apply(new Dictionary<string, string>(StringComparer.Ordinal)
+        var env = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["TOPIC_NAME"] = SmokeTopic,
             ["ASYNC"] = asyncMode ? "True" : "False",
@@ -148,11 +238,20 @@ public sealed class ConsumerReadinessGateTests
             ["NUM_MESSAGES"] = numMessages.ToString(CultureInfo.InvariantCulture),
             ["READINESS_MIN_RECORDS"] = readinessMinRecords.ToString(CultureInfo.InvariantCulture),
             ["READINESS_TIMEOUT_SECONDS"] = readinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture),
-        });
+        };
+        if (extraEnv is not null)
+        {
+            foreach (KeyValuePair<string, string> pair in extraEnv)
+            {
+                env[pair.Key] = pair.Value;
+            }
+        }
+
+        PerfEngineFixture.Apply(env);
 
         ConsumerBenchmarkConfig config = ConsumerBenchmarkConfig.FromEnv();
         var driver = new PollScript(script);
-        using var metrics = new Metrics();
+        using Metrics metrics = Metrics.ForConsumer();
 
         if (asyncMode)
         {
