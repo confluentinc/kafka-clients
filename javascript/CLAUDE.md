@@ -657,8 +657,9 @@ The layout is the root conventions' (Layout and modules).
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
   TypeScript `private` constructor (`protected` where Java's is), and so is
-  one users must not call (`RecordMetadata`, whose Java constructor takes an
-  untranslated `TopicPartition`); there is no run-time guard (root
+  one users must not call (`RecordMetadata`, whose Java constructor's `long`
+  parameters wait on how a `long` is typed, not decided yet in the root
+  conventions); there is no run-time guard (root
   conventions, Class family). The library builds such an object through one
   static factory, `internalCreate`, and calls its own methods on public
   classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)
