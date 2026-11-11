@@ -1,0 +1,30 @@
+{
+  "name": "@confluentinc/kafka-javascript-linux-x64-gnu",
+  "version": "4.4.0-preview.1",
+  "description": "The linux-x64-gnu native binary of @confluentinc/kafka-javascript",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/confluentinc/kafka-clients.git",
+    "directory": "javascript/npm/linux-x64-gnu"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "main": "confluent-kafka-javascript.node",
+  "files": [
+    "dist/",
+    "NOTICE",
+    "confluent-kafka-javascript.node",
+    "THIRD_PARTY_LICENSES.txt"
+  ],
+  "engines": {
+    "node": ">=22.14.0"
+  }
+}
