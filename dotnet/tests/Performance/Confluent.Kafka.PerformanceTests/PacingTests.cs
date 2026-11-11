@@ -23,7 +23,8 @@ namespace Confluent.Kafka.Performance.Tests;
 /// <summary>
 /// The rate limiter (<c>LIMIT_RPS</c>, zero or less meaning max rate), as Python's <c>pacing_wait_s</c>: every
 /// <c>max(floor(LIMIT_RPS / 10), 1)</c> sends the sender sleeps until the cumulative deadline
-/// <c>first send + sends / LIMIT_RPS</c>.
+/// <c>first send + sends / LIMIT_RPS</c>, and after the last send it waits for what the run still owes, off the
+/// checkpoint.
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class PacingTests
@@ -100,6 +101,27 @@ public sealed class PacingTests
         ProducerBenchmarkConfig config = ProducerBenchmarkConfig.FromEnv();
 
         Assert.Equal(33_333.0 / 333_333.0, ProducerBenchmark.PacingWaitSeconds(config, messagesSent: 33_333, elapsedSeconds: 0.0), 12);
+    }
+
+    [Fact]
+    public void FinalWait_IsOffTheCheckpoint_ForWhatTheRunStillOwes()
+    {
+        Apply(limitRps: "1000");
+        ProducerBenchmarkConfig config = ProducerBenchmarkConfig.FromEnv();
+
+        Assert.Equal(0.0, ProducerBenchmark.PacingWaitSeconds(config, messagesSent: 150, elapsedSeconds: 0.1));
+
+        Assert.Equal(0.05, ProducerBenchmark.PacingWaitSeconds(config, messagesSent: 150, elapsedSeconds: 0.1, final: true), 9);
+
+        Assert.True(ProducerBenchmark.PacingWaitSeconds(config, messagesSent: 150, elapsedSeconds: 0.2, final: true) <= 0.0);
+    }
+
+    [Fact]
+    public void FinalWait_WithNoLimit_IsNone()
+    {
+        Apply(limitRps: null, numMessages: "150");
+
+        Assert.Equal(0.0, ProducerBenchmark.PacingWaitSeconds(ProducerBenchmarkConfig.FromEnv(), messagesSent: 150, elapsedSeconds: 0.0, final: true));
     }
 
     private static void Apply(string? limitRps, string numMessages = "0", string testDurationSeconds = "600")

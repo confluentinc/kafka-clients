@@ -19,12 +19,15 @@ namespace Confluent.Kafka.Performance;
 
 /// <summary>
 /// The consumer benchmark's settings, read from the environment variables of Python's <c>Config</c>: the run shape
-/// the engine uses and the fetch-size, batch-size and use-defaults inputs each per-client exe builds its consumer
-/// from.
+/// the engine uses and the fetch and poll-size inputs each per-client exe builds its consumer from. A fetch or
+/// poll-size setting that is <c>null</c> keeps the client's default.
 /// </summary>
 public sealed class ConsumerBenchmarkConfig
 {
     private const long NoDataTimeoutSeconds = 120;
+
+    // The fetch size the benchmark tunes unless USE_DEFAULTS=True.
+    private const int TunedFetchBytes = 4 * 1024 * 1024;
 
     private static readonly string[] s_compressionTypes = { "none", "gzip", "snappy", "lz4", "zstd" };
 
@@ -72,11 +75,20 @@ public sealed class ConsumerBenchmarkConfig
 
     public string? CompressionType { get; private set; }
 
-    public int FetchMinBytes { get; private set; } = 4 * 1024 * 1024;
+    public int? FetchMinBytes { get; private set; } = TunedFetchBytes;
 
-    public int MaxPartitionFetchBytes { get; private set; } = 4 * 1024 * 1024;
+    public int? MaxPartitionFetchBytes { get; private set; } = TunedFetchBytes;
 
-    public int BatchSize { get; private set; } = 2000;
+    public int? FetchMaxWaitMs { get; private set; }
+
+    /// <summary>The most records one poll returns, <c>MAX_POLL_RECORDS</c>; <c>null</c> when it is unset.</summary>
+    public int? MaxPollRecords { get; private set; }
+
+    /// <summary>
+    /// <c>CONSUMER_BATCH_SIZE</c> (default 2500, as Python's): both harnesses' batch when neither <c>MAX_POLL_RECORDS</c>
+    /// nor <c>USE_DEFAULTS=True</c> sets it, so a run outside the driver keeps its tuned batch.
+    /// </summary>
+    public int BatchSize { get; private set; } = 2500;
 
     public bool AsyncMode { get; private set; }
 
@@ -90,8 +102,12 @@ public sealed class ConsumerBenchmarkConfig
 
     public int ReadinessTimeoutSeconds { get; private set; } = 20;
 
+    public string ResultsFile { get; private set; } = "results.json";
+
     public static ConsumerBenchmarkConfig FromEnv()
     {
+        bool useDefaults = PerfEnv.GetBool("USE_DEFAULTS", false);
+        int? tunedFetch = useDefaults ? null : TunedFetchBytes;
         var config = new ConsumerBenchmarkConfig
         {
             BootstrapServers = PerfEnv.GetString("BOOTSTRAP_SERVERS", "localhost:9092"),
@@ -110,21 +126,38 @@ public sealed class ConsumerBenchmarkConfig
             SettleTimeoutSeconds = PerfEnv.GetInt("SETTLE_TIMEOUT_SECONDS", 15),
             KafkaBin = PerfEnv.GetStringOrNull("KAFKA_BIN"),
             CompressionType = CompressionTypeFromEnv(),
-            FetchMinBytes = PerfEnv.GetInt("FETCH_MIN_BYTES", 4 * 1024 * 1024),
-            MaxPartitionFetchBytes = PerfEnv.GetInt("MAX_PARTITION_FETCH_BYTES", 4 * 1024 * 1024),
-            BatchSize = PerfEnv.GetInt("CONSUMER_BATCH_SIZE", 2000),
+            FetchMinBytes = OptionalInt("FETCH_MIN_BYTES", tunedFetch),
+            MaxPartitionFetchBytes = OptionalInt("MAX_PARTITION_FETCH_BYTES", tunedFetch),
+            FetchMaxWaitMs = OptionalInt("FETCH_MAX_WAIT_MS", null),
+            MaxPollRecords = OptionalInt("MAX_POLL_RECORDS", null),
+            BatchSize = PerfEnv.GetInt("CONSUMER_BATCH_SIZE", 2500),
             AsyncMode = PerfEnv.GetBool("ASYNC", false),
             PollSingle = PerfEnv.GetBool("POLL_SINGLE", false),
-            UseDefaults = PerfEnv.GetBool("USE_DEFAULTS", false),
+            UseDefaults = useDefaults,
             CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", true),
             ReadinessMinRecords = PerfEnv.GetInt("READINESS_MIN_RECORDS", 20),
             ReadinessTimeoutSeconds = PerfEnv.GetInt("READINESS_TIMEOUT_SECONDS", 20),
+            ResultsFile = ResultsFileFromEnv(),
         };
 
         config.GroupId = PerfEnv.GetString(
             "GROUP_ID",
             $"benchmark-{config.ClientVersion}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)}");
         return config;
+    }
+
+    // Unset or empty keeps the fallback, as Python's _env_int.
+    private static int? OptionalInt(string name, int? fallback)
+    {
+        string? value = PerfEnv.GetStringOrNull(name);
+        return string.IsNullOrEmpty(value) ? fallback : int.Parse(value, CultureInfo.InvariantCulture);
+    }
+
+    // An empty RESULTS_FILE is the default, as Python's `os.getenv("RESULTS_FILE") or "results.json"`.
+    private static string ResultsFileFromEnv()
+    {
+        string? path = PerfEnv.GetStringOrNull("RESULTS_FILE");
+        return string.IsNullOrEmpty(path) ? "results.json" : path;
     }
 
     private static string? CompressionTypeFromEnv()

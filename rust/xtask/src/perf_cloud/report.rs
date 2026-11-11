@@ -118,9 +118,14 @@ pub(crate) fn comparisons(group: Group) -> &'static [Comparison] {
         c(Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync (Rust vs librdkafka)"),
         c(Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async (Rust vs librdkafka)"),
     ];
+    const DOTNET: &[Comparison] = &[
+        c(Arm::DotnetSyncRust, Arm::DotnetSyncLibrdkafka, "Δ sync (Rust vs librdkafka)"),
+        c(Arm::DotnetAsyncRust, Arm::DotnetAsyncLibrdkafka, "Δ async (Rust vs librdkafka)"),
+    ];
     match group {
         Group::Rust => RUST,
         Group::Python => PYTHON,
+        Group::Dotnet => DOTNET,
     }
 }
 
@@ -129,6 +134,7 @@ fn title(group: Group) -> &'static str {
     match group {
         Group::Rust => "Rust client performance results",
         Group::Python => "Python client performance results",
+        Group::Dotnet => ".NET client performance results",
     }
 }
 
@@ -299,12 +305,7 @@ const SETTING_NAMES: &[(&str, &str, &str, &str)] = &[
     ("ENABLE_IDEMPOTENCE", "idempotence", "Idempotence", ""),
     ("MAX_IN_FLIGHT", "in-flight", "Max in-flight requests", ""),
     ("BUFFER_MEMORY", "buffer", "Buffer memory", " MiB"),
-    (
-        "BUFFER_MEMORY_ALLOCATION_STRATEGY",
-        "buffer allocation",
-        "Buffer allocation strategy",
-        "",
-    ),
+    ("BUFFER_MEMORY_ALLOCATION_STRATEGY", "buffer allocation", STRATEGY_NAME, ""),
     ("MAX_REQUEST_SIZE", "max request", "Max request size", " KiB"),
     (
         "RECORDS_PER_TRANSACTION",
@@ -406,6 +407,30 @@ fn parameters(test: &PerfTest) -> Vec<(String, String)> {
     );
     for &(key, _, name, unit) in SETTING_NAMES {
         add(name, shown_setting(test, key, unit, grouped));
+    }
+    rows
+}
+
+/// The label of the buffer allocation strategy, a parameter-table row unless
+/// the clients report it (see [`reported_strategies`]).
+const STRATEGY_NAME: &str = "Buffer allocation strategy";
+
+/// Whether a client of `result` reported the `buffer.memory.allocation.strategy`
+/// it ran with: the results table then shows it per client.
+fn reported_strategies(result: &TestResult) -> bool {
+    result.arms.iter().any(|a| {
+        a.metrics
+            .as_ref()
+            .is_some_and(|m| m.buffer_memory_allocation_strategy.is_some())
+    })
+}
+
+/// `result`'s test settings as parameter-table rows, without the buffer
+/// allocation strategy when its results table shows it per client.
+fn result_parameters(result: &TestResult) -> Vec<(String, String)> {
+    let mut rows = parameters(&result.test);
+    if reported_strategies(result) {
+        rows.retain(|(name, _)| name != STRATEGY_NAME);
     }
     rows
 }
@@ -570,7 +595,7 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult], live: Option<&Liv
                 let _ = writeln!(out, "\n### {}\n", inline(&result.test.id));
                 results_table(&mut out, info, &columns, result, live);
                 let _ = writeln!(out, "\n#### Parameters\n");
-                parameter_list(&mut out, &parameters(&result.test));
+                parameter_list(&mut out, &result_parameters(result));
             },
         }
     }
@@ -586,7 +611,10 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult], live: Option<&Liv
     rows.extend(machine);
     rows.push(("Clients".to_string(), clients.join(", ")));
     if let Some(test) = single {
-        rows.extend(parameters(test));
+        match results.iter().find(|r| r.test.id == test.id) {
+            Some(result) => rows.extend(result_parameters(result)),
+            None => rows.extend(parameters(test)),
+        }
     }
     rows.push(("Warmup".to_string(), format!("{} min per client", info.warmup_min)));
     rows.push(("Measurement".to_string(), format!("{} min per client", info.duration_min)));
@@ -729,6 +757,26 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
             })
             .collect();
         let _ = writeln!(out, "| {} | {} |", row.label, cells.join(" | "));
+    }
+    // The strategy each client ran with, when one reports it: the one it
+    // reports, else the one the test sets (which the Rust and Java harnesses
+    // read).
+    if reported_strategies(result) {
+        let cells: Vec<String> = columns
+            .iter()
+            .map(|c| match c {
+                Column::Client(arm) => metrics_of(&result.arms, *arm)
+                    .and_then(|m| m.buffer_memory_allocation_strategy.clone())
+                    .or_else(|| {
+                        test.setting("BUFFER_MEMORY_ALLOCATION_STRATEGY")
+                            .filter(|_| find(&result.arms, *arm).is_some())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "–".to_string()),
+                Column::Delta(_) => String::new(),
+            })
+            .collect();
+        let _ = writeln!(out, "| {STRATEGY_NAME} | {} |", cells.join(" | "));
     }
 }
 
@@ -897,6 +945,7 @@ mod tests {
             rss_mib: 100.0,
             messages: msg_s * 60.0,
             txn: None,
+            buffer_memory_allocation_strategy: None,
         }
     }
 
@@ -1399,6 +1448,66 @@ mod tests {
             "| RSS (MiB) | – | 100.0 | – | n/a | pending |"
         );
         assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_shows_the_allocation_strategy_each_client_reports() {
+        let reports = |client: &str, strategy: &str| Metrics {
+            buffer_memory_allocation_strategy: Some(strategy.to_string()),
+            ..metrics(client, 1_000.0, 9.0)
+        };
+        let results = vec![TestResult {
+            test: test(
+                "t dotnet PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0 BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental",
+            ),
+            arms: vec![
+                arm(
+                    Arm::DotnetSyncRust,
+                    Outcome::Passed,
+                    Some(reports("dotnet-rust", "incremental")),
+                ),
+                arm(
+                    Arm::DotnetSyncLibrdkafka,
+                    Outcome::Passed,
+                    Some(metrics("dotnet-librdkafka", 1_000.0, 9.0)),
+                ),
+                arm(
+                    Arm::DotnetAsyncRust,
+                    Outcome::Passed,
+                    Some(reports("dotnet-rust-async", "full")),
+                ),
+                arm(
+                    Arm::DotnetAsyncLibrdkafka,
+                    Outcome::Passed,
+                    Some(metrics("dotnet-librdkafka-async", 1_000.0, 9.0)),
+                ),
+            ],
+        }];
+        let md = render(Group::Dotnet, Group::Dotnet.arms(), None, &results);
+        assert!(md.starts_with("# .NET client performance results"), "{md}");
+        assert!(
+            md.contains(
+                "| Metric | .NET sync (Rust) | .NET sync (librdkafka) | .NET async (Rust) | .NET async (librdkafka) \
+                 | Δ sync (Rust vs librdkafka) | Δ async (Rust vs librdkafka) |"
+            ),
+            "{md}"
+        );
+        assert_eq!(
+            line_starting(&md, "| Buffer allocation strategy |"),
+            "| Buffer allocation strategy | incremental | incremental | full | incremental |  |  |"
+        );
+        // Shown per client, not also as a test parameter.
+        assert_eq!(md.matches("Buffer allocation strategy").count(), 1, "{md}");
+        assert_rectangular(&md);
+
+        // No client reports it: the test's setting stays a parameter.
+        let set = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0 BUFFER_MEMORY_ALLOCATION_STRATEGY=full"),
+            arms: vec![arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1_000.0, 9.0)))],
+        }];
+        let md = render(Group::Rust, &[Arm::Rust], None, &set);
+        assert!(!md.contains("| Buffer allocation strategy |"), "{md}");
+        assert_eq!(md.matches("Buffer allocation strategy").count(), 1, "{md}");
     }
 
     #[test]
