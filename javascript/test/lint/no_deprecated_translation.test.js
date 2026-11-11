@@ -25,7 +25,7 @@ const { CLASSES, LIB, javaClass, javaIndex, method } = require('./_java_fixture'
 const RULE = 'check-no-deprecated-translation';
 
 const fixture = (files = {}, classes = CLASSES) =>
-  project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(classes), ...LIB, ...files });
+  project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...LIB, ...files });
 
 test('live API passes; a name with a live overload is live', () => {
   const classes = CLASSES.map((c) =>
@@ -66,7 +66,7 @@ test('cannot run without the Java index', () => {
 
 test('nothing translated fails: 0 items checked', () => {
   const r = lint(
-    project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex([javaClass('clients.producer.Rec')]), 'src/a.ts': 'export const a = 1;\n' }),
+    project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex([javaClass('clients.producer.Rec')]), 'src/a.ts': 'export const a = 1;\n' }),
     [RULE],
   );
   assert.ok(r.err.includes('❌ check-no-deprecated-translation: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);

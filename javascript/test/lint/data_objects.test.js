@@ -35,7 +35,7 @@ const VOID_CLOSE = CLASSES.map((c) =>
   c.fqn.endsWith('.Rec') ? { ...c, overloads: c.overloads.map((o) => (o.name === 'close' ? { ...o, return_type: 'void' } : o)) } : c,
 );
 const INDEX = javaIndex(VOID_CLOSE);
-const FILES = { 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX };
+const FILES = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX };
 
 const REC = `export class Rec {
   static readonly UNKNOWN: number = -1;
@@ -187,7 +187,7 @@ test('an error class keeps its fields, and no code or retriable flag', () => {
     lint(
       project({
         'tsconfig.json': TSCONFIG,
-        'build/java-index.json': javaIndex(classes),
+        'java-index.json': javaIndex(classes),
         'src/common/errors/foo_error.ts': `export class FooError extends Error {\n${body}}\n`,
         'src/internal/error_registry.ts': "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
       }),
@@ -207,7 +207,7 @@ test('an error class keeps its fields, and no code or retriable flag', () => {
 });
 
 test('cannot run without tsconfig.json, or without the Java index', () => {
-  let r = lint(project({ 'build/java-index.json': INDEX, 'src/a.ts': 'export class A {}\n' }), [RULE]);
+  let r = lint(project({ 'java-index.json': INDEX, 'src/a.ts': 'export class A {}\n' }), [RULE]);
   assert.deepEqual(r.err.slice(0, 2), ['', '❌ check-data-objects: cannot run, no tsconfig.json']);
   r = lint(project({ 'tsconfig.json': TSCONFIG, 'src/a.ts': 'export class A {}\n' }), [RULE]);
   assert.match(r.err[1], /^❌ check-data-objects: cannot run, no Java index/);

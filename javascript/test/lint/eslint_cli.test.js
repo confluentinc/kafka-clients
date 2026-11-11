@@ -45,8 +45,7 @@ function layout() {
   for (const rel of ['src', 'native', 'tsconfig.json', 'CLAUDE.md', 'eslint-baseline.txt', 'lint-baseline.txt', 'lint-mapping.json']) copy(ROOT, root, rel);
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
-  fs.mkdirSync(path.join(root, 'build'));
-  copy(ROOT, root, 'build/java-index.json');
+  copy(ROOT, root, 'java-index.json');
   // The type declarations the typed configuration reads (@types/node); ignored by the linter itself.
   fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(root, 'node_modules'), 'dir');
   fs.writeFileSync(
@@ -97,13 +96,13 @@ test('`eslint .` from the client and `eslint client` from its parent report the 
 
 test('a run of part of the client fails while a rule cannot run, or the baseline has a stale line', () => {
   const { root } = layout();
-  fs.rmSync(path.join(root, 'build', 'java-index.json'));
+  fs.rmSync(path.join(root, 'java-index.json'));
   for (const target of ['src', 'src/producer', 'src/producer/record_metadata.ts']) {
     const r = eslint(root, root, [target]);
     assert.equal(r.status, 1, target);
-    assert.ok(r.messages.some((m) => / kafka\/java-name check-java-name: cannot run, no Java index at build\/java-index\.json/.test(m)), target);
+    assert.ok(r.messages.some((m) => / kafka\/java-name check-java-name: cannot run, no Java index at java-index\.json/.test(m)), target);
   }
-  copy(ROOT, root, 'build/java-index.json');
+  copy(ROOT, root, 'java-index.json');
   fs.appendFileSync(path.join(root, 'eslint-baseline.txt'), 'missing clients.producer.KafkaProducer#gone\n');
   const r = eslint(root, root, ['src/producer/record_metadata.ts']);
   assert.equal(r.status, 1);
@@ -122,7 +121,7 @@ test('in one process, an edit, a removed Java index and a removed baseline line 
   assert.deepEqual(await lint(), []);
   addMember(root);
   assert.deepEqual(await lint(), ['kafka/java-members no-java-member']);
-  fs.rmSync(path.join(root, 'build', 'java-index.json'));
+  fs.rmSync(path.join(root, 'java-index.json'));
   const missing = await lint();
   assert.ok(missing.includes('kafka/java-name cannot-run'), missing.join('\n'));
 });
@@ -155,7 +154,7 @@ test('a one-file run of a file carrying a file-wide disable fails: the finding i
 
 test('the formatter of make lint-rules prints a project finding once, with its file count; the exit code is ESLint\'s', () => {
   const { root } = layout();
-  fs.rmSync(path.join(root, 'build', 'java-index.json'));
+  fs.rmSync(path.join(root, 'java-index.json'));
   // A finding of a rule that needs no Java index: an underscore member.
   fs.writeFileSync(path.join(root, 'src', 'producer', 'stray.ts'), 'export class Stray {\n  _x = 1;\n}\n');
   const r = spawnSync(process.execPath, [BIN, '.', '--format', path.join(ROOT, 'scripts', 'lint', 'eslint', 'formatter.js')], {
@@ -166,7 +165,7 @@ test('the formatter of make lint-rules prints a project finding once, with its f
   assert.equal(r.status, 1, r.stderr);
   const once = r.stdout.split('\n').filter((l) => l.includes('check-java-name: cannot run'));
   assert.equal(once.length, 1, r.stdout);
-  assert.match(once[0], /^ {2}error {2}check-java-name: cannot run, no Java index at build\/java-index\.json .* kafka\/java-name {2}\(on \d+ files\)$/);
+  assert.match(once[0], /^ {2}error {2}check-java-name: cannot run, no Java index at java-index\.json .* kafka\/java-name {2}\(on \d+ files\)$/);
   // An ordinary finding stays under its file.
   assert.match(r.stdout, /\nsrc\/producer\/stray\.ts\n {2}\d+:\d+ {2}error {2}src\/producer\/stray\.ts:Stray\._x: .* {2}kafka\/internal-members\n/);
   assert.match(r.stdout, /\n✖ \d+ problems \(\d+ errors, 0 warnings\)\n/);

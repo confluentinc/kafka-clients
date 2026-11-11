@@ -53,7 +53,7 @@ const LISTS = {
 function fixture(files = {}) {
   return project({
     'tsconfig.json': TSCONFIG,
-    'build/java-index.json': INDEX,
+    'java-index.json': INDEX,
     'src/internal/error_registry.ts': REGISTRY,
     'src/internal/private.ts': 'export class Nothing {}\n',
     'src/producer/index.ts': "export { Rec } from './rec';\n",
@@ -178,17 +178,17 @@ test('cannot run without the Java index, or with one of another schema', () => {
   assert.equal(r.status, 1);
   assert.deepEqual(r.err.slice(0, 2), [
     '',
-    '❌ check-java-name: cannot run, no Java index at build/java-index.json (run `cargo xtask java-index --json` from rust/)',
+    '❌ check-java-name: cannot run, no Java index at java-index.json (run `cargo xtask java-api` from rust/)',
   ]);
-  r = lint(project({ 'tsconfig.json': TSCONFIG, 'src/a.ts': '', 'build/java-index.json': '{"schema":2,"classes":[]}' }), [RULE]);
+  r = lint(project({ 'tsconfig.json': TSCONFIG, 'src/a.ts': '', 'java-index.json': '{"schema":1,"classes":[]}' }), [RULE]);
   assert.equal(
     r.err[1],
-    '❌ check-java-name: cannot run, the Java index build/java-index.json is not schema 1 (rerun `cargo xtask java-index --json`)',
+    '❌ check-java-name: cannot run, the Java index java-index.json is not schema 2 (rerun `cargo xtask java-api` from rust/)',
   );
 });
 
 test('a src/ exporting nothing fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-name: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

@@ -38,7 +38,7 @@ pruned only of a check the linter duplicates exactly.
 ## 3. Architecture
 
 ```
-kafka/ Java sources ──java.rs scanner──▶ cargo xtask java-index --json ──▶ build/java-index.json ─┐
+kafka/ Java sources ──java.rs scanner──▶ cargo xtask java-api ──▶ javascript/java-index.json (committed) ─┐
 design/current/ Public + deprecated lists ──────────────────────────────────────────────────────┤
 javascript/lib/**/*.ts ──TypeScript compiler API (program + type checker)─────────────────────────┼─▶ rules ─▶ findings ─▶ baseline ─▶ report / exit 1
 javascript/src/*.c + confluent_kafka_bindings.h ──C tokenizer (from header_conformance)───────────┤
@@ -49,22 +49,49 @@ The rules run in two tools (§3.5): ESLint (a local plugin, `kafka/<rule>`, for 
 that read TypeScript, with typescript-eslint's recommended type-checked rules on `lib/`)
 and the runner (`scripts/lint_rules.js`, for the addon's C rules and the other files).
 
-### 3.1 Java side: reuse `rust/xtask/src/java.rs`
+### 3.1 Java side: one scan, committed files
 
-Add `cargo xtask java-index --json <out>`, which writes the `JavaIndex` the Rust lint
-already builds. For each main class it records:
+User decision of 2026-11-11 (§8 decision 20): Java is scanned once, by `cargo xtask
+java-api` (`rust/xtask/src/java_api.rs`), which loads the `JavaIndex` the Rust lint builds
+(one `JavaIndex::load`, the deprecation list merged, the Kafka 4.4 ref read once for its
+unsupported-API disclaimers) and writes every binding's committed copy of it:
 
-- package, nested path, kind, visibility, `abstract`, `@FunctionalInterface`, supertypes;
-- each overload: name, parameter types and names, visibility, `static`, `default`,
-  `@Deprecated`, and its Javadoc translated by `javadoc.rs` (the `@param` / `@return` /
-  `@throws` tags split out, plus the word count);
-- fields: visibility, `static final`, deprecated;
+- `dotnet/analyzers/java-api.txt`, the public API list the .NET analyzer reads (CKRDA0013),
+  unchanged byte for byte;
+- `javascript/java-index.json`, the index the client's rule linter (ESLint and the runner)
+  and its unit tests read (`rust/xtask/src/java_index_json.rs` documents the schema).
+
+`cargo xtask java-api --check` and `cargo xtask check-generated` check both from the one
+scan and fail, naming the file and its first differing line, with the command to rerun.
+`cargo xtask java-index` is gone: there is one way to write the index. So nothing in
+`javascript/` reads the `kafka` submodule (`test/static/java_sources.test.js` fails if a
+file does); `make -C javascript lint-rules` and `test-lint` run no cargo, and the
+JavaScript CI jobs fetch no Kafka refs: the Rust jobs fetch them and check the committed
+files. Rust's `lint-custom` keeps its own reading of the same checkout.
+
+The index (schema 2) holds the main classes, one per line, sorted by package then nested
+path, and only what its readers use; a key at its default is left out and the loader,
+`javascript/scripts/lint/java_index.js`, puts it back. For each class:
+
+- package, nested path, kind, visibility, `abstract`, supertypes and each one's fully
+  qualified name (`null` for a JDK type);
+- each overload: name, erased parameter types and their names, the types as written when
+  they differ, the return type, visibility, `static`, `default`, deprecated, and, for a
+  constructor of a Throwable class, the text of the string literals its `super(...)` /
+  `this(...)` call starts with (`fixed_message`); a private overload keeps only its name,
+  erased parameter types, visibility and flags;
+- fields: type, visibility, `static`, `final`, deprecated, and the value of a `public static
+  final String` literal (`value`);
 - enum constants;
-- whether the class is `@InterfaceAudience.Public` in 4.4, whether its package is
-  "not supported", and whether it appears in the deprecation list.
+- whether the class is `@InterfaceAudience.Public` in 4.4, whether its package is "not
+  supported", and whether it is deprecated (the source's annotation or the deprecation
+  list).
 
-New in the scanner: the **return type** of each overload and the **type** of each field,
-as written. `java.rs` does not record these today, and rule J7 needs them.
+The Javadoc is not recorded: no reader uses it (it was most of the 7.1 MB the earlier
+`build/java-index.json` took; the committed file is 2.3 MB).
+
+The scanner records the **return type** of each overload and the **type** of each field, as
+written: rule J7 needs them.
 
 Why not scan Java again in JS: it would duplicate `java.rs` (DoD #6), and the two would
 drift on what "deprecated", "public" or "getter" means. The Rust, Python and JS lints
@@ -211,8 +238,9 @@ the addon's C rules and the checks of the other files stay in the runner.
   `--format`): a `kafka/` finding about the project, reported on every file, is printed once
   with the number of files it was reported on; every other message, any rule's, stays under
   its file with its line and column. The exit code is ESLint's.
-- **Context:** the TS program, the Java index, the C sources and the header, loaded once.
-- **Failure modes:** a missing `kafka/`, header or `java-index.json` fails with a reason,
+- **Context:** the TS program, the committed Java index, the C sources and the header,
+  loaded once.
+- **Failure modes:** a missing header or `java-index.json` fails with a reason,
   and so does a rule that checks 0 items (the idea behind Rust's `check-consumer-receiver`,
   which fails when either trait is missing): in the runner as a failed rule, in ESLint as an
   error on every file the rule visits, so any `eslint` run exits non-zero.
@@ -639,7 +667,10 @@ Answered 2026-11-05, for P3:
    parameters, a JavaScript function taking the longest form's parameters, those the
    shorter forms lack optional, is accepted beside the options object
    (`send(record, callback?)`).
-10. **An option whose Java parameter may be null** may be left out, omission meaning
+10. *(Superseded by `c956a779a`: an option is never left out because its Java parameter
+    may be null. The given names must be exactly one Java form's, `null` is given, and
+    nullability is no longer read from the Java index, whose Javadoc is gone (decision 20).
+    The original text follows.)* **An option whose Java parameter may be null** may be left out, omission meaning
     null. "May be null" is read from the Java index, and needs a positive statement: the
     parameter's type is a boxed primitive (`Byte`, `Short`, `Integer`, `Long`, `Float`,
     `Double`, `Boolean`, `Character`) or a key / value type variable (`K`, `V`), or the
@@ -667,8 +698,8 @@ parameters of different forms at one position whose Java types map to one host t
 one, named after the earliest-declared form (`KafkaProducer(Map configs)` /
 `(Properties properties)` -> `configs`). A type variable is a kind of its own, as in the
 Python rule (`ProducerRecord[K, V]`): `K key` and `V value` never merge, although both
-are `Data` in JavaScript. Decision 10's phrases are read in the Javadoc as rendered
-(`{@code null}` as `null`), and "null indicates" counts as one.
+are `Data` in JavaScript. Decision 10's phrases (superseded, see there) were read in
+the Javadoc as rendered (`{@code null}` as `null`), and "null indicates" counted as one.
 
 J6 keys an untranslated form by the form itself: when a function's positional parameters
 translate some of a Java overload set's forms (their names in place, a shorter form's
@@ -706,3 +737,7 @@ waives a wrong shape of the forms that are translated.
     typescript-eslint's `recommendedTypeChecked` on `lib/`; the addon's C rules and the
     non-TypeScript files stay in the runner; no-todo, exception-word and java-line are split
     by file type under one name. No custom ESLint languages (§3.5).
+20. **One Java scan, committed files** (2026-11-11): `cargo xtask java-api` scans Java once
+    and writes `dotnet/analyzers/java-api.txt` and `javascript/java-index.json`;
+    `check-generated` checks both; `cargo xtask java-index` is removed; nothing in
+    `javascript/` reads `kafka/`, and the JavaScript CI jobs fetch no Kafka refs (§3.1).

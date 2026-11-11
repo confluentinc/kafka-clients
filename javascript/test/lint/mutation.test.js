@@ -35,8 +35,8 @@ const LICENSE_END = 'limitations under the License.\n';
 /**
  * A copy of the client's src/, native/, tsconfig.json, CLAUDE.md (whose rule
  * sentence check-no-todo exempts), both baselines, the mapping lists
- * (lint-mapping.json), Java index (build/java-index.json, which `make
- * test-lint` writes first) and bindings header, with the findings the rules
+ * (lint-mapping.json), the committed Java index (java-index.json) and
+ * bindings header, with the findings the rules
  * report on the real tree now added to the copy's baselines
  * (`baselineCurrent`): the real tree may not follow every rule yet, and a
  * mutation is judged by what it adds.
@@ -47,8 +47,7 @@ function realCopy() {
   // The test that calls the test-only registration probe (check-native-registry).
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
-  fs.mkdirSync(path.join(root, 'build'));
-  copy(ROOT, root, 'build/java-index.json');
+  copy(ROOT, root, 'java-index.json');
   // The bindings header, where the lint helper looks for it.
   fs.copyFileSync(require('../../scripts/header').headerPath(), path.join(root, 'confluent_kafka_bindings.h'));
   baselineCurrent(root);

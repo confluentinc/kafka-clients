@@ -24,7 +24,7 @@ const { CLASSES, LIB, javaIndex, mapping, INVENTED } = require('./_java_fixture'
 
 const RULE = 'check-java-members';
 
-const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), ...LIB, ...files });
+const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), ...LIB, ...files });
 
 test('members named as Java\'s pass: getters as properties, supertype methods, constants, the constructor, invented ones', () => {
   const r = lint(fixture(), [RULE]);
@@ -71,7 +71,7 @@ test('toString maps to java.lang.Enum only on an enum', () => {
   const r = lint(fixture({ 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  toString(): string { return \'\'; }\n', '') + '' }), [RULE]);
   assert.equal(r.status, 0, r.text);
   const classes = CLASSES.map((c) => (c.fqn.endsWith('.Rec') ? { ...c, overloads: c.overloads.filter((o) => o.name !== 'toString') } : c));
-  const root = project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(classes), ...LIB });
+  const root = project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...LIB });
   assert.deepEqual(findings(lint(root, [RULE])), ['Rec.toString: no Java member of clients.producer.Rec']);
 });
 
@@ -89,11 +89,11 @@ test('a member listed in javaTargets maps to the member it names', () => {
 test('cannot run without the Java index', () => {
   const r = lint(project({ 'tsconfig.json': TSCONFIG, ...LIB }), [RULE]);
   assert.equal(r.status, 1);
-  assert.match(r.err[1], /^❌ check-java-members: cannot run, no Java index at build\/java-index\.json/);
+  assert.match(r.err[1], /^❌ check-java-members: cannot run, no Java index at java-index\.json/);
 });
 
 test('no exported class with a Java class fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), 'src/producer/callback.ts': LIB['src/producer/callback.ts'] }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/producer/callback.ts': LIB['src/producer/callback.ts'] }), [RULE]);
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-members: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

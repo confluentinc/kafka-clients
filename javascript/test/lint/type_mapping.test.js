@@ -79,7 +79,7 @@ const classes = [...CLASSES, TYPED, javaClass('common.KafkaFuture', { abstract: 
 const fixture = (files = {}) =>
   project({
     'tsconfig.json': TSCONFIG,
-    'build/java-index.json': javaIndex(classes),
+    'java-index.json': javaIndex(classes),
     ...FILES,
     ...LIB,
     'src/producer/typed.ts': TYPED_TS,
@@ -192,7 +192,7 @@ test("KafkaFuture's rows: CompletionStage, its nested function types, Throwable,
   const files = (source) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': javaIndex([...CLASSES, TYPED, futureClass]),
+      'java-index.json': javaIndex([...CLASSES, TYPED, futureClass]),
       ...FILES,
       ...LIB,
       'src/producer/typed.ts': TYPED_TS,
@@ -244,7 +244,7 @@ test('a Java parameter named check is compared, as any other: only a BareCheck r
   const files = (name, elem) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': javaIndex([...CLASSES, cls(name)]),
+      'java-index.json': javaIndex([...CLASSES, cls(name)]),
       ...FILES,
       ...LIB,
       'src/producer/tagged.ts': source(name, elem),
@@ -266,7 +266,7 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing mapped fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(classes), ...FILES, 'src/producer/producer.ts': 'export {};\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...FILES, 'src/producer/producer.ts': 'export {};\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-type-mapping: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
 
@@ -280,7 +280,7 @@ test('where Java takes an Iterable<Header>, a [key, value] pair is no element: J
   const files = (element) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': javaIndex([...classes, taker]),
+      'java-index.json': javaIndex([...classes, taker]),
       ...FILES,
       ...LIB,
       'src/producer/typed.ts': TYPED_TS,

@@ -90,7 +90,7 @@ PACK_DIR ?= $(CURDIR)/build/pack
 HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (process.platform === 'linux' ? '-gnu' : '')")
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
-	grpc-image grpc-native test-integration-grpc pack pack-check clean java-index lint-rules test-lint \
+	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
 	test-verifiable-clients check-api update-api
 
 # The addon and the compiled library: the package cannot run without either.
@@ -132,31 +132,28 @@ test-static:
 # read TypeScript (`kafka/...`, with eslint-baseline.txt) and
 # typescript-eslint's recommended type-checked rules on src/; the runner
 # (scripts/lint_rules.js, with lint-baseline.txt) runs the addon's C rules and
-# the other files. Both run; the target fails if either fails. The Java index
-# comes first: `cargo xtask java-index` writes the Java client's classes into
-# build/java-index.json (it reads the kafka submodule and its Kafka 4.4 ref:
-# `cargo xtask fetch-java-refs`). ESLINT_ARGS goes to ESLint; LINT_RULES_ARGS
-# (a rule name, check-..., and --no-baseline) to the runner. ESLint's --cache is
-# not supported: the kafka/ findings depend on other files than the one cached
-# (the baselines, the Java index, the C sources). The formatter
-# (scripts/lint/eslint/formatter.js) prints a finding about the project, which
-# the kafka/ rules report on every file, once, with its file count.
-CARGO ?= cargo
+# the other files. Both run; the target fails if either fails. What the rules
+# read from Java is the committed java-index.json, which `cargo xtask java-api`
+# writes from the kafka submodule (and `cargo xtask check-generated` checks):
+# neither target runs cargo or reads the submodule. ESLINT_ARGS goes to ESLint;
+# LINT_RULES_ARGS (a rule name, check-..., and --no-baseline) to the runner.
+# ESLint's --cache is not supported: the kafka/ findings depend on other files
+# than the one cached (the baselines, the Java index, the C sources). The
+# formatter (scripts/lint/eslint/formatter.js) prints a finding about the
+# project, which the kafka/ rules report on every file, once, with its file
+# count.
 ESLINT ?= node_modules/.bin/eslint
 ESLINT_ARGS ?=
 LINT_RULES_ARGS ?=
-java-index:
-	cd $(RUST_PROJECT_ROOT) && $(CARGO) xtask java-index --json $(CURDIR)/build/java-index.json
 
-lint-rules: java-index
+lint-rules:
 	@status=0; \
 	$(NODE) $(ESLINT) . --format ./scripts/lint/eslint/formatter.js $(ESLINT_ARGS) || status=1; \
 	$(NODE) scripts/lint_rules.js $(LINT_RULES_ARGS) || status=1; \
 	exit $$status
 
-# The rule linter's own tests: no build of the client, only the Java index,
-# which the real-tree and mutation tests read.
-test-lint: java-index
+# The rule linter's own tests: no build of the client.
+test-lint:
 	$(NODE) --test $(LINT_TESTS)
 
 test-unit: build

@@ -151,7 +151,7 @@ test('a rule that cannot run leaves the prefix and unknown-kind lines unjudged',
 test('the inputs a later rule needs: a missing Java index or header is a reason, never a skip', () => {
   const root = project({});
   const ctx = new Context({ root, headerPath: path.join(root, 'none.h') });
-  assert.equal(ctx.missing('java'), 'no Java index at build/java-index.json (run `cargo xtask java-index --json` from rust/)');
+  assert.equal(ctx.missing('java'), 'no Java index at java-index.json (run `cargo xtask java-api` from rust/)');
   assert.equal(
     ctx.missing('header'),
     `no bindings header at ${path.join(root, 'none.h')} (build the Rust library first: \`make build-javascript\` from the repository root)`,
@@ -164,23 +164,40 @@ test('the inputs a later rule needs: a missing Java index or header is a reason,
   assert.equal(r.status, 1);
   assert.equal(
     r.err[1],
-    `❌ check-needy: cannot run, no Java index at build/java-index.json (run \`cargo xtask java-index --json\` from rust/); ` +
+    `❌ check-needy: cannot run, no Java index at java-index.json (run \`cargo xtask java-api\` from rust/); ` +
       `no bindings header at ${path.join(root, 'none.h')} (build the Rust library first: \`make build-javascript\` from the repository root)`,
   );
 });
 
 test('a present Java index and header load once', () => {
-  const root = project({ 'build/java-index.json': '{"schema":1,"classes":[{"fqn":"x"}]}', 'h.h': 'void kafka_x(void);\n' });
+  const root = project({ 'java-index.json': '{"schema":2,"classes":[{"package":"x","path":["X"]}]}', 'h.h': 'void kafka_x(void);\n' });
   const ctx = new Context({ root, headerPath: path.join(root, 'h.h') });
   assert.equal(ctx.missing('java'), null);
   assert.equal(ctx.missing('header'), null);
   assert.equal(ctx.javaIndex(), ctx.javaIndex());
-  assert.equal(ctx.javaIndex().schema, 1);
+  assert.equal(ctx.javaIndex().schema, 2);
+  // The loader puts back what the file leaves out at its default.
+  assert.deepEqual(ctx.javaIndex().classes[0], {
+    package: 'x',
+    path: ['X'],
+    kind: 'class',
+    visibility: 'public',
+    abstract: false,
+    deprecated: false,
+    public_audience: false,
+    unsupported_package: false,
+    supertypes: [],
+    supertype_fqns: [],
+    overloads: [],
+    fields: [],
+    enum_constants: [],
+    fqn: 'org.apache.kafka.x.X',
+  });
   assert.equal(ctx.header(), 'void kafka_x(void);\n');
-  const bad = project({ 'build/java-index.json': '{' });
-  assert.match(new Context({ root: bad }).missing('java'), /^cannot read the Java index build\/java-index\.json: /);
-  const empty = project({ 'build/java-index.json': '{"schema":1,"classes":[]}' });
-  assert.equal(new Context({ root: empty }).missing('java'), 'the Java index build/java-index.json lists no class');
+  const bad = project({ 'java-index.json': '{' });
+  assert.match(new Context({ root: bad }).missing('java'), /^cannot read the Java index java-index\.json: /);
+  const empty = project({ 'java-index.json': '{"schema":2,"classes":[]}' });
+  assert.equal(new Context({ root: empty }).missing('java'), 'the Java index java-index.json lists no class');
 });
 
 test('the TypeScript program is built only for a rule that needs it', () => {

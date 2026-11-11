@@ -26,7 +26,7 @@ const { CLASSES, LIB, javaClass, javaIndex, mapping, INVENTED } = require('./_ja
 const RULE = 'check-invented-names';
 
 const classes = [...CLASSES, javaClass('common.header.Header', { kind: 'interface', overloads: [] })];
-const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(classes), ...LIB, ...files });
+const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...LIB, ...files });
 
 test('needed entries that resolve pass, an invented options type named ...Args too', () => {
   const r = lint(
@@ -120,6 +120,6 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing exported fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(classes), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-invented-names: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
