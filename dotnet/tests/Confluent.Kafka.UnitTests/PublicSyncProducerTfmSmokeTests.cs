@@ -41,7 +41,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
     [Fact]
     public void MockProducer_SendCloseRoundTrip_AutoComplete()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
@@ -60,7 +60,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualComplete_RoundTrips()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
@@ -77,7 +77,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualError_RoundTrips()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
@@ -94,8 +94,8 @@ public sealed class PublicSyncProducerTfmSmokeTests
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
-            Serdes.ByteArray(),
-            Serdes.ByteArray());
+            Serdes.ByteArray().Serializer(),
+            Serdes.ByteArray().Serializer());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }

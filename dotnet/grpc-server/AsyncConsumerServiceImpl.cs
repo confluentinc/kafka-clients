@@ -98,11 +98,11 @@ internal sealed class AsyncConsumerServiceImpl
             // An empty or all-blank config selects an AsyncMockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+                consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
             }
             else
             {
-                consumer = new AsyncKafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
+                consumer = new AsyncKafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
             }
         }
         catch (Exception ex)

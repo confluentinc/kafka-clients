@@ -545,7 +545,9 @@ internal sealed partial class NativeConsumer
     internal Task<ConsumerRecords<TKey, TValue>> PollWithCallback<TKey, TValue>(
         TimeSpan timeout,
         IDeserializer<TKey> keyDeserializer,
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
         IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders,
         CancellationToken cancellationToken = default)
     {
         long timeoutMs = TimerTimeoutMs(timeout);
@@ -555,7 +557,8 @@ internal sealed partial class NativeConsumer
             s_records,
             (_, opaque) => NativeMethods.ConsumerPollCb(_handle, timeoutMs, ConsumerCompletion.Pointer, opaque),
             atPoll: true);
-        return CompletePoll(completion, keyDeserializer, valueDeserializer, cancellationToken);
+        return CompletePoll(
+            completion, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, cancellationToken);
     }
 
     internal Task<long> PositionWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
@@ -1371,7 +1374,9 @@ internal sealed partial class NativeConsumer
     private async Task<ConsumerRecords<TKey, TValue>> CompletePoll<TKey, TValue>(
         ConsumerCompletion<IntPtr> completion,
         IDeserializer<TKey> keyDeserializer,
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
         IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders,
         CancellationToken cancellationToken)
     {
         IntPtr records;
@@ -1408,7 +1413,7 @@ internal sealed partial class NativeConsumer
             if (!cancellationToken.IsCancellationRequested)
             {
                 copied = ConsumerRecordsMarshal.CopyOut(
-                    records, keyDeserializer, valueDeserializer, out error, out rewind);
+                    records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
             }
 
             if (cancellationToken.IsCancellationRequested)

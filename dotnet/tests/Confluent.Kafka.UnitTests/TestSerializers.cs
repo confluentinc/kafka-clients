@@ -33,7 +33,7 @@ internal sealed class RecordingSerializer<T> : ISerializer<T>
 
     internal int LastThreadId { get; private set; }
 
-    public ReadOnlyMemory<byte>? Serialize(string topic, T data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, T? data)
     {
         InvocationCount++;
         LastDatumWasNull = data is null;
@@ -73,7 +73,7 @@ internal sealed class ThrowingSerializer<T> : ISerializer<T>
 
     internal Exception? LastThrown { get; private set; }
 
-    public ReadOnlyMemory<byte>? Serialize(string topic, T data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, T? data)
     {
         InvocationCount++;
         Exception thrown = _make();
@@ -93,7 +93,7 @@ internal sealed class NullableInt64Serializer : ISerializer<long?>
     public ReadOnlyMemory<byte>? Serialize(string topic, long? data)
     {
         InvocationCount++;
-        return data is null ? null : Serdes.Long().Serialize(topic, data.Value);
+        return data is null ? null : Serdes.Long().Serializer().Serialize(topic, data.Value);
     }
 }
 

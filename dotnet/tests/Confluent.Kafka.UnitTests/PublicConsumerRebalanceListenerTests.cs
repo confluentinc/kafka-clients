@@ -47,10 +47,10 @@ public sealed class PublicConsumerRebalanceListenerTests
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     [Fact]
     public void ConsumerRebalanceListenerBase_OnPartitionsLost_DelegatesToRevoked()
@@ -446,7 +446,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     public void SyncMock_AListener_CallsBackIntoTheMock()
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             List<string> seen = new List<string>();
@@ -489,7 +489,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     public void SyncMock_ACommitInsideOnPartitionsRevoked_Succeeds()
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             consumer.Subscribe(new[] { Topic }, new DelegateListener(revoked: _ => consumer.Commit(Offsets(tp0, 7))));
@@ -642,7 +642,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             await TestTimeout.Run(
@@ -674,7 +674,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             List<TopicPartition[]> lost = new List<TopicPartition[]>();
