@@ -1380,12 +1380,25 @@ test('close() closes both serializers, a failure being a process warning, never 
   assert.deepEqual(rejected.map((w) => w.message), ['Failed to close producer valueSerializer: Error: later']);
 });
 
-test('a producer the core cannot build closes the serializers it was given', async () => {
+test("a producer whose construction fails closes the serializers; a ConfigError of the configuration's check, which Java throws before that catch, does not", async () => {
   const closed = [];
   const serializer = (name) => ({ serialize: () => null, close: () => closed.push(name) });
+  // Inside Java's constructor catch: relabelled "Failed to construct kafka producer", serializers closed.
   assert.throws(
-    () => new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', acks: 'sometimes' }, keySerializer: serializer('key'), valueSerializer: serializer('value') }),
-    { name: 'ConfigError' },
+    () =>
+      new KafkaProducer({
+        configs: { 'bootstrap.servers': '127.0.0.1:1', 'delivery.timeout.ms': 1 },
+        keySerializer: serializer('key'),
+        valueSerializer: serializer('value'),
+      }),
+    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause.name === 'ConfigError',
   );
   assert.deepEqual(closed, ['key', 'value']);
+  // Java's new ProducerConfig(...) validates before that catch: the serializers stay open.
+  closed.length = 0;
+  assert.throws(
+    () => new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', acks: 'sometimes' }, keySerializer: serializer('key'), valueSerializer: serializer('value') }),
+    { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
+  );
+  assert.deepEqual(closed, []);
 });

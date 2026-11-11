@@ -26,6 +26,7 @@ import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { illegalState } from '../internal/errors';
 import { producerClosed, producerOpened, warnPreview } from '../internal/lifecycle';
 import { checkSerializer, closeSerializer, isThenable, serializedBytes } from '../internal/serde';
+import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Duration } from '../duration';
 import type { Serializer } from '../common/serialization/serializer';
@@ -113,6 +114,15 @@ const FAST_PATH_YIELD_EVERY = 1000;
 // callbacks run and their state is released in batches of at most this many
 // records (Python's AsyncProducer._PUMP_EVERY).
 const PUMP_EVERY = 64;
+
+// The core's relabelled failure of the producer's construction, Java's
+// KafkaException("Failed to construct kafka producer", t).
+const CONSTRUCTION_FAILED = 'Failed to construct kafka producer';
+
+/** Whether `error` is the construction failure Java's constructor throws from its catch. */
+function isConstructionFailure(error: unknown): boolean {
+  return error instanceof KafkaError && error.constructor === KafkaError && error.message === CONSTRUCTION_FAILED;
+}
 
 /** The callback `send` was given, or null; throws a TypeError for a non-function. */
 function checkCallback(callback: unknown): Callback | null {
@@ -285,8 +295,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> {
     try {
       this.#handle = native.producerCreate(entries);
     } catch (error) {
-      // Java's constructor closes what it was given before it throws.
-      this.#closeSerializers();
+      // Java's constructor closes the serializers in the catch around its
+      // body, whose failure it relabels "Failed to construct kafka producer"
+      // (the core's KafkaError). A ConfigError of the configuration's check
+      // is thrown before that catch: the serializers stay open, as in Java.
+      if (isConstructionFailure(error)) this.#closeSerializers();
       throw error;
     }
     producerOpened();
