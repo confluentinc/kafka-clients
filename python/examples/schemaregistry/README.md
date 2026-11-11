@@ -16,11 +16,11 @@ what the Rust producer writes.
 
 ## Why a third-party registry client
 
-- This client has no Schema Registry serdes of its own yet.
-- The PyPI `confluent-kafka` package, which has them, cannot be installed beside this client: both
-  install the `confluent_kafka` package.
-- `python-schema-registry-client` has no Kafka client dependency, so it installs cleanly beside this
-  client.
+- This client, `confluent-kafka` 4.4.0b1, has no Schema Registry serdes yet.
+- The `confluent-kafka` 2.x releases have them (`confluent_kafka.schema_registry`), but cannot be
+  used with 4.4.0b1: they are the same PyPI package, so only one version can be installed at a time.
+- `python-schema-registry-client` has no Kafka client dependency, so it installs cleanly beside
+  4.4.0b1.
 
 ## How it works
 
