@@ -40,8 +40,6 @@ internal sealed class AsyncConsumerServiceImpl
 
     private readonly CallbackLog _callbackLog = new CallbackLog();
 
-    // SetListenerAction's pending scripts, keyed by consumer id, each taken by the consumer's next Subscribe
-    // with with_listener.
     private readonly ConcurrentDictionary<ulong, ListenerAction> _listenerActions = new ConcurrentDictionary<ulong, ListenerAction>();
 
     private readonly GroupMetadataStore _groupMetadata;
@@ -120,8 +118,7 @@ internal sealed class AsyncConsumerServiceImpl
     }
 
     // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe
-    // registered, as in Python. A pending SetListenerAction belongs to this registration: its async listener
-    // calls back into the consumer from inside the method it targets.
+    // registered, as in Python.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
         if (request.HasPattern)
@@ -203,8 +200,6 @@ internal sealed class AsyncConsumerServiceImpl
         {
             TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
 
-            // The Map overload for offsets, or for an empty map with with_offsets (Java's commitSync(Map.of()));
-            // otherwise the current consumed positions.
             if (request.Offsets.Count > 0 || request.WithOffsets)
             {
                 Dictionary<TopicPartition, OffsetAndMetadata> offsets = Translate.ProtoOffsetsToDictionary(request.Offsets);
@@ -662,8 +657,6 @@ internal sealed class AsyncConsumerServiceImpl
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.CallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ConsumerId));
 
-    // Kept for the consumer's next Subscribe with with_listener, whose listener runs it; a request with no
-    // script clears a pending one.
     public override Task<Proto.StatusResponse> SetListenerAction(Proto.ListenerActionRequest request, ServerCallContext context)
     {
         if (Get(request.ConsumerId) is null)
@@ -722,8 +715,6 @@ internal sealed class AsyncConsumerServiceImpl
         return result;
     }
 
-    // The pending SetListenerAction of a Subscribe with with_listener, with the consumer its listener calls
-    // back into; null when there is none.
     private (IAsyncConsumer<byte[], byte[]>, ListenerAction)? TakeListenerAction(ulong consumerId)
     {
         if (_listenerActions.TryRemove(consumerId, out ListenerAction? action) && Get(consumerId) is ConsumerEntry entry)

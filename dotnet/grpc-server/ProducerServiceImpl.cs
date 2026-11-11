@@ -124,22 +124,19 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         }
         catch (Exception ex)
         {
-            // Thrown by Send itself, Java's send throwing, as opposed to the future failing below:
-            // raised_by_send tells the harness which.
             return Task.FromResult(new Proto.SendResponse { Error = Translate.ToProto(ex), RaisedBySend = true });
         }
 
         try
         {
-            // The delivery callback runs before the future completes, so its entry is logged before
-            // the response is built. The 120 s bound is Python's future.get(timeout=120).
+            // The 120 s bound is Python's future.get(timeout=120).
             RecordMetadata metadata = future.Get(_sendTimeout);
             return Task.FromResult(new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) });
         }
         catch (System.TimeoutException) when (!future.IsDone())
         {
-            // Only the server's own bound is LOCAL_TIMEOUT from here: a future that failed with a
-            // TimeoutException is done, and goes out through ToProto.
+            // Only the server's own bound is LOCAL_TIMEOUT: a future that failed with a TimeoutException is
+            // done, and goes out through ToProto.
             return Task.FromResult(new Proto.SendResponse { Error = Translate.SendTimedOut() });
         }
         catch (Exception ex)
