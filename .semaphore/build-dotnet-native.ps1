@@ -105,7 +105,8 @@ $header = Join-Path $repo 'rust\target\include\confluent_kafka_bindings.h'
 Push-Location (Join-Path $repo 'rust')
 try {
     # A scanner can hold a build output for a moment (os error 32, or LNK1114 from the linker), which
-    # fails the build; the build is retried, and Cargo keeps what it already built.
+    # fails the build; the build is retried, and Cargo keeps what it already built. A real build error
+    # also runs three times before the job fails.
     Invoke-Retry { Invoke-Native cargo @('build', '--locked', '--features', 'ffi', '--release', '--target', $triple) }
 } finally {
     Pop-Location
