@@ -1049,7 +1049,8 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Stopwatch watch = Stopwatch.StartNew();
         while (watch.Elapsed < s_deadline)
         {
-            consumer.PollTyped(TimeSpan.FromMilliseconds(100), Serdes.ByteArray(), Serdes.ByteArray());
+            consumer.PollTyped(
+                TimeSpan.FromMilliseconds(100), Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null);
         }
     }
 

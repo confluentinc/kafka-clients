@@ -42,7 +42,7 @@ public sealed class PublicProducerCountedDrainTests
     public async Task Drain_IsCountedAsAUse_CloseDoesNotRefuseIt_AndTheDestroyDoes()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         NativeProducer native = NativeOf(producer);
         using ManualResetEventSlim entered = new ManualResetEventSlim();
         using ManualResetEventSlim release = new ManualResetEventSlim();

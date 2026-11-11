@@ -255,6 +255,147 @@ public sealed class PublicProducerRecordTests
     }
 
     [Fact]
+    public void Equals_ComparesAReadOnlyMemoryKeyByContent()
+    {
+        byte[] long1 = LongContent();
+        byte[] long2 = LongContent();
+        Assert.Equal(KeyRecord(long1), KeyRecord(long2));
+        Assert.Equal(KeyRecord(long1).GetHashCode(), KeyRecord(long2).GetHashCode());
+        Assert.Equal(KeyRecord(Bytes("key")), KeyRecord(Bytes("key")));
+        Assert.Equal(KeyRecord(Bytes("key")).GetHashCode(), KeyRecord(Bytes("key")).GetHashCode());
+
+        byte[] buffer = Bytes("abXab");
+        ReadOnlyMemory<byte> first = new ReadOnlyMemory<byte>(buffer, 0, 2);
+        ReadOnlyMemory<byte> second = new ReadOnlyMemory<byte>(buffer, 3, 2);
+        Assert.Equal(KeyRecord(first), KeyRecord(second));
+        Assert.Equal(KeyRecord(first).GetHashCode(), KeyRecord(second).GetHashCode());
+        Assert.Equal(KeyRecord(first), KeyRecord(Bytes("ab")));
+
+        Assert.NotEqual(KeyRecord(Bytes("key")), KeyRecord(Bytes("kez")));
+        Assert.NotEqual(KeyRecord(Bytes("key")), KeyRecord(Bytes("ke")));
+        Assert.NotEqual(KeyRecord(first), KeyRecord(new ReadOnlyMemory<byte>(buffer, 1, 2)));
+    }
+
+    [Fact]
+    public void Equals_TellsANullReadOnlyMemoryKeyFromAnEmptyOne()
+    {
+        ReadOnlyMemory<byte> emptyArray = new ReadOnlyMemory<byte>(new byte[0]);
+        ReadOnlyMemory<byte> emptySlice = new ReadOnlyMemory<byte>(Bytes("ab"), 1, 0);
+
+        Assert.NotEqual(KeyRecord(null), KeyRecord(ReadOnlyMemory<byte>.Empty));
+        Assert.NotEqual(KeyRecord(ReadOnlyMemory<byte>.Empty), KeyRecord(null));
+        Assert.NotEqual(KeyRecord(null), KeyRecord(emptyArray));
+        Assert.Equal(KeyRecord(null), KeyRecord(null));
+        Assert.Equal(KeyRecord(null).GetHashCode(), KeyRecord(null).GetHashCode());
+
+        Assert.Equal(KeyRecord(emptyArray), KeyRecord(emptySlice));
+        Assert.Equal(KeyRecord(emptyArray).GetHashCode(), KeyRecord(emptySlice).GetHashCode());
+        Assert.Equal(KeyRecord(ReadOnlyMemory<byte>.Empty), KeyRecord(emptyArray));
+    }
+
+    [Fact]
+    public void Equals_ComparesAReadOnlyMemoryValueByContent()
+    {
+        byte[] long1 = LongContent();
+        byte[] long2 = LongContent();
+        Assert.Equal(ValueRecord(long1), ValueRecord(long2));
+        Assert.Equal(ValueRecord(long1).GetHashCode(), ValueRecord(long2).GetHashCode());
+        Assert.Equal(ValueRecord(Bytes("value")), ValueRecord(Bytes("value")));
+        Assert.Equal(ValueRecord(Bytes("value")).GetHashCode(), ValueRecord(Bytes("value")).GetHashCode());
+
+        byte[] buffer = Bytes("abXab");
+        ReadOnlyMemory<byte> first = new ReadOnlyMemory<byte>(buffer, 0, 2);
+        ReadOnlyMemory<byte> second = new ReadOnlyMemory<byte>(buffer, 3, 2);
+        Assert.Equal(ValueRecord(first), ValueRecord(second));
+        Assert.Equal(ValueRecord(first).GetHashCode(), ValueRecord(second).GetHashCode());
+        Assert.Equal(ValueRecord(first), ValueRecord(Bytes("ab")));
+
+        Assert.NotEqual(ValueRecord(Bytes("value")), ValueRecord(Bytes("valuf")));
+        Assert.NotEqual(ValueRecord(Bytes("value")), ValueRecord(Bytes("valu")));
+        Assert.NotEqual(ValueRecord(first), ValueRecord(new ReadOnlyMemory<byte>(buffer, 1, 2)));
+    }
+
+    [Fact]
+    public void Equals_TellsANullReadOnlyMemoryValueFromAnEmptyOne()
+    {
+        ReadOnlyMemory<byte> emptyArray = new ReadOnlyMemory<byte>(new byte[0]);
+        ReadOnlyMemory<byte> emptySlice = new ReadOnlyMemory<byte>(Bytes("ab"), 1, 0);
+
+        Assert.NotEqual(ValueRecord(null), ValueRecord(ReadOnlyMemory<byte>.Empty));
+        Assert.NotEqual(ValueRecord(ReadOnlyMemory<byte>.Empty), ValueRecord(null));
+        Assert.NotEqual(ValueRecord(null), ValueRecord(emptyArray));
+        Assert.Equal(ValueRecord(null), ValueRecord(null));
+        Assert.Equal(ValueRecord(null).GetHashCode(), ValueRecord(null).GetHashCode());
+
+        Assert.Equal(ValueRecord(emptyArray), ValueRecord(emptySlice));
+        Assert.Equal(ValueRecord(emptyArray).GetHashCode(), ValueRecord(emptySlice).GetHashCode());
+        Assert.Equal(ValueRecord(ReadOnlyMemory<byte>.Empty), ValueRecord(emptyArray));
+    }
+
+    [Fact]
+    public void Equals_ComparesANonNullableReadOnlyMemoryKeyAndValueByContent()
+    {
+        ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> record =
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", Bytes("v"), Bytes("k"));
+        ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> sameBytes =
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>(
+                "t", new ReadOnlyMemory<byte>(Bytes("xv"), 1, 1), new ReadOnlyMemory<byte>(Bytes("kx"), 0, 1));
+        Assert.Equal(record, sameBytes);
+        Assert.Equal(record.GetHashCode(), sameBytes.GetHashCode());
+
+        Assert.NotEqual(record, new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", Bytes("v"), Bytes("j")));
+        Assert.NotEqual(record, new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", Bytes("w"), Bytes("k")));
+        Assert.Equal(
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", default, default),
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", new byte[0], new byte[0]));
+    }
+
+    [Fact]
+    public void GetHashCode_HashesAReadOnlyMemoryKeyAndValueAsJavasByteBufferHashCode()
+    {
+        const int KeyWeight = 31 * 31;
+        const int ValueWeight = 31;
+        int nullKey = KeyRecord(null).GetHashCode();
+        int nullValue = ValueRecord(null).GetHashCode();
+
+        Assert.Equal(unchecked(nullKey + (1 * KeyWeight)), KeyRecord(ReadOnlyMemory<byte>.Empty).GetHashCode());
+        Assert.Equal(unchecked(nullKey + (32737 * KeyWeight)), KeyRecord(new byte[] { 1, 2, 3 }).GetHashCode());
+        Assert.Equal(unchecked(nullKey + (30 * KeyWeight)), KeyRecord(new byte[] { 0xFF }).GetHashCode());
+        Assert.Equal(unchecked(nullKey + (864 * KeyWeight)), KeyRecord(new byte[] { 0x80, 0x01 }).GetHashCode());
+
+        Assert.Equal(unchecked(nullValue + (1 * ValueWeight)), ValueRecord(ReadOnlyMemory<byte>.Empty).GetHashCode());
+        Assert.Equal(unchecked(nullValue + (32737 * ValueWeight)), ValueRecord(new byte[] { 1, 2, 3 }).GetHashCode());
+        Assert.Equal(unchecked(nullValue + (30 * ValueWeight)), ValueRecord(new byte[] { 0xFF }).GetHashCode());
+        Assert.Equal(unchecked(nullValue + (864 * ValueWeight)), ValueRecord(new byte[] { 0x80, 0x01 }).GetHashCode());
+    }
+
+    [Fact]
+    public void Equals_StillComparesAByteArrayKeyByReference()
+    {
+        byte[] key = Bytes("k");
+        Assert.Equal(new ProducerRecord<byte[], string>("t", "v", key), new ProducerRecord<byte[], string>("t", "v", key));
+        Assert.Equal(
+            new ProducerRecord<byte[], string>("t", "v", key).GetHashCode(),
+            new ProducerRecord<byte[], string>("t", "v", key).GetHashCode());
+        Assert.NotEqual(new ProducerRecord<byte[], string>("t", "v", key), new ProducerRecord<byte[], string>("t", "v", Bytes("k")));
+    }
+
+    [Fact]
+    public void Equals_StillComparesAStringKeyByValue()
+    {
+        string key = new string('k', 3);
+        string sameText = new string('k', 3);
+        Assert.NotSame(key, sameText);
+
+        Assert.Equal(new ProducerRecord<string, string>("t", "v", key), new ProducerRecord<string, string>("t", "v", sameText));
+        Assert.Equal(
+            new ProducerRecord<string, string>("t", "v", key).GetHashCode(),
+            new ProducerRecord<string, string>("t", "v", sameText).GetHashCode());
+        Assert.NotEqual(new ProducerRecord<string, string>("t", "v", key), new ProducerRecord<string, string>("t", "v", "kk"));
+        Assert.NotEqual(new ProducerRecord<string, string>("t", "v", key), new ProducerRecord<string, string>("t", "v", null));
+    }
+
+    [Fact]
     public void FormsAndHeaders()
     {
         ProducerRecord<byte[], byte[]> r = new ProducerRecord<byte[], byte[]>("t", Bytes("v"));
@@ -359,6 +500,23 @@ public sealed class PublicProducerRecordTests
     }
 
     private static byte[] Bytes(string value) => Encoding.UTF8.GetBytes(value);
+
+    private static ProducerRecord<ReadOnlyMemory<byte>?, string> KeyRecord(ReadOnlyMemory<byte>? key) =>
+        new ProducerRecord<ReadOnlyMemory<byte>?, string>("t", "v", key);
+
+    private static ProducerRecord<string, ReadOnlyMemory<byte>?> ValueRecord(ReadOnlyMemory<byte>? value) =>
+        new ProducerRecord<string, ReadOnlyMemory<byte>?>("t", value, "k");
+
+    private static byte[] LongContent()
+    {
+        byte[] content = new byte[100];
+        for (int i = 0; i < content.Length; i++)
+        {
+            content[i] = (byte)(255 - (i * 7));
+        }
+
+        return content;
+    }
 
     private static List<string> Keys(Headers headers)
     {

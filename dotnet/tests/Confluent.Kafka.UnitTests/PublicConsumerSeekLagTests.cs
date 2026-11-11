@@ -42,7 +42,7 @@ public sealed class PublicConsumerSeekLagTests
 
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyAssigned(string topic = Topic, int partition = Partition)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         return consumer;
@@ -124,7 +124,7 @@ public sealed class PublicConsumerSeekLagTests
     public async Task CurrentLag_WaitsForTheBackgroundTask_OnTheAsyncKafkaConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
+            RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             TopicPartition tp = new TopicPartition(Topic, Partition);
@@ -146,7 +146,7 @@ public sealed class PublicConsumerSeekLagTests
     public void CurrentLag_WaitsForTheBackgroundTask_OnTheKafkaConsumer()
     {
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
+            RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             TopicPartition tp = new TopicPartition(Topic, Partition);
@@ -166,7 +166,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void CurrentLag_AssignedWithEndOffset_ReturnsEndMinusPosition_OnTheSyncMock()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
@@ -179,7 +179,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void CurrentLag_APositionPastTheEnd_IsANegativeValue_OnTheSyncMock()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
@@ -204,7 +204,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void CurrentLag_AFailingPosition_ThrowsTheCoreError_OnTheSyncMock()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset("unassigned-topic", 0, 2);
 
@@ -230,7 +230,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void Seek_WithMetadata_ObservableViaPosition_OnTheSyncMock()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
@@ -243,7 +243,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -254,7 +254,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task SeekWithMetadata_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -266,7 +266,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_NegativeOffset_OnTheMock_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -279,7 +279,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_NegativeOffset_OnTheMock_AssignedPartition_IsAccepted()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition("t", 0);
         await consumer.Assign(new[] { tp });
@@ -290,7 +290,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_NegativeOffset_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -2); });
@@ -299,7 +299,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void Seek_NullTopic_ThrowsIllegalStateAtTheCall()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(default, 0L); });
@@ -309,7 +309,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void SeekWithMetadata_NullOffsetAndMetadata_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
@@ -328,7 +328,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), 0L); });
@@ -337,7 +337,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task SeekWithMetadata_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(
@@ -347,7 +347,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task CurrentLag_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(() => { _ = consumer.CurrentLag(new TopicPartition("t", 0)); });

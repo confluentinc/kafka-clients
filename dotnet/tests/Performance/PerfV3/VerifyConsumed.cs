@@ -216,7 +216,7 @@ internal static class VerifyConsumed
             config[kv.Key] = kv.Value;
         }
 
-        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
+        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
     }
 
     private static double Monotonic() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;

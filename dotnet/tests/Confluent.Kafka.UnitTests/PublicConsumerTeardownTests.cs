@@ -37,21 +37,21 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DisposeAsync_ReturnsWithoutHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
     }
 
     [Fact]
     public void Dispose_ReturnsWithoutHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
 
     [Fact]
     public async Task DisposeAsync_WithUnawaitedOpInFlight_ReturnsWithoutHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         _ = consumer.Subscribe(ProofTopic());
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
@@ -60,7 +60,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Dispose_WithUnawaitedOpInFlight_ReturnsWithoutHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         _ = consumer.Subscribe(ProofTopic());
 
         await TestTimeout.Run(() => Task.Run(consumer.Dispose), s_deadline);
@@ -69,7 +69,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DoubleDisposeAsync_IsSafe()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
         await TestTimeout.DisposeAsync(consumer);
     }
@@ -77,7 +77,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public void DoubleDispose_IsSafe()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
         TestTimeout.Dispose(consumer);
     }
@@ -85,7 +85,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task MixedDisposeAndDisposeAsync_IsSafe()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
         await TestTimeout.DisposeAsync(consumer);
     }
@@ -93,7 +93,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task UseAfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Poll(s_pollTimeout));
@@ -106,14 +106,14 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Close_ReturnsWithoutHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
     public async Task Close_ThenDisposeAndDisposeAsync_IsIdempotent()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.TeardownAsync(consumer, () => consumer.Close());
         await TestTimeout.DisposeAsync(consumer);
         TestTimeout.Dispose(consumer);
@@ -122,7 +122,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Close_UseAfterClose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.TeardownAsync(consumer, () => consumer.Close());
 
         await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Subscribe(ProofTopic()));
@@ -131,7 +131,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Close_OnMock_DoesNotSurfaceError_ButPathReturns()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await consumer.Subscribe(ProofTopic());
 
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
@@ -145,7 +145,7 @@ public sealed class PublicConsumerTeardownTests
             {
                 for (int i = 0; i < 100; i++)
                 {
-                    AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                    AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
                     await consumer.Subscribe(ProofTopic());
                     await consumer.DisposeAsync();
                 }
