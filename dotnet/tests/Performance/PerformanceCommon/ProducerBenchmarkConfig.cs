@@ -68,6 +68,12 @@ public sealed class ProducerBenchmarkConfig
 
     public int Partitions { get; private set; } = -1;
 
+    /// <summary>
+    /// The Rust core's effective <c>buffer.memory.allocation.strategy</c>, written to <c>results.json</c> when set; the
+    /// harness of a client without the setting leaves it null.
+    /// </summary>
+    public string? BufferMemoryAllocationStrategy { get; set; }
+
     public static ProducerBenchmarkConfig FromEnv()
     {
         var config = new ProducerBenchmarkConfig

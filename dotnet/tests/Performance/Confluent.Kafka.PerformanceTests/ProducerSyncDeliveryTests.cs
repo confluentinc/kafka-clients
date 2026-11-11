@@ -78,13 +78,25 @@ public sealed class ProducerSyncDeliveryTests
     [Fact]
     public Task RunSync_UnwritableResultsFile_FailsTheRun() => UnwritableResultsAsync();
 
+    [Fact]
+    public Task RunSync_ResultsJson_EndsWithTheAllocationStrategyWhenSet() => AllocationStrategyAsync();
+
+    [Fact]
+    public Task RunSync_AThousandConsecutiveRejections_StopTheRunAsFailed() => ConsecutiveRejectionsAsync();
+
+    [Fact]
+    public Task RunSync_RejectionsBrokenByASuccessfulSend_DoNotFailTheRun() => RejectionsBelowTheLimitAsync();
+
+    [Fact]
+    public Task RunSync_UnboundedRun_StopsAtTheTestDuration() => UnboundedRunAsync();
+
     private static async Task LateCallbacksAsync()
     {
         const int delayMs = 300;
         Apply(numMessages: 5);
-        var pending = new ConcurrentQueue<(IPerfDeliveryCallback Callback, long StartMs, int N)>();
+        var pending = new ConcurrentQueue<(IPerfDeliveryCallback Callback, long StartTicks, int N)>();
         var backend = new ScriptedProducerBackend(
-            onSend: (n, callback, startMs) => pending.Enqueue((callback, startMs, n)),
+            onSend: (n, callback, startTicks) => pending.Enqueue((callback, startTicks, n)),
             onFlush: () =>
             {
                 // Delivered only after the flush, late and in reverse order: the run reports every record only if it
@@ -92,9 +104,9 @@ public sealed class ProducerSyncDeliveryTests
                 var deliverer = new Thread(() =>
                 {
                     Thread.Sleep(delayMs);
-                    foreach ((IPerfDeliveryCallback callback, long startMs, int n) in pending.Reverse())
+                    foreach ((IPerfDeliveryCallback callback, long startTicks, int n) in pending.Reverse())
                     {
-                        callback.OnCompletion(startMs, Delivered(n), null);
+                        callback.OnCompletion(startTicks, Delivered(n), null);
                     }
                 })
                 { IsBackground = true };
@@ -111,28 +123,29 @@ public sealed class ProducerSyncDeliveryTests
         using JsonDocument results = ReadResults("results.json");
         Assert.Equal(5, results.RootElement.GetProperty("messages_measured").GetInt64());
         Assert.True(
-            results.RootElement.GetProperty("latency_ms").GetProperty("min").GetInt64() >= delayMs - 50,
+            results.RootElement.GetProperty("latency_ms").GetProperty("min").GetDouble() >= delayMs - 50,
             $"the latency was not stamped in the callback: {results.RootElement}");
     }
 
     private static async Task FailedDeliveryAsync()
     {
         Apply(numMessages: 5, doVerify: true);
-        var backend = new ScriptedProducerBackend(onSend: (n, callback, startMs) =>
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) =>
         {
             if (n == 3)
             {
-                callback.OnCompletion(startMs, default, new InvalidOperationException("delivery failed (fake)"));
+                callback.OnCompletion(startTicks, default, new InvalidOperationException("delivery failed (fake)"));
             }
             else
             {
-                callback.OnCompletion(startMs, Delivered(n), null);
+                callback.OnCompletion(startTicks, Delivered(n), null);
             }
         });
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
         // The failed third record counts as completed, so the counts match, but it did not verify: the run fails.
+        // messages_measured counts it too, as Python counts every completed delivery.
         Assert.Equal(5, result.MeasuredSent);
         Assert.Equal(1, Occurrences(output, "Produce call resulted in exception: delivery failed (fake)"));
         Assert.Equal(1, Occurrences(output, "Verified messages 4 does not match completed messages 5"));
@@ -147,14 +160,14 @@ public sealed class ProducerSyncDeliveryTests
     private static async Task SendThatThrowsAsync()
     {
         Apply(numMessages: 5, doVerify: true);
-        var backend = new ScriptedProducerBackend(onSend: (n, callback, startMs) =>
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) =>
         {
             if (n == 3)
             {
                 throw new InvalidOperationException("send rejected (fake)");
             }
 
-            callback.OnCompletion(startMs, Delivered(n), null);
+            callback.OnCompletion(startTicks, Delivered(n), null);
         });
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
@@ -173,10 +186,10 @@ public sealed class ProducerSyncDeliveryTests
         Apply(numMessages: measured, warmupSeconds: 1, doVerify: true);
         var events = new ConcurrentQueue<string>();
         var backend = new ScriptedProducerBackend(
-            onSend: (n, callback, startMs) =>
+            onSend: (n, callback, startTicks) =>
             {
                 events.Enqueue($"C{n}");
-                callback.OnCompletion(startMs, Delivered(n), null);
+                callback.OnCompletion(startTicks, Delivered(n), null);
             },
             onWarmupSend: n =>
             {
@@ -216,7 +229,7 @@ public sealed class ProducerSyncDeliveryTests
     {
         Apply(numMessages: 3, warmupSeconds: 5);
         var backend = new ScriptedProducerBackend(
-            onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null),
+            onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null),
             onWarmupSend: n => Handle(() => throw new InvalidOperationException("warmup delivery failed (fake)")));
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
@@ -235,7 +248,7 @@ public sealed class ProducerSyncDeliveryTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         var backend = new ScriptedProducerBackend(
-            onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null),
+            onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null),
             onWarmupSend: n => Handle(() => Delivered(n)));
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend, cts.Token).ConfigureAwait(false);
@@ -252,7 +265,7 @@ public sealed class ProducerSyncDeliveryTests
         const string path = "custom-results.json";
         Apply(numMessages: 4, clientVersion: clientVersion, resultsFile: path);
         File.Delete(path);
-        var backend = new ScriptedProducerBackend(onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null));
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null));
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
@@ -273,7 +286,7 @@ public sealed class ProducerSyncDeliveryTests
     private static async Task NothingCompletedAsync()
     {
         Apply(numMessages: 5);
-        var backend = new ScriptedProducerBackend(onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null));
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null));
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -290,7 +303,7 @@ public sealed class ProducerSyncDeliveryTests
         Assert.Contains("\"messages_measured\": 0,", text, StringComparison.Ordinal);
         Assert.Contains("\"throughput_msg_s\": 0.0,", text, StringComparison.Ordinal);
         Assert.Contains("\"avg\": 0.0,", text, StringComparison.Ordinal);
-        Assert.Contains("\"max\": 0\n", text, StringComparison.Ordinal);
+        Assert.Contains("\"max\": 0.0\n", text, StringComparison.Ordinal);
         using JsonDocument results = JsonDocument.Parse(text);
         Assert.Equal(s_resultKeys, results.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
     }
@@ -299,7 +312,7 @@ public sealed class ProducerSyncDeliveryTests
     {
         string path = Path.Combine("no-such-directory", "results.json");
         Apply(numMessages: 3, resultsFile: path);
-        var backend = new ScriptedProducerBackend(onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null));
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null));
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
@@ -309,12 +322,83 @@ public sealed class ProducerSyncDeliveryTests
         Assert.True(result.RunFailed);
     }
 
+    private static async Task AllocationStrategyAsync()
+    {
+        Apply(numMessages: 2);
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null));
+
+        (ProducerBenchmarkResult result, string output) =
+            await RunSyncCapturingOutputAsync(backend, allocationStrategy: "incremental").ConfigureAwait(false);
+
+        Assert.False(result.RunFailed, output);
+        using JsonDocument results = ReadResults("results.json");
+        Assert.Equal(
+            s_resultKeys.Append("buffer_memory_allocation_strategy").ToArray(),
+            results.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("incremental", results.RootElement.GetProperty("buffer_memory_allocation_strategy").GetString());
+    }
+
+    private static async Task ConsecutiveRejectionsAsync()
+    {
+        Apply(numMessages: 5);
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) => throw new InvalidOperationException("send rejected (fake)"));
+
+        (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
+
+        Assert.Equal(1000, backend.SendCount);
+        Assert.Equal(0, result.MeasuredSent);
+        Assert.Equal(
+            1,
+            Occurrences(output, "1000 consecutive sends rejected with no successful send in between; stopping the run as failed"));
+        Assert.True(result.RunFailed);
+        Assert.Contains("Results summary written to: results.json", output, StringComparison.Ordinal);
+    }
+
+    private static async Task RejectionsBelowTheLimitAsync()
+    {
+        // 999 rejections in a row, then accepted sends: one short of the limit, so the run goes on.
+        Apply(numMessages: 3);
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) =>
+        {
+            if (n <= 999)
+            {
+                throw new InvalidOperationException("send rejected (fake)");
+            }
+
+            callback.OnCompletion(startTicks, Delivered(n), null);
+        });
+
+        (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
+
+        Assert.Equal(1002, backend.SendCount);
+        Assert.Equal(3, result.MeasuredSent);
+        Assert.DoesNotContain("consecutive sends rejected", output, StringComparison.Ordinal);
+        Assert.False(result.RunFailed, output);
+    }
+
+    private static async Task UnboundedRunAsync()
+    {
+        Apply(numMessages: 0, testDurationSeconds: 1);
+        var backend = new ScriptedProducerBackend(onSend: (n, callback, startTicks) => callback.OnCompletion(startTicks, Delivered(n), null));
+
+        (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
+
+        Assert.True(result.MeasuredSent > 0);
+        Assert.Equal(1, Occurrences(output, "Test duration reached, "));
+        Assert.DoesNotContain("capped:", output, StringComparison.Ordinal);
+        Assert.False(result.RunFailed, output);
+
+        using JsonDocument results = ReadResults("results.json");
+        Assert.InRange(results.RootElement.GetProperty("duration_s").GetDouble(), 1.0, 5.0);
+    }
+
     private static void Apply(
         long numMessages,
         int warmupSeconds = 0,
         bool doVerify = false,
         string clientVersion = "3",
-        string? resultsFile = null)
+        string? resultsFile = null,
+        int testDurationSeconds = 600)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -324,7 +408,7 @@ public sealed class ProducerSyncDeliveryTests
             ["KEY_SIZE"] = "0",
             ["VALUE_SIZE"] = "16",
             ["WARMUP_SECONDS"] = warmupSeconds.ToString(CultureInfo.InvariantCulture),
-            ["TEST_DURATION_SECONDS"] = "600",
+            ["TEST_DURATION_SECONDS"] = testDurationSeconds.ToString(CultureInfo.InvariantCulture),
             ["NUM_MESSAGES"] = numMessages.ToString(CultureInfo.InvariantCulture),
             ["DO_VERIFY"] = doVerify ? "True" : "False",
         };
@@ -338,7 +422,8 @@ public sealed class ProducerSyncDeliveryTests
 
     private static async Task<(ProducerBenchmarkResult Result, string Output)> RunSyncCapturingOutputAsync(
         IProducerBackend backend,
-        CancellationToken token = default)
+        CancellationToken token = default,
+        string? allocationStrategy = null)
     {
         using var output = new StringWriter(CultureInfo.InvariantCulture);
         TextWriter original = Console.Out;
@@ -346,7 +431,8 @@ public sealed class ProducerSyncDeliveryTests
         try
         {
             using var metrics = new Metrics();
-            ProducerBenchmarkResult result = await FinishWithinBudget(StartRunSync(backend, metrics, token)).ConfigureAwait(false);
+            ProducerBenchmarkResult result =
+                await FinishWithinBudget(StartRunSync(backend, metrics, token, allocationStrategy)).ConfigureAwait(false);
             return (result, output.ToString());
         }
         finally
@@ -357,9 +443,14 @@ public sealed class ProducerSyncDeliveryTests
 
     // RunSync blocks its caller for the whole run, so it gets a thread of its own and the test waits for it
     // within a budget.
-    private static Task<ProducerBenchmarkResult> StartRunSync(IProducerBackend backend, Metrics metrics, CancellationToken token)
+    private static Task<ProducerBenchmarkResult> StartRunSync(
+        IProducerBackend backend,
+        Metrics metrics,
+        CancellationToken token,
+        string? allocationStrategy)
     {
         ProducerBenchmarkConfig config = ProducerBenchmarkConfig.FromEnv();
+        config.BufferMemoryAllocationStrategy = allocationStrategy;
         PerfMessage[] messages = MessageGenerator.Generate(config.KeySize, config.ValueSize, count: 4);
         return Task.Factory.StartNew(
             () => ProducerBenchmark.RunSync(backend, config, metrics, messages, token),
@@ -430,8 +521,8 @@ public sealed class ProducerSyncDeliveryTests
                 : _onWarmupSend(n);
         }
 
-        public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs) =>
-            _onSend(Interlocked.Increment(ref _sendCount), callback, sendStartMs);
+        public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks) =>
+            _onSend(Interlocked.Increment(ref _sendCount), callback, sendStartTicks);
 
         public void Flush(CancellationToken cancellationToken)
         {

@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -45,6 +44,13 @@ internal static class ProducerMain
         PerfMessage[] messages = MessageGenerator.Generate(config.KeySize, config.ValueSize, MessageGenerator.DefaultCount);
 
         Dictionary<string, string> producerConfig = V2Config.BuildProducerConfig();
+        if (!config.Async)
+        {
+            // One poller: the sync backend's poll thread serves the delivery reports, as Python's CompatibleProducer,
+            // so ckd's own background poll stays off.
+            producerConfig["dotnet.producer.enable.background.poll"] = "false";
+        }
+
         V2Config.PrintProducerConfiguration(producerConfig, config.KeySize, config.ValueSize, config.DoVerify);
 
         PrintProducingBanner(config);
@@ -85,7 +91,6 @@ internal static class ProducerMain
         if (config.Async)
         {
             Console.WriteLine("Running async producer performance test v2 (confluent-kafka-dotnet)...");
-            ApplyDefaultAsyncQueueSizing(producerConfig, config);
             var backend = new V2AsyncProducerBackend(producerConfig);
             try
             {
@@ -108,23 +113,6 @@ internal static class ProducerMain
         {
             CloseQuietly(syncBackend);
             syncBackend.Dispose();
-        }
-    }
-
-    // As Python's AsyncCompatibleProducer (v2 async): size the send queue to the run unless BUFFER_MEMORY set the key.
-    private static void ApplyDefaultAsyncQueueSizing(Dictionary<string, string> producerConfig, ProducerBenchmarkConfig config)
-    {
-        if (!producerConfig.ContainsKey("queue.buffering.max.messages"))
-        {
-            long numMessagesConf = config.NumMessages > 0 ? Math.Min(config.NumMessages, int.MaxValue) : int.MaxValue;
-            producerConfig["queue.buffering.max.messages"] = numMessagesConf.ToString(CultureInfo.InvariantCulture);
-        }
-
-        if (!producerConfig.ContainsKey("queue.buffering.max.kbytes"))
-        {
-            long totalSize = config.NumMessages * config.MessageSize;
-            long totalSizeConf = totalSize > 0 ? Math.Min(totalSize, int.MaxValue) : int.MaxValue;
-            producerConfig["queue.buffering.max.kbytes"] = totalSizeConf.ToString(CultureInfo.InvariantCulture);
         }
     }
 

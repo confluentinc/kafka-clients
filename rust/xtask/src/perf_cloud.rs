@@ -31,6 +31,9 @@
 //! - `python`: the Rust-backed and the librdkafka-backed Python clients, sync
 //!   and async. Each Rust-backed client is compared with its librdkafka
 //!   equivalent (sync with sync, async with async).
+//! - `dotnet`: the .NET clients on the Rust core (this repository's binding)
+//!   and on librdkafka (Confluent.Kafka 2.x from NuGet), sync and async,
+//!   compared as the Python clients are.
 //!
 //! A test's `WORKLOAD` is `producer` (the producer harnesses, the default),
 //! `transactional` (the transactional producer harnesses, in `TXN_MODE`
@@ -162,11 +165,14 @@ const PLAN_BUFFER_MEMORY_MIB: u64 = 32;
 /// the Rust client's `RUST_LOG` included, and every test setting (see
 /// [`SETTINGS`]; `LIBRDKAFKA_BATCH` is the driver's own). Each arm starts from
 /// the job's environment with all of them removed, so a stray value in the
-/// job cannot change one arm and not the others.
+/// job cannot change one arm and not the others; the .NET runtime's own
+/// settings go too (see [`scrub_environment`]).
 const HARNESS_VARS: &[&str] = &[
     "ABORT_RATE",
     "ACKS",
     "ASYNC",
+    // The .NET producer harnesses: wait for each record's acceptance.
+    "AWAIT_ACCEPTED",
     "BATCH_SIZE",
     "BOOTSTRAP_SERVERS",
     "BUFFER_MEMORY",
@@ -193,6 +199,8 @@ const HARNESS_VARS: &[&str] = &[
     "MAX_POLL_RECORDS",
     "MAX_REQUEST_SIZE",
     "METRICS_FILE",
+    // The .NET harnesses' workload (or `version`).
+    "MODE",
     "MSG_F_BLOCK",
     "NUM_MESSAGES",
     "NUM_TRANSACTIONAL_PRODUCERS",
@@ -232,6 +240,34 @@ const HARNESS_VARS: &[&str] = &[
     "VERIFY_CONSUMED",
     "WARMUP_SECONDS",
 ];
+
+/// The prefixes of the .NET runtime's settings (GC mode, tiered compilation,
+/// ...), which would change the dotnet group's clients only.
+const DOTNET_RUNTIME_PREFIXES: &[&str] = &["DOTNET_", "COMPlus_"];
+
+/// The .NET variables the scrub keeps: `DOTNET_ROOT` (and its per-architecture
+/// forms) says where the runtime is installed, and the globalization settings
+/// let it start on a host without ICU. Neither changes how a client performs.
+const DOTNET_KEPT_PREFIXES: &[&str] = &["DOTNET_ROOT", "DOTNET_SYSTEM_GLOBALIZATION_"];
+
+/// Whether `var` is a .NET runtime setting the scrub removes.
+fn is_dotnet_runtime_setting(var: &str) -> bool {
+    DOTNET_RUNTIME_PREFIXES.iter().any(|p| var.starts_with(p))
+        && !DOTNET_KEPT_PREFIXES.iter().any(|p| var.starts_with(p))
+}
+
+/// Remove from `command`'s environment every [`HARNESS_VARS`] entry and every
+/// inherited .NET runtime setting.
+fn scrub_environment(command: &mut Command) {
+    for var in HARNESS_VARS {
+        command.env_remove(var);
+    }
+    for (var, _) in std::env::vars_os() {
+        if var.to_str().is_some_and(is_dotnet_runtime_setting) {
+            command.env_remove(var);
+        }
+    }
+}
 
 pub fn run(raw: &[String]) -> anyhow::Result<()> {
     let Some((sub, rest)) = raw.split_first() else {
@@ -315,10 +351,13 @@ const USAGES: &[(&str, &str)] = &[
     ),
 ];
 
-const HELP_NOTES: &str = "  G is `rust` (Rust, librdkafka, Java) or `python` (Rust- and librdkafka-backed
-  Python clients, sync and async). C is `all` (the default) or the group's
+const HELP_NOTES: &str = "  G is `rust` (Rust, librdkafka, Java), `python` (Rust- and librdkafka-backed
+  Python clients, sync and async) or `dotnet` (.NET clients on the Rust core and
+  on librdkafka, sync and async). C is `all` (the default) or the group's
   clients to run: rust, librdkafka, java / python-sync-rust,
-  python-sync-librdkafka, python-async-rust, python-async-librdkafka.
+  python-sync-librdkafka, python-async-rust, python-async-librdkafka /
+  dotnet-sync-rust, dotnet-sync-librdkafka, dotnet-async-rust,
+  dotnet-async-librdkafka.
   B is a batch of the group's tests, run one after another on the same cluster,
   e.g. producer-basic-perf-python.
   S is one test given by its settings, as in the tests file, e.g.
@@ -335,6 +374,7 @@ const HELP_NOTES: &str = "  G is `rust` (Rust, librdkafka, Java) or `python` (Ru
 pub(crate) enum Group {
     Rust,
     Python,
+    Dotnet,
 }
 
 impl Group {
@@ -342,7 +382,8 @@ impl Group {
         match value {
             "rust" => Ok(Group::Rust),
             "python" => Ok(Group::Python),
-            other => bail!("unknown client group `{other}` (expected `rust` or `python`)"),
+            "dotnet" => Ok(Group::Dotnet),
+            other => bail!("unknown client group `{other}` (expected `rust`, `python` or `dotnet`)"),
         }
     }
 
@@ -350,6 +391,7 @@ impl Group {
         match self {
             Group::Rust => "rust",
             Group::Python => "python",
+            Group::Dotnet => "dotnet",
         }
     }
 
@@ -362,6 +404,12 @@ impl Group {
                 Arm::PythonSyncLibrdkafka,
                 Arm::PythonAsyncRust,
                 Arm::PythonAsyncLibrdkafka,
+            ],
+            Group::Dotnet => &[
+                Arm::DotnetSyncRust,
+                Arm::DotnetSyncLibrdkafka,
+                Arm::DotnetAsyncRust,
+                Arm::DotnetAsyncLibrdkafka,
             ],
         }
     }
@@ -435,6 +483,10 @@ pub(crate) enum Arm {
     PythonSyncLibrdkafka,
     PythonAsyncRust,
     PythonAsyncLibrdkafka,
+    DotnetSyncRust,
+    DotnetSyncLibrdkafka,
+    DotnetAsyncRust,
+    DotnetAsyncLibrdkafka,
 }
 
 impl Arm {
@@ -448,6 +500,10 @@ impl Arm {
             Arm::PythonSyncLibrdkafka => "python-sync-librdkafka",
             Arm::PythonAsyncRust => "python-async-rust",
             Arm::PythonAsyncLibrdkafka => "python-async-librdkafka",
+            Arm::DotnetSyncRust => "dotnet-sync-rust",
+            Arm::DotnetSyncLibrdkafka => "dotnet-sync-librdkafka",
+            Arm::DotnetAsyncRust => "dotnet-async-rust",
+            Arm::DotnetAsyncLibrdkafka => "dotnet-async-librdkafka",
         }
     }
 
@@ -462,12 +518,17 @@ impl Arm {
             Arm::PythonSyncLibrdkafka => "Python sync (librdkafka)",
             Arm::PythonAsyncRust => "Python async (Rust)",
             Arm::PythonAsyncLibrdkafka => "Python async (librdkafka)",
+            Arm::DotnetSyncRust => ".NET sync (Rust)",
+            Arm::DotnetSyncLibrdkafka => ".NET sync (librdkafka)",
+            Arm::DotnetAsyncRust => ".NET async (Rust)",
+            Arm::DotnetAsyncLibrdkafka => ".NET async (librdkafka)",
         }
     }
 
     /// The `client` its harness writes into `results.json`, checked so a
     /// wrong `CLIENT_VERSION` / `ASYNC` cannot pass as the arm. The Python
-    /// transactional harness writes the same name for sync and async.
+    /// transactional harness writes the same name for sync and async; the .NET
+    /// ones do not.
     fn expected_client(self, workload: Workload) -> &'static str {
         match (workload, self) {
             (Workload::Producer, Arm::Rust) => "rust",
@@ -477,6 +538,10 @@ impl Arm {
             (Workload::Producer, Arm::PythonSyncLibrdkafka) => "python-librdkafka",
             (Workload::Producer, Arm::PythonAsyncRust) => "python-rust-async",
             (Workload::Producer, Arm::PythonAsyncLibrdkafka) => "python-librdkafka-async",
+            (Workload::Producer, Arm::DotnetSyncRust) => "dotnet-rust",
+            (Workload::Producer, Arm::DotnetSyncLibrdkafka) => "dotnet-librdkafka",
+            (Workload::Producer, Arm::DotnetAsyncRust) => "dotnet-rust-async",
+            (Workload::Producer, Arm::DotnetAsyncLibrdkafka) => "dotnet-librdkafka-async",
             (Workload::Transactional, Arm::Rust) => "rust-txn",
             (Workload::Transactional, Arm::Librdkafka) => "librdkafka-txn",
             (Workload::Transactional, Arm::Java) => "java-txn",
@@ -484,6 +549,10 @@ impl Arm {
             (Workload::Transactional, Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka) => {
                 "python-librdkafka-txn"
             },
+            (Workload::Transactional, Arm::DotnetSyncRust) => "dotnet-rust-txn",
+            (Workload::Transactional, Arm::DotnetSyncLibrdkafka) => "dotnet-librdkafka-txn",
+            (Workload::Transactional, Arm::DotnetAsyncRust) => "dotnet-rust-async-txn",
+            (Workload::Transactional, Arm::DotnetAsyncLibrdkafka) => "dotnet-librdkafka-async-txn",
             (Workload::Consumer, Arm::Rust) => "rust-consumer",
             (Workload::Consumer, Arm::Librdkafka) => "librdkafka-consumer",
             (Workload::Consumer, Arm::Java) => "java-consumer",
@@ -491,13 +560,17 @@ impl Arm {
             (Workload::Consumer, Arm::PythonSyncLibrdkafka) => "python-librdkafka-consumer",
             (Workload::Consumer, Arm::PythonAsyncRust) => "python-rust-async-consumer",
             (Workload::Consumer, Arm::PythonAsyncLibrdkafka) => "python-librdkafka-async-consumer",
+            (Workload::Consumer, Arm::DotnetSyncRust) => "dotnet-rust-consumer",
+            (Workload::Consumer, Arm::DotnetSyncLibrdkafka) => "dotnet-librdkafka-consumer",
+            (Workload::Consumer, Arm::DotnetAsyncRust) => "dotnet-rust-async-consumer",
+            (Workload::Consumer, Arm::DotnetAsyncLibrdkafka) => "dotnet-librdkafka-async-consumer",
         }
     }
 
     /// The command that runs this arm's harness for `workload` (the
     /// `RUN_PERF_SH` recipes of `deploy_and_run_perf.py`), to be started in
     /// the arm's directory unless it sets its own. A consumer harness other
-    /// than Python's also takes [`consumer_args`].
+    /// than Python's and .NET's also takes [`consumer_args`].
     fn command(self, repo: &Path, workload: Workload) -> Command {
         let transactional = workload == Workload::Transactional;
         match self {
@@ -540,12 +613,30 @@ impl Arm {
                 c.arg(python_harness(repo, workload));
                 c
             },
+            // `MODE` picks the workload ([`Arm::own_env`]). No directory of its
+            // own: it writes metrics.jsonl to the current one, the arm's.
+            Arm::DotnetSyncRust | Arm::DotnetAsyncRust | Arm::DotnetSyncLibrdkafka | Arm::DotnetAsyncLibrdkafka => {
+                let mut c = Command::new(dotnet());
+                c.arg(dotnet_harness(repo, self.dotnet_harness_name().unwrap_or_default()));
+                c
+            },
+        }
+    }
+
+    /// The .NET harness the arm runs (`PerfV3` on the Rust core, `PerfV2` on
+    /// librdkafka); `None` outside the dotnet group.
+    fn dotnet_harness_name(self) -> Option<&'static str> {
+        match self {
+            Arm::DotnetSyncRust | Arm::DotnetAsyncRust => Some(DOTNET_RUST_HARNESS),
+            Arm::DotnetSyncLibrdkafka | Arm::DotnetAsyncLibrdkafka => Some(DOTNET_LIBRDKAFKA_HARNESS),
+            _ => None,
         }
     }
 
     /// The settings this arm's harness needs on top of the shared ones,
-    /// spelled the way that harness parses them.
-    fn own_env(self, repo: &Path) -> Vec<(String, String)> {
+    /// spelled the way that harness parses them. They are set after the
+    /// [`HARNESS_VARS`] scrub, so a variable among them survives it.
+    fn own_env(self, repo: &Path, workload: Workload) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = Vec::new();
         let mut set = |k: &str, v: &str| env.push((k.to_string(), v.to_string()));
         match self {
@@ -561,6 +652,17 @@ impl Arm {
                 // The Rust-backed run reaches the librdkafka venv through this
                 // for its helpers (librdkafka_helpers.py).
                 set("LIBRDKAFKA_PYTHON", &venv_python(repo, "venv-librdkafka").display().to_string());
+            },
+            // The .NET harnesses read their booleans as exactly `True` / `False`.
+            Arm::DotnetSyncRust | Arm::DotnetAsyncRust | Arm::DotnetSyncLibrdkafka | Arm::DotnetAsyncLibrdkafka => {
+                let mode = match workload {
+                    Workload::Producer => "producer",
+                    Workload::Transactional => "transactional",
+                    Workload::Consumer => "consumer",
+                };
+                set("MODE", mode);
+                let is_async = matches!(self, Arm::DotnetAsyncRust | Arm::DotnetAsyncLibrdkafka);
+                set("ASYNC", if is_async { "True" } else { "False" });
             },
         }
         env
@@ -591,6 +693,14 @@ impl Arm {
             Arm::Java => vec![java_jar(repo)],
             Arm::PythonSyncRust | Arm::PythonAsyncRust => vec![venv_python(repo, "venv")],
             Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka => vec![venv_python(repo, "venv-librdkafka")],
+            // The binding loads the Rust client's C library from next to it.
+            Arm::DotnetSyncRust | Arm::DotnetAsyncRust => vec![
+                dotnet_harness(repo, DOTNET_RUST_HARNESS),
+                dotnet_publish_dir(repo, DOTNET_RUST_HARNESS).join(native_library_name()),
+            ],
+            Arm::DotnetSyncLibrdkafka | Arm::DotnetAsyncLibrdkafka => {
+                vec![dotnet_harness(repo, DOTNET_LIBRDKAFKA_HARNESS)]
+            },
         }
     }
 }
@@ -636,6 +746,44 @@ fn python_harness(repo: &Path, workload: Workload) -> PathBuf {
 
 fn venv_python(repo: &Path, venv: &str) -> PathBuf {
     repo.join(venv).join("bin/python")
+}
+
+/// The .NET harness on the Rust core (this repository's binding).
+const DOTNET_RUST_HARNESS: &str = "PerfV3";
+/// The .NET harness on librdkafka (Confluent.Kafka 2.x from NuGet).
+const DOTNET_LIBRDKAFKA_HARNESS: &str = "PerfV2";
+/// The one framework the .NET harnesses are published for: the newest
+/// supported runtime, and the runner installs a single SDK.
+const DOTNET_FRAMEWORK: &str = "net10.0";
+
+fn dotnet() -> String {
+    std::env::var("DOTNET").unwrap_or_else(|_| "dotnet".to_string())
+}
+
+/// The .NET performance harnesses' sources.
+fn dotnet_perf_dir(repo: &Path) -> PathBuf {
+    repo.join("dotnet/tests/Performance")
+}
+
+/// Where `build` publishes a .NET harness: one folder each, since both carry
+/// a `Confluent.Kafka.dll`, of different clients.
+fn dotnet_publish_dir(repo: &Path, harness: &str) -> PathBuf {
+    dotnet_perf_dir(repo).join(harness).join("bin/publish")
+}
+
+fn dotnet_harness(repo: &Path, harness: &str) -> PathBuf {
+    dotnet_publish_dir(repo, harness).join(format!("{harness}.dll"))
+}
+
+/// The Rust client's C library as the .NET binding loads it on this platform.
+fn native_library_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libconfluent_kafka.dylib"
+    } else if cfg!(windows) {
+        "confluent_kafka.dll"
+    } else {
+        "libconfluent_kafka.so"
+    }
 }
 
 fn repo_root() -> &'static Path {
@@ -744,7 +892,7 @@ const SETTINGS: &[Setting] = &[
     number_setting("MAX_IN_FLIGHT", Kind::Positive, 1_000_000, PRODUCING),
     // MiB: 16 GiB.
     number_setting("BUFFER_MEMORY", Kind::Positive, 16_384, PRODUCING),
-    // Read by the Rust and Java producer harnesses only (Kafka 4.4; see
+    // Read by the Rust, Java and .NET-on-Rust producer harnesses only (Kafka 4.4; see
     // `check_allocation_strategy` and `PerfTest::check_arms`); librdkafka has
     // no such setting and runs at its own queue.
     setting(
@@ -778,7 +926,7 @@ const SETTINGS: &[Setting] = &[
     number_setting("LIBRDKAFKA_BATCH", Kind::Count, 1_000_000, &[Workload::Consumer]),
 ];
 
-/// How the librdkafka clients (C, and Python on librdkafka) read in a
+/// How the librdkafka clients (C, and Python and .NET on librdkafka) read in a
 /// consumer test: `LIBRDKAFKA_BATCH=0` polls one record at a time
 /// (`rd_kafka_consumer_poll`, Python's `Consumer.poll()`), `LIBRDKAFKA_BATCH=N`
 /// consumes batches of N (`rd_kafka_consume_batch_queue`, Python's
@@ -909,10 +1057,12 @@ impl PerfTest {
         }
         // The report would show the strategy for clients that ran without it.
         if self.setting("BUFFER_MEMORY_ALLOCATION_STRATEGY").is_some() {
-            if let Some(arm) = arms.iter().find(|a| !matches!(a, Arm::Rust | Arm::Java)) {
+            let reads = |a: &Arm| matches!(a, Arm::Rust | Arm::Java | Arm::DotnetSyncRust | Arm::DotnetAsyncRust);
+            if let Some(arm) = arms.iter().find(|a| !reads(a)) {
                 bail!(
-                    "test `{}`: only the Rust and Java clients read BUFFER_MEMORY_ALLOCATION_STRATEGY, and the {} \
-                     client does not; run the rust group with --clients rust,java",
+                    "test `{}`: only the Rust, Java, dotnet-sync-rust and dotnet-async-rust clients read \
+                     BUFFER_MEMORY_ALLOCATION_STRATEGY, and the {} client does not; run the rust group with \
+                     --clients rust,java or the dotnet group with --clients dotnet-sync-rust,dotnet-async-rust",
                     self.id,
                     arm.id()
                 );
@@ -923,7 +1073,7 @@ impl PerfTest {
         if self.workload == Workload::Consumer && self.number("LIMIT_RPS") == 0 {
             if let Some(arm) = arms.iter().find(|a| matches!(a, Arm::Rust | Arm::Java | Arm::Librdkafka)) {
                 bail!(
-                    "test `{}`: a consumer test with an unbounded load (LIMIT_RPS=0) runs only the Python clients, \
+                    "test `{}`: a consumer test with an unbounded load (LIMIT_RPS=0) runs only the Python and .NET clients, \
                      whose warmup is timed; the {} client counts its warmup in records at LIMIT_RPS",
                     self.id,
                     arm.id()
@@ -970,10 +1120,16 @@ impl PerfTest {
         if PRODUCING.contains(&self.workload) && self.setting("BUFFER_MEMORY").is_none() {
             env.push(("BUFFER_MEMORY".to_string(), PLAN_BUFFER_MEMORY_MIB.to_string()));
         }
-        // The Python harness's librdkafka backend reads MAX_POLL_RECORDS as
-        // its consume() batch only (librdkafka has no max.poll.records), and
-        // POLL_SINGLE as one poll() per record.
-        if matches!(arm, Arm::PythonSyncLibrdkafka | Arm::PythonAsyncLibrdkafka) {
+        // The Python and .NET harnesses' librdkafka backends read
+        // MAX_POLL_RECORDS as their batch only (librdkafka has no
+        // max.poll.records), and POLL_SINGLE as one poll per record.
+        if matches!(
+            arm,
+            Arm::PythonSyncLibrdkafka
+                | Arm::PythonAsyncLibrdkafka
+                | Arm::DotnetSyncLibrdkafka
+                | Arm::DotnetAsyncLibrdkafka
+        ) {
             match LibrdkafkaRead::of(self) {
                 Some(LibrdkafkaRead::Poll) => env.push(("POLL_SINGLE".to_string(), "True".to_string())),
                 Some(LibrdkafkaRead::Batch(n)) => {
@@ -1781,7 +1937,8 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
 /// for the machine. The system packages must already be installed: for
 /// `rust` librdkafka-dev (pkg-config `rdkafka`), cmake, a C compiler (`cc`), a
 /// JDK 17+ and Gradle (`$GRADLE` or `gradle`); for `python` python3-venv and
-/// python3-dev (`$PERF_PYTHON` or `python3`).
+/// python3-dev (`$PERF_PYTHON` or `python3`); for `dotnet` a .NET 10 SDK
+/// (`$DOTNET` or `dotnet`).
 fn build(group: Group) -> anyhow::Result<()> {
     let repo = repo_root();
     let rust = repo.join("rust");
@@ -1932,6 +2089,33 @@ fn build(group: Group) -> anyhow::Result<()> {
                     .arg(repo.join("python/test/performance/requirements-librdkafka.txt")),
             )?;
         },
+        Group::Dotnet => {
+            let sdk = Command::new(dotnet()).arg("--list-sdks").output();
+            if !sdk.is_ok_and(|o| o.status.success() && !o.stdout.is_empty()) {
+                bail!(
+                    "no .NET SDK found (`{} --list-sdks`); install the .NET 10 SDK, or point $DOTNET at its `dotnet`",
+                    dotnet()
+                );
+            }
+            // The binding loads it; its publish copies it next to PerfV3.dll.
+            step(
+                "Rust client C library (FFI)",
+                Command::new(cargo())
+                    .args(["build", "--features", "ffi", "--release"])
+                    .current_dir(&rust),
+            )?;
+            for harness in [DOTNET_RUST_HARNESS, DOTNET_LIBRDKAFKA_HARNESS] {
+                let project = dotnet_perf_dir(repo).join(harness).join(format!("{harness}.csproj"));
+                step(
+                    &format!(".NET {harness} harness"),
+                    Command::new(dotnet())
+                        .args(["publish", "-c", "Release", "-f", DOTNET_FRAMEWORK, "--nologo"])
+                        .arg(&project)
+                        .arg("-o")
+                        .arg(dotnet_publish_dir(repo, harness)),
+                )?;
+            }
+        },
     }
     for arm in group.arms() {
         for workload in [Workload::Producer, Workload::Transactional, Workload::Consumer] {
@@ -1959,10 +2143,12 @@ fn build(group: Group) -> anyhow::Result<()> {
 /// The sources `build` makes `artifact` (one of [`Arm::prerequisites`]) from,
 /// for `run` to tell a stale one: a jar built against an older kafka-clients
 /// would silently ignore a setting it does not know. Empty for the venvs,
-/// whose interpreter is the system's.
+/// whose interpreter is the system's. A .NET project's `bin` and `obj` are
+/// not sources (see [`is_dotnet_build_output`]).
 fn artifact_sources(repo: &Path, artifact: &Path) -> Vec<PathBuf> {
     let java = repo.join("tools/java-perf-test");
     let compare = consumer_compare_dir(repo);
+    let dotnet = dotnet_perf_dir(repo);
     let table = [
         (java_jar(repo), vec![java.join("build.gradle"), java.join("src")]),
         (
@@ -1978,6 +2164,28 @@ fn artifact_sources(repo: &Path, artifact: &Path) -> Vec<PathBuf> {
             vec![repo.join("c/tests/transactional_producer_perf_test.c")],
         ),
         (c_harness(repo, Workload::Consumer), vec![compare.join("librdkafka_e2e.c")]),
+        (
+            dotnet_harness(repo, DOTNET_RUST_HARNESS),
+            vec![
+                dotnet.join(DOTNET_RUST_HARNESS),
+                dotnet.join("PerformanceCommon"),
+                repo.join("dotnet/src/Confluent.Kafka"),
+                repo.join("dotnet/Directory.Build.props"),
+                repo.join("rust/src"),
+            ],
+        ),
+        (
+            dotnet_publish_dir(repo, DOTNET_RUST_HARNESS).join(native_library_name()),
+            vec![repo.join("rust/src")],
+        ),
+        (
+            dotnet_harness(repo, DOTNET_LIBRDKAFKA_HARNESS),
+            vec![
+                dotnet.join(DOTNET_LIBRDKAFKA_HARNESS),
+                dotnet.join("PerformanceCommon"),
+                repo.join("dotnet/Directory.Build.props"),
+            ],
+        ),
         (
             rust_consumer_harness(repo),
             vec![
@@ -2005,6 +2213,9 @@ fn changed_since_built(artifact: &Path, sources: &[PathBuf]) -> anyhow::Result<O
     let built = modified(artifact)?;
     let mut pending: Vec<PathBuf> = sources.to_vec();
     while let Some(path) = pending.pop() {
+        if is_dotnet_build_output(&path) {
+            continue;
+        }
         if path.is_dir() {
             for entry in fs::read_dir(&path).with_context(|| format!("reading {}", path.display()))? {
                 pending.push(entry?.path());
@@ -2014,6 +2225,18 @@ fn changed_since_built(artifact: &Path, sources: &[PathBuf]) -> anyhow::Result<O
         }
     }
     Ok(None)
+}
+
+/// Whether `path` is a .NET project's `bin` or `obj` folder (next to its
+/// `.csproj`), which every build rewrites and the publish lives in: not a
+/// source.
+fn is_dotnet_build_output(path: &Path) -> bool {
+    let named = path.file_name().is_some_and(|n| n == "bin" || n == "obj");
+    named
+        && path.is_dir()
+        && path.parent().and_then(|p| fs::read_dir(p).ok()).is_some_and(|mut entries| {
+            entries.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "csproj")))
+        })
 }
 
 fn step(what: &str, command: &mut Command) -> anyhow::Result<()> {
@@ -2097,6 +2320,10 @@ pub(crate) struct Metrics {
     pub(crate) messages: f64,
     /// The transactional harnesses' numbers, `None` for the others.
     pub(crate) txn: Option<TxnMetrics>,
+    /// The `buffer.memory.allocation.strategy` the harness ran with, when it
+    /// reports one (the .NET producer harness on the Rust core, which picks
+    /// it itself unless the test sets it).
+    pub(crate) buffer_memory_allocation_strategy: Option<String>,
 }
 
 /// The transaction numbers of a transactional harness's `results.json`.
@@ -2167,6 +2394,10 @@ impl Metrics {
             rss_mib: top("rss_avg_kib")? / 1024.0,
             messages: top("messages_measured")?,
             txn,
+            buffer_memory_allocation_strategy: v
+                .get("buffer_memory_allocation_strategy")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         })
     }
 }
@@ -2401,6 +2632,31 @@ fn run_info(options: &RunOptions) -> RunInfo {
     } else {
         None
     };
+    // The .NET runtime and clients the harnesses ran on, from their
+    // `MODE=version`; the runtime facts come from the first that answers.
+    let dotnet_rust = if uses(&[Arm::DotnetSyncRust, Arm::DotnetAsyncRust]) {
+        dotnet_version(repo_root(), DOTNET_RUST_HARNESS)
+    } else {
+        None
+    };
+    let dotnet_librdkafka = if uses(&[Arm::DotnetSyncLibrdkafka, Arm::DotnetAsyncLibrdkafka]) {
+        dotnet_version(repo_root(), DOTNET_LIBRDKAFKA_HARNESS)
+    } else {
+        None
+    };
+    let dotnet_runtime = dotnet_rust.as_ref().or(dotnet_librdkafka.as_ref());
+    let dotnet_fact = |key: &str| dotnet_runtime.and_then(|v| v.get(key).cloned());
+    let dotnet_gc = dotnet_fact("server_gc")
+        .zip(dotnet_fact("concurrent_gc"))
+        .map(|(server, concurrent)| format!("server {server}, concurrent {concurrent}"));
+    let dotnet_binding = dotnet_rust.as_ref().and_then(|v| v.get("confluent_kafka_version").cloned());
+    let dotnet_nuget = dotnet_librdkafka.as_ref().and_then(|v| {
+        let version = v.get("confluent_kafka_version")?;
+        Some(match v.get("librdkafka_version") {
+            Some(librdkafka) => format!("{version} (librdkafka {librdkafka})"),
+            None => version.clone(),
+        })
+    });
     // A limit is positive; anything else (e.g. a `0` meaning "not reported")
     // would flag every result as near it.
     let ingress = env("PERF_CLUSTER_INGRESS_MB_S")
@@ -2430,6 +2686,11 @@ fn run_info(options: &RunOptions) -> RunInfo {
         ("Cluster ingress limit", ingress.map(|mb| format!("{mb:.0} MB/s"))),
         ("librdkafka version", librdkafka),
         ("confluent-kafka version (PyPI)", python_librdkafka),
+        (".NET runtime", dotnet_fact("framework")),
+        (".NET GC", dotnet_gc),
+        (".NET TieredPGO", dotnet_fact("tiered_pgo")),
+        ("Confluent.Kafka version (.NET, Rust core)", dotnet_binding),
+        ("Confluent.Kafka version (NuGet)", dotnet_nuget),
     ] {
         if let Some(value) = value {
             facts.push((label.to_string(), value));
@@ -2456,6 +2717,27 @@ fn cpu() -> Option<String> {
         .find_map(|l| l.strip_prefix("model name")?.split_once(':').map(|(_, m)| m.trim().to_string()))?;
     let count = info.lines().filter(|l| l.starts_with("processor")).count();
     Some(format!("{model}, {count} vCPUs"))
+}
+
+/// The `key: value` lines a .NET harness prints with `MODE=version`, run as
+/// an arm would be (the same scrubbed environment); `None` when it did not
+/// run or printed none.
+fn dotnet_version(repo: &Path, harness: &str) -> Option<BTreeMap<String, String>> {
+    let mut command = Command::new(dotnet());
+    command.arg(dotnet_harness(repo, harness));
+    scrub_environment(&mut command);
+    command.env("MODE", "version");
+    let lines = parse_key_values(&stdout_of(&mut command)?);
+    (!lines.is_empty()).then_some(lines)
+}
+
+/// `key: value` lines; other lines are skipped.
+fn parse_key_values(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .filter_map(|l| l.split_once(": "))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, _)| !k.is_empty() && !k.contains(' '))
+        .collect()
 }
 
 /// A command's standard output, trimmed, when it ran, succeeded and printed
@@ -2804,9 +3086,10 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
     Ok(ArmResult { arm: ctx.arm, outcome, metrics, load_msg_s, elapsed: started.elapsed() })
 }
 
-/// Run the arm's harness: its outcome, and for a consumer test the rate its
-/// load reached.
-fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<(Outcome, Option<f64>)> {
+/// The arm's harness command: its directory, consumer options and the
+/// environment it runs with, scrubbed of the job's harness variables (see
+/// [`scrub_environment`]) before the arm's own are set.
+fn harness_command(ctx: &ArmContext<'_>) -> Command {
     let options = ctx.options;
     let consumer = ctx.test.workload == Workload::Consumer;
     let mut command = ctx.arm.command(ctx.repo, ctx.test.workload);
@@ -2819,9 +3102,7 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<(Outcome, O
     if consumer {
         command.args(consumer_args(ctx));
     }
-    for var in HARNESS_VARS {
-        command.env_remove(var);
-    }
+    scrub_environment(&mut command);
     without_cargo_library_paths(&mut command, ctx.repo);
     let mut env: Vec<(String, String)> = vec![
         ("BOOTSTRAP_SERVERS".into(), options.bootstrap.clone()),
@@ -2855,16 +3136,25 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<(Outcome, O
         env.push(("KAFKA_BIN".into(), ctx.kafka_bin.display().to_string()));
     }
     if consumer {
-        // The Python harness's group (the others take it in
+        // The Python and .NET harnesses' group (the others take it in
         // `consumer_args`), and the client defaults for every consumer
         // setting the test leaves out.
         env.push(("GROUP_ID".into(), ctx.topic.clone()));
         env.push(("USE_DEFAULTS".into(), "True".into()));
     }
-    env.extend(ctx.arm.own_env(ctx.repo));
+    env.extend(ctx.arm.own_env(ctx.repo, ctx.test.workload));
     for (k, v) in &env {
         command.env(k, v);
     }
+    command
+}
+
+/// Run the arm's harness: its outcome, and for a consumer test the rate its
+/// load reached.
+fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<(Outcome, Option<f64>)> {
+    let options = ctx.options;
+    let consumer = ctx.test.workload == Workload::Consumer;
+    let mut command = harness_command(ctx);
     let minutes = options.warmup_min + options.duration_min + ctx.test.seed_minutes(options.duration_min);
     let timeout = Duration::from_secs(minutes * 60) + ARM_TIMEOUT_SLACK;
     let mut load = if consumer {
@@ -2985,8 +3275,8 @@ fn load_rate(output: &str) -> Option<f64> {
     (seconds > 0.0).then(|| records / seconds)
 }
 
-/// The command-line options of a consumer harness other than Python's (which
-/// reads the environment): the arm's topic, its group (named after the
+/// The command-line options of a consumer harness other than Python's and
+/// .NET's (which read the environment): the arm's topic, its group (named after the
 /// topic), the measured seconds, the warmup, the consumer settings the test
 /// sets, where the harness writes `results.json`, and that the driver
 /// produces the load (`--no-produce`). These harnesses count their warmup in
@@ -2999,7 +3289,14 @@ fn consumer_args(ctx: &ArmContext<'_>) -> Vec<String> {
         Arm::Rust => ("--warmup-messages", CONSUMER_FLAGS),
         Arm::Java => ("--warmup", CONSUMER_FLAGS),
         Arm::Librdkafka => ("--warmup", LIBRDKAFKA_CONSUMER_FLAGS),
-        Arm::PythonSyncRust | Arm::PythonSyncLibrdkafka | Arm::PythonAsyncRust | Arm::PythonAsyncLibrdkafka => {
+        Arm::PythonSyncRust
+        | Arm::PythonSyncLibrdkafka
+        | Arm::PythonAsyncRust
+        | Arm::PythonAsyncLibrdkafka
+        | Arm::DotnetSyncRust
+        | Arm::DotnetSyncLibrdkafka
+        | Arm::DotnetAsyncRust
+        | Arm::DotnetAsyncLibrdkafka => {
             return Vec::new();
         },
     };
@@ -4189,16 +4486,23 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             .unwrap();
             test.check_arms(&[Arm::Rust, Arm::Java]).unwrap();
             test.check_arms(&[Arm::Java]).unwrap();
+            test.check_arms(&[Arm::DotnetSyncRust, Arm::DotnetAsyncRust]).unwrap();
             for (arms, arm) in [
                 (Group::Rust.arms(), "librdkafka"),
                 (Group::Python.arms(), "python-sync-rust"),
                 (&[Arm::PythonAsyncLibrdkafka][..], "python-async-librdkafka"),
+                (Group::Dotnet.arms(), "dotnet-sync-librdkafka"),
+                (
+                    &[Arm::DotnetAsyncRust, Arm::DotnetAsyncLibrdkafka][..],
+                    "dotnet-async-librdkafka",
+                ),
             ] {
                 assert_eq!(
                     test.check_arms(arms).unwrap_err().to_string(),
                     format!(
-                        "test `{}`: only the Rust and Java clients read BUFFER_MEMORY_ALLOCATION_STRATEGY, and the \
-                         {arm} client does not; run the rust group with --clients rust,java",
+                        "test `{}`: only the Rust, Java, dotnet-sync-rust and dotnet-async-rust clients read \
+                         BUFFER_MEMORY_ALLOCATION_STRATEGY, and the {arm} client does not; run the rust group with \
+                         --clients rust,java or the dotnet group with --clients dotnet-sync-rust,dotnet-async-rust",
                         test.id
                     )
                 );
@@ -4224,17 +4528,18 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     }
 
     #[test]
-    fn an_unbounded_consumer_load_runs_only_the_python_clients() {
+    fn an_unbounded_consumer_load_runs_only_the_python_and_dotnet_clients() {
         let test = parse_scenario("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", Group::Python).unwrap();
         assert_eq!(test.id, "consumer-max-1b-1p");
         test.check_arms(Group::Python.arms()).unwrap();
+        test.check_arms(Group::Dotnet.arms()).unwrap();
         for arm in [Arm::Rust, Arm::Java, Arm::Librdkafka] {
             let err = test.check_arms(&[arm]).unwrap_err().to_string();
             assert_eq!(
                 err,
                 format!(
                     "test `consumer-max-1b-1p`: a consumer test with an unbounded load (LIMIT_RPS=0) runs only the \
-                     Python clients, whose warmup is timed; the {} client counts its warmup in records at LIMIT_RPS",
+                     Python and .NET clients, whose warmup is timed; the {} client counts its warmup in records at LIMIT_RPS",
                     arm.id()
                 )
             );
@@ -4376,7 +4681,8 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     #[test]
     fn python_arms_select_backend_and_mode() {
         let repo = Path::new("/repo");
-        let env = |arm: Arm| -> BTreeMap<String, String> { arm.own_env(repo).into_iter().collect() };
+        let env =
+            |arm: Arm| -> BTreeMap<String, String> { arm.own_env(repo, Workload::Producer).into_iter().collect() };
         let sync_rust = env(Arm::PythonSyncRust);
         assert_eq!(sync_rust["CLIENT_VERSION"], "3");
         assert_eq!(sync_rust["ASYNC"], "False");
@@ -4390,6 +4696,115 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             Arm::PythonAsyncLibrdkafka.command(repo, Workload::Producer).get_program(),
             "/repo/venv-librdkafka/bin/python"
         );
+    }
+
+    #[test]
+    fn dotnet_arms_select_harness_workload_and_mode() {
+        let repo = Path::new("/repo");
+        let env = |arm: Arm, workload: Workload| -> BTreeMap<String, String> {
+            arm.own_env(repo, workload).into_iter().collect()
+        };
+        for (workload, mode) in [
+            (Workload::Producer, "producer"),
+            (Workload::Transactional, "transactional"),
+            (Workload::Consumer, "consumer"),
+        ] {
+            for arm in Group::Dotnet.arms() {
+                let e = env(*arm, workload);
+                assert_eq!(e["MODE"], mode, "{arm:?}");
+                let is_async = matches!(arm, Arm::DotnetAsyncRust | Arm::DotnetAsyncLibrdkafka);
+                assert_eq!(e["ASYNC"], if is_async { "True" } else { "False" }, "{arm:?}");
+                assert_eq!(e.len(), 2, "{arm:?}");
+                // One harness per backend, whatever the workload, run in the
+                // arm's directory.
+                let command = arm.command(repo, workload);
+                assert_eq!(command.get_program(), dotnet().as_str());
+                let harness = if matches!(arm, Arm::DotnetSyncRust | Arm::DotnetAsyncRust) {
+                    "/repo/dotnet/tests/Performance/PerfV3/bin/publish/PerfV3.dll"
+                } else {
+                    "/repo/dotnet/tests/Performance/PerfV2/bin/publish/PerfV2.dll"
+                };
+                assert_eq!(command.get_args().collect::<Vec<_>>(), [harness], "{arm:?}");
+                assert!(command.get_current_dir().is_none(), "{arm:?}");
+            }
+        }
+        // The idempotence flag goes into the client configuration.
+        assert_eq!(Arm::DotnetSyncLibrdkafka.idempotence_value(true), "true");
+        assert_eq!(Arm::DotnetAsyncRust.idempotence_value(false), "false");
+        let clients: Vec<&str> = Group::Dotnet
+            .arms()
+            .iter()
+            .flat_map(|a| {
+                [Workload::Producer, Workload::Consumer, Workload::Transactional].map(|w| a.expected_client(w))
+            })
+            .collect();
+        assert_eq!(
+            clients,
+            [
+                "dotnet-rust",
+                "dotnet-rust-consumer",
+                "dotnet-rust-txn",
+                "dotnet-librdkafka",
+                "dotnet-librdkafka-consumer",
+                "dotnet-librdkafka-txn",
+                "dotnet-rust-async",
+                "dotnet-rust-async-consumer",
+                "dotnet-rust-async-txn",
+                "dotnet-librdkafka-async",
+                "dotnet-librdkafka-async-consumer",
+                "dotnet-librdkafka-async-txn",
+            ]
+        );
+        // The binding's native library is published next to PerfV3.dll.
+        let native = PathBuf::from("/repo/dotnet/tests/Performance/PerfV3/bin/publish").join(native_library_name());
+        assert_eq!(
+            Arm::DotnetAsyncRust.prerequisites(repo, Workload::Consumer),
+            [
+                PathBuf::from("/repo/dotnet/tests/Performance/PerfV3/bin/publish/PerfV3.dll"),
+                native
+            ]
+        );
+        assert_eq!(
+            Arm::DotnetSyncLibrdkafka.prerequisites(repo, Workload::Producer),
+            [PathBuf::from(
+                "/repo/dotnet/tests/Performance/PerfV2/bin/publish/PerfV2.dll"
+            )]
+        );
+    }
+
+    #[test]
+    fn the_scrub_removes_the_dotnet_runtime_settings_but_not_its_location_or_globalization() {
+        for var in [
+            "DOTNET_gcServer",
+            "DOTNET_TieredPGO",
+            "COMPlus_gcConcurrent",
+            "DOTNET_GCHeapCount",
+        ] {
+            assert!(is_dotnet_runtime_setting(var), "{var}");
+        }
+        for var in [
+            "DOTNET_ROOT",
+            "DOTNET_ROOT_X64",
+            "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT",
+            "DOTNET_SYSTEM_GLOBALIZATION_PREDEFINED_CULTURES_ONLY",
+            "PATH",
+            "XDOTNET_gcServer",
+            "complus_x",
+        ] {
+            assert!(!is_dotnet_runtime_setting(var), "{var}");
+        }
+    }
+
+    #[test]
+    fn reads_a_dotnet_version() {
+        let lines = parse_key_values(
+            "client: dotnet-librdkafka\nconfluent_kafka_version: 2.12.0\nlibrdkafka_version: 2.12.0\n\
+             framework: .NET 10.0.1\nserver_gc: False\nnot a fact\nwith space: x\n",
+        );
+        assert_eq!(lines["confluent_kafka_version"], "2.12.0");
+        assert_eq!(lines["framework"], ".NET 10.0.1");
+        assert_eq!(lines["server_gc"], "False");
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]
@@ -4500,6 +4915,56 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         consumer_args(&ctx)
     }
 
+    /// The arm's own settings are set after the scrub of the job's harness
+    /// variables, so `MODE` and `ASYNC` (themselves harness variables) reach
+    /// the .NET harnesses.
+    #[test]
+    fn the_dotnet_mode_survives_the_scrub() {
+        let mut options = options(Group::Dotnet, 0, 30);
+        options.bootstrap = "broker:9092".to_string();
+        let credentials = Credentials { key: "KEY".to_string(), secret: "hunter2".to_string() };
+        for (scenario, mode) in [
+            ("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1", "producer"),
+            ("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1", "consumer"),
+            ("WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1", "transactional"),
+        ] {
+            let test = parse_scenario(scenario, Group::Dotnet).unwrap();
+            for &arm in Group::Dotnet.arms() {
+                let ctx = ArmContext {
+                    repo: Path::new("/repo"),
+                    options: &options,
+                    test: &test,
+                    arm,
+                    dir: PathBuf::from("/results/t/dotnet"),
+                    topic: "perf-t".to_string(),
+                    source_topic: None,
+                    topics_cli: Path::new("/kafka/bin/kafka-topics.sh"),
+                    kafka_bin: Path::new("/kafka/bin"),
+                    client_properties: Path::new("/private/client.properties"),
+                    credentials: &credentials,
+                    redactions: Arc::new(Vec::new()),
+                    signals_baseline: 0,
+                };
+                let command = harness_command(&ctx);
+                let envs: BTreeMap<String, Option<String>> = command
+                    .get_envs()
+                    .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+                    .collect();
+                let is_async = matches!(arm, Arm::DotnetAsyncRust | Arm::DotnetAsyncLibrdkafka);
+                assert_eq!(envs["MODE"].as_deref(), Some(mode), "{arm:?}");
+                assert_eq!(
+                    envs["ASYNC"].as_deref(),
+                    Some(if is_async { "True" } else { "False" }),
+                    "{arm:?}"
+                );
+                // Its options come from the environment, and it runs where it
+                // writes metrics.jsonl.
+                assert_eq!(command.get_args().count(), 1, "{arm:?}");
+                assert_eq!(command.get_current_dir(), Some(Path::new("/results/t/dotnet")));
+            }
+        }
+    }
+
     #[test]
     fn passes_a_consumer_test_to_each_harness() {
         let scenario = "WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 FETCH_MAX_WAIT_MS=100 \
@@ -4573,7 +5038,12 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         let get = |env: &[(String, String)], key: &str| -> Vec<String> {
             env.iter().filter(|(k, _)| k == key).map(|(_, v)| v.clone()).collect()
         };
-        for arm in [Arm::PythonSyncLibrdkafka, Arm::PythonAsyncLibrdkafka] {
+        for arm in [
+            Arm::PythonSyncLibrdkafka,
+            Arm::PythonAsyncLibrdkafka,
+            Arm::DotnetSyncLibrdkafka,
+            Arm::DotnetAsyncLibrdkafka,
+        ] {
             let polled = env(&poll, arm);
             assert_eq!(get(&polled, "POLL_SINGLE"), ["True"], "{arm:?}");
             let batched = env(&batch, arm);
@@ -4581,14 +5051,24 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             assert!(get(&batched, "POLL_SINGLE").is_empty(), "{arm:?}");
             assert_eq!(get(&env(base, arm), "MAX_POLL_RECORDS"), ["4500"], "{arm:?}");
         }
-        for arm in [Arm::PythonSyncRust, Arm::PythonAsyncRust] {
+        for arm in [
+            Arm::PythonSyncRust,
+            Arm::PythonAsyncRust,
+            Arm::DotnetSyncRust,
+            Arm::DotnetAsyncRust,
+        ] {
             for scenario in [&poll, &batch] {
                 let e = env(scenario, arm);
                 assert_eq!(get(&e, "MAX_POLL_RECORDS"), ["4500"], "{arm:?}");
                 assert!(get(&e, "POLL_SINGLE").is_empty(), "{arm:?}");
             }
         }
-        for arm in Group::Python.arms().iter().chain(Group::Rust.arms()) {
+        for arm in Group::Python
+            .arms()
+            .iter()
+            .chain(Group::Rust.arms())
+            .chain(Group::Dotnet.arms())
+        {
             for scenario in [&poll, &batch] {
                 assert!(get(&env(scenario, *arm), "LIBRDKAFKA_BATCH").is_empty(), "{arm:?}");
             }
@@ -4798,6 +5278,17 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "_env_int(",
             "os.environ.get(",
             "os.environ[",
+            // The .NET harnesses (`PerfEnv` and their own helpers).
+            "PerfEnv.GetString(",
+            "GetStringOrNull(",
+            "GetInt(",
+            "GetLong(",
+            "GetBool(",
+            "GetDouble(",
+            "OptionalInt(",
+            "Has(",
+            "ParseInt(",
+            "Environment.GetEnvironmentVariable(",
         ];
         let name = |quoted: &str| -> Option<String> {
             let quote = quoted.chars().next().filter(|c| matches!(c, '"' | '\''))?;
@@ -4835,6 +5326,13 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             ),
             ["A_B", "SASL_MECHANISM", "CC", "DD"]
         );
+        assert_eq!(
+            env_reads(
+                "PerfEnv.GetInt(\"PARTITIONS\", 1) PerfEnv.Has(\"MODE\") \
+                 Environment.GetEnvironmentVariable(\"ASYNC\") GetBool(name, false)"
+            ),
+            ["PARTITIONS", "MODE", "ASYNC"]
+        );
         let repo = repo_root();
         let mut sources = vec![
             "rust/tests/performance/producer_perf_test.rs",
@@ -4855,6 +5353,14 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         let java = repo.join("tools/java-perf-test/src/main/java/io/confluent/kafka/perftest");
         for entry in fs::read_dir(&java).unwrap() {
             sources.push(entry.unwrap().path());
+        }
+        for harness in ["PerfV2", "PerfV3", "PerformanceCommon"] {
+            for entry in fs::read_dir(dotnet_perf_dir(repo).join(harness)).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|x| x == "cs") {
+                    sources.push(path);
+                }
+            }
         }
         let mut read = 0;
         for path in &sources {
@@ -4877,8 +5383,19 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert_eq!(Group::Rust.arms(), &[Arm::Rust, Arm::Librdkafka, Arm::Java]);
         assert_eq!(Group::Python.arms().len(), 4);
         assert_eq!(
+            Group::Dotnet.arms(),
+            &[
+                Arm::DotnetSyncRust,
+                Arm::DotnetSyncLibrdkafka,
+                Arm::DotnetAsyncRust,
+                Arm::DotnetAsyncLibrdkafka
+            ]
+        );
+        assert_eq!(Group::parse("dotnet").unwrap(), Group::Dotnet);
+        assert_eq!(Group::Dotnet.name(), "dotnet");
+        assert_eq!(
             Group::parse("java").unwrap_err().to_string(),
-            "unknown client group `java` (expected `rust` or `python`)"
+            "unknown client group `java` (expected `rust`, `python` or `dotnet`)"
         );
     }
 
@@ -4985,7 +5502,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 PathBuf::from("/repo/tools/java-perf-test/src")
             ]
         );
-        for arm in Group::Rust.arms() {
+        for arm in Group::Rust.arms().iter().chain(Group::Dotnet.arms()) {
             for workload in [Workload::Producer, Workload::Transactional, Workload::Consumer] {
                 for path in arm.prerequisites(repo, workload) {
                     assert!(!artifact_sources(repo, &path).is_empty(), "{}", path.display());
@@ -4993,6 +5510,41 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             }
         }
         assert!(artifact_sources(repo, &venv_python(repo, "venv")).is_empty());
+        assert_eq!(
+            artifact_sources(repo, &dotnet_harness(repo, "PerfV2")),
+            [
+                PathBuf::from("/repo/dotnet/tests/Performance/PerfV2"),
+                PathBuf::from("/repo/dotnet/tests/Performance/PerformanceCommon"),
+                PathBuf::from("/repo/dotnet/Directory.Build.props")
+            ]
+        );
+        assert_eq!(
+            artifact_sources(repo, &dotnet_harness(repo, "PerfV3")),
+            [
+                PathBuf::from("/repo/dotnet/tests/Performance/PerfV3"),
+                PathBuf::from("/repo/dotnet/tests/Performance/PerformanceCommon"),
+                PathBuf::from("/repo/dotnet/src/Confluent.Kafka"),
+                PathBuf::from("/repo/dotnet/Directory.Build.props"),
+                PathBuf::from("/repo/rust/src")
+            ]
+        );
+    }
+
+    /// A .NET project's `bin` and `obj` are build output, not sources; a
+    /// folder of that name elsewhere is a source.
+    #[test]
+    fn a_dotnet_build_folder_is_not_a_source() {
+        let dir = std::env::temp_dir().join(format!("perf-cloud-dotnet-bin-{}", std::process::id()));
+        let project = dir.join("P");
+        fs::create_dir_all(project.join("bin")).unwrap();
+        fs::create_dir_all(project.join("obj")).unwrap();
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::write(project.join("P.csproj"), "").unwrap();
+        assert!(is_dotnet_build_output(&project.join("bin")));
+        assert!(is_dotnet_build_output(&project.join("obj")));
+        assert!(!is_dotnet_build_output(&dir.join("bin")));
+        assert!(!is_dotnet_build_output(&project));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -5009,6 +5561,18 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert_eq!(m.p99, 8.0);
         assert_eq!(m.rss_mib, 50.0);
         assert_eq!(m.txn, None);
+        assert_eq!(m.buffer_memory_allocation_strategy, None);
+        // As the .NET harness on the Rust core writes it, last.
+        let dotnet = Metrics::from_results(
+            r#"{"test": "producer", "client": "dotnet-rust", "messages_measured": 600000, "duration_s": 60.0,
+                "throughput_msg_s": 10000.0, "throughput_mib_s": 9.77,
+                "latency_ms": {"min": 0.4, "avg": 3.25, "p50": 3.0, "p90": 4.0, "p95": 5.0, "p99": 8.5,
+                               "p999": 12.0, "max": 40.0},
+                "cpu_avg_pct": 21.5, "rss_avg_kib": 51200.0, "buffer_memory_allocation_strategy": "incremental"}"#,
+        )
+        .unwrap();
+        assert_eq!(dotnet.p99, 8.5);
+        assert_eq!(dotnet.buffer_memory_allocation_strategy.as_deref(), Some("incremental"));
         let err = Metrics::from_results(r#"{"client": "rust", "throughput_msg_s": 1}"#)
             .unwrap_err()
             .to_string();

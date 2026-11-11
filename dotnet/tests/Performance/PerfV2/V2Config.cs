@@ -27,6 +27,8 @@ internal static class V2Config
 {
     private const int DefaultBatchSize = 1024 * 1024;
     private const int MaxRequestSizeCap = 8 * 1024 * 1024;
+    private const int DefaultBufferMemoryMib = 32;
+    private const int DefaultMaxPollRecords = 500;
 
     internal static Dictionary<string, string> BuildProducerConfig()
     {
@@ -48,15 +50,16 @@ internal static class V2Config
         bool useDefaults = PerfEnv.GetBool("USE_DEFAULTS", false);
         if (!useDefaults)
         {
-            conf["acks"] = "all";
+            conf["acks"] = PerfEnv.GetString("ACKS", "all");
 
             int batchSize = PerfEnv.Has("BATCH_SIZE") ? PerfEnv.ParseInt("BATCH_SIZE") * 1024 : DefaultBatchSize;
             conf["batch.size"] = Str(batchSize);
 
-            int maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
-                ? PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
-                : Math.Min(batchSize * 64, MaxRequestSizeCap);
-            conf["message.max.bytes"] = Str(maxRequestSize);
+            // Capped at 8 MiB whether set or not, as the C, Rust, Java and Python harnesses do.
+            long maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
+                ? (long)PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
+                : (long)batchSize * 64;
+            conf["message.max.bytes"] = Str((int)Math.Min(maxRequestSize, MaxRequestSizeCap));
 
             conf["compression.type"] = PerfEnv.GetString("COMPRESSION_TYPE", "none");
             conf["enable.idempotence"] = PerfEnv.GetString("ENABLE_IDEMPOTENCE", "false");
@@ -66,12 +69,11 @@ internal static class V2Config
                 conf["max.in.flight.requests.per.connection"] = PerfEnv.GetString("MAX_IN_FLIGHT", string.Empty);
             }
 
-            if (PerfEnv.Has("BUFFER_MEMORY"))
-            {
-                long bufferMemoryBytes = (long)PerfEnv.ParseInt("BUFFER_MEMORY") * 1024 * 1024;
-                conf["queue.buffering.max.kbytes"] = (bufferMemoryBytes / 1024).ToString(CultureInfo.InvariantCulture);
-                conf["queue.buffering.max.messages"] = "2147483647";
-            }
+            // The same buffer as the Rust core's buffer.memory (32 MiB unless BUFFER_MEMORY says otherwise), with no
+            // message cap, so the two clients queue the same bytes before a send has to wait.
+            long bufferMemoryMib = PerfEnv.Has("BUFFER_MEMORY") ? PerfEnv.ParseInt("BUFFER_MEMORY") : DefaultBufferMemoryMib;
+            conf["queue.buffering.max.kbytes"] = (bufferMemoryMib * 1024).ToString(CultureInfo.InvariantCulture);
+            conf["queue.buffering.max.messages"] = "2147483647";
 
             conf["linger.ms"] = PerfEnv.GetString("LINGER_MS", "5");
 
@@ -98,11 +100,25 @@ internal static class V2Config
             ["enable.auto.commit"] = "true",
         };
 
+        // As Python's _librdkafka_tuning, under librdkafka's names; an unset setting keeps librdkafka's default. No
+        // max.poll.records: librdkafka has none, and the harness reads ConsumeBatch records per poll instead.
+        if (cfg.FetchMinBytes is int fetchMinBytes)
+        {
+            conf["fetch.min.bytes"] = Str(fetchMinBytes);
+        }
+
+        if (cfg.MaxPartitionFetchBytes is int maxPartitionFetchBytes)
+        {
+            conf["fetch.message.max.bytes"] = Str(maxPartitionFetchBytes);
+        }
+
+        if (cfg.FetchMaxWaitMs is int fetchMaxWaitMs)
+        {
+            conf["fetch.wait.max.ms"] = Str(fetchMaxWaitMs);
+        }
+
         if (!cfg.UseDefaults)
         {
-            conf["fetch.min.bytes"] = Str(cfg.FetchMinBytes);
-            // No max.poll.records: librdkafka batches through Consume(num_messages).
-            conf["fetch.message.max.bytes"] = Str(cfg.MaxPartitionFetchBytes);
             conf["check.crcs"] = "false";
         }
 
@@ -113,6 +129,14 @@ internal static class V2Config
 
         return conf;
     }
+
+    /// <summary>
+    /// The most records one batch poll returns, as Python's <c>_librdkafka_batch</c>: <c>MAX_POLL_RECORDS</c>, else
+    /// 500 (the Java and Rust clients' default <c>max.poll.records</c>) under <c>USE_DEFAULTS=True</c>, else
+    /// <c>CONSUMER_BATCH_SIZE</c>.
+    /// </summary>
+    internal static int ConsumeBatch(ConsumerBenchmarkConfig cfg) =>
+        cfg.MaxPollRecords ?? (cfg.UseDefaults ? DefaultMaxPollRecords : cfg.BatchSize);
 
     internal static void PrintProducerConfiguration(IReadOnlyDictionary<string, string> conf, int keySize, int valueSize, bool doVerify)
     {
