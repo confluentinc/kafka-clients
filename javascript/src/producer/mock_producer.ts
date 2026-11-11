@@ -490,6 +490,10 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * @returns a new array of the records sent, the caller's own record
    *   objects, in send order
    * @throws `TypeError` when it is given an argument
+   *
+   * @remarks Provisional: an array for Java's `List`, the mapping the client
+   * already uses, while how other collections are typed is not decided yet
+   * (Q25); it may change when that is decided.
    */
   history(): ProducerRecord<K | null, V | null>[] {
     HISTORY_FORMS.match(undefined, arguments.length);

@@ -208,7 +208,7 @@ Conventions" for the rules, and update this table in the same commit as the work
 | P4 | Built-in factories (`stringSerializer()`, …) | **blocked: "The list of serde factories"** |
 | P4 | A string key/value without a serializer | **blocked: Q24/Q27** (today: accepted, `encodeLikeJava`) |
 | P4 | Whether serde methods must all be async | **blocked: Q50** |
-| P5 | `MockProducer` (TS translation): send/flush/close/history/clear/completeNext/errorNext/closed/flushed, public exception fields | done: `MockProducer()` and `MockProducer({ autoComplete, partitioner, keySerializer, valueSerializer })` (`Partitioner` a placeholder `unknown`), `sendException` / `flushException` / `closeException`; non-transactional `MockProducerTest` cases translated but `testPartitioner` (needs a `Cluster`) |
+| P5 | `MockProducer` (TS translation): send/flush/close/history/clear/completeNext/errorNext/closed/flushed, public exception fields | done: `MockProducer()` and `MockProducer({ autoComplete, partitioner, keySerializer, valueSerializer })` (`Partitioner` a placeholder `unknown`), `sendException` / `flushException` / `closeException`; non-transactional `MockProducerTest` cases translated but `testPartitioner` (needs a `Cluster`); `history()` returns an array, **provisional** pending Q25 (other collections) |
 | P5 | `grpc-server/`: an empty config creates a `MockProducer` (autoComplete, no partitioner or serializers), as Python's server does | done |
 | P5 | `MockProducer(cluster, …)` constructor, `partitionsFor` / `partitionsForException`, `metrics`, `setMockMetrics` | **blocked: Q30 list, Q25, Q23** |
 | P6 | Error constructors `{ message, cause, … }` | done (in PR #312) |
