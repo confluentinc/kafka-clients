@@ -37,48 +37,58 @@ public enum ScramMechanism : byte
 
 /// <summary>
 /// The members Java declares on the <see cref="ScramMechanism"/> enum itself, which a C# enum
-/// cannot carry.
+/// cannot carry. From C# 14 the static ones are called on the enum
+/// (<c>ScramMechanism.FromMechanismName(…)</c>); older C# calls them on this class.
 /// </summary>
-public static class ScramMechanisms
+public static class ScramMechanismMethods
 {
-    /// <summary>
-    /// The SASL mechanism name — Java's <c>mechanismName()</c>: the enum constant with
-    /// <c>'_'</c> replaced by <c>'-'</c>.
-    /// </summary>
-    /// <param name="mechanism">The mechanism.</param>
-    /// <returns>The mechanism name, or <c>"UNKNOWN"</c>.</returns>
-    public static string MechanismName(this ScramMechanism mechanism) =>
-        mechanism switch
-        {
-            ScramMechanism.SCRAM_SHA_256 => "SCRAM-SHA-256",
-            ScramMechanism.SCRAM_SHA_512 => "SCRAM-SHA-512",
-            _ => "UNKNOWN",
-        };
+    extension(ScramMechanism)
+    {
+        /// <summary>
+        /// The mechanism for a type code — Java's <c>fromType(byte)</c>. Falls back to
+        /// <see cref="ScramMechanism.UNKNOWN"/>; never throws.
+        /// </summary>
+        /// <param name="type">The type code.</param>
+        /// <returns>The mechanism.</returns>
+        public static ScramMechanism FromType(byte type) =>
+            type switch
+            {
+                1 => ScramMechanism.SCRAM_SHA_256,
+                2 => ScramMechanism.SCRAM_SHA_512,
+                _ => ScramMechanism.UNKNOWN,
+            };
 
-    /// <summary>
-    /// The mechanism for a type code — Java's <c>fromType(byte)</c>. Falls back to
-    /// <see cref="ScramMechanism.UNKNOWN"/>; never throws.
-    /// </summary>
-    /// <param name="type">The type code.</param>
-    /// <returns>The mechanism.</returns>
-    public static ScramMechanism FromType(byte type) =>
-        type switch
-        {
-            1 => ScramMechanism.SCRAM_SHA_256,
-            2 => ScramMechanism.SCRAM_SHA_512,
-            _ => ScramMechanism.UNKNOWN,
-        };
+        /// <summary>
+        /// The mechanism for a SASL mechanism name — Java's <c>fromMechanismName(String)</c>. Falls
+        /// back to <see cref="ScramMechanism.UNKNOWN"/>; never throws.
+        /// </summary>
+        /// <param name="mechanismName">The mechanism name.</param>
+        /// <returns>The mechanism.</returns>
+        public static ScramMechanism FromMechanismName(string mechanismName) =>
+            string.Equals(mechanismName, "SCRAM-SHA-256", StringComparison.Ordinal)
+                ? ScramMechanism.SCRAM_SHA_256
+                : string.Equals(mechanismName, "SCRAM-SHA-512", StringComparison.Ordinal)
+                    ? ScramMechanism.SCRAM_SHA_512
+                    : ScramMechanism.UNKNOWN;
+    }
 
-    /// <summary>
-    /// The mechanism for a SASL mechanism name — Java's <c>fromMechanismName(String)</c>. Falls
-    /// back to <see cref="ScramMechanism.UNKNOWN"/>; never throws.
-    /// </summary>
-    /// <param name="mechanismName">The mechanism name.</param>
-    /// <returns>The mechanism.</returns>
-    public static ScramMechanism FromMechanismName(string mechanismName) =>
-        string.Equals(mechanismName, "SCRAM-SHA-256", StringComparison.Ordinal)
-            ? ScramMechanism.SCRAM_SHA_256
-            : string.Equals(mechanismName, "SCRAM-SHA-512", StringComparison.Ordinal)
-                ? ScramMechanism.SCRAM_SHA_512
-                : ScramMechanism.UNKNOWN;
+    extension(ScramMechanism mechanism)
+    {
+        /// <summary>
+        /// The SASL mechanism name — Java's <c>mechanismName()</c>: the enum constant with
+        /// <c>'_'</c> replaced by <c>'-'</c>.
+        /// </summary>
+        /// <returns>The mechanism name, or <c>"UNKNOWN"</c>.</returns>
+        public string MechanismName() =>
+            mechanism switch
+            {
+                ScramMechanism.SCRAM_SHA_256 => "SCRAM-SHA-256",
+                ScramMechanism.SCRAM_SHA_512 => "SCRAM-SHA-512",
+                _ => "UNKNOWN",
+            };
+
+        /// <summary>The type indicator for this mechanism — Java's <c>type()</c>.</summary>
+        /// <returns>The type indicator, which is the member's value.</returns>
+        public byte Type() => (byte)mechanism;
+    }
 }

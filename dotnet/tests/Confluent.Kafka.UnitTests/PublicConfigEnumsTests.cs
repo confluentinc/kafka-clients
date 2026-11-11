@@ -27,11 +27,11 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Checks <see cref="SecurityProtocol"/>, <see cref="SslClientAuth"/> and <see cref="GroupProtocol"/> and their
-/// static classes against Java's enums: the constants, their order and ids, and the lookups by id and by name,
-/// which upper-case the name as Java's <c>toUpperCase(Locale.ROOT)</c> does where its upper case is ASCII and refuse
-/// what Java's <c>valueOf</c> refuses, with Java's message (any other special-cased letter keeps its invariant upper
-/// case there).
+/// Checks <see cref="SecurityProtocol"/>, <see cref="SslClientAuth"/> and <see cref="GroupProtocol"/> and their static
+/// classes against Java's enums: the constants, their order and ids, Java's text of <see cref="SslClientAuth"/>, and
+/// the lookups by id and by name, which upper-case the name as Java's <c>toUpperCase(Locale.ROOT)</c> does where its
+/// upper case is ASCII and refuse what Java's <c>valueOf</c> refuses, with Java's message (any other special-cased
+/// letter keeps its invariant upper case there).
 /// </summary>
 public sealed class PublicConfigEnumsTests
 {
@@ -62,10 +62,10 @@ public sealed class PublicConfigEnumsTests
     [Fact]
     public void ConfigClasses_test_security_protocol_NamesAreJavasInOrder_AndReadOnly()
     {
-        IReadOnlyList<string> names = SecurityProtocols.Names();
+        IReadOnlyList<string> names = SecurityProtocol.Names();
 
         Assert.Equal(new[] { "PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL" }, names);
-        Assert.Same(names, SecurityProtocols.Names());
+        Assert.Same(names, SecurityProtocol.Names());
         AssertReadOnly(names, "TLS");
     }
 
@@ -75,7 +75,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData((short)2, SecurityProtocol.SASL_PLAINTEXT)]
     [InlineData((short)3, SecurityProtocol.SASL_SSL)]
     public void ConfigClasses_test_security_protocol_ForIdFindsTheProtocol(short id, SecurityProtocol expected) =>
-        Assert.Equal(expected, SecurityProtocols.ForId(id));
+        Assert.Equal(expected, SecurityProtocol.ForId(id));
 
     [Theory]
     [InlineData((short)9)]
@@ -83,7 +83,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData((short)-1)]
     [InlineData(short.MaxValue)]
     public void ConfigClasses_test_security_protocol_ForIdIsNullForAnUnknownId(short id) =>
-        Assert.Null(SecurityProtocols.ForId(id));
+        Assert.Null(SecurityProtocol.ForId(id));
 
     [Theory]
     [InlineData("sasl_plaintext", SecurityProtocol.SASL_PLAINTEXT)]
@@ -91,7 +91,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("Ssl", SecurityProtocol.SSL)]
     [InlineData("sasl_SSL", SecurityProtocol.SASL_SSL)]
     public void ConfigClasses_test_security_protocol_ForNameIgnoresCase(string name, SecurityProtocol expected) =>
-        Assert.Equal(expected, SecurityProtocols.ForName(name));
+        Assert.Equal(expected, SecurityProtocol.ForName(name));
 
     [Theory]
     [InlineData("tls", "TLS")]
@@ -105,7 +105,7 @@ public sealed class PublicConfigEnumsTests
     public void ConfigClasses_test_security_protocol_ForNameRefusesAnUnknownNameWithJavasMessage(
         string name, string upper)
     {
-        var e = Assert.Throws<IllegalArgumentException>(() => SecurityProtocols.ForName(name));
+        var e = Assert.Throws<IllegalArgumentException>(() => SecurityProtocol.ForName(name));
 
         Assert.Equal("No enum constant " + SecurityProtocolClass + "." + upper, e.Message);
         Assert.Null(e.ParamName);
@@ -117,7 +117,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("sa\u017Fl_ssl", SecurityProtocol.SASL_SSL)]
     public void ConfigClasses_test_security_protocol_ForNameUpperCasesTheLettersJavaMapsToAscii(
         string name, SecurityProtocol expected) =>
-        Assert.Equal(expected, SecurityProtocols.ForName(name));
+        Assert.Equal(expected, SecurityProtocol.ForName(name));
 
     [Theory]
     [InlineData("\uFB00x", "FFX")]
@@ -128,7 +128,7 @@ public sealed class PublicConfigEnumsTests
     public void ConfigClasses_test_security_protocol_ForNameRefusesALigatureWithJavasUpperCaseInTheMessage(
         string name, string upper)
     {
-        var e = Assert.Throws<IllegalArgumentException>(() => SecurityProtocols.ForName(name));
+        var e = Assert.Throws<IllegalArgumentException>(() => SecurityProtocol.ForName(name));
 
         Assert.Equal("No enum constant " + SecurityProtocolClass + "." + upper, e.Message);
     }
@@ -136,7 +136,7 @@ public sealed class PublicConfigEnumsTests
     [Fact]
     public void ConfigClasses_test_security_protocol_ForNameRefusesAnotherSpecialCasedLetter_WithItsInvariantUpperCase()
     {
-        var e = Assert.Throws<IllegalArgumentException>(() => SecurityProtocols.ForName("\u0149one"));
+        var e = Assert.Throws<IllegalArgumentException>(() => SecurityProtocol.ForName("\u0149one"));
 
         Assert.Equal("No enum constant " + SecurityProtocolClass + "." + "\u0149one".ToUpperInvariant(), e.Message);
     }
@@ -144,7 +144,7 @@ public sealed class PublicConfigEnumsTests
     [Fact]
     public void ConfigClasses_test_security_protocol_ForNameRefusesNull()
     {
-        var e = Assert.Throws<ArgumentNullException>(() => SecurityProtocols.ForName(null!));
+        var e = Assert.Throws<ArgumentNullException>(() => SecurityProtocol.ForName(null!));
 
         Assert.Equal("name", e.ParamName);
         Assert.Equal(new ArgumentNullException("name").Message, e.Message);
@@ -162,36 +162,68 @@ public sealed class PublicConfigEnumsTests
     [Fact]
     public void ConfigClasses_test_ssl_client_auth_ValuesAreJavasInOrder_AndReadOnly()
     {
-        IReadOnlyList<SslClientAuth> values = SslClientAuths.VALUES;
+        IReadOnlyList<SslClientAuth> values = SslClientAuthMethods.VALUES;
 
         Assert.Equal(new[] { SslClientAuth.REQUIRED, SslClientAuth.REQUESTED, SslClientAuth.NONE }, values);
         Assert.Equal(SslClientAuth.REQUIRED, values[0]);
-        Assert.Same(values, SslClientAuths.VALUES);
+        Assert.Same(values, SslClientAuthMethods.VALUES);
         AssertReadOnly(values, SslClientAuth.NONE);
     }
 
     [Fact]
     public void ConfigClasses_test_ssl_client_auth_ValuesIsAStaticReadOnlyField_NotAProperty()
     {
-        FieldInfo? field = typeof(SslClientAuths).GetField(
-            nameof(SslClientAuths.VALUES), BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
+        FieldInfo? field = typeof(SslClientAuthMethods).GetField(
+            nameof(SslClientAuthMethods.VALUES), BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
 
-        Assert.True(field is { IsInitOnly: true, IsLiteral: false }, "SslClientAuths.VALUES is not a static readonly field.");
+        Assert.True(
+            field is { IsInitOnly: true, IsLiteral: false }, "SslClientAuthMethods.VALUES is not a static readonly field.");
         Assert.Equal(typeof(IReadOnlyList<SslClientAuth>), field!.FieldType);
-        Assert.Empty(typeof(SslClientAuths).GetProperties(
+        Assert.Empty(typeof(SslClientAuthMethods).GetProperties(
             BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly));
     }
 
+    [Fact]
+    public void ConfigClasses_test_ssl_client_auth_JavasTextIsTheStaticToString() =>
+        Assert.Equal("requested", SslClientAuth.ToString(SslClientAuth.REQUESTED));
+
     [Theory]
-    [InlineData(SslClientAuth.REQUIRED, "REQUIRED")]
-    [InlineData(SslClientAuth.REQUESTED, "REQUESTED")]
-    [InlineData(SslClientAuth.NONE, "NONE")]
-    public void ConfigClasses_test_ssl_client_auth_ToStringIsTheConstantName(SslClientAuth auth, string name) =>
+    [InlineData(SslClientAuth.REQUIRED, "REQUIRED", "required")]
+    [InlineData(SslClientAuth.REQUESTED, "REQUESTED", "requested")]
+    [InlineData(SslClientAuth.NONE, "NONE", "none")]
+    public void SslClientAuth_ToStringIsTheConstantName_AndTheStaticToStringJavasText_WhichForConfigReadsBack(
+        SslClientAuth auth, string name, string text)
+    {
         Assert.Equal(name, auth.ToString());
+        Assert.Equal(text, SslClientAuth.ToString(auth));
+        Assert.Equal(text, SslClientAuthMethods.ToString(auth));
+        Assert.Equal(auth, SslClientAuth.ForConfig(SslClientAuth.ToString(auth)));
+    }
+
+    [Theory]
+    [InlineData(3, "3")]
+    [InlineData(-1, "-1")]
+    public void SslClientAuth_ToStringOfAnUndefinedValue_IsItsNumberInTheInvariantCulture(int value, string text)
+    {
+        CultureInfo previous = CultureInfo.CurrentCulture;
+        var minus = (CultureInfo)CultureInfo.GetCultureInfo("sv-SE").Clone();
+        minus.NumberFormat.NegativeSign = "\u2212";
+        CultureInfo.CurrentCulture = minus;
+        try
+        {
+            Assert.NotEqual("-1", (-1).ToString(CultureInfo.CurrentCulture));
+
+            Assert.Equal(text, SslClientAuth.ToString((SslClientAuth)value));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
+    }
 
     [Fact]
     public void ConfigClasses_test_ssl_client_auth_ForConfigOfNullIsNone() =>
-        Assert.Equal(SslClientAuth.NONE, SslClientAuths.ForConfig(null));
+        Assert.Equal(SslClientAuth.NONE, SslClientAuth.ForConfig(null));
 
     [Theory]
     [InlineData("required", SslClientAuth.REQUIRED)]
@@ -199,7 +231,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("none", SslClientAuth.NONE)]
     [InlineData("NONE", SslClientAuth.NONE)]
     public void ConfigClasses_test_ssl_client_auth_ForConfigIgnoresCase(string key, SslClientAuth expected) =>
-        Assert.Equal(expected, SslClientAuths.ForConfig(key));
+        Assert.Equal(expected, SslClientAuth.ForConfig(key));
 
     [Theory]
     [InlineData("other")]
@@ -209,7 +241,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData(" required")]
     [InlineData("")]
     public void ConfigClasses_test_ssl_client_auth_ForConfigIsNullForAnUnknownName(string key) =>
-        Assert.Null(SslClientAuths.ForConfig(key));
+        Assert.Null(SslClientAuth.ForConfig(key));
 
     [Theory]
     [InlineData("reque\uFB06ed", SslClientAuth.REQUESTED)]
@@ -218,7 +250,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("reque\u017Fted", SslClientAuth.REQUESTED)]
     public void ConfigClasses_test_ssl_client_auth_ForConfigUpperCasesTheLettersJavaMapsToAscii(
         string key, SslClientAuth expected) =>
-        Assert.Equal(expected, SslClientAuths.ForConfig(key));
+        Assert.Equal(expected, SslClientAuth.ForConfig(key));
 
     [Theory]
     [InlineData("\uFB00x")]
@@ -228,7 +260,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("\uFB04x")]
     [InlineData("\u0149one")]
     public void ConfigClasses_test_ssl_client_auth_ForConfigIsNullForALigatureOrAnotherSpecialCasedLetter(string key) =>
-        Assert.Null(SslClientAuths.ForConfig(key));
+        Assert.Null(SslClientAuth.ForConfig(key));
 
     [Fact]
     public void ConfigClasses_test_group_protocol_TheConstantsAreJavasInOrder()
@@ -250,7 +282,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("Classic", GroupProtocol.CLASSIC)]
     [InlineData("CLASSIC", GroupProtocol.CLASSIC)]
     public void ConfigClasses_test_group_protocol_OfIgnoresCase(string name, GroupProtocol expected) =>
-        Assert.Equal(expected, GroupProtocols.Of(name));
+        Assert.Equal(expected, GroupProtocol.Of(name));
 
     [Theory]
     [InlineData("share", "SHARE")]
@@ -262,7 +294,7 @@ public sealed class PublicConfigEnumsTests
     public void ConfigClasses_test_group_protocol_OfRefusesAnUnknownNameWithJavasMessage(
         string name, string upper)
     {
-        var e = Assert.Throws<IllegalArgumentException>(() => GroupProtocols.Of(name));
+        var e = Assert.Throws<IllegalArgumentException>(() => GroupProtocol.Of(name));
 
         Assert.Equal("No enum constant " + GroupProtocolClass + "." + upper, e.Message);
         Assert.Null(e.ParamName);
@@ -273,7 +305,7 @@ public sealed class PublicConfigEnumsTests
     [InlineData("class\u0131c")]
     [InlineData("cla\u017F\u017Fic")]
     public void ConfigClasses_test_group_protocol_OfUpperCasesTheLettersJavaMapsToAscii(string name) =>
-        Assert.Equal(GroupProtocol.CLASSIC, GroupProtocols.Of(name));
+        Assert.Equal(GroupProtocol.CLASSIC, GroupProtocol.Of(name));
 
     [Theory]
     [InlineData("\uFB00x", "FFX")]
@@ -284,7 +316,7 @@ public sealed class PublicConfigEnumsTests
     public void ConfigClasses_test_group_protocol_OfRefusesALigatureWithJavasUpperCaseInTheMessage(
         string name, string upper)
     {
-        var e = Assert.Throws<IllegalArgumentException>(() => GroupProtocols.Of(name));
+        var e = Assert.Throws<IllegalArgumentException>(() => GroupProtocol.Of(name));
 
         Assert.Equal("No enum constant " + GroupProtocolClass + "." + upper, e.Message);
     }
@@ -292,7 +324,7 @@ public sealed class PublicConfigEnumsTests
     [Fact]
     public void ConfigClasses_test_group_protocol_OfRefusesAnotherSpecialCasedLetter_WithItsInvariantUpperCase()
     {
-        var e = Assert.Throws<IllegalArgumentException>(() => GroupProtocols.Of("\u0149one"));
+        var e = Assert.Throws<IllegalArgumentException>(() => GroupProtocol.Of("\u0149one"));
 
         Assert.Equal("No enum constant " + GroupProtocolClass + "." + "\u0149one".ToUpperInvariant(), e.Message);
     }
@@ -300,7 +332,7 @@ public sealed class PublicConfigEnumsTests
     [Fact]
     public void ConfigClasses_test_group_protocol_OfRefusesNull()
     {
-        var e = Assert.Throws<ArgumentNullException>(() => GroupProtocols.Of(null!));
+        var e = Assert.Throws<ArgumentNullException>(() => GroupProtocol.Of(null!));
 
         Assert.Equal("name", e.ParamName);
         Assert.Equal(new ArgumentNullException("name").Message, e.Message);
@@ -317,14 +349,15 @@ public sealed class PublicConfigEnumsTests
         {
             Assert.NotEqual("I", "i".ToUpper(CultureInfo.CurrentCulture));
 
-            Assert.Equal(SecurityProtocol.SASL_PLAINTEXT, SecurityProtocols.ForName("sasl_plaintext"));
-            Assert.Equal(GroupProtocol.CLASSIC, GroupProtocols.Of("classic"));
-            Assert.Equal(SslClientAuth.REQUIRED, SslClientAuths.ForConfig("required"));
-            Assert.Equal(SslClientAuth.REQUESTED, SslClientAuths.ForConfig("requested"));
+            Assert.Equal(SecurityProtocol.SASL_PLAINTEXT, SecurityProtocolMethods.ForName("sasl_plaintext"));
+            Assert.Equal(GroupProtocol.CLASSIC, GroupProtocolMethods.Of("classic"));
+            Assert.Equal(SslClientAuth.REQUIRED, SslClientAuthMethods.ForConfig("required"));
+            Assert.Equal(SslClientAuth.REQUESTED, SslClientAuthMethods.ForConfig("requested"));
 
-            var protocol = Assert.Throws<IllegalArgumentException>(() => SecurityProtocols.ForName("plaintext_tls"));
+            var protocol = Assert.Throws<IllegalArgumentException>(
+                () => SecurityProtocolMethods.ForName("plaintext_tls"));
             Assert.Equal("No enum constant " + SecurityProtocolClass + ".PLAINTEXT_TLS", protocol.Message);
-            var group = Assert.Throws<IllegalArgumentException>(() => GroupProtocols.Of("streaming"));
+            var group = Assert.Throws<IllegalArgumentException>(() => GroupProtocolMethods.Of("streaming"));
             Assert.Equal("No enum constant " + GroupProtocolClass + ".STREAMING", group.Message);
         }
         finally

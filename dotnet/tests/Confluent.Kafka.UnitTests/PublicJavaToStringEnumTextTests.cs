@@ -135,7 +135,9 @@ public sealed class PublicJavaToStringEnumTextTests
         }
 
         Assert.Null(TransactionMarshal.NameFromState((TransactionState)99));
-        Assert.Equal("Unknown", TransactionMarshal.WireName((TransactionState)99));
+        Assert.Equal(
+            "state",
+            Assert.Throws<ArgumentOutOfRangeException>(() => TransactionMarshal.WireName((TransactionState)99)).ParamName);
         Assert.Equal(
             "TransactionListing(transactionalId='t', producerId=1, transactionState=99)",
             new TransactionListing("t", 1L, (TransactionState)99).ToString());

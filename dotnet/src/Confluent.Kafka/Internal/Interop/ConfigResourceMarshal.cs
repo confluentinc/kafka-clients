@@ -20,13 +20,13 @@ namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// Builds a <c>kafka_common_config_ConfigResource_t</c> from a <see cref="ConfigResource"/> and copies one
-/// out, mapping the type through Java's <c>ConfigResource.Type</c> id (<c>forId</c> degrades an id this
-/// client does not know to <see cref="ConfigResourceType.UNKNOWN"/>).
+/// out, mapping the type through <c>ConfigResourceType.ForId</c>, which degrades an id this client does not
+/// know to <see cref="ConfigResourceType.UNKNOWN"/>; an id outside a byte is <c>UNKNOWN</c> too.
 /// </summary>
 internal static class ConfigResourceMarshal
 {
     internal static ConfigResourceType TypeFromId(int id) =>
-        Enum.IsDefined(typeof(ConfigResourceType), id) ? (ConfigResourceType)id : ConfigResourceType.UNKNOWN;
+        (uint)id <= byte.MaxValue ? ConfigResourceType.ForId((byte)id) : ConfigResourceType.UNKNOWN;
 
     internal static IntPtr NativeType(ConfigResourceType type)
     {

@@ -94,16 +94,17 @@ public sealed class AdminP4SubmitArgumentTests
     [Theory]
     [InlineData(-1)]
     [InlineData(2)]
+    [InlineData(256)]
     [InlineData(int.MaxValue)]
     public void ElectLeaders_AnUndefinedElectionType_IsRejected(int value)
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentOutOfRangeException rejected = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException rejected = Assert.Throws<IllegalArgumentException>(
             () => admin.ElectLeaders((ElectionType)value, Array.Empty<TopicPartition>(), options: null));
 
-        Assert.Equal("electionType", rejected.ParamName);
+        Assert.Equal("Value " + value + " must be one of [PREFERRED, UNCLEAN]", rejected.Message);
     }
 
     [Theory]

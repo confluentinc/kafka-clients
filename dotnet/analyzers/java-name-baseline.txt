@@ -37,8 +37,6 @@ missing T:Confluent.Kafka.Admin.AdminClientConfig org.apache.kafka.common.config
 missing T:Confluent.Kafka.Admin.AdminClientConfig org.apache.kafka.common.config.AbstractConfig#valuesWithPrefixAllOrNothing(String)
 missing T:Confluent.Kafka.Admin.AdminClientConfig org.apache.kafka.common.config.AbstractConfig#valuesWithPrefixOverride(String)
 missing T:Confluent.Kafka.Admin.AlterClientQuotasResult org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult(Map)
-missing T:Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType#forId(byte)
-missing T:Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType#id()
 missing T:Confluent.Kafka.Admin.AlterUserScramCredentialsResult org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult(Map)
 missing T:Confluent.Kafka.Admin.AsyncAlterClientQuotasResult org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult(Map)
 missing T:Confluent.Kafka.Admin.AsyncAlterUserScramCredentialsResult org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult(Map)
@@ -214,37 +212,11 @@ missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.M
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#setMockMetrics(MetricName,Metric)
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterBroker(int,UnregisterBrokerOptions)
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterMetricFromSubscription(KafkaMetric)
-missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)
-missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromType(byte)
-missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#mechanismName()
-missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#type()
-missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#parse(String)
-missing T:Confluent.Kafka.Admin.UpgradeType org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#code()
-missing T:Confluent.Kafka.Admin.UpgradeType org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#fromCode(int)
-missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#code()
-missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#fromCode(byte)
-missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#fromString(String)
-missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#isUnknown()
-missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#code()
-missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#fromCode(byte)
-missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#fromString(String)
-missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#isUnknown()
 missing T:Confluent.Kafka.Common.AsyncKafkaFuture`1 org.apache.kafka.common.KafkaFuture#allOf(KafkaFuture[])
 missing T:Confluent.Kafka.Common.AsyncKafkaFuture`1 org.apache.kafka.common.KafkaFuture#completedFuture(U)
-missing T:Confluent.Kafka.Common.ClassicGroupState org.apache.kafka.common.ClassicGroupState#parse(String)
-missing T:Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type#forId(byte)
-missing T:Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type#id()
 missing T:Confluent.Kafka.Common.Config.SaslConfigs org.apache.kafka.common.config.SaslConfigs#addClientSaslSupport(ConfigDef)
-missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#VALUES
-missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#forConfig(String)
-missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#toString()
 missing T:Confluent.Kafka.Common.Config.SslConfigs org.apache.kafka.common.config.SslConfigs#addClientSslSupport(ConfigDef)
 missing T:Confluent.Kafka.Common.Errors.ApiException org.apache.kafka.common.errors.ApiException#fillInStackTrace()
-missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#groupStatesForType(GroupType)
-missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#parse(String)
-missing T:Confluent.Kafka.Common.GroupType org.apache.kafka.common.GroupType#parse(String)
-missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#forId(byte)
-missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#id()
 missing T:Confluent.Kafka.Common.KafkaFuture org.apache.kafka.common.KafkaFuture#toCompletionStage()
 missing T:Confluent.Kafka.Common.KafkaFuture`1 org.apache.kafka.common.KafkaFuture#allOf(KafkaFuture[])
 missing T:Confluent.Kafka.Common.KafkaFuture`1 org.apache.kafka.common.KafkaFuture#completedFuture(U)
@@ -256,21 +228,6 @@ missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.met
 missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#measurable()
 missing T:Confluent.Kafka.Common.Metrics.QuotaViolationException org.apache.kafka.common.metrics.QuotaViolationException#fillInStackTrace()
 missing T:Confluent.Kafka.Common.Metrics.QuotaViolationException org.apache.kafka.common.metrics.QuotaViolationException#toString()
-missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#forName(String)
-missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#code()
-missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#fromCode(byte)
-missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#fromString(String)
-missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#isSpecific()
-missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#isUnknown()
-missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#code()
-missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#fromCode(byte)
-missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#fromString(String)
-missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#isUnknown()
-missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#forId(short)
-missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#forName(String)
-missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#id
-missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#name
-missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#names()
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Bytes()
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#ListSerde(Class,Serde)
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$BytesSerde
@@ -339,8 +296,6 @@ missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.co
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#partitions()
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#records(String)
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#records(TopicPartition)
-missing T:Confluent.Kafka.Consumer.GroupProtocol org.apache.kafka.clients.consumer.GroupProtocol#name
-missing T:Confluent.Kafka.Consumer.GroupProtocol org.apache.kafka.clients.consumer.GroupProtocol#of(String)
 missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#clientInstanceId(Duration)
 missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#registerMetricForSubscription(KafkaMetric)
 missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#unregisterMetricFromSubscription(KafkaMetric)
@@ -458,20 +413,11 @@ parameter M:Confluent.Kafka.Common.Errors.InterruptException.#ctor(System.Except
 parameter M:Confluent.Kafka.Common.Errors.InterruptException.#ctor(System.String,System.Exception)
 parameter M:Confluent.Kafka.Consumer.OffsetAndMetadata.#ctor(System.Int64,System.String,System.Nullable{System.Int32})
 parameter M:Confluent.Kafka.Producer.ProducerRecord`2.#ctor(System.String,`1,`0,System.Nullable{System.Int32},System.Nullable{System.Int64},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Header.Header})
-unmatched M:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.MatchType
 unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.UpdateBeginningOffset(System.String,System.Int32,System.Int64)
 unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.UpdateEndOffset(System.String,System.Int32,System.Int64)
 unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.UpdateBeginningOffset(System.String,System.Int32,System.Int64)
 unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.UpdateEndOffset(System.String,System.Int32,System.Int64)
 unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.HistoryCount
 unmatched M:Confluent.Kafka.Producer.MockProducer`2.HistoryCount
-unmatched T:Confluent.Kafka.Admin.AlterConfigOpType
-unmatched T:Confluent.Kafka.Admin.ScramMechanisms
-unmatched T:Confluent.Kafka.Admin.UpgradeTypes
-unmatched T:Confluent.Kafka.Common.Config.SslClientAuths
-unmatched T:Confluent.Kafka.Common.GroupStateExtensions
-unmatched T:Confluent.Kafka.Common.Quota.ClientQuotaMatchType
-unmatched T:Confluent.Kafka.Common.Security.Auth.SecurityProtocols
 unmatched T:Confluent.Kafka.Consumer.AsyncConsumerRebalanceListenerBase
 unmatched T:Confluent.Kafka.Consumer.ConsumerRebalanceListenerBase
-unmatched T:Confluent.Kafka.Consumer.GroupProtocols

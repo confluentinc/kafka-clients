@@ -535,7 +535,7 @@ public sealed class PublicAdminP14DifferentialTests
 
         ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, "diff-l");
         ConfigResource missing = new ConfigResource(ConfigResourceType.TOPIC, "diff-l-absent");
-        AlterConfigOp[] set = { new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET) };
+        AlterConfigOp[] set = { new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), OpType.SET) };
         Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> request =
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [present] = set, [missing] = set };
 
@@ -2272,7 +2272,7 @@ public sealed class PublicAdminP14DifferentialTests
             static groupId => new ConfigResource(ConfigResourceType.GROUP, groupId),
             static _ => (IReadOnlyCollection<AlterConfigOp>)new[]
             {
-                new AlterConfigOp(new ConfigEntry("consumer.session.timeout.ms", "45000"), AlterConfigOpType.SET),
+                new AlterConfigOp(new ConfigEntry("consumer.session.timeout.ms", "45000"), OpType.SET),
             });
         Assert.Same(
             BlockingCall.Returned,
