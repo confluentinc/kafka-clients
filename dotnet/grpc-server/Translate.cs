@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -128,6 +129,8 @@ internal static class Translate
     internal static Proto.CurrentLagResponse CurrentLagResponse(long? lag) =>
         lag.HasValue ? new Proto.CurrentLagResponse { Lag = lag.Value } : new Proto.CurrentLagResponse();
 
+    private const int UnknownServerErrorCode = -1;
+
     private const int LocalIllegalArgumentCode = -3;
 
     private const int LocalIllegalStateCode = -4;
@@ -169,11 +172,78 @@ internal static class Translate
         _ => throw new KeyNotFoundException($"'{name}'"),
     };
 
-    private static Proto.KafkaError Coded(int code, Exception error) => new Proto.KafkaError
+    private static Proto.KafkaError Coded(int code, Exception error)
     {
-        Code = code,
-        Message = WithoutDotNetSuffix(error),
-    };
+        Proto.KafkaError proto = new Proto.KafkaError
+        {
+            Code = code,
+            Message = WithoutDotNetSuffix(error),
+        };
+        FillErrorPayload(proto, error);
+        return proto;
+    }
+
+    // The class-specific payload of a proto KafkaError, read through the error's own getters, and the bit
+    // that tells a bare KafkaException from UnknownServerException, which share code -1, as Python's
+    // _fill_error_payload fills them. The cause goes one level deep (Java's getCause()), when it has an id.
+    private static void FillErrorPayload(Proto.KafkaError proto, Exception error)
+    {
+        if (error is TopicAuthorizationException topicAuthorization)
+        {
+            proto.UnauthorizedTopics.Add(Sorted(topicAuthorization.UnauthorizedTopics()));
+        }
+
+        if (error is InvalidTopicException invalidTopic)
+        {
+            proto.InvalidTopics.Add(Sorted(invalidTopic.InvalidTopics()));
+        }
+
+        if (error is GroupAuthorizationException groupAuthorization && groupAuthorization.GroupId() is string groupId)
+        {
+            proto.GroupId = groupId;
+        }
+
+        if (error is NoOffsetForPartitionException noOffset)
+        {
+            foreach (TopicPartition partition in noOffset.Partitions())
+            {
+                proto.Partitions.Add(CallbackLogPartitionToProto(partition));
+            }
+        }
+
+        if (error is Consumer.OffsetOutOfRangeException outOfRange)
+        {
+            foreach (KeyValuePair<TopicPartition, long> pair in outOfRange.OffsetOutOfRangePartitions())
+            {
+                proto.OffsetOutOfRangePartitions.Add(new Proto.PartitionOffset
+                {
+                    Partition = CallbackLogPartitionToProto(pair.Key),
+                    Offset = pair.Value,
+                });
+            }
+        }
+
+        proto.BareKafkaError = IsBareKafkaError(proto.Code, error);
+        if (error.InnerException is { } cause && KafkaException.FfiIdOf(cause) is int causeCode)
+        {
+            proto.Cause = new Proto.KafkaErrorCause
+            {
+                Code = causeCode,
+                Message = WithoutDotNetSuffix(cause),
+                BareKafkaError = IsBareKafkaError(causeCode, cause),
+            };
+        }
+    }
+
+    private static bool IsBareKafkaError(int code, Exception error) =>
+        code == UnknownServerErrorCode && error is not ApiException;
+
+    private static List<string> Sorted(IEnumerable<string> values)
+    {
+        List<string> sorted = new List<string>(values);
+        sorted.Sort(StringComparer.Ordinal);
+        return sorted;
+    }
 
     // The message without what .NET appends to it, so the text is Java's, as Python sends it. The suffix
     // is read from a probe of the same type, so it matches this runtime and culture.
