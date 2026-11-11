@@ -892,7 +892,7 @@ const SETTINGS: &[Setting] = &[
     number_setting("MAX_IN_FLIGHT", Kind::Positive, 1_000_000, PRODUCING),
     // MiB: 16 GiB.
     number_setting("BUFFER_MEMORY", Kind::Positive, 16_384, PRODUCING),
-    // Read by the Rust, Java and .NET-on-Rust producer harnesses only (Kafka 4.4; see
+    // Read by the Rust, Java and Rust-core Python and .NET producer harnesses only (Kafka 4.4; see
     // `check_allocation_strategy` and `PerfTest::check_arms`); librdkafka has
     // no such setting and runs at its own queue.
     setting(
@@ -1057,12 +1057,23 @@ impl PerfTest {
         }
         // The report would show the strategy for clients that ran without it.
         if self.setting("BUFFER_MEMORY_ALLOCATION_STRATEGY").is_some() {
-            let reads = |a: &Arm| matches!(a, Arm::Rust | Arm::Java | Arm::DotnetSyncRust | Arm::DotnetAsyncRust);
+            let reads = |a: &Arm| {
+                matches!(
+                    a,
+                    Arm::Rust
+                        | Arm::Java
+                        | Arm::PythonSyncRust
+                        | Arm::PythonAsyncRust
+                        | Arm::DotnetSyncRust
+                        | Arm::DotnetAsyncRust
+                )
+            };
             if let Some(arm) = arms.iter().find(|a| !reads(a)) {
                 bail!(
-                    "test `{}`: only the Rust, Java, dotnet-sync-rust and dotnet-async-rust clients read \
+                    "test `{}`: only the Rust, Java and Rust-core Python and .NET clients read \
                      BUFFER_MEMORY_ALLOCATION_STRATEGY, and the {} client does not; run the rust group with \
-                     --clients rust,java or the dotnet group with --clients dotnet-sync-rust,dotnet-async-rust",
+                     --clients rust,java, the python group with --clients python-sync-rust,python-async-rust or the \
+                     dotnet group with --clients dotnet-sync-rust,dotnet-async-rust",
                     self.id,
                     arm.id()
                 );
@@ -1383,7 +1394,7 @@ fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
     if let Some(mib) = number("BUFFER_MEMORY") {
         parts.push(format!("buffer{}", size_label(mib * 1024 * 1024)));
     }
-    // `full` is the clients' default.
+    // `full` is the Java client's default; the harnesses on the Rust core pick their own unless it is set.
     if get("BUFFER_MEMORY_ALLOCATION_STRATEGY") == Some("incremental") {
         parts.push("incremental".to_string());
     }
@@ -2321,8 +2332,8 @@ pub(crate) struct Metrics {
     /// The transactional harnesses' numbers, `None` for the others.
     pub(crate) txn: Option<TxnMetrics>,
     /// The `buffer.memory.allocation.strategy` the harness ran with, when it
-    /// reports one (the .NET producer harness on the Rust core, which picks
-    /// it itself unless the test sets it).
+    /// reports one (the Rust, Python and .NET producer harnesses on the Rust
+    /// core, which pick it themselves unless the test sets it).
     pub(crate) buffer_memory_allocation_strategy: Option<String>,
 }
 
@@ -4487,9 +4498,10 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             test.check_arms(&[Arm::Rust, Arm::Java]).unwrap();
             test.check_arms(&[Arm::Java]).unwrap();
             test.check_arms(&[Arm::DotnetSyncRust, Arm::DotnetAsyncRust]).unwrap();
+            test.check_arms(&[Arm::PythonSyncRust, Arm::PythonAsyncRust]).unwrap();
             for (arms, arm) in [
                 (Group::Rust.arms(), "librdkafka"),
-                (Group::Python.arms(), "python-sync-rust"),
+                (Group::Python.arms(), "python-sync-librdkafka"),
                 (&[Arm::PythonAsyncLibrdkafka][..], "python-async-librdkafka"),
                 (Group::Dotnet.arms(), "dotnet-sync-librdkafka"),
                 (
@@ -4500,9 +4512,10 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 assert_eq!(
                     test.check_arms(arms).unwrap_err().to_string(),
                     format!(
-                        "test `{}`: only the Rust, Java, dotnet-sync-rust and dotnet-async-rust clients read \
+                        "test `{}`: only the Rust, Java and Rust-core Python and .NET clients read \
                          BUFFER_MEMORY_ALLOCATION_STRATEGY, and the {arm} client does not; run the rust group with \
-                         --clients rust,java or the dotnet group with --clients dotnet-sync-rust,dotnet-async-rust",
+                         --clients rust,java, the python group with --clients python-sync-rust,python-async-rust or \
+                         the dotnet group with --clients dotnet-sync-rust,dotnet-async-rust",
                         test.id
                     )
                 );
