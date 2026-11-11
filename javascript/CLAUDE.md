@@ -445,8 +445,29 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   ...check: BareCheck<U>)` infers `U` from the value alone and refuses any
   other `U` through the rest parameter, which no call gives, and a member of a
   class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
-  other object goes by name there, while plain JavaScript takes it bare. The
-  serializer forms of the constructor are not translated yet.
+  other object goes by name there, while plain JavaScript takes it bare.
+- Serializers (root conventions, Serialization): `Serializer` is an object
+  type in `common/serialization`, run in JavaScript inside `send()`
+  (`src/internal/serde.ts`), key then value, after the form and argument
+  checks and before the pump and the hand-over; a thenable result is
+  awaited. The binding keeps no closed state, so a serializer runs on a
+  closed producer too, and the core reports the closed producer at the
+  hand-over (rule 1). What a serializer returns is borrowed until the
+  hand-over, as the app's bytes are (rule 8). A null serializer, or none,
+  sends the record's own bytes (a string encoded by `encodeLikeJava`, checked
+  at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
+  type TypeScript cannot enforce). `close()` closes both serializers once
+  the core reports the producer closed; a construction the core fails with
+  Java's relabelled "Failed to construct kafka producer" closes them too.
+  **(root conflict)** The root conventions' Class family says an omitted or
+  `null` key or value binds `never`, and their Signatures say each Java form
+  has one TypeScript overload signature. With one signature per Java
+  constructor, TypeScript binds a `null` argument to `null`, not `never`
+  (binding `never` needs extra signatures per null combination, as Python's
+  binding stubs have, which the plan's B4 adds: plan §5, item 7); the code
+  follows Signatures, so a record built with
+  `key: null` is a `ProducerRecord<null, ...>`, and `send` takes a
+  `ProducerRecord<K | null, V | null>`, noted in its `@remarks`.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with

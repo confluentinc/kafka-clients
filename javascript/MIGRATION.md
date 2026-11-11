@@ -170,8 +170,11 @@ keys (their value, an object, written as `[object Object]`), which the core
 lists as unused and otherwise ignores, so a builder given there is silently
 not used. Java's `key.serializer` and `value.serializer` throw
 `ConfigError` too, whatever their value: a serializer is a constructor
-argument, never a configuration value. The preview has no serializers yet
-(Section 3): serialize keys and values yourself, then send the bytes.
+argument, never a configuration value:
+`new KafkaProducer({ configs, keySerializer, valueSerializer })`, each an
+object `{ serialize({ topic, headers, data }) }` (or `null`), whose
+`serialize` may return a Promise. The built-in serializer factories
+(`stringSerializer()`, ...) are not in the preview yet (Section 3).
 
 **Schema Registry.** Keep `@confluentinc/schemaregistry`, its imports and its
 calls, and upgrade it to its release that supports 4.x, which ships its own
@@ -218,7 +221,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
 | `partitionsFor()`, `metrics()` | not translated yet |
 | `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
-| Serializers: the `keySerializer` / `valueSerializer` constructor arguments and the built-in factories (`stringSerializer()`, ...) | the serdes |
+| The built-in serializer factories (`stringSerializer()`, ...) | the serdes |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |
 | Musl (Alpine), Linux arm64 and Windows packages | later releases; build from source until then |
 

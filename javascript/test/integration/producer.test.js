@@ -349,6 +349,30 @@ test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: 
   }
 });
 
+test('the serializers bytes, a header one adds and the sizes reach the broker', { skip: SKIP, timeout: 120000 }, async () => {
+  const topic = freshTopic('serde');
+  const keySerializer = { serialize: ({ data }) => (data === null ? null : Buffer.from(`key-${data}`)) };
+  const valueSerializer = {
+    serialize: async ({ headers, data }) => {
+      headers.add({ key: 'type', value: Buffer.from('json') });
+      return Buffer.from(JSON.stringify(data));
+    },
+  };
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' }, keySerializer, valueSerializer });
+  try {
+    const metadata = await (await producer.send(new ProducerRecord({ topic, partition: 0, key: 7, value: { a: 1 } }))).get();
+    assert.equal(metadata.serializedKeySize, 'key-7'.length);
+    assert.equal(metadata.serializedValueSize, '{"a":1}'.length);
+    const { records } = await fetchRecords(BOOTSTRAP, topic, metadata.partition);
+    assert.deepEqual(
+      records.map((r) => [r.key, r.value, r.headers]),
+      [[Buffer.from('key-7'), Buffer.from('{"a":1}'), [{ key: 'type', value: Buffer.from('json'), keyBytes: Buffer.from('type') }]]],
+    );
+  } finally {
+    await producer.close();
+  }
+});
+
 test('CreateTime: the timestamp given, or the send time, reaches the broker', { skip: SKIP, timeout: 120000 }, async () => {
   const topic = freshTopic('create-time');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
