@@ -25,16 +25,9 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// A <c>ListenerActionRequest</c>: the script of each listener method, which a logging listener runs
-/// from inside that method on the invocations the script's trigger selects, after logging the invocation,
-/// the C# port of Python's <c>ListenerAction</c>.
+/// The scripts of a <c>ListenerActionRequest</c>, which a logging listener runs from inside its methods; the C#
+/// port of Python's <c>ListenerAction</c>.
 /// </summary>
-/// <remarks>
-/// Each step is logged as one <c>listener_action</c> entry, encoded as producer_service.proto's
-/// <c>CallbackLogEntry</c> says. A failing step is logged with its error and ends the script; the listener
-/// still returns normally, except for a FAIL step, which throws <see cref="IllegalArgumentException"/> with
-/// its message once logged.
-/// </remarks>
 internal sealed class ListenerAction
 {
     internal const string KindListenerAction = "listener_action";
@@ -58,10 +51,6 @@ internal sealed class ListenerAction
         _scripts = scripts;
     }
 
-    /// <summary>
-    /// The request's scripts, <see langword="null"/> when it has none; throws
-    /// <see cref="IllegalArgumentException"/> for an unspecified trigger or step.
-    /// </summary>
     internal static ListenerAction? FromRequest(Proto.ListenerActionRequest request)
     {
         Dictionary<string, Script> scripts = new Dictionary<string, Script>();
@@ -83,7 +72,6 @@ internal sealed class ListenerAction
         return scripts.Count > 0 ? new ListenerAction(scripts) : null;
     }
 
-    /// <summary>Runs <paramref name="method"/>'s script on a sync consumer, from inside its listener.</summary>
     internal void RunSync(
         IConsumer<byte[], byte[]> consumer,
         CallbackLog log,
@@ -147,10 +135,6 @@ internal sealed class ListenerAction
         }
     }
 
-    /// <summary>
-    /// <see cref="RunSync"/> for an async consumer: the consumer's tasks are awaited, and SLEEP awaits a
-    /// delay.
-    /// </summary>
     internal async Task RunAsync(
         IAsyncConsumer<byte[], byte[]> consumer,
         CallbackLog log,
@@ -343,7 +327,6 @@ internal sealed class ListenerAction
 
         internal List<Proto.ListenerStep> Steps { get; }
 
-        // Whether this invocation runs the script; counts the invocation.
         internal bool Triggered(IReadOnlyCollection<TopicPartition> partitions)
         {
             _calls++;
@@ -389,9 +372,8 @@ internal sealed class ListenerAction
 }
 
 /// <summary>
-/// A <see cref="LoggingRebalanceListener"/>'s logging plus a <see cref="ListenerAction"/>'s scripts, run on
-/// its sync consumer from inside each method after the invocation is logged, as Java's listener calls back
-/// into the consumer it captured; the C# port of Python's <c>ActionLoggingRebalanceListener</c>.
+/// A logging listener that runs a <see cref="ListenerAction"/>'s scripts on its sync consumer; the C# port of
+/// Python's <c>ActionLoggingRebalanceListener</c>.
 /// </summary>
 internal sealed class ActionLoggingRebalanceListener : IConsumerRebalanceListenerWithPartitionsLost
 {
@@ -425,9 +407,8 @@ internal sealed class ActionLoggingRebalanceListener : IConsumerRebalanceListene
 }
 
 /// <summary>
-/// The async twin of <see cref="ActionLoggingRebalanceListener"/>: its methods return a
-/// <see cref="Task"/>, so the async consumer waits for them, and the scripts await the consumer's tasks;
-/// the C# port of Python's <c>AsyncActionLoggingRebalanceListener</c>.
+/// The async twin of <see cref="ActionLoggingRebalanceListener"/>; the C# port of Python's
+/// <c>AsyncActionLoggingRebalanceListener</c>.
 /// </summary>
 internal sealed class AsyncActionLoggingRebalanceListener : IAsyncConsumerRebalanceListenerWithPartitionsLost
 {

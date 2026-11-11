@@ -35,9 +35,6 @@ internal sealed class CallbackLog
     private readonly Dictionary<ulong, List<Proto.CallbackLogEntry>> _entries =
         new Dictionary<ulong, List<Proto.CallbackLogEntry>>();
 
-    // `exception` is the error the callback saw, logged as its message, code and detail; `error` a message of
-    // the server's own, for an error with no exception object, logged with LOCAL_ILLEGAL_STATE. `method`,
-    // `resultPartitions` and `step` are for the "listener_action" entries only.
     internal void Append(
         ulong clientId,
         string kind,

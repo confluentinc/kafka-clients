@@ -38,8 +38,6 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
     private readonly CallbackLog _callbackLog = new CallbackLog();
 
-    // SetListenerAction's pending scripts, keyed by consumer id, each taken by the consumer's next Subscribe
-    // with with_listener.
     private readonly ConcurrentDictionary<ulong, ListenerAction> _listenerActions = new ConcurrentDictionary<ulong, ListenerAction>();
 
     private readonly GroupMetadataStore _groupMetadata;
@@ -97,8 +95,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
     }
 
     // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe
-    // registered, as in Python. A pending SetListenerAction belongs to this registration: the listener calls back
-    // into the consumer from inside the method it targets.
+    // registered, as in Python.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
         if (request.HasPattern)
@@ -162,8 +159,6 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         {
             TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
 
-            // The Map overload for offsets, or for an empty map with with_offsets (Java's commitSync(Map.of()));
-            // otherwise the current consumed positions.
             if (request.Offsets.Count > 0 || request.WithOffsets)
             {
                 Dictionary<TopicPartition, OffsetAndMetadata> offsets = Translate.ProtoOffsetsToDictionary(request.Offsets);
@@ -598,8 +593,6 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.CallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ConsumerId));
 
-    // Kept for the consumer's next Subscribe with with_listener, whose listener runs it; a request with no
-    // script clears a pending one.
     public override Task<Proto.StatusResponse> SetListenerAction(Proto.ListenerActionRequest request, ServerCallContext context)
     {
         if (Get(request.ConsumerId) is null)
@@ -658,8 +651,6 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         return result;
     }
 
-    // The listener of a Subscribe with with_listener: the logging listener, running the pending
-    // SetListenerAction's scripts when there is one.
     private IConsumerRebalanceListener Listener(ulong consumerId)
     {
         if (_listenerActions.TryRemove(consumerId, out ListenerAction? action) && Get(consumerId) is ConsumerEntry entry)

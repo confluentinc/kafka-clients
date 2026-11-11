@@ -98,10 +98,8 @@ internal static class Translate
     internal static TimeSpan? ConsumerTimeout(bool hasTimeoutMs, long timeoutMs) =>
         hasTimeoutMs ? DurationOfMs(timeoutMs) : null;
 
-    // Java's Duration.ofMillis(ms) as the TimeSpan the binding takes, in whole milliseconds, as Python's
-    // _duration_of_ms: a count beyond what a TimeSpan holds, such as Long.MAX_VALUE ms (Java's unbounded
-    // wait), becomes TimeSpan.MaxValue (MinValue for a negative one), an equally unbounded wait that still
-    // fits a signed 64-bit millisecond count.
+    // A count beyond a TimeSpan, such as Java's unbounded Long.MAX_VALUE ms, becomes TimeSpan.MaxValue (MinValue
+    // for a negative one), as Python's _duration_of_ms clamps to timedelta.max.
     internal static TimeSpan DurationOfMs(long ms)
     {
         const long MaxMs = long.MaxValue / TimeSpan.TicksPerMillisecond;
@@ -179,10 +177,9 @@ internal static class Translate
         };
     }
 
-    // Whether ToProto sends the error with a code of the binding's own (a class with an id, or a .NET-only
-    // ArgumentException precondition) rather than the server-made -4 fallback. The consumer servicers return
-    // only such an error as their reply's error; any other exception is a server bug and fails the call, so the
-    // harness reports it instead of matching it as an error class, as Python's _binding_error decides.
+    // In every consumer handler and the producer handlers other than CreateProducer and Send, only an error ToProto
+    // sends with a code of the binding's own is a reply's error; any other exception fails the call (Python's
+    // _binding_error).
     internal static bool IsBindingError(Exception error)
     {
         Exception sent = Unwrapped(error);
@@ -214,9 +211,6 @@ internal static class Translate
         return proto;
     }
 
-    // The class-specific payload of a proto KafkaError, read through the error's own getters, and the bit
-    // that tells a bare KafkaException from UnknownServerException, which share code -1, as Python's
-    // _fill_error_payload fills them. The cause goes one level deep (Java's getCause()), when it has an id.
     private static void FillErrorPayload(Proto.KafkaError proto, Exception error)
     {
         if (error is TopicAuthorizationException topicAuthorization)
@@ -462,8 +456,7 @@ internal static class Translate
         int? partition = proto.HasPartition ? proto.Partition : (int?)null;
         long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
 
-        // The headers are sent, as the Python and C servers send them. A proto header's value is never null, so an
-        // empty value is sent empty.
+        // A proto header's value is never null, so an empty value is sent empty.
         Header[]? headers = null;
         if (proto.Headers.Count > 0)
         {

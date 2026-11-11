@@ -116,8 +116,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             return new Proto.SendResponse { Error = Translate.ToProto(ex) };
         }
 
-        // The 120 s bound covers both stages of the send, so a stuck send fails the RPC instead of hanging
-        // the scenario.
+        // The 120 s bound covers both stages of the send, where Python bounds only the future.
         Stopwatch elapsed = Stopwatch.StartNew();
         Task<AsyncKafkaFuture<RecordMetadata>>? handover = null;
         AsyncKafkaFuture<RecordMetadata> future;
@@ -134,24 +133,20 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
         catch (Exception ex)
         {
-            // Thrown by Send or its first stage, Java's send throwing, as opposed to the record's future
-            // failing below: raised_by_send tells the harness which.
             return new Proto.SendResponse { Error = Translate.ToProto(ex), RaisedBySend = true };
         }
 
         Task<RecordMetadata> delivered = future.Get();
         try
         {
-            // The delivery callback runs before the record's future completes, so its entry is logged
-            // before the await below resumes.
             TimeSpan remaining = _sendTimeout - elapsed.Elapsed;
             RecordMetadata metadata = await delivered.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
         catch (System.TimeoutException) when (!delivered.IsCompleted)
         {
-            // Only the server's own bound is LOCAL_TIMEOUT from here: a send that failed with a
-            // TimeoutException is completed, and goes out through ToProto.
+            // Only the server's own bound is LOCAL_TIMEOUT: a send that failed with a TimeoutException is
+            // completed, and goes out through ToProto.
             return new Proto.SendResponse { Error = Translate.SendTimedOut() };
         }
         catch (Exception ex)
