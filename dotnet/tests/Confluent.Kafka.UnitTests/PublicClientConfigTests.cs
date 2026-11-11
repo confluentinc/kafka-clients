@@ -534,10 +534,10 @@ public sealed class PublicClientConfigTests
 
     private static IDisposable Create(string client, IReadOnlyDictionary<string, object?> configs) => client switch
     {
-        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
+        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
         KafkaAdminClientClient => new KafkaAdminClient(configs),
         AsyncKafkaAdminClientClient => new AsyncKafkaAdminClient(configs),
         _ => throw new ArgumentOutOfRangeException(nameof(client), client, null),

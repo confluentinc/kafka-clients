@@ -205,7 +205,7 @@ public sealed class PublicProducerUnfinishedSendTests
         if (flavor == SyncFlavor)
         {
             MockProducer<byte[], byte[]> producer =
-                new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+                new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             KafkaFuture<long> offset = producer.Send(UnreachableProducers.Record(topic)).ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
@@ -218,7 +218,7 @@ public sealed class PublicProducerUnfinishedSendTests
         else
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future =
                 await TestTimeout.Run(() => producer.Send(UnreachableProducers.Record(topic)).AsTask(), Deadline);
@@ -279,7 +279,7 @@ public sealed class PublicProducerUnfinishedSendTests
         Action? inCallback = null)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback?.Invoke());
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(

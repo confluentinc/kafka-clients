@@ -137,3 +137,39 @@ default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTopics(System.Collections.Ge
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConsumerGroupOffsets(System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions)
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition},Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+
+# Java's deserialize(String, Headers, ByteBuffer): its default on Deserializer and its overrides on the built-in
+# deserializers. .NET passes the bytes as one ReadOnlySpan<byte> form, for byte[] and ByteBuffer alike (ledger 458), so
+# DeserializerExtensions and IDeserializerWithHeaders carry the byte[] form only.
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.BooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.ByteBufferDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.DoubleDeserializer org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.FloatDeserializer org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.IntegerDeserializer org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.LongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.ShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.StringDeserializer org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.UUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.VoidDeserializer org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,Headers,ByteBuffer)
+
+# Java's close() on Serializer and Deserializer is an optional IDisposable (dotnet/CLAUDE.md §3 rule 7; ledgers 377,
+# 383): a serializer or deserializer that holds a resource implements IDisposable, and the client it is given to disposes
+# it; there is no ISerializerWithClose or IDeserializerWithClose (row 464).
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
+missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#close()
+
+# Java's close() on Serde and WrapperSerde is Dispose (dotnet/CLAUDE.md §3 rule 7): ISerde<T> is IDisposable, and its
+# Dispose closes the two halves as Java's close() does (row 461). The clients keep Close() beside Dispose, with another
+# contract, so their close() stays required.
+missing T:Confluent.Kafka.Common.Serialization.ISerde`1 org.apache.kafka.common.serialization.Serde#close()
+missing T:Confluent.Kafka.Common.Serialization.Serdes.WrapperSerde`1 org.apache.kafka.common.serialization.Serdes$WrapperSerde#close()
+
+# Java's serdeFrom(Class<T> type) is SerdeFrom<T>(): the type argument stands for Java's class token, so the method
+# takes no parameter and picks the built-in serde with no reflection (row 465).
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#serdeFrom(Class)
+overload M:Confluent.Kafka.Common.Serialization.Serdes.SerdeFrom``1
+
+# Java's Serdes() constructor, the default one of a class used only for its static methods: Serdes is a static class,
+# which has no constructor.
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Serdes()

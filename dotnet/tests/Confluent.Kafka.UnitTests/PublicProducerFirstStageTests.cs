@@ -114,7 +114,7 @@ public sealed class PublicProducerFirstStageTests
     {
         string topic = "first-stage-token-after-" + Guid.NewGuid().ToString("N");
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -206,7 +206,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_RecordTakenAtOnce_FirstStageIsCompleteWhenSendReturns()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         UnreachableProducers.HoldingCallback hold = new UnreachableProducers.HoldingCallback();
         try
@@ -231,7 +231,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_NotifyHookFiredOnTheSendingThread_WakesThePump_WithoutADeadlock()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: true);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: true);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         NativeProducer native = NativeOf(producer);
         CompletionThread completion = (CompletionThread)typeof(NativeProducer)
@@ -266,8 +266,8 @@ public sealed class PublicProducerFirstStageTests
                 ["bootstrap.servers"] = "localhost:1",
                 ["max.block.ms"] = maxBlockMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
             },
-            Serdes.ByteArray(),
-            Serdes.ByteArray());
+            Serdes.ByteArray().Serializer(),
+            Serdes.ByteArray().Serializer());
 
     private static ProducerRecord<byte[], byte[]> MockRecord(string prefix) =>
         new ProducerRecord<byte[], byte[]>(prefix + "-" + Guid.NewGuid().ToString("N"), Encoding.UTF8.GetBytes("v"));

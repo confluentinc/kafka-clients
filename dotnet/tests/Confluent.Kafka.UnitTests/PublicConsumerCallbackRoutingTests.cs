@@ -1384,10 +1384,10 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static Dictionary<TopicPartition, long> Timestamps() => new Dictionary<TopicPartition, long> { [s_tp0] = 0 };
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
@@ -1399,10 +1399,10 @@ public sealed class PublicConsumerCallbackRoutingTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
+        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
     private sealed class SyncListener : ConsumerRebalanceListenerBase

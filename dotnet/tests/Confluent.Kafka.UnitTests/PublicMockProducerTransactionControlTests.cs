@@ -395,7 +395,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task SetFlushException_FlushFromAnAsyncCallbackAfterAnAwait_ThrowsTheSameInstance()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
         IllegalStateException injected = new IllegalStateException("flush");
         producer.SetFlushException(injected);
@@ -418,7 +418,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task SetFlushException_ConcurrentCalls_LeaveBothFlushPathsEqual()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
         using PausingException pausing = new PausingException();
 
@@ -534,7 +534,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
     private static ConsumerGroupMetadata GroupMetadata()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         return consumer.GroupMetadata();
     }
 
@@ -659,11 +659,11 @@ public sealed class PublicMockProducerTransactionControlTests
         {
             if (async)
             {
-                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
+                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete);
             }
             else
             {
-                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
+                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete);
             }
         }
 

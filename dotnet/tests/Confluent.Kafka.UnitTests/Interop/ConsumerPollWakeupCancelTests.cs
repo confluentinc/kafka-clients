@@ -60,10 +60,10 @@ public sealed class ConsumerPollWakeupCancelTests
 
         consumer.Wakeup();
         WakeupException ex = await Assert.ThrowsAsync<WakeupException>(
-            () => TestTimeout.Run(() => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray()), s_deadline));
+            () => TestTimeout.Run(() => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null), s_deadline));
         Assert.False(string.IsNullOrEmpty(ex.Message));
 
-        ConsumerRecords<byte[], byte[]> records = await TestTimeoutResult(consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray()));
+        ConsumerRecords<byte[], byte[]> records = await TestTimeoutResult(consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null));
         Assert.Single(records);
     }
 
@@ -76,7 +76,7 @@ public sealed class ConsumerPollWakeupCancelTests
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray(), cts.Token));
+            () => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null, cts.Token));
     }
 
     private static async Task<ConsumerRecords<byte[], byte[]>> TestTimeoutResult(Task<ConsumerRecords<byte[], byte[]>> op)

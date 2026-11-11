@@ -41,7 +41,7 @@ public sealed class PublicConsumerSerdeThrowTests
     public void SyncPoll_ValueDeserializerThrows_ThrowsRecordDeserializationException()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        MockConsumer<byte[], int> consumer = ReadyToPollSync(Serdes.ByteArray(), valueDeserializer);
+        MockConsumer<byte[], int> consumer = ReadyToPollSync(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 99, key: new byte[] { 1 }, value: new byte[] { 2, 3 });
 
@@ -61,7 +61,7 @@ public sealed class PublicConsumerSerdeThrowTests
     public void SyncPoll_KeyDeserializerThrows_ThrowsRecordDeserializationException_ForTheKey()
     {
         ThrowingDeserializer<int> keyDeserializer = new ThrowingDeserializer<int>();
-        MockConsumer<int, byte[]> consumer = ReadyToPollSync(keyDeserializer, Serdes.ByteArray());
+        MockConsumer<int, byte[]> consumer = ReadyToPollSync(keyDeserializer, Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 5, key: new byte[] { 1 }, value: new byte[] { 2 });
 
@@ -80,7 +80,7 @@ public sealed class PublicConsumerSerdeThrowTests
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
         AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray(), valueDeserializer);
+            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), valueDeserializer);
         try
         {
             await TestTimeout.Run(
@@ -110,7 +110,7 @@ public sealed class PublicConsumerSerdeThrowTests
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
         AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray(), valueDeserializer);
+            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), valueDeserializer);
         try
         {
             await TestTimeout.Run(

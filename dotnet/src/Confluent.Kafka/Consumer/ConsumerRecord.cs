@@ -31,8 +31,9 @@ namespace Confluent.Kafka.Consumer;
 /// </para>
 /// <para>
 /// An absent key, or an absent value (a tombstone), is <c>default(TKey)</c> / <c>default(TValue)</c>, and the
-/// deserializer is not called; an empty one is deserialized from an empty span. To tell a tombstone from a zero
-/// value, use a nullable value type, such as <c>ConsumerRecord&lt;string, long?&gt;</c>.
+/// deserializer is not called; an empty one is deserialized from an empty span. That default is
+/// <see langword="null"/> for a reference type and for a nullable value type, such as the <c>long?</c> of
+/// <c>Serdes.Long()</c>, so <c>ConsumerRecord&lt;string, long?&gt;</c> reads a tombstone as <see langword="null"/>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
@@ -50,8 +51,8 @@ public sealed class ConsumerRecord<TKey, TValue>
     private readonly long _offset;
     private readonly long _timestamp;
     private readonly TimestampType _timestampType;
-    private readonly TKey _key;
-    private readonly TValue _value;
+    private readonly TKey? _key;
+    private readonly TValue? _value;
     private readonly Headers _headers;
     private readonly int? _leaderEpoch;
     private readonly int _serializedKeySize;
@@ -63,8 +64,8 @@ public sealed class ConsumerRecord<TKey, TValue>
         long offset,
         long timestamp,
         TimestampType timestampType,
-        TKey key,
-        TValue value,
+        TKey? key,
+        TValue? value,
         Headers headers,
         int? leaderEpoch,
         int serializedKeySize,
@@ -112,14 +113,14 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The deserialized key, or <c>default(TKey)</c> when the key is absent; the deserializer is not
     /// called then.</returns>
-    public TKey Key() => _key;
+    public TKey? Key() => _key;
 
     /// <summary>
     /// The deserialized value, or <c>default(TValue)</c> for a tombstone; the deserializer is not called then.
     /// </summary>
     /// <returns>The deserialized value, or <c>default(TValue)</c> for a tombstone; the deserializer is not called
     /// then.</returns>
-    public TValue Value() => _value;
+    public TValue? Value() => _value;
 
     /// <summary>The record headers; empty when the record has none.</summary>
     /// <returns>The record headers; empty when the record has none.</returns>

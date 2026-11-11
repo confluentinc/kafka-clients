@@ -36,6 +36,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     private readonly NativeConsumer _native;
     private readonly IDeserializer<TKey> _keyDeserializer;
     private readonly IDeserializer<TValue> _valueDeserializer;
+    private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
+    private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
     /// Creates a real KIP-848 consumer from a configuration map and the two deserializers
@@ -48,7 +50,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the
     /// key's validator refuses <c>null</c>. The deserializer keys (<c>key.deserializer</c>,
     /// <c>value.deserializer</c>, <c>deserializer.encoding</c>, <c>key.deserializer.encoding</c>,
-    /// <c>value.deserializer.encoding</c>) are ignored: the deserializers are the arguments.
+    /// <c>value.deserializer.encoding</c>) are ignored: the deserializers are the arguments, which the consumer never
+    /// configures, as Java never configures a deserializer it is given.
     /// </param>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
@@ -56,6 +59,11 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <exception cref="ConfigException">
     /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null: Java then reads the
     /// <c>key.deserializer</c> / <c>value.deserializer</c> config, which .NET config cannot set.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not
+    /// <see cref="IDisposable"/>: the consumer would never call that method.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
@@ -72,7 +80,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// construct kafka consumer", but not for a configuration the core refuses with another error, nor when this
     /// constructor throws
     /// <see cref="ArgumentNullException"/> or refuses a deserializer, a value's type or a <c>null</c> with
-    /// <see cref="ConfigException"/>, nor by a close refused with <see cref="ConcurrentModificationException"/>, which
+    /// <see cref="ConfigException"/> or a deserializer with <see cref="IllegalArgumentException"/>, nor by a close
+    /// refused with <see cref="ConcurrentModificationException"/>, which
     /// leaves the consumer open. So a deserializer shared with another client, or used after the close, sees it
     /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
     /// A deserializer that is only <see cref="IAsyncDisposable"/> is not disposed. When a <c>Poll</c> is still
@@ -92,12 +101,17 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
 
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
+        SerdeGuard.Check(_keyDeserializer, SerdeGuard.Consumer, disposes: true);
+        SerdeGuard.Check(_valueDeserializer, SerdeGuard.Consumer, disposes: true);
+        _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
+        _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.Create(configs, serdes: new SerdeDisposal(keyDeserializer, valueDeserializer));
     }
 
     /// <inheritdoc/>
     public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
-        _native.PollWithCallback(timeout, _keyDeserializer, _valueDeserializer, cancellationToken);
+        _native.PollWithCallback(
+            timeout, _keyDeserializer, _keyWithHeaders, _valueDeserializer, _valueWithHeaders, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
