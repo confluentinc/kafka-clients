@@ -53,10 +53,9 @@ const path = require('node:path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 
-const { KafkaProducer } = require('../dist/producer');
+const { KafkaProducer, MockProducer } = require('../dist/producer');
 const {
   CallbackLog,
-  LOCAL_UNSUPPORTED_OPERATION,
   REQUEST_TIMED_OUT,
   futureError,
   int64,
@@ -143,16 +142,14 @@ class ProducerService {
 
   async createProducer(request) {
     const config = request.config || {};
-    if (selectsMock(config)) {
-      // Python creates a MockProducer here; the JS binding has none.
-      return {
-        producer_id: 0,
-        error: serverError('MockProducer is not implemented', LOCAL_UNSUPPORTED_OPERATION),
-      };
-    }
     let producer;
     try {
-      producer = new KafkaProducer({ configs: config });
+      // An empty config selects the mock, as python's server does: Java's
+      // MockProducer(autoComplete, partitioner, keySerializer,
+      // valueSerializer), completing every send at once.
+      producer = selectsMock(config)
+        ? new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null })
+        : new KafkaProducer({ configs: config });
     } catch (e) {
       return { producer_id: 0, error: kafkaErrorToProto(e) };
     }
@@ -305,4 +302,8 @@ function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-main();
+// Run as a program (the image and the harness's native arm); required, it
+// only exports the service, for a test.
+if (require.main === module) main();
+
+module.exports = { ProducerService };
