@@ -52,6 +52,27 @@ function isPropertyName(ts, node) {
   return false;
 }
 
+/** The class declaration enclosing `node`, or undefined. */
+function enclosingClass(ts, node) {
+  for (let n = node.parent; n !== undefined; n = n.parent) if (ts.isClassDeclaration(n)) return n;
+  return undefined;
+}
+
+/**
+ * Whether identifier `node` is a field of class `className`: the name of a
+ * property it declares, or of a property access in its body
+ * (`this.sendException`).
+ */
+function fieldOf(className) {
+  return (ts, node) => {
+    const parent = node.parent;
+    if (parent === undefined) return false;
+    const named = (ts.isPropertyDeclaration(parent) || ts.isPropertyAccessExpression(parent)) && parent.name === node;
+    const cls = enclosingClass(ts, node);
+    return named && cls !== undefined && cls.name !== undefined && cls.name.text === className;
+  };
+}
+
 /**
  * The TypeScript names kept from Java: why, and in which positions (`where`,
  * absent for every position).
@@ -65,7 +86,10 @@ const JAVA_NAMES = new Map([
   ],
   ...['sendException', 'flushException', 'closeException'].map((name) => [
     name,
-    { reason: `Java's public field MockProducer#${name}, which the TypeScript MockProducer keeps as a field of the same name` },
+    {
+      reason: `Java's public field MockProducer#${name}, which the TypeScript MockProducer keeps as a field of the same name, as a field of MockProducer only`,
+      where: fieldOf('MockProducer'),
+    },
   ]),
   [
     'exception',
