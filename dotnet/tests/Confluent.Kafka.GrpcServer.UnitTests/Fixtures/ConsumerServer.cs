@@ -14,9 +14,11 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Xunit;
 
@@ -95,6 +97,21 @@ internal sealed class ConsumerServer : IDisposable
                 break;
             case AsyncMockConsumer<byte[], byte[]> async:
                 async.UpdateEndOffset(topic, partition, offset);
+                break;
+            default:
+                throw new InvalidOperationException("not a mock consumer");
+        }
+    }
+
+    internal async Task Rebalance(ulong consumerId, IReadOnlyCollection<TopicPartition> assignment)
+    {
+        switch (Consumer(consumerId))
+        {
+            case MockConsumer<byte[], byte[]> sync:
+                sync.Rebalance(assignment);
+                break;
+            case AsyncMockConsumer<byte[], byte[]> async:
+                await async.Rebalance(assignment).ConfigureAwait(false);
                 break;
             default:
                 throw new InvalidOperationException("not a mock consumer");

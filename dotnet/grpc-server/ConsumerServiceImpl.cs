@@ -38,6 +38,10 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
     private readonly CallbackLog _callbackLog = new CallbackLog();
 
+    // SetListenerAction's pending scripts, keyed by consumer id, each taken by the consumer's next Subscribe
+    // with with_listener.
+    private readonly ConcurrentDictionary<ulong, ListenerAction> _listenerActions = new ConcurrentDictionary<ulong, ListenerAction>();
+
     private readonly GroupMetadataStore _groupMetadata;
 
     private long _nextId;
@@ -93,7 +97,8 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
     }
 
     // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe
-    // registered, as in Python.
+    // registered, as in Python. A pending SetListenerAction belongs to this registration: the listener calls back
+    // into the consumer from inside the method it targets.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
         if (request.HasPattern)
@@ -101,7 +106,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             SubscriptionPattern pattern = new SubscriptionPattern(request.Pattern);
             if (request.WithListener)
             {
-                LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
+                IConsumerRebalanceListener listener = Listener(request.ConsumerId);
                 return RunStatus(request.ConsumerId, c => c.Subscribe(pattern, listener));
             }
 
@@ -111,7 +116,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         List<string> topics = new List<string>(request.Topics);
         if (request.WithListener)
         {
-            LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
+            IConsumerRebalanceListener listener = Listener(request.ConsumerId);
             return RunStatus(request.ConsumerId, c => c.Subscribe(topics, listener));
         }
 
@@ -587,6 +592,37 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.CallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ConsumerId));
 
+    // Kept for the consumer's next Subscribe with with_listener, whose listener runs it; a request with no
+    // script clears a pending one.
+    public override Task<Proto.StatusResponse> SetListenerAction(Proto.ListenerActionRequest request, ServerCallContext context)
+    {
+        if (Get(request.ConsumerId) is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownConsumer(request.ConsumerId) });
+        }
+
+        ListenerAction? action;
+        try
+        {
+            action = ListenerAction.FromRequest(request);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+
+        if (action is null)
+        {
+            _listenerActions.TryRemove(request.ConsumerId, out _);
+        }
+        else
+        {
+            _listenerActions[request.ConsumerId] = action;
+        }
+
+        return Task.FromResult(new Proto.StatusResponse());
+    }
+
     private static bool IsEmptyConfig(IReadOnlyDictionary<string, string> config)
     {
         if (config.Count == 0)
@@ -614,6 +650,18 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         }
 
         return result;
+    }
+
+    // The listener of a Subscribe with with_listener: the logging listener, running the pending
+    // SetListenerAction's scripts when there is one.
+    private IConsumerRebalanceListener Listener(ulong consumerId)
+    {
+        if (_listenerActions.TryRemove(consumerId, out ListenerAction? action) && Get(consumerId) is ConsumerEntry entry)
+        {
+            return new ActionLoggingRebalanceListener(_callbackLog, consumerId, entry.Consumer, action);
+        }
+
+        return new LoggingRebalanceListener(_callbackLog, consumerId);
     }
 
     private ConsumerEntry? Get(ulong consumerId) =>
