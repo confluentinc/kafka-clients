@@ -50,13 +50,13 @@ public sealed class PublicConsumerTypedPollTests
     [Fact]
     public void SyncPoll_StringLong_RoundTripsDecodedKeyAndValue()
     {
-        MockConsumer<string, long> consumer = ReadyToPoll(Serdes.String(), Serdes.Long());
+        MockConsumer<string, long?> consumer = ReadyToPoll(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        byte[] key = Serdes.String().Serialize(Topic, "hello")?.ToArray()!;
-        byte[] value = Serdes.Long().Serialize(Topic, 1_234_567_890_123L)?.ToArray()!;
+        byte[] key = Serdes.String().Serializer().Serialize(Topic, "hello")?.ToArray()!;
+        byte[] value = Serdes.Long().Serializer().Serialize(Topic, 1_234_567_890_123L)?.ToArray()!;
         consumer.AddRecord(Topic, Partition, offset: 11, key, value);
 
-        ConsumerRecord<string, long> record = Assert.Single(Poll(consumer));
+        ConsumerRecord<string, long?> record = Assert.Single(Poll(consumer));
 
         Assert.Equal("hello", record.Key());
         Assert.Equal(1_234_567_890_123L, record.Value());
@@ -66,20 +66,20 @@ public sealed class PublicConsumerTypedPollTests
     [Fact]
     public async Task AsyncPoll_StringLong_RoundTripsDecodedKeyAndValue()
     {
-        AsyncMockConsumer<string, long> consumer =
-            new AsyncMockConsumer<string, long>(Serdes.String(), Serdes.Long());
+        AsyncMockConsumer<string, long?> consumer =
+            new AsyncMockConsumer<string, long?>(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
         try
         {
             await TestTimeout.Run(
                 () => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
             await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
             consumer.AddRecord(
-                Topic, Partition, offset: 12, Serdes.String().Serialize(Topic, "wörld-Ω")?.ToArray(), Serdes.Long().Serialize(Topic, -7L)?.ToArray());
+                Topic, Partition, offset: 12, Serdes.String().Serializer().Serialize(Topic, "wörld-Ω")?.ToArray(), Serdes.Long().Serializer().Serialize(Topic, -7L)?.ToArray());
 
-            ConsumerRecords<string, long> records = default!;
+            ConsumerRecords<string, long?> records = default!;
             await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
 
-            ConsumerRecord<string, long> record = Assert.Single(records);
+            ConsumerRecord<string, long?> record = Assert.Single(records);
             Assert.Equal("wörld-Ω", record.Key());
             Assert.Equal(-7L, record.Value());
         }
@@ -92,7 +92,7 @@ public sealed class PublicConsumerTypedPollTests
     [Fact]
     public void SyncPoll_ByteArrayIdentity_EquivalentToRawBytes()
     {
-        MockConsumer<byte[], byte[]> consumer = ReadyToPoll(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         byte[] key = { 1, 2, 3 };
         byte[] value = { 9, 8, 7, 6 };
@@ -108,7 +108,7 @@ public sealed class PublicConsumerTypedPollTests
     public void AbsentValue_ReturnsDefault_DeserializerNotInvoked()
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray(), valueDeserializer);
+        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 1, key: new byte[] { 7 }, value: null);
 
@@ -122,7 +122,7 @@ public sealed class PublicConsumerTypedPollTests
     public void AbsentValue_DoesNotInvoke_EvenAThrowingDeserializer()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray(), valueDeserializer);
+        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 2, key: new byte[] { 7 }, value: null);
 
@@ -136,7 +136,7 @@ public sealed class PublicConsumerTypedPollTests
     public void PresentEmptyValue_DeserializesZeroLengthSpan()
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray(), valueDeserializer);
+        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 3, key: new byte[] { 7 }, value: Array.Empty<byte>());
 
@@ -151,7 +151,7 @@ public sealed class PublicConsumerTypedPollTests
     public void PresentValue_DeserializesSpanOfItsLength()
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray(), valueDeserializer);
+        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 4, key: new byte[] { 7 }, value: new byte[] { 1, 2, 3 });
 
@@ -167,7 +167,7 @@ public sealed class PublicConsumerTypedPollTests
     {
         NullableInt64Deserializer tombstone = new NullableInt64Deserializer();
         {
-            MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray(), tombstone);
+            MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), tombstone);
             using (TestTimeout.Disposal(consumer))
             {
                 consumer.AddRecord(Topic, Partition, offset: 5, key: new byte[] { 7 }, value: null);
@@ -179,10 +179,10 @@ public sealed class PublicConsumerTypedPollTests
 
         NullableInt64Deserializer zero = new NullableInt64Deserializer();
         {
-            MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray(), zero);
+            MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), zero);
             using (TestTimeout.Disposal(consumer))
             {
-                consumer.AddRecord(Topic, Partition, offset: 6, key: new byte[] { 7 }, value: Serdes.Long().Serialize(Topic, 0L)?.ToArray());
+                consumer.AddRecord(Topic, Partition, offset: 6, key: new byte[] { 7 }, value: Serdes.Long().Serializer().Serialize(Topic, 0L)?.ToArray());
                 ConsumerRecord<byte[], long?> record = Assert.Single(Poll(consumer));
                 Assert.Equal(0L, record.Value());
                 Assert.Equal(1, zero.InvocationCount);

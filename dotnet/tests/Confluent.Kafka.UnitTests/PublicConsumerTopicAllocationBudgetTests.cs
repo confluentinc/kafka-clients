@@ -79,7 +79,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
     private static long MeasurePoll(string topic, int recordCount, byte[] key, byte[] value)
     {
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(topic, Partition) });
         consumer.Seek(new TopicPartition(topic, Partition), offset: 0);
@@ -108,7 +108,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         byte[] value = MakeBytes(ValueSize, 0xEE);
 
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(topic, Partition) });
         consumer.Seek(new TopicPartition(topic, Partition), offset: 0);

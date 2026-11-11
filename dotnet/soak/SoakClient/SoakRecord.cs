@@ -92,7 +92,7 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
         _padSource = pad;
     }
 
-    public ReadOnlyMemory<byte>? Serialize(string topic, SoakRecord data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, SoakRecord? data)
     {
         // The producer calls the serializer for a null value too, as Java; the soak sends none.
         if (data is null)

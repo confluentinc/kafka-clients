@@ -56,7 +56,7 @@ public sealed class ConsumerPollHeadersTests
         consumer.Seek(Topic, Partition, offset: 0);
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
-        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.NotNull(record.Headers());
@@ -70,14 +70,18 @@ public sealed class ConsumerPollHeadersTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
         consumer.Seek(Topic, Partition, offset: 0);
-        AddRecordWithHeaders(
+        using IDisposable valueBlock = AddRecordWithHeaders(
             consumer,
+            Topic,
+            Partition,
             offset: 0,
+            key: null,
+            value: null,
             ("null-value", null),
             (NonAsciiKey, s_valueWithNul),
             ("empty-value", Array.Empty<byte>()));
 
-        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.Collection(
@@ -100,9 +104,21 @@ public sealed class ConsumerPollHeadersTests
             });
     }
 
-    private static void AddRecordWithHeaders(NativeConsumer consumer, long offset, params (string Key, byte[]? Value)[] headers)
+    // Adds a record with this key, value and headers to a mock. The mock shares the key's and value's kafka_Bytes_t
+    // until the records holding them are destroyed, so the blocks are freed by the object returned, disposed after the
+    // consumer.
+    internal static IDisposable AddRecordWithHeaders(
+        NativeConsumer consumer,
+        string topic,
+        int partition,
+        long offset,
+        byte[]? key,
+        byte[]? value,
+        params (string Key, byte[]? Value)[] headers)
     {
         IntPtr outErr = IntPtr.Zero;
+        UnmanagedBytes keyBlock = new UnmanagedBytes(key);
+        UnmanagedBytes valueBlock = new UnmanagedBytes(value, keyBlock);
         IntPtr recordHeaders = TestNativeMethods.RecordHeadersNew(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         IntPtr builder = IntPtr.Zero;
@@ -112,26 +128,26 @@ public sealed class ConsumerPollHeadersTests
         {
             IntPtr view = NativeMethods.RecordHeadersAsHeaders(recordHeaders, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            foreach ((string key, byte[]? value) in headers)
+            foreach ((string headerKey, byte[]? headerValue) in headers)
             {
-                AddHeader(view, key, value);
+                AddHeader(view, headerKey, headerValue);
             }
 
             builder = TestNativeMethods.OptionsBuilderNew(ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(Topic))
+            using (Utf8Marshal.PinnedUtf8String pinnedTopic = Utf8Marshal.Pin(topic))
             {
-                TestNativeMethods.OptionsBuilderSetTopic(builder, topic.Pointer, ref outErr);
+                TestNativeMethods.OptionsBuilderSetTopic(builder, pinnedTopic.Pointer, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 
-            TestNativeMethods.OptionsBuilderSetPartition(builder, Partition, ref outErr);
+            TestNativeMethods.OptionsBuilderSetPartition(builder, partition, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             TestNativeMethods.OptionsBuilderSetOffset(builder, offset, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            TestNativeMethods.OptionsBuilderSetKey(builder, IntPtr.Zero, ref outErr);
+            TestNativeMethods.OptionsBuilderSetKey(builder, keyBlock.Pointer, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            TestNativeMethods.OptionsBuilderSetValue(builder, IntPtr.Zero, ref outErr);
+            TestNativeMethods.OptionsBuilderSetValue(builder, valueBlock.Pointer, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             TestNativeMethods.OptionsBuilderSetHeaders(builder, recordHeaders, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -155,6 +171,11 @@ public sealed class ConsumerPollHeadersTests
                 }
             }
         }
+        catch
+        {
+            valueBlock.Dispose();
+            throw;
+        }
         finally
         {
             Destroy(NativeMethods.ConsumerRecordDestroy, record);
@@ -162,6 +183,8 @@ public sealed class ConsumerPollHeadersTests
             Destroy(TestNativeMethods.OptionsBuilderDestroy, builder);
             Destroy(TestNativeMethods.RecordHeadersDestroy, recordHeaders);
         }
+
+        return valueBlock;
     }
 
     private static void AddHeader(IntPtr headers, string key, byte[]? value)
@@ -194,6 +217,50 @@ public sealed class ConsumerPollHeadersTests
         IntPtr outErr = IntPtr.Zero;
         destroy(self, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    /// <summary>
+    /// A kafka_Bytes_t and its bytes in unmanaged memory, or a null pointer for no bytes; freed once, with the block it
+    /// was given to free after it.
+    /// </summary>
+    private sealed class UnmanagedBytes : IDisposable
+    {
+        private readonly IDisposable? _next;
+
+        private IntPtr _data;
+
+        internal UnmanagedBytes(byte[]? bytes, IDisposable? next = null)
+        {
+            _next = next;
+            if (bytes is null)
+            {
+                return;
+            }
+
+            _data = Marshal.AllocHGlobal(Math.Max(bytes.Length, 1));
+            Marshal.Copy(bytes, 0, _data, bytes.Length);
+            Pointer = Marshal.AllocHGlobal(Marshal.SizeOf<KafkaBytes>());
+            Marshal.StructureToPtr(new KafkaBytes(_data, bytes.Length), Pointer, fDeleteOld: false);
+        }
+
+        internal IntPtr Pointer { get; private set; }
+
+        public void Dispose()
+        {
+            if (Pointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(Pointer);
+                Pointer = IntPtr.Zero;
+            }
+
+            if (_data != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(_data);
+                _data = IntPtr.Zero;
+            }
+
+            _next?.Dispose();
+        }
     }
 
     /// <summary>

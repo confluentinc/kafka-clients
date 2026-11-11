@@ -122,7 +122,7 @@ internal sealed class V3SyncTransactionalProducer : ITransactionalProducer
 
     internal V3SyncTransactionalProducer(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
+        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 
     public ValueTask InitTransactions()
@@ -181,7 +181,7 @@ internal sealed class V3AsyncTransactionalProducer : ITransactionalProducer
 
     internal V3AsyncTransactionalProducer(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
+        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 
     public ValueTask InitTransactions() => new(_producer.InitTransactions());
@@ -222,7 +222,7 @@ internal sealed class V3TransactionalConsumer : ITransactionalConsumer
 
     internal V3TransactionalConsumer(IReadOnlyDictionary<string, string> config, string sourceTopic, bool offThread)
     {
-        _consumer = new KafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
+        _consumer = new KafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         _consumer.Subscribe(new[] { sourceTopic });
         _offThread = offThread;
     }

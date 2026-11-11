@@ -45,6 +45,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     private readonly NativeConsumer _native;
     private readonly IDeserializer<TKey> _keyDeserializer;
     private readonly IDeserializer<TValue> _valueDeserializer;
+    private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
+    private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
@@ -61,6 +63,10 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// </exception>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
@@ -68,12 +74,16 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
+        SerdeGuard.Check(_keyDeserializer, SerdeGuard.Consumer, disposes: false);
+        SerdeGuard.Check(_valueDeserializer, SerdeGuard.Consumer, disposes: false);
+        _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
+        _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.CreateMock(autoOffsetReset, withPump: false);
     }
 
     /// <inheritdoc/>
     public ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout) =>
-        _native.PollTyped(timeout, _keyDeserializer, _valueDeserializer);
+        _native.PollTyped(timeout, _keyDeserializer, _keyWithHeaders, _valueDeserializer, _valueWithHeaders);
 
     /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
