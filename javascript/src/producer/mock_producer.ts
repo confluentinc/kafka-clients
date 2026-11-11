@@ -112,10 +112,10 @@ function metadataOf(tp: TopicPartition, offset: number, size: number): RecordMet
  * or Java's `RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)` and `e`; then
  * the record's future completes, with the offset, or `e`. A callback that
  * returns a Promise is awaited first, as KafkaProducer awaits one: the
- * returned Promise settles once the future completed, and a rejection is
- * reported through `process.emitWarning`, as KafkaProducer reports it to the
- * core's log. What the callback throws propagates, and the future then never
- * completes, as in Java.
+ * returned Promise resolves once the future completed. What the callback
+ * throws propagates, and the future then never completes, as in Java; a
+ * rejection of its Promise is handled as that throw: the returned Promise
+ * rejects with it, and the future never completes.
  */
 function complete(completion: Completion, e: unknown): Promise<void> | undefined {
   const failed = e !== null && e !== undefined;
@@ -126,10 +126,7 @@ function complete(completion: Completion, e: unknown): Promise<void> | undefined
     const metadata = failed ? metadataOf(completion.tp, -1, -1) : completion.metadata;
     const returned: unknown = completion.callback({ metadata, exception: failed ? (e as Error) : null });
     if (returned !== undefined) {
-      return Promise.resolve(returned).then(settle, (reason: unknown) => {
-        process.emitWarning(`Error executing user-provided callback on message for topic-partition '${String(completion.tp)}': ${String(reason)}`);
-        settle();
-      });
+      return Promise.resolve(returned).then(settle);
     }
   }
   settle();
@@ -147,8 +144,10 @@ function complete(completion: Completion, e: unknown): Promise<void> | undefined
  *
  * @remarks Its producer methods (`send`, `flush`, `close`) return Promises,
  * as `KafkaProducer`'s do, so the mock stands in for it; a send completes,
- * and its callback runs, in the call that completes it. It emits no preview
- * warning.
+ * and its callback runs, in the call that completes it. A callback that
+ * throws, or returns a Promise that rejects, fails that call with its error,
+ * and the record's future never completes, as Java's mock leaves it. It
+ * emits no preview warning.
  */
 export class MockProducer<K = Uint8Array, V = Uint8Array> {
   /**
@@ -173,6 +172,10 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
   // Map<TopicPartition, Long>, whose key has value equality).
   readonly #offsets = new Map<string, number>();
   #closed = false;
+  // What a callback's Promise rejected with after the synchronous
+  // completeNext() / errorNext() that ran it had returned: raised by the next
+  // send(), flush() or close() of the mock, once.
+  #deferredError: { error: unknown } | null = null;
 
   /**
    * Create a mock producer.
@@ -247,8 +250,8 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * headers, their bytes unused, as Java's mock runs them to surface a wrong
    * serializer; one returning a Promise is awaited. With `autoComplete`, the
    * record completes and its callback runs inside the call; what the
-   * callback throws is then the rejection, and the record's future never
-   * completes.
+   * callback throws, or its Promise rejects with, is then the rejection, and
+   * the record's future never completes.
    */
   send(options: {
     /** The record to send. */
@@ -289,6 +292,7 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
   // then the record (Java dereferences it next).
   #send(options: unknown, count: number): Promise<KafkaFuture<RecordMetadata>> {
     SEND_FORMS.match(options, count);
+    this.#throwDeferred();
     if (this.#closed) throw illegalState(CLOSED_MESSAGE);
     if (this.sendException !== null) throw this.sendException;
     const record = SEND_FORMS.value(options, 'record');
@@ -380,12 +384,14 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    *
    * @remarks `flushException`, when set, is the rejection, the same
    * instance. What a callback throws is the rejection, and the calls queued
-   * behind it stay uncompleted.
+   * behind it stay uncompleted; a rejected callback Promise is the rejection
+   * too, once the callbacks already started have settled.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {
     try {
       FLUSH_FORMS.match(options, arguments.length);
+      this.#throwDeferred();
       if (this.#closed) throw illegalState(CLOSED_MESSAGE);
       if (this.flushException !== null) throw this.flushException;
       const settling: Promise<void>[] = [];
@@ -409,7 +415,9 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
    * @remarks `closeException`, when set, is the rejection, the same
-   * instance, and the mock stays open. Java's mock closes no serializer.
+   * instance, and the mock stays open. Java's mock closes no serializer. An
+   * error kept from a callback's Promise (`completeNext()`) is the rejection
+   * once the mock is closed.
    */
   close(): Promise<void>;
   /**
@@ -430,6 +438,7 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
       CLOSE_FORMS.match(options, arguments.length);
       if (this.closeException !== null) throw this.closeException;
       this.#closed = true;
+      this.#throwDeferred();
       return Promise.resolve();
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check or the injected error threw, as Java's mock throws it
@@ -504,7 +513,12 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * @throws `IllegalArgumentError` when it is given an argument
    *
    * @remarks The record's callback runs inside the call: what it throws
-   * propagates, and the record's future then never completes.
+   * propagates, and the record's future then never completes. *(deviation,
+   * as Python's `AsyncMockProducer`)* A callback's Promise that rejects does
+   * so after this call returned: the record's future never completes, and
+   * the error is kept and raised by the next `send()`, `flush()` or
+   * `close()` of the mock. Why: the call is synchronous, as Java's, and
+   * cannot wait for the Promise. Goes when: never.
    */
   completeNext(): boolean {
     COMPLETE_NEXT_FORMS.match(undefined, arguments.length);
@@ -519,7 +533,8 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * @throws `IllegalArgumentError` when the given parameters are not `{e}`
    * @throws `TypeError` when `e` is `undefined`
    *
-   * @remarks The callback receives the error itself, and the future's `get()`
+   * @remarks A callback's Promise that rejects is kept as `completeNext()`
+   * keeps it. The callback receives the error itself, and the future's `get()`
    * rejects with an `ExecutionError` whose `cause` it is. A null `e`
    * completes the call successfully, as Java's does.
    */
@@ -541,10 +556,27 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
   }
 
   // Java's errorNext: the earliest completion, if any, completed with `e`.
+  // A callback's Promise that rejects does so after this call returned: its
+  // error is kept for the next send(), flush() or close() (Python's
+  // AsyncMockProducer keeps it the same way).
   #completeEarliest(e: unknown): boolean {
     const completion = this.#completions.shift();
     if (completion === undefined) return false;
-    void complete(completion, e);
+    const settled = complete(completion, e);
+    if (settled !== undefined) {
+      void settled.catch((error: unknown) => {
+        if (this.#deferredError === null) this.#deferredError = { error };
+      });
+    }
     return true;
+  }
+
+  // Throws, once, the error a callback's Promise rejected with after the call
+  // that ran it had returned.
+  #throwDeferred(): void {
+    const deferred = this.#deferredError;
+    if (deferred === null) return;
+    this.#deferredError = null;
+    throw deferred.error;
   }
 }
