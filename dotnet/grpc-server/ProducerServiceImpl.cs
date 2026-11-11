@@ -80,11 +80,11 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             // An empty or all-blank config selects a MockProducer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+                producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             }
             else
             {
-                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
+                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             }
         }
         catch (Exception ex)

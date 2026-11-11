@@ -488,7 +488,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
         TimeSpan timeout,
         IDeserializer<TKey> keyDeserializer,
-        IDeserializer<TValue> valueDeserializer)
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
+        IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders)
     {
         long timeoutMs = TimerTimeoutMs(timeout);
         RefuseInsideACallback();
@@ -506,7 +508,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind;
         try
         {
-            copied = ConsumerRecordsMarshal.CopyOut(records, keyDeserializer, valueDeserializer, out error, out rewind);
+            copied = ConsumerRecordsMarshal.CopyOut(
+                records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
         }
         finally
         {

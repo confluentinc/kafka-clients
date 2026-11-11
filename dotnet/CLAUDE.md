@@ -431,8 +431,8 @@ public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>
     public long Offset();
     public long Timestamp();
     public TimestampType TimestampType();
-    public TKey Key();           // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
-    public TValue Value();       // deserialized; default(TValue) if absent (a tombstone; deser NOT called)
+    public TKey? Key();          // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
+    public TValue? Value();      // deserialized (span → T); default(TValue) if absent (deser NOT called — decision C)
     public Headers Headers();    // the record's own, writable copies (not routed through a deserializer this phase)
 }
 
@@ -668,22 +668,36 @@ P1b's typed consumers**; `ISerializer<T>` is **now consumed by the shipped typed
 
 ```csharp
 public interface ISerializer<T> {
-    ReadOnlyMemory<byte>? Serialize(string topic, T data); // Java Serializer<T>.serialize returns byte[]; see below
+    ReadOnlyMemory<byte>? Serialize(string topic, T? data);           // Java Serializer<T>.serialize(String, T)
 }
 public interface IDeserializer<T> {
-    T Deserialize(string topic, ReadOnlySpan<byte> data); // Java Deserializer<T>.deserialize — sync, span (see below)
+    T? Deserialize(string topic, ReadOnlySpan<byte> data);            // Java Deserializer<T>.deserialize — sync, span
 }
-public interface ISerde<T> : ISerializer<T>, IDeserializer<T> { }   // Java Serde<T> — what Serdes returns
+public interface ISerde<T> : IDisposable {                            // Java Serde<T> extends Closeable
+    ISerializer<T> Serializer();
+    IDeserializer<T> Deserializer();
+}
+// Java's defaults (rule 10): ISerializerWithHeaders<T>, IDeserializerWithHeaders<T>, ISerializerWithConfigure<T>,
+// IDeserializerWithConfigure<T>, ISerdeWithConfigure<T>, with SerializerExtensions, DeserializerExtensions, SerdeExtensions.
 
-public static class Serdes {     // Java `Serdes` factory, Java's method names — Java wire-format parity
-    public static ISerde<string> String();         // UTF-8
-    public static ISerde<byte[]> ByteArray();      // identity (deserialize copies the span out)
-    public static ISerde<int>    Integer();        // 4 bytes big-endian (IntegerSerializer)
-    public static ISerde<long>   Long();           // 8 bytes big-endian (LongSerializer)
-    public static ISerde<double> Double();         // 8 bytes big-endian doubleToLongBits (DoubleSerializer)
-    public static ISerde<Guid>   UUID();           // ⚠ UUID.toString() -> UTF-8, NOT 16 raw bytes (UUIDSerializer)
-    public static ISerde<object?> Void();          // VoidSerializer (serialize null; deserialize default)
-}                                // each returns one shared, stateless instance (Java returns a new one per call)
+public static class Serdes {     // Java `Serdes`: a new serde per call, Java wire-format parity
+    public class WrapperSerde<T> : ISerdeWithConfigure<T> { … }       // Java Serdes.WrapperSerde: one pair, configured and disposed together
+    public sealed class StringSerde : WrapperSerde<string> { … }      // and one nested serde per built-in
+    public static ISerde<string>  String();      // UTF-8 unless configured (Java's encoding keys)
+    public static ISerde<byte[]>  ByteArray();
+    public static ISerde<short?>  Short();
+    public static ISerde<int?>    Integer();
+    public static ISerde<long?>   Long();
+    public static ISerde<float?>  Float();
+    public static ISerde<double?> Double();
+    public static ISerde<bool?>   Boolean();
+    public static ISerde<Guid?>   UUID();        // ⚠ UUID.toString() as text, NOT 16 raw bytes
+    public static ISerde<ReadOnlyMemory<byte>?> ByteBuffer();   // the deserializer copies (§6.4)
+    public static ISerde<object?> Void();        // the deserializer throws for any data, as Java's
+    public static ISerde<T> SerdeFrom<T>();
+    public static ISerde<T> SerdeFrom<T>(ISerializer<T> serializer, IDeserializer<T> deserializer);
+}
+// Each built-in has its public, sealed Java class: StringSerializer, StringDeserializer, LongSerializer, …
 
 public class SerializationException : KafkaException { }  // generated (§4 Error granularity); serdes throw it on malformed input
 ```
@@ -695,10 +709,11 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   native fetch slice in place and provably can't outlive the batch (can't be stored/boxed/
   awaited/sent). Sync because a span can't cross an `await` and serde is CPU-bound — also
   Java-faithful (`Deserializer<T>` is sync).
-- **Headers overload deferred** (Java's `default T deserialize(String, Headers, byte[])`, ledger 153). A C#
-  default interface method does not compile while netstandard2.0 is a target (CS8701), so the overload follows
-  §3 Java names rule 10: an extension method forwarding to the header-less form, and an interface that
-  replaces it (its name, for an overloaded default, is not decided yet).
+- **Headers.** Java's headers overloads are rule 10's: `ISerializerWithHeaders<T>` and `IDeserializerWithHeaders<T>`,
+  with extension methods running Java's default. The client tests the type once, at construction. `KafkaProducer` and
+  `AsyncKafkaProducer` pass the record's own `Headers`, writable during the call and sealed after it; the mock producers
+  pass a new, empty `Headers` to each call and drop it, as Java's `MockProducer` does on its empty cluster; the consumers
+  pass the record's own. Java's two deserializer overloads are one span form.
 - **Async serde deferred** — a note only, no async interface; a Schema-Registry path *may* later
   want one (decided then). Java's SR serdes are themselves sync.
 - **`Serialize` returns `ReadOnlyMemory<byte>?`**, not Java's `byte[]` (M23/P1, ledger 400).
@@ -710,11 +725,16 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   binding's serializers return `null` in its own `return` or as `(ReadOnlyMemory<byte>?)null`.
   The producer reads the memory until `Send` returns or throws, or, on the async producers,
   until the `ValueTask` it returns has completed (ledger 73, 402).
-- **`ISerde<T>` added** = Java's `Serde<T>` (what `Serdes.String()` returns); composes the two
-  shipped directional interfaces so a `Serdes` member offers both directions from one type. Java's
-  `Serde<T>` uses `serializer()`/`deserializer()` accessors + `Closeable`; ours extends both
-  directly. Java's `close()` is `IDisposable`: the built-in serdes are stateless and not `IDisposable`, and a
-  user's serde that is `IDisposable` is disposed by the client it was given to (§4 **Close/Dispose**).
+- **`ISerde<T>` is Java's pair.** `Serializer()` and `Deserializer()` hand out two objects; a client takes and disposes
+  only the half it is given. `Serdes.WrapperSerde<T>` holds a pair, and `Serdes.SerdeFrom` builds one.
+- **A Java boxed type is a C# nullable value type.** `Serdes.Long()` is a serde of `long?`, as Java's is "for nullable
+  `Long`": null in, null out, and a keyless record or a tombstone is null, not `0`. A user's own deserializer of a
+  non-nullable value type still gets `default(T)` for an absent field, which it is not called for (decision C).
+- **Encodings.** The String and UUID classes read Java's encoding keys in `Configure` (`key.` or `value.` plus
+  `serializer.encoding` / `deserializer.encoding`, then the plain `serializer.encoding` / `deserializer.encoding`), with
+  Java's byte rules, for the Unicode charsets, `US-ASCII` and `ISO-8859-1`; any other name is refused *(deviation: Java accepts every
+  charset. Why: no new dependency on netstandard2.0)*.
+- **Messages.** A built-in's message is the one Java's consumer path throws (the `ByteBuffer` overload).
 
 **The Java → C# idiom map** — the binding's spine. Each row: the Java construct,
 its C# realization, and where the enforcing rule lives.
@@ -749,6 +769,7 @@ its C# realization, and where the enforcing rule lives.
 | `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
 | a Java array `T[]` (`PartitionInfo.replicas()`, `Headers.toArray()`) | a C# array of the mapped element type (`Node[]`, `Header[]`), as Java's | ledger 370 (proposed) |
 | a Java primitive parameter (`DescribeFeaturesOptions.nodeId(int)`) | the C# primitive (`int`), never `int?`; an `OptionalInt` getter is `int?` | ledger 181 (amended) |
+| a boxed `Long` / `Integer` / `Short` / `Double` / `Float` / `Boolean` / `UUID` as a serde's type | `long?` / `int?` / `short?` / `double?` / `float?` / `bool?` / `Guid?` | null in, null out, as Java's "nullable" serdes (§3 Serdes) |
 | a Java getter that maps an unset field to a sentinel (`NewTopic.numPartitions()`, `orElse(-1)`) | the same sentinel (`-1`); only `Equals` and `ToString` tell unset from the sentinel, as Java's | ledger 371 (proposed) |
 | `Producer<K,V>` / `Consumer<K,V>` (generic) | **both shipped generic-only** — `Consumer<K,V>` (M6/P1b) and now `Producer<K,V>` (M11/P5): the producer trios + `ProducerRecord` are `<TKey,TValue>`, the non-generic ones removed (bytes = `<byte[],byte[]>` + `Serdes.ByteArray()`); `RecordMetadata` stays non-generic. Serialize above the bytes core, invoke-on-null, synchronous `SerializationException` wrap (§4) | §4 |
 
@@ -868,8 +889,15 @@ out of date). The rule:
     `Admin` defaults that only convert their arguments stay members of `IAdmin` and `IAsyncAdmin`, whose
     clients are their only implementers (allowlisted). A Java interface's static method goes in an
     `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`, and on C#
-    14 `IAdmin.Create(…)`. How the extra interface of an overloaded default is named (the serializers'
-    headers overloads) is not decided yet.
+    14 `IAdmin.Create(…)`. An overloaded default gets one interface per overload, named after the parameter the
+    overload adds: `ISerializerWithHeaders<T>` for `serialize(String, Headers, T)`; when two overloads add a parameter
+    of the same name, its type is added too. Java's `close()` is not a rule-10 default: `Closeable` is `IDisposable`
+    (rule 7), which an implementer adds beside the interface, and there is no `I…WithClose`. Because the analyzer does
+    not ship, each client that calls a rule-10 default checks the object it is given once: a public method of the
+    default's name and parameters without the interface that replaces it, or, on the four real clients (the mocks never
+    dispose a serde), a public `Close()` on a serde that is not `IDisposable`, throws `IllegalArgumentException` naming
+    what to implement *(best effort: under trimming or Native
+    AOT an uncalled method can be removed, and then the check passes)*.
 
 A difference is fixed or listed, in `analyzers/`: `java-name-allowlist.txt` (kept on purpose, each group
 under a comment saying why), `java-name-pairs.txt` (a renamed type and the Java type it translates, so its
@@ -895,7 +923,7 @@ where it is needed, in one concise code comment (§4 Comments).
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
-| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`ReadOnlyMemory<byte>? Serialize(topic, T)`, M23/P1) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (`String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, Java's names — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (a `RecordDeserializationException : SerializationException` with Java's fields and accessors, carrying the inner exception: decisions 11 and 22. `Poll` returns the records before the bad one and throws only when there are none, after seeking the failing partition back to the bad record and later partitions to their first record not returned, decision 11. The deserialize runs on the caller's thread, or in the async `Poll`'s continuation, never on the drain thread or inside a native callback). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `ReadOnlyMemory<byte>?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and handling a serializer's throw as Java's `doSend` on `KafkaProducer` / `AsyncKafkaProducer` (§3; the mocks rethrow every serializer exception, as Java's `MockProducer`): an `InvalidCastException` is wrapped in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread), an `ApiException` goes to the callback and a failed future, and any other exception is rethrown unchanged. No serializer callback through the ABI (`CLAUDE.md §11`); the per-record `Callback_t` is the delivery callback, not a serde (ffi §A6). See §3 for the sketch + the deliberate deviations. **Constructor arguments only** (ledger 365): Java's config-only constructors `KafkaProducer(Map)`, `KafkaProducer(Properties)`, `KafkaConsumer(Map)` and `KafkaConsumer(Properties)` are not translated, and nothing is built by reflection: the user builds and sets up each serializer and deserializer and passes it, as Java allows (Java never calls `configure()` on one it is given), and `key.serializer` and its peers are neither checked nor sent (§4 **Config**). Each setting Java fills by reflection (`partitioner.class`, `interceptor.classes`, `metric.reporters`, `config.providers`, the SASL and OAuth handler classes, `ssl.engine.factory.class`) gets, when it is translated, a setter on `ProducerConfig` / `ConsumerConfig` that takes an object the user built, as the Rust core's `ProducerConfig::set_partitioner` does. *(Deviation from Java's public constructors, and from Python's, whose configuration route resolves and configures `key.serializer` and falls back to a bytes serde. Why: a C# constructor cannot be async, and Java calls a possibly blocking `configure()` on the classes it builds by reflection; without reflection, trimming and native AOT stay open. The Rust core makes the same choice.)* **Disposal** (M22/P2): the four real clients dispose each serializer or deserializer they were given that is `IDisposable`, once, key then value, after the destroy (§4 **Close/Dispose**, step 6), and when the core fails to build the client with Java's wrapped "Failed to construct kafka producer" / "… consumer", not for an error it returns bare, such as a configuration value it cannot parse, which Java raises before its constructor's `try` (ledger 447); a throwing `Dispose` is written to one `Trace.TraceWarning` and never rethrown, as Python logs and never raises. An `IAsyncDisposable`-only serde is not disposed. The mocks never dispose them, as Java's and Python's mocks. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) · ✅ M22/P2 (constructor arguments only; disposal) |
+| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`ReadOnlyMemory<byte>? Serialize(topic, T)`, M23/P1) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (Java's pair: `Serializer()` / `Deserializer()`, returned new by each `Serdes` member; `WrapperSerde`, `SerdeFrom`), with the built-in `Serdes` (`String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, Java's names — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span). The headers forms and `Configure` follow §3 Java names rule 10; the client calls the headers forms and never calls `Configure`, as Java never configures a given instance. The typed poll applies a **mandatory `SerializationException` wrap** of any deserializer throw (a `RecordDeserializationException : SerializationException` with Java's fields and accessors, carrying the inner exception: decisions 11 and 22. `Poll` returns the records before the bad one and throws only when there are none, after seeking the failing partition back to the bad record and later partitions to their first record not returned, decision 11. The deserialize runs on the caller's thread, or in the async `Poll`'s continuation, never on the drain thread or inside a native callback). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `ReadOnlyMemory<byte>?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and handling a serializer's throw as Java's `doSend` on `KafkaProducer` / `AsyncKafkaProducer` (§3; the mocks rethrow every serializer exception, as Java's `MockProducer`): an `InvalidCastException` is wrapped in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread), an `ApiException` goes to the callback and a failed future, and any other exception is rethrown unchanged. No serializer callback through the ABI (`CLAUDE.md §11`); the per-record `Callback_t` is the delivery callback, not a serde (ffi §A6). See §3 for the sketch + the deliberate deviations. **Constructor arguments only** (ledger 365): Java's config-only constructors `KafkaProducer(Map)`, `KafkaProducer(Properties)`, `KafkaConsumer(Map)` and `KafkaConsumer(Properties)` are not translated, and nothing is built by reflection: the user builds and sets up each serializer and deserializer and passes it, as Java allows (Java never calls `configure()` on one it is given), and `key.serializer` and its peers are neither checked nor sent (§4 **Config**). Each setting Java fills by reflection (`partitioner.class`, `interceptor.classes`, `metric.reporters`, `config.providers`, the SASL and OAuth handler classes, `ssl.engine.factory.class`) gets, when it is translated, a setter on `ProducerConfig` / `ConsumerConfig` that takes an object the user built, as the Rust core's `ProducerConfig::set_partitioner` does. *(Deviation from Java's public constructors, and from Python's, whose configuration route resolves and configures `key.serializer` and falls back to a bytes serde. Why: a C# constructor cannot be async, and Java calls a possibly blocking `configure()` on the classes it builds by reflection; without reflection, trimming and native AOT stay open. The Rust core makes the same choice.)* **Disposal** (M22/P2): the four real clients dispose each serializer or deserializer they were given that is `IDisposable`, once, key then value, after the destroy (§4 **Close/Dispose**, step 6), and when the core fails to build the client with Java's wrapped "Failed to construct kafka producer" / "… consumer", not for an error it returns bare, such as a configuration value it cannot parse, which Java raises before its constructor's `try` (ledger 447); a throwing `Dispose` is written to one `Trace.TraceWarning` and never rethrown, as Python logs and never raises. An `IAsyncDisposable`-only serde is not disposed. The mocks never dispose them, as Java's and Python's mocks. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) · ✅ M22/P2 (constructor arguments only; disposal) |
 | **Config** | One `IReadOnlyDictionary<string, object?> configs` on each `Kafka*` client constructor: Java's `Map<String, Object>`, with no `Properties` form, as Python merges it. Keys are **Java dotted names** (`bootstrap.servers` required). A value is a C# value of a type Java's `ConfigDef.parseType` accepts for the key's type (`bool`; `int` for INT, `short` for SHORT, `int` or `long` for LONG; any number but `nint` / `nuint` for DOUBLE, `BigInteger` included; an `IList` for LIST; a `System.Type` for CLASS) or the string Java would parse. The binding checks the type against the key's Java `ConfigDef` type (`Internal/ConfigTypes.g.cs`, generated from `kafka/` by `cargo xtask generate-error-codes`) and sends a text the core parses to the value Java's `parseType` gives (integers and `decimal` as digits, a `double` as "G17"; the core rounds); a wrong type, a `null` the key's validator refuses or a `null` key throws `ConfigException` (code −10) with Java's message, before any P/Invoke. Any other `null` leaves the key out, so the core's default applies. The value itself (ranges, valid strings, number text) is the core's to check, and the core's errors are `ConfigException` too; unknown keys reach the core, which logs them as unused. The five own-role serializer keys (`key.serializer`, `value.serializer`, `serializer.encoding`, `key.serializer.encoding`, `value.serializer.encoding`; consumer: the deserializer ones) are neither checked nor sent, as in Python; nothing reads them, since a serializer is a constructor argument only (§4 **Serializers**, ledger 365). *(Deviation from the one law: the type check and the text are Kafka logic, here because the C ABI takes every value as a C string and only the binding sees the object's type, as root `CLAUDE.md`'s Python conventions record for Python (Implementation over the FFI, exception 2); and a `null` the validator accepts is "not set" where Java holds `null` (ledger 272). Goes when: the C ABI takes typed config values.)* | wiring the constructor (M22/P1) |
 | **Error granularity** | One class per Java exception class, with Java's parent and namespace (§2, §3's `KafkaException` hierarchy row, ffi §A5), generated as Python's are; this replaces decision 14's flat `KafkaException` (`dotnet/design/history/M22/P1-error-hierarchy-parity/PLAN.md`). Two stay hand-written: `KafkaException` and **`RecordDeserializationException : SerializationException`** (M19/P1, decision 22), thrown by `Poll` for a key or value that fails to deserialize when no record precedes it (decision 11). **`SerializationException : KafkaException`**, which the built-in serdes throw on malformed input, is generated. **`ConfigException : KafkaException`** (Java's `common.config` class, −10) is generated too: the client constructors throw it for a configuration value the binding refuses, and it is the type of the core's −10 (§4 **Config**). | a user classifies by class, as in Java and Python |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |

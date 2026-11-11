@@ -68,7 +68,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback: null);
@@ -98,7 +98,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback: null);
@@ -141,7 +141,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, smallValue, key, callback);
@@ -183,7 +183,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback);
