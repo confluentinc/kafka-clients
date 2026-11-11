@@ -391,9 +391,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   awaited, and the producer is checked for closed again after the await, as
   its native producer may be gone. A null serializer, or none, sends the
   record's own bytes (a string encoded by `encodeLikeJava`, checked at
-  `send()`: a `ProducerRecord<K, V>` holds any key and value). TypeScript
-  infers `null`, not `never`, for a null key or value, so `send` takes a
-  `ProducerRecord<K | null, V | null>`.
+  `send()`: a `ProducerRecord<K, V>` holds any key and value).
+  **(root conflict)** The root conventions' Class family says an omitted or
+  `null` key or value binds `never`, and their Signatures say each Java form
+  has one TypeScript overload signature. With one signature per Java
+  constructor, TypeScript binds a `null` argument to `null`, not `never`
+  (binding `never` needs extra signatures per null combination, as Python's
+  binding stubs have); the code follows Signatures, so a record built with
+  `key: null` is a `ProducerRecord<null, ...>`, and `send` takes a
+  `ProducerRecord<K | null, V | null>`, noted in its `@remarks`.
 - `MockProducer` (root conventions, Implementation over the FFI) is a
   TypeScript translation of Java's mock, calling no addon: its producer
   methods (`send`, `flush`, `close`) return Promises as `KafkaProducer`'s do,
