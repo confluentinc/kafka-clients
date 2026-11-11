@@ -17,6 +17,9 @@
 // which this index does not re-export.
 
 export { KafkaFuture } from './kafka_future';
+export { Node } from './node';
+export { PartitionInfo } from './partition_info';
+export { TopicPartition } from './topic_partition';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';
