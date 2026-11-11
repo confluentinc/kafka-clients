@@ -125,8 +125,7 @@ public static class ConsumerBenchmark
         }
         finally
         {
-            // Unlike Python, which leaks its spawn_producer process when the pipeline is not ready, every exit stops
-            // the load driver.
+            // As Python, every exit stops the load driver.
             loadDriver?.Stop();
             CloseQuietly(backend);
         }
@@ -203,8 +202,7 @@ public static class ConsumerBenchmark
         }
         finally
         {
-            // Unlike Python, which leaks its spawn_producer process when the pipeline is not ready, every exit stops
-            // the load driver.
+            // As Python, every exit stops the load driver.
             loadDriver?.Stop();
             await CloseQuietlyAsync(backend).ConfigureAwait(false);
         }

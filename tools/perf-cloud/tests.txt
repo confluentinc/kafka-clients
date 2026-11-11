@@ -78,13 +78,14 @@ producer-max-1kb-200p-key100b  rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=102
 # Rust-core clients read it, so it runs with --clients rust,java (check refuses
 # the other clients). The report's Δ is against librdkafka, so it gives none
 # here: compare each client with its own run of producer-max-1kb-200p-key100b
-# (the same test, full strategy) and of producer-max-1kb-200p-key100b-bufmem256.
-# The .NET Rust-core arms run incremental on those two by default; the report
-# shows each client's strategy.
+# and of producer-max-1kb-200p-key100b-bufmem256. Those two run each client's
+# default strategy (incremental on the .NET Rust-core arms, full elsewhere); the
+# report shows each client's strategy.
 producer-max-1kb-200p-key100b-incremental  rust  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024 BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental
 
-# The keyed test with the full strategy and 256 MiB of buffer.memory, room for
-# a full batch on every partition: the control for the incremental run.
+# The keyed test with 256 MiB of buffer.memory, room for a full batch on every
+# partition: the control for the incremental run (full strategy except on the
+# .NET Rust-core arms, which run incremental).
 producer-max-1kb-200p-key100b-bufmem256  rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024 BUFFER_MEMORY=256
 
 # 250k msg/s of 1 KiB values (~256 MB/s) read as they are produced, the

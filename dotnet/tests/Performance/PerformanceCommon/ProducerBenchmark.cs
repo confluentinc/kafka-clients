@@ -77,7 +77,7 @@ public static class ProducerBenchmark
             Console.WriteLine($"Warming up for {config.WarmupSeconds} seconds ...");
             long warmupEnd = Stopwatch.GetTimestamp() + SecondsToTicks(config.WarmupSeconds);
             int i = 0;
-            while (Stopwatch.GetTimestamp() < warmupEnd)
+            while (Stopwatch.GetTimestamp() < warmupEnd && !cancellationToken.IsCancellationRequested)
             {
                 PerfMessage message = messages[i % messages.Length];
                 try
@@ -88,6 +88,12 @@ public static class ProducerBenchmark
                 }
                 catch (Exception)
                 {
+                    // A signal during the warmup ends it; the measured run then stops at once.
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
                     Console.WriteLine("Warmup failed due to message verification error");
                     return WarmupFailed(warmupSent);
                 }
@@ -183,7 +189,7 @@ public static class ProducerBenchmark
             Console.WriteLine($"Warming up for {config.WarmupSeconds} seconds ...");
             long warmupEnd = Stopwatch.GetTimestamp() + SecondsToTicks(config.WarmupSeconds);
             int i = 0;
-            while (Stopwatch.GetTimestamp() < warmupEnd)
+            while (Stopwatch.GetTimestamp() < warmupEnd && !cancellationToken.IsCancellationRequested)
             {
                 PerfMessage message = messages[i % messages.Length];
                 try
@@ -195,6 +201,12 @@ public static class ProducerBenchmark
                 }
                 catch (Exception)
                 {
+                    // A signal during the warmup ends it; the measured run then stops at once.
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
                     Console.WriteLine("Warmup failed due to message verification error");
                     return WarmupFailed(warmupSent);
                 }
@@ -539,7 +551,7 @@ public static class ProducerBenchmark
     }
 
     // Checked before every send, rejected retries included, as the C and Rust harnesses do: a counted run stops at
-    // TEST_DURATION_SECONDS plus the slack (capped), an unbounded one at TEST_DURATION_SECONDS.
+    // TEST_DURATION_SECONDS plus the slack (capped), an unbounded one past TEST_DURATION_SECONDS + 1, as Python's.
     private static bool TimeBoundReached(ProducerBenchmarkConfig config, long firstTicks, ref bool capped)
     {
         double elapsed = ElapsedSeconds(firstTicks);
@@ -554,7 +566,7 @@ public static class ProducerBenchmark
             return true;
         }
 
-        if (elapsed < config.TestDurationSeconds)
+        if (elapsed <= config.TestDurationSeconds + 1)
         {
             return false;
         }

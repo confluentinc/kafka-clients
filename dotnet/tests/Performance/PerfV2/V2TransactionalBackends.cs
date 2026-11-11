@@ -184,6 +184,16 @@ internal sealed class V2TransactionalProducer : ITransactionalProducer
 
     public ValueTask AbortTransaction()
     {
+        // Flushed first as before the commit, so an abort after an error also has nothing in flight. A flush that
+        // fails here is left to the abort to report.
+        try
+        {
+            _producer.Flush(s_controlTimeout);
+        }
+        catch (KafkaException)
+        {
+        }
+
         _producer.AbortTransaction(s_controlTimeout);
         return default;
     }

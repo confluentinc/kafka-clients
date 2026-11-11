@@ -528,7 +528,14 @@ public sealed class TransactionalBenchmark
                 // As Python's close: a failed consumer close does not change the run's outcome.
             }
 
-            consumer.Dispose();
+            try
+            {
+                consumer.Dispose();
+            }
+            catch (Exception)
+            {
+                // Likewise for the dispose that frees the native consumer.
+            }
         }
     }
 
@@ -634,16 +641,10 @@ public sealed class TransactionalBenchmark
         return true;
     }
 
-    // A commit or send-offsets call that failed after its retries: still retriable, its outcome is unknown, so the
-    // worker stops; otherwise the transaction is aborted (no abort is attempted after a fatal error).
+    // A commit or send-offsets call that failed after its retries: the transaction is aborted, as Python's
+    // _abort_after_error (no abort is attempted after a fatal error).
     private async Task<bool> OnControlError(ITransactionalProducer producer, string who, string call, Exception error, int records)
     {
-        if (producer.Classify(error) == TxnErrorKind.Retriable)
-        {
-            MarkRunFailed($"{who}: {call} still failing after {MaxTxnCallAttempts} attempts: {error.Message}");
-            return false;
-        }
-
         Console.WriteLine($"{call} error: {error.Message}");
         return await AbortAfterError(producer, who, records, true, error).ConfigureAwait(false);
     }

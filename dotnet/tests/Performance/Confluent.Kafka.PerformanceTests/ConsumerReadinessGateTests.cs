@@ -71,21 +71,26 @@ public sealed class ConsumerReadinessGateTests
 
     private static async Task GateWhenEnoughMeasurableRecordsMeasuresAsync(bool asyncMode)
     {
-        // The gate's 20 records are warmup: they must not be counted in MessagesMeasured.
+        // The gate's 20 records are warmup. The run is unbounded and timed, so counted they would make the total 45.
         var script = new List<IReadOnlyList<PolledRecord>>
         {
             Array.Empty<PolledRecord>(),
             Array.Empty<PolledRecord>(),
             Fresh(20),
-            Fresh(5),
+            Fresh(25),
         };
 
         (ConsumerBenchmarkResult result, PollScript driver) = await RunEngineAsync(
-            asyncMode, script, readinessMinRecords: 20, readinessTimeoutSeconds: 5, numMessages: 5).ConfigureAwait(false);
+            asyncMode,
+            script,
+            readinessMinRecords: 20,
+            readinessTimeoutSeconds: 5,
+            numMessages: 0,
+            extraEnv: new Dictionary<string, string>(StringComparer.Ordinal) { ["TEST_DURATION_SECONDS"] = "1" }).ConfigureAwait(false);
 
         Assert.False(result.SetupNotReady);
         Assert.False(result.AssignmentFailed);
-        Assert.Equal(5, result.MessagesMeasured);
+        Assert.Equal(25, result.MessagesMeasured);
         Assert.Equal(1, driver.CloseCount);
     }
 

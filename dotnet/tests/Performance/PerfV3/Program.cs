@@ -32,6 +32,10 @@ internal static class Program
 
     private static async Task<int> Main()
     {
+        // This exe is client version 3: results.json's client_version and the default group.id derive from it, as
+        // Python.
+        Environment.SetEnvironmentVariable("CLIENT_VERSION", "3");
+
         PerfSignals.Install();
 
         string mode = PerfEnv.GetString("MODE", "producer");

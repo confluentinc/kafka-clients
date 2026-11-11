@@ -16,7 +16,9 @@ Both harnesses are configured by environment variables and select the workload w
 | `transactional` | The transactional producer: `TXN_MODE=produce`, or `eos` (consume, produce, send the offsets, commit) |
 | `version` | Prints `key: value` lines: client, versions, .NET runtime, GC mode and TieredPGO |
 
-`ASYNC=True` selects the async API (`ProduceAsync`, the async consumer and transaction calls), else the sync one.
+`ASYNC=True` selects the async API, else the sync one: the async producer and consumer, and on v3 the async
+transaction calls. On v2 the transaction calls and the transactional consumer stay blocking, and `ASYNC` only
+sends the records through `ProduceAsync`.
 Each run writes `results.json` (`RESULTS_FILE`) and a `metrics.jsonl` line per window (`METRICS_FILE`), with the
 same keys as the Python harnesses in `python/test/performance`.
 

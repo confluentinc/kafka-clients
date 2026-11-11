@@ -88,13 +88,17 @@ internal sealed class V3TransactionalFactory : ITransactionalClientFactory
         TopicProvisioning.RecreateTopic(_config.BootstrapServers, _config.Producer.TopicName, _config.Producer.Partitions);
 
     // Java's fatal transaction errors: the producer must be closed. Retriable ones may still complete; anything else
-    // is answered with an abort.
+    // is answered with an abort. Of the authorization errors only these two are fatal: a topic or group one aborts.
     internal static TxnErrorKind Classify(Exception error) => error switch
     {
-        ApplicationRecoverableException or OutOfOrderSequenceException or UnsupportedVersionException or AuthorizationException => TxnErrorKind.Fatal,
+        ApplicationRecoverableException or OutOfOrderSequenceException or UnsupportedVersionException
+            or TransactionalIdAuthorizationException or ClusterAuthorizationException => TxnErrorKind.Fatal,
         RetriableException => TxnErrorKind.Retriable,
         _ => TxnErrorKind.Abortable,
     };
+
+    // Bounds the producer close, so a broker that stops answering cannot hang the run.
+    internal static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(30);
 
     internal static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(IReadOnlyDictionary<(string Topic, int Partition), long> offsets)
     {
@@ -163,7 +167,7 @@ internal sealed class V3SyncTransactionalProducer : ITransactionalProducer
 
     public ValueTask Close()
     {
-        _producer.Close();
+        _producer.Close(V3TransactionalFactory.CloseTimeout);
         return default;
     }
 
@@ -201,7 +205,7 @@ internal sealed class V3AsyncTransactionalProducer : ITransactionalProducer
 
     public void PrintCompressionRateAvg() => V3ProducerMetrics.PrintCompressionRateAvg(_producer.Metrics);
 
-    public ValueTask Close() => new(_producer.Close());
+    public ValueTask Close() => new(_producer.Close(V3TransactionalFactory.CloseTimeout));
 
     public void Dispose() => _producer.Dispose();
 }
