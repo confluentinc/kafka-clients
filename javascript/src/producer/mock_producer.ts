@@ -251,7 +251,8 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * serializer; one returning a Promise is awaited. With `autoComplete`, the
    * record completes and its callback runs inside the call; what the
    * callback throws, or its Promise rejects with, is then the rejection, and
-   * the record's future never completes.
+   * the record's future never completes. The record is typed
+   * `ProducerRecord<K | null, V | null>`, as `KafkaProducer.send`'s is.
    */
   send(options: {
     /** The record to send. */
