@@ -18,6 +18,37 @@ missing clients.producer.KafkaProducer#partitionsFor
 missing clients.producer.KafkaProducer#registerMetricForSubscription
 missing clients.producer.KafkaProducer#sendOffsetsToTransaction
 missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# MockProducer: the transaction members, excluded from the producer's
+# completion for now, as the KafkaProducer's are.
+missing clients.producer.MockProducer#abortTransaction
+missing clients.producer.MockProducer#beginTransaction
+missing clients.producer.MockProducer#commitCount
+missing clients.producer.MockProducer#commitTransaction
+missing clients.producer.MockProducer#consumerGroupOffsetsHistory
+missing clients.producer.MockProducer#fenceProducer
+missing clients.producer.MockProducer#initTransactions
+missing clients.producer.MockProducer#sendOffsetsToTransaction
+missing clients.producer.MockProducer#sentOffsets
+missing clients.producer.MockProducer#transactionAborted
+missing clients.producer.MockProducer#transactionCommitted
+missing clients.producer.MockProducer#transactionInFlight
+missing clients.producer.MockProducer#transactionInitialized
+missing clients.producer.MockProducer#uncommittedOffsets
+missing clients.producer.MockProducer#uncommittedRecords
+# MockProducer: partitionsFor, metrics and setMockMetrics, whose List and Map
+# types and long metric values are not decided yet (Q25, Q23).
+missing clients.producer.MockProducer#metrics
+missing clients.producer.MockProducer#partitionsFor
+missing clients.producer.MockProducer#setMockMetrics
+# MockProducer: telemetry and metric subscription, which KafkaProducer does
+# not have (no FFI entry point), and the helpers serving only them.
+missing clients.producer.MockProducer#addedMetrics
+missing clients.producer.MockProducer#clientInstanceId
+missing clients.producer.MockProducer#disableTelemetry
+missing clients.producer.MockProducer#injectTimeoutException
+missing clients.producer.MockProducer#registerMetricForSubscription
+missing clients.producer.MockProducer#setClientInstanceId
+missing clients.producer.MockProducer#unregisterMetricFromSubscription
 # Serializer: the root conventions (Serialization) give a serde no
 # configure(): a serializer is given only as a constructor argument, for
 # which Java does not call it either.
@@ -43,6 +74,10 @@ missing clients.producer.RecordMetadata#RecordMetadata
 # Java's (Properties, Serializer, Serializer) form is the (Map, Serializer,
 # Serializer) one.
 overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
+# MockProducer's constructor taking a Cluster: its only extra parameter is a
+# type the client does not translate (root conventions, Scope; the list of
+# forms Q30 leaves out is not decided yet).
+overload-missing MockProducer.constructor/MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)
 # Header's constructor takes Java's (String, byte[]) form: JavaScript has no
 # ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing Header.constructor/RecordHeader(ByteBuffer,ByteBuffer)

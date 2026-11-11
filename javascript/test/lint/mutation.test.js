@@ -204,7 +204,7 @@ MUTATIONS.push(
   {
     rule: 'check-java-completeness',
     what: 'a translated method dropped',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', '  flush(): Promise<void>;\n  flush(options?: unknown): Promise<void> {', '  private flushAll(options?: unknown): Promise<void> {'),
+    apply: (root) => edit(root, 'src/producer/mock_producer.ts', '  flushed(): boolean {', '  private flushedState(): boolean {'),
   },
   {
     rule: 'check-java-name',

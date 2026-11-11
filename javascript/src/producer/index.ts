@@ -33,6 +33,8 @@
 export { KafkaProducer } from './kafka_producer';
 export type { CloseArgs, ProducerConfigs } from './kafka_producer';
 export type { Callback } from './callback';
+export { MockProducer } from './mock_producer';
+export type { Partitioner } from './partitioner';
 export { ProducerRecord } from './producer_record';
 export { RecordMetadata } from './record_metadata';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)

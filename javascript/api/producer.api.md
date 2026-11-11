@@ -61,6 +61,46 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> {
 }
 
 // @public
+export class MockProducer<K = Uint8Array, V = Uint8Array> {
+    [Symbol.asyncDispose](): Promise<void>;
+    constructor(options: {
+        autoComplete: boolean;
+        partitioner: Partitioner;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
+    });
+    constructor();
+    clear(): void;
+    close(): Promise<void>;
+    close(options: CloseArgs): Promise<void>;
+    close(timeout: Duration): Promise<void>;
+    closed(): boolean;
+    closeException: Error | null;
+    completeNext(): boolean;
+    errorNext(options: {
+        e: Error | null;
+    }): boolean;
+    errorNext(e: Error | null): boolean;
+    flush(): Promise<void>;
+    flushed(): boolean;
+    flushException: Error | null;
+    history(): ProducerRecord<K | null, V | null>[];
+    send(options: {
+        record: ProducerRecord<K | null, V | null>;
+        callback: Callback | null;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(options: {
+        record: ProducerRecord<K | null, V | null>;
+        callback?: never;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
+    sendException: Error | null;
+}
+
+// @public
+export type Partitioner = unknown;
+
+// @public
 export class ProducerConfig {
     static readonly ACKS_CONFIG: string;
     static readonly AUTOMATIC_CONFIG_PROVIDERS_PROPERTY: string;
