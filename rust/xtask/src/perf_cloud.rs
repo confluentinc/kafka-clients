@@ -5643,8 +5643,10 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             "password=\"<redacted>\" again <redacted>"
         );
         assert_eq!(redact("nothing here", &[String::new()]), "nothing here");
-        let text = client_properties_text("b:9092", &Credentials { key: "K".into(), secret: "a+b/c=".into() });
-        assert!(text.contains(r#"username="K" password="a+b/c=";"#), "{text}");
+        // The secret needs the characters a JAAS value can carry unescaped.
+        let secret = ["a", "+b", "/c="].concat();
+        let text = client_properties_text("b:9092", &Credentials { key: "K".into(), secret: secret.clone() });
+        assert!(text.contains(&format!(r#"username="K" password="{secret}";"#)), "{text}");
         assert!(
             text.starts_with("bootstrap.servers=b:9092\nsecurity.protocol=SASL_SSL\n"),
             "{text}"
