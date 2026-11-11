@@ -1146,11 +1146,7 @@ fn list_tests(unit: &Unit, harness: &[String], library_paths: &[PathBuf]) -> any
 /// The executable's command in the environment `cargo test` gives it: run from
 /// its package directory, with the build's library directories searched.
 fn unit_command(unit: &Unit, library_paths: &[PathBuf]) -> Command {
-    let variable = if cfg!(target_os = "macos") {
-        "DYLD_FALLBACK_LIBRARY_PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    };
+    let variable = library_path_variable();
     let deps = unit.executable.parent().map(Path::to_path_buf).unwrap_or_default();
     let profile = deps.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut paths: Vec<PathBuf> = library_paths.iter().cloned().chain([deps, profile]).collect();
@@ -1162,6 +1158,36 @@ fn unit_command(unit: &Unit, library_paths: &[PathBuf]) -> Command {
         .env("CARGO_PKG_NAME", &unit.package)
         .env(variable, env::join_paths(paths).unwrap_or_default());
     command
+}
+
+/// The variable of the dynamic library search path that cargo sets for the
+/// programs it runs.
+fn library_path_variable() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
+}
+
+/// The library search path `paths` without the directories under
+/// `build_dir`, `None` when nothing is left.
+///
+/// `cargo xtask` is `cargo run`, which puts the build directory of this
+/// program (`target/debug`, its `deps` and the build scripts' outputs) at the
+/// front of the library search path. A command `selected-run` starts must not
+/// inherit them: `target/debug/libconfluent_kafka.so` is whatever the last
+/// debug build left there, often without the `ffi` feature, and the library
+/// path wins over the `RUNPATH` with which the Python extension and the C
+/// tests find the library they were built against. The toolchain directories
+/// cargo adds hold only Rust's own libraries and stay.
+fn without_build_dirs(paths: &std::ffi::OsStr, build_dir: &Path) -> Option<OsString> {
+    let kept: Vec<PathBuf> = env::split_paths(paths).filter(|path| !path.starts_with(build_dir)).collect();
+    if kept.is_empty() {
+        None
+    } else {
+        env::join_paths(kept).ok()
+    }
 }
 
 fn run(command: &mut Command) -> anyhow::Result<()> {
@@ -1245,6 +1271,14 @@ pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
     }
     let mut command = Command::new(program);
     command.args(argv).current_dir(dir);
+    let variable = library_path_variable();
+    let build_dir = env::current_exe()?.parent().map(Path::to_path_buf);
+    if let (Some(paths), Some(build_dir)) = (env::var_os(variable), build_dir) {
+        match without_build_dirs(&paths, &build_dir) {
+            Some(kept) => command.env(variable, kept),
+            None => command.env_remove(variable),
+        };
+    }
     if let Some(filter) = c_test_filter {
         command.env("C_TEST_FILTER", filter);
     }
@@ -1376,6 +1410,32 @@ mod tests {
             ]),
             Choice::Only(strings(&["a", "b"]))
         );
+    }
+
+    #[test]
+    fn test_without_build_dirs() {
+        let build_dir = Path::new("/repo/rust/target/debug");
+        let paths = env::join_paths([
+            "/repo/rust/target/debug",
+            "/repo/rust/target/debug/deps",
+            "/repo/rust/target/debug/build/zstd-sys-0123/out",
+            "/toolchain/lib",
+            "/usr/local/lib",
+            "/repo/rust/target/release",
+        ])
+        .unwrap();
+        let kept = without_build_dirs(&paths, build_dir).unwrap();
+        assert_eq!(
+            env::split_paths(&kept).collect::<Vec<_>>(),
+            [
+                PathBuf::from("/toolchain/lib"),
+                PathBuf::from("/usr/local/lib"),
+                PathBuf::from("/repo/rust/target/release"),
+            ]
+        );
+
+        let only_build = env::join_paths(["/repo/rust/target/debug", "/repo/rust/target/debug/deps"]).unwrap();
+        assert_eq!(without_build_dirs(&only_build, build_dir), None);
     }
 
     #[test]
