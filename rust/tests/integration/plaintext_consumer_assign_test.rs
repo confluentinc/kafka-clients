@@ -999,7 +999,24 @@ async fn async_poll_after_topic_deleted<F: ConsumerBackendFactory>(ctx: &mut Tes
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: commit_sync should succeed: {e}"));
 
-    // Delete the topic and wait for deletion to propagate to metadata
+    // Delete the topic and wait for deletion to propagate to metadata.
+    // Java waits 10 s for the name to disappear. Here the consumer under test
+    // is still assigned to the topic, and a metadata update its fetch path
+    // requests for the position the seek set before the leader was known
+    // (`request_update(false)`, as Java's `AbstractFetch` does, sent after the
+    // ~100 ms refresh backoff) can make the broker auto-create the topic again
+    // before the name is seen gone. So this wait, with Java's 10 s bound, is
+    // for the deleted topic's id instead: done when no listing under the name
+    // carries the old id.
+    let old_topic_id = admin
+        .list_topics()
+        .names_to_listings()
+        .get()
+        .await
+        .expect("list_topics should succeed")
+        .get(&topic_to_delete)
+        .unwrap_or_else(|| panic!("topic {topic_to_delete} should be listed before the delete"))
+        .topic_id();
     admin
         .delete_topics_with_topic_collection(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
         .all()
@@ -1010,8 +1027,10 @@ async fn async_poll_after_topic_deleted<F: ConsumerBackendFactory>(ctx: &mut Tes
         || async {
             // Java's `waitForCondition` retries when `listTopics()` throws;
             // an error here is treated as "not yet" for the same reason.
-            match admin.list_topics().names().get().await {
-                Ok(names) => !names.contains(&topic_to_delete),
+            match admin.list_topics().names_to_listings().get().await {
+                Ok(listings) => listings
+                    .get(&topic_to_delete)
+                    .is_none_or(|listing| listing.topic_id() != old_topic_id),
                 Err(_) => false,
             }
         },
