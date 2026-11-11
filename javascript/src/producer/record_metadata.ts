@@ -28,8 +28,9 @@ interface RecordMetadataFields {
  * The metadata for a record that has been acknowledged by the server.
  *
  * Built by the client; a delivery callback for a failed record receives one
- * whose fields are -1. Java's public constructor takes a `TopicPartition`,
- * which is not translated yet, so the constructor is private.
+ * whose fields are -1. Java's public constructor is not translated yet, so
+ * the constructor is private: its `long` parameters wait on how a Java
+ * `long` is typed (not decided yet, Q23).
  */
 export class RecordMetadata {
   /** The topic the record was appended to */

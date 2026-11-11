@@ -32,11 +32,15 @@ missing clients.producer.Producer#partitionsFor
 missing clients.producer.Producer#registerMetricForSubscription
 missing clients.producer.Producer#sendOffsetsToTransaction
 missing clients.producer.Producer#unregisterMetricFromSubscription
-# KafkaProducer's public metric and thread-name constants: not translated yet.
-missing clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
-missing clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
-# RecordMetadata: Java's public constructor, not translated yet: it takes a
-# TopicPartition, which this client does not translate yet.
+# PartitionInfo: Java's constructors take Node[] arrays and three getters
+# return them; how a Java array other than byte[] is typed is not decided yet
+# (Q25, other collections). The client builds it through its library-only
+# factory.
+missing common.PartitionInfo#PartitionInfo
+missing common.PartitionInfo#inSyncReplicas
+missing common.PartitionInfo#offlineReplicas
+missing common.PartitionInfo#replicas
+# RecordMetadata: Java's public constructor, not translated yet.
 missing clients.producer.RecordMetadata#RecordMetadata
 
 

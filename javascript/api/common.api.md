@@ -86,6 +86,64 @@ export namespace KafkaFuture {
     export type BiConsumer<A, B> = (a: A, b: B) => void;
 }
 
+// @public
+export class Node {
+    constructor(options: {
+        id: number;
+        host: string | null;
+        port: number;
+        rack: string | null;
+        isFenced: boolean;
+    });
+    constructor(options: {
+        id: number;
+        host: string | null;
+        port: number;
+        rack: string | null;
+        isFenced?: never;
+    });
+    constructor(options: {
+        id: number;
+        host: string | null;
+        port: number;
+        rack?: never;
+        isFenced?: never;
+    });
+    readonly hasRack: boolean;
+    readonly host: string | null;
+    readonly id: number;
+    readonly idString: string;
+    readonly isEmpty: boolean;
+    readonly isFenced: boolean;
+    static noNode(): Node;
+    readonly port: number;
+    readonly rack: string | null;
+    toString(): string;
+}
+
+// @public
+export class PartitionInfo {
+    leader(): Node | null;
+    partition(): number;
+    topic(): string;
+    toString(): string;
+}
+
+// @public
+export class TopicPartition {
+    constructor(options: {
+        topic: string | null;
+        partition: number;
+    });
+    readonly partition: number;
+    toJSON(): {
+        topic: string | null;
+        partition: number;
+    };
+    readonly topic: string | null;
+    toString(): string;
+}
+
 // (No @packageDocumentation comment for this package)
 
 ```

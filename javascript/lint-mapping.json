@@ -12,7 +12,8 @@
     "Headers.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "ProducerRecord.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
-    "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string"
+    "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol"
   },
   "javaTargets": {
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",

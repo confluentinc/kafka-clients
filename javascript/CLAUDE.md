@@ -333,12 +333,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
   A `ProducerRecord` is frozen (`Object.freeze(this)` in its constructor,
-  as `TopicPartition` will be), so `ProducerRecord.internalToNative` reads
+  as `TopicPartition` is), so `ProducerRecord.internalToNative` reads
   the fields its constructor checked and checks nothing again at `send()`
   (root conventions, Q35: no repeated precondition); its `Headers` stays
   writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord` and `RecordMetadata` today. **(root conflict)** The root
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
   `RecordMetadata`, `Node`, the admin description classes) does not name
   `Header`, which its one-line test would admit; the code follows the list, so
@@ -749,8 +749,9 @@ The layout is the root conventions' (Layout and modules).
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
   TypeScript `private` constructor (`protected` where Java's is), and so is
-  one users must not call (`RecordMetadata`, whose Java constructor takes an
-  untranslated `TopicPartition`); there is no run-time guard (root
+  one users must not call (`RecordMetadata`, whose Java constructor's `long`
+  parameters wait on how a `long` is typed, not decided yet in the root
+  conventions); there is no run-time guard (root
   conventions, Class family). The library builds such an object through one
   static factory, `internalCreate`, and calls its own methods on public
   classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)

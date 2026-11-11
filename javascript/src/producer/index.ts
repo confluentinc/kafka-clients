@@ -26,9 +26,7 @@
  *
  * Not translated yet: `KafkaProducer`'s constructors taking serializers
  * (`Map`/`Properties`, `Serializer`, `Serializer`), `partitionsFor`,
- * `metrics`, and its constants `NETWORK_THREAD_PREFIX` and
- * `PRODUCER_METRIC_GROUP_NAME`; `RecordMetadata`'s public constructor, which
- * takes a `TopicPartition`.
+ * `metrics`; `RecordMetadata`'s public constructor.
  *
  * @packageDocumentation
  */
