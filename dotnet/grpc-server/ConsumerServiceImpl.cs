@@ -162,8 +162,9 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         {
             TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
 
-            // Empty offsets => commit the current consumed positions; otherwise commit these.
-            if (request.Offsets.Count > 0)
+            // The Map overload for offsets, or for an empty map with with_offsets (Java's commitSync(Map.of()));
+            // otherwise the current consumed positions.
+            if (request.Offsets.Count > 0 || request.WithOffsets)
             {
                 Dictionary<TopicPartition, OffsetAndMetadata> offsets = Translate.ProtoOffsetsToDictionary(request.Offsets);
                 if (timeout.HasValue)
@@ -193,7 +194,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
         return RunStatus(request.ConsumerId, c =>
         {
-            if (request.Offsets.Count > 0)
+            if (request.Offsets.Count > 0 || request.WithOffsets)
             {
                 // This overload honours a null callback (Java's commitAsync(Map, null)).
                 c.CommitAsync(Translate.ProtoOffsetsToDictionary(request.Offsets), callback);
