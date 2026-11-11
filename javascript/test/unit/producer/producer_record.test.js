@@ -329,13 +329,20 @@ test('values of the wrong type are TypeErrors', () => {
     message: `${FORMS}; got a string`,
   });
   assert.throws(() => new ProducerRecord({ topic: 1, value: 'v' }), { name: 'TypeError', message: 'topic must be a string' });
-  assert.throws(() => new ProducerRecord({ topic: 't', key: 1, value: 'v' }), {
+  // A key and a value are what the producer's serializers take, as Java's
+  // ProducerRecord<K, V> holds any K and V: without a serializer, send()
+  // refuses one that is not bytes or a string.
+  const order = { id: 1 };
+  const typed = new ProducerRecord({ topic: 't', key: 1, value: order });
+  assert.equal(typed.key, 1);
+  assert.equal(typed.value, order);
+  assert.throws(() => typed.internalToNative(), {
     name: 'TypeError',
-    message: 'key must be a Buffer, a Uint8Array, a string or null',
+    message: 'key must be a Buffer, a Uint8Array, a string or null when the producer has no key serializer',
   });
-  assert.throws(() => new ProducerRecord({ topic: 't', value: {} }), {
+  assert.throws(() => new ProducerRecord({ topic: 't', value: {} }).internalToNative(), {
     name: 'TypeError',
-    message: 'value must be a Buffer, a Uint8Array, a string or null',
+    message: 'value must be a Buffer, a Uint8Array, a string or null when the producer has no value serializer',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', partition: 1.5, key: null, value: 'v' }), {
     name: 'TypeError',

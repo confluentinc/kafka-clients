@@ -33,9 +33,12 @@ import type { RecordMetadata } from './record_metadata';
 /**
  * The interface for the `KafkaProducer`.
  *
+ * @typeParam K - the type of the keys the producer's key serializer takes
+ * @typeParam V - the type of the values the producer's value serializer takes
+ *
  * @see KafkaProducer
  */
-export interface Producer {
+export interface Producer<K = Uint8Array, V = Uint8Array> {
   /**
    * See `KafkaProducer.send({ record, callback })`.
    *
@@ -44,7 +47,7 @@ export interface Producer {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord;
+    record: ProducerRecord<K | null, V | null>;
     /**
      * A user-supplied callback to execute when the record has been
      * acknowledged by the server (null indicates no callback).
@@ -59,7 +62,7 @@ export interface Producer {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord;
+    record: ProducerRecord<K | null, V | null>;
     callback?: never;
   }): Promise<KafkaFuture<RecordMetadata>>;
   /**
@@ -68,7 +71,7 @@ export interface Producer {
    * @param record - The record to send
    * @returns resolving at hand-over to the future of the record's metadata
    */
-  send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+  send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
 
   /**
    * See `KafkaProducer.flush()`.

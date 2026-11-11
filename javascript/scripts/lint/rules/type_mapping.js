@@ -40,7 +40,6 @@
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
-// | a key or value type variable K / V           | Data (bytes, or a string encodeLikeJava encodes) |
 // | Future<T>, KafkaFuture<T>                    | KafkaFuture<T>                          |
 // | CompletionStage<T>                           | Promise<T>                              |
 // | KafkaFuture.BaseFunction<A, B>, BiConsumer   | the alias of the same name: KafkaFuture.BaseFunction<A, B> |
@@ -70,6 +69,17 @@ const PURE_JS_WAITING = new Map([
     'org.apache.kafka.common.KafkaFuture#get',
     "Java's get() blocks until the future completes; a JavaScript future with no native handle (allOf(), completedFuture(), " +
       "the dependants) settles in JavaScript, and a record's waits natively through its _cb twins",
+  ],
+]);
+/**
+ * The Java members a user implements whose JavaScript form may also return a
+ * Promise of the mapped type, which the client awaits (root CLAUDE.md,
+ * JavaScript Binding Conventions, Serialization: *(js-only)*).
+ */
+const AWAITED_RETURNS = new Map([
+  [
+    'org.apache.kafka.common.serialization.Serializer#serialize',
+    'a serializer may return a Promise, which the producer awaits before it hands the record over',
   ],
 ]);
 const { mappedItems, functionType, constantsOnly, formParameters } = require('../java_ts');
@@ -208,11 +218,6 @@ module.exports = {
       if (j.name === 'String' || j.name === 'char' || j.name === 'Character') return (t.flags & ts.TypeFlags.StringLike) !== 0;
       if (j.name === 'void' || j.name === 'Void') return (t.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) !== 0;
       if (j.name === 'Object') return (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0;
-      if (j.name === 'K' || j.name === 'V') {
-        return parts(t).every(
-          (p) => (p.flags & ts.TypeFlags.StringLike) !== 0 || ['Buffer', 'Uint8Array'].includes(symbolName(p)),
-        );
-      }
       if (j.name === 'CompletionStage') {
         return symbolName(t) === 'Promise' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
@@ -267,11 +272,13 @@ module.exports = {
      * forms naming one option, their union); `promise` unwraps a Promise
      * return of a waiting member.
      */
-    const check = (subject, where, javaTypes, tsType, { promise = false } = {}) => {
+    const check = (subject, where, javaTypes, tsType, { promise = false, awaited = false } = {}) => {
       const list = (Array.isArray(javaTypes) ? javaTypes : [javaTypes]).filter((x) => x);
       if (list.length === 0) return;
       checked += 1;
-      outward = where === 'type' || where === 'return';
+      // A return the user's implementation gives the client (AWAITED_RETURNS)
+      // is taken, not returned.
+      outward = (where === 'type' || where === 'return') && !awaited;
       const js = [...new Map(list.map((x) => [x, parseJava(x)])).values()];
       let t = tsType;
       if (promise) {
@@ -279,7 +286,12 @@ module.exports = {
         if (symbolName(s) === 'Promise') t = checker.getTypeArguments(s)[0] || (s.aliasTypeArguments || [])[0] || t;
       }
       let ok;
-      if (js.length === 1) {
+      if (awaited && js.length === 1) {
+        // Each part as itself, a Promise as what it resolves to.
+        const ps = parts(strip(t)).map((p) => (symbolName(p) === 'Promise' ? checker.getTypeArguments(p)[0] || p : p));
+        const each = ps.map((p) => matches(js[0], p));
+        ok = each.includes('unmapped') ? 'unmapped' : each.every((x) => x === true);
+      } else if (js.length === 1) {
         ok = matches(js[0], t);
       } else {
         const ps = parts(strip(t));
@@ -343,7 +355,8 @@ module.exports = {
           // _cb twin) is never unwrapped.
           const blocking =
             (waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`)) && parseJava(javaReturn || 'void').name !== 'CompletionStage';
-          if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking });
+          const awaited = AWAITED_RETURNS.has(`${jm.owner.fqn}#${jm.name}`);
+          if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }
         const p0 = params.length === 1 ? params[0] : null;
         if (p0 !== null && bareName !== null && ts.isIdentifier(p0.name) && p0.name.text === bareName) {
