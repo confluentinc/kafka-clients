@@ -9,7 +9,10 @@ RUST_PROFILE ?= debug
 # all-features build.
 RUST_BUILD_TARGET = $(if $(filter release,$(RUST_PROFILE)),build-all-features,devel-build-all-features)
 BUILD_DIR = build
-GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
+# The tag of the gRPC image; rust/tests/common/backend_pool.rs reads the same
+# variable. Override it per worktree so concurrent sessions do not share images.
+MULTILANG_IMAGE_TAG ?= dev
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:$(MULTILANG_IMAGE_TAG)
 # Native (non-container) gRPC server builds for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for them in MULTILANG_BACKEND_MODE=native.

@@ -8,8 +8,11 @@ PROFILE ?= debug
 # The rust/Makefile target that builds that library: the release or the debug
 # all-features build.
 RUST_BUILD_TARGET = $(if $(filter release,$(PROFILE)),build-all-features,devel-build-all-features)
-GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
-GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
+# The tag of the gRPC images; rust/tests/common/backend_pool.rs reads the same
+# variable. Override it per worktree so concurrent sessions do not share images.
+MULTILANG_IMAGE_TAG ?= dev
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:$(MULTILANG_IMAGE_TAG)
+GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:$(MULTILANG_IMAGE_TAG)
 # Native (non-container) gRPC server builds for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for them in MULTILANG_BACKEND_MODE=native.
