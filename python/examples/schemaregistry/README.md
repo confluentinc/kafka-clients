@@ -10,9 +10,7 @@
 | `avro_producer.py` | Sends 10 `User` records as Avro to `avro-users`, registering the schema in Schema Registry under `avro-users-value`. |
 | `avro_consumer.py` | Reads them back from `avro-users` (group `avro-users-group`), decoding each value with the schema fetched from Schema Registry. Stops after a poll interval (30 s) with no records. |
 
-They are the Python peers of `rust/examples/schemaregistry/avro_producer.rs` and `avro_consumer.rs`:
-same topic, group, schema and output, and the records are interchangeable. The Python consumer reads
-what the Rust producer writes.
+Run the producer first, then the consumer: the consumer reads the records the producer wrote.
 
 ## Why a third-party registry client
 

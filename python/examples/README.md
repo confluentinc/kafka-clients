@@ -38,7 +38,7 @@ it is assigned and the ones revoked from it.
 
 ## Schema Registry examples
 
-`schemaregistry/` has an Avro producer and consumer, the Python peers of `rust/examples/schemaregistry`.
+`schemaregistry/` has an Avro producer and a consumer that reads what it writes.
 They need a Schema Registry and the third-party `python-schema-registry-client` package. For GA,
 Confluent will provide a supported Schema Registry client that works with this Python client. See
 [`schemaregistry/README.md`](schemaregistry/README.md) for why, how they work, and how to run them.
