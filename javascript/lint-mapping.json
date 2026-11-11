@@ -9,7 +9,8 @@
     "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "SecurityProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "Headers.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
-    "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol"
+    "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol"
   },
   "javaTargets": {
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",

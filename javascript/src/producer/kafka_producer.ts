@@ -175,6 +175,12 @@ function thrownMessage(thrown: unknown): string {
  * closes a producer: close every one (`close()`, or `await using`).
  */
 export class KafkaProducer {
+  /** The name prefix of the producer's network thread. */
+  static readonly NETWORK_THREAD_PREFIX: string = 'kafka-producer-network-thread';
+
+  /** The group of the producer's metrics. */
+  static readonly PRODUCER_METRIC_GROUP_NAME: string = 'producer-metrics';
+
   #handle: ProducerHandle;
   // close() was called: send refuses records from then on.
   #closed = false;

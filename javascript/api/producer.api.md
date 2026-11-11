@@ -43,6 +43,8 @@ export class KafkaProducer {
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
     flush(): Promise<void>;
+    static readonly NETWORK_THREAD_PREFIX: string;
+    static readonly PRODUCER_METRIC_GROUP_NAME: string;
     send(options: {
         record: ProducerRecord;
         callback: Callback | null;

@@ -34,7 +34,7 @@ import {
   ProducerRecord,
   RecordMetadata,
 } from '@confluentinc/kafka-javascript/producer';
-import { KafkaError, KafkaFuture } from '@confluentinc/kafka-javascript/common';
+import { KafkaError, KafkaFuture, Node, PartitionInfo, TopicPartition } from '@confluentinc/kafka-javascript/common';
 import { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateError } from '@confluentinc/kafka-javascript';
 import { AuthenticationError, RetriableError, SaslAuthenticationError, TopicAuthorizationError } from '@confluentinc/kafka-javascript/common/errors';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
@@ -514,3 +514,28 @@ void literalError;
 // @ts-expect-error two error classes with the same public members are not interchangeable
 const otherError: TopicAuthorizationError = new SaslAuthenticationError('x');
 void otherError;
+
+// The common value types: TopicPartition and Node are data classes (readonly
+// fields), PartitionInfo keeps Java's methods and has no public constructor.
+const tp = new TopicPartition({ topic: 't', partition: 0 });
+expectTypeOf(tp.topic).toEqualTypeOf<string | null>();
+expectTypeOf(tp.partition).toEqualTypeOf<number>();
+expectTypeOf(tp.toJSON()).toEqualTypeOf<{ topic: string | null; partition: number }>();
+// @ts-expect-error a TopicPartition's fields are readonly
+tp.partition = 1;
+// @ts-expect-error an object literal with TopicPartition's fields is no TopicPartition
+const literalTp: TopicPartition = { topic: 't', partition: 0, toJSON: () => ({ topic: 't', partition: 0 }) };
+void literalTp;
+const node = new Node({ id: 1, host: 'h', port: 9092, rack: null });
+expectTypeOf(node.rack).toEqualTypeOf<string | null>();
+expectTypeOf(node.isEmpty).toEqualTypeOf<boolean>();
+expectTypeOf(Node.noNode()).toEqualTypeOf<Node>();
+// @ts-expect-error isFenced needs the rack, as Java's constructors do
+void new Node({ id: 1, host: 'h', port: 9092, isFenced: true });
+declare const info: PartitionInfo;
+expectTypeOf(info.topic()).toEqualTypeOf<string>();
+expectTypeOf(info.leader()).toEqualTypeOf<Node | null>();
+// @ts-expect-error PartitionInfo has no public constructor yet
+void new PartitionInfo({ topic: 't' });
+expectTypeOf(KafkaProducer.NETWORK_THREAD_PREFIX).toEqualTypeOf<string>();
+expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
