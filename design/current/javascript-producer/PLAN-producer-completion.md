@@ -195,12 +195,12 @@ Conventions" for the rules, and update this table in the same commit as the work
 
 | Phase | Item | State |
 |---|---|---|
-| P1 | `NETWORK_THREAD_PREFIX`, `PRODUCER_METRIC_GROUP_NAME` | missing |
-| P1 | `TopicPartition` (frozen data class, `toString`, `toJSON`) | missing |
+| P1 | `NETWORK_THREAD_PREFIX`, `PRODUCER_METRIC_GROUP_NAME` | done |
+| P1 | `TopicPartition` (frozen data class, `toString`, `toJSON`) | done |
 | P1 | `TopicPartition` / `Node` / `PartitionInfo` `equals` / `hashCode` | **blocked: Q29** |
-| P1 | `Node` (data class) | missing |
-| P1 | `PartitionInfo` (methods) except the `Node[]` getters | missing |
-| P1 | `PartitionInfo.replicas()` / `inSyncReplicas()` / `offlineReplicas()` | **blocked: Q25** |
+| P1 | `Node` (data class) | done (Java's protected `idString` constructor left out: subclasses only) |
+| P1 | `PartitionInfo` (methods) except the `Node[]` getters | done: `topic()`, `partition()`, `leader()`, `toString()`; built through `internalCreate` |
+| P1 | `PartitionInfo.replicas()` / `inSyncReplicas()` / `offlineReplicas()`, and its public constructors (they take `Node[]`) | **blocked: Q25** |
 | P1 | `RecordMetadata` public constructor | **blocked: Q23** (`long` parameters) |
 | P2 | `partitionsFor` (Promise via `partitions_for_cb`), gRPC `PartitionsFor`, 4 `JS_GRPC_SKIPS` | **blocked: Q25** (`List<PartitionInfo>`); native walk of `kafka_List_t` can be written first |
 | P3 | `metrics()` (sync, `metrics_err`), `MetricName`, `Metric`, gRPC `Metrics`, 2 `JS_GRPC_SKIPS` | **blocked: Q25** (`Map`), Q23 (long values) |

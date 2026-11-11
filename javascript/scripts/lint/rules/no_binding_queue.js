@@ -95,6 +95,9 @@ const ALLOWED = [
     key: 'JavaForms.#bare',
     reason: "a method's one-parameter Java forms, fixed when its module loads: a table of forms, not records",
   },
+  { key: 'PartitionInfo.#replicas', reason: "one partition's replicas (Java's Node[]), not a store of records" },
+  { key: 'PartitionInfo.#inSyncReplicas', reason: "one partition's in-sync replicas (Java's Node[]), not a store of records" },
+  { key: 'PartitionInfo.#offlineReplicas', reason: "one partition's offline replicas (Java's Node[]), not a store of records" },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',

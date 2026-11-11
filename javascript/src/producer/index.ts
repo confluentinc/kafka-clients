@@ -20,9 +20,8 @@
 // (initTransactions, beginTransaction, sendOffsetsToTransaction,
 // commitTransaction, abortTransaction), partitionsFor, metrics,
 // clientInstanceId, registerMetricForSubscription,
-// unregisterMetricFromSubscription, and its constants NETWORK_THREAD_PREFIX
-// and PRODUCER_METRIC_GROUP_NAME; RecordMetadata's public constructor, which
-// takes a TopicPartition.
+// unregisterMetricFromSubscription; RecordMetadata's public constructor, whose
+// long parameters wait on how a Java long is typed (not decided yet, Q23).
 
 export { KafkaProducer } from './kafka_producer';
 export type { CloseArgs, ProducerConfigs } from './kafka_producer';

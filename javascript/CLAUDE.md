@@ -283,13 +283,13 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
-  The objects are not frozen (but `TopicPartition`, once translated), so
+  The objects are not frozen (but `TopicPartition`), so
   `ProducerRecord.internalToNative` runs the constructor's checks again at
   `send()` on the fields it reads, with the constructor's errors, rejecting
   the send (a field reassigned from plain JavaScript is never sent
   unchecked). The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord` and `RecordMetadata` today. **(root conflict)** The root
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
   `RecordMetadata`, `Node`, the admin description classes) does not name
   `Header`, which its one-line test would admit; the code follows the list, so
