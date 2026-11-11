@@ -36,7 +36,7 @@ const of = (messages, id) => messages.filter((m) => m.ruleId === id).map((m) => 
 
 test('a missing Java member is reported on the declaration of the class that should hold it', () => {
   const rec = LIB['src/producer/rec.ts'].replace('  get size(): number { return 0; }\n', '');
-  const root = project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, ...LIB, 'src/producer/rec.ts': rec });
+  const root = project({ 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB, 'src/producer/rec.ts': rec });
   assert.deepEqual(of(eslintMessages(root), 'kafka/java-completeness'), [
     'src/producer/rec.ts:1 missing clients.producer.Rec#getSize: Rec does not translate it',
   ]);
@@ -44,7 +44,7 @@ test('a missing Java member is reported on the declaration of the class that sho
 
 test('a member finding is reported on the member', () => {
   const rec = LIB['src/producer/rec.ts'].replace('  flush(): void {}\n', '  flush(): void {}\n  bogus(): void {}\n');
-  const root = project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, ...LIB, 'src/producer/rec.ts': rec });
+  const root = project({ 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB, 'src/producer/rec.ts': rec });
   const lines = rec.split('\n');
   const line = lines.findIndex((l) => l.includes('bogus()')) + 1;
   const found = of(eslintMessages(root), 'kafka/java-members');
@@ -67,12 +67,12 @@ const linted = (files) => Object.keys(files).filter((f) => /\.(ts|js|cjs|mjs)$/.
 
 test('a rule that cannot run is reported on every file it visits, line 1', () => {
   const files = { 'tsconfig.json': TSCONFIG, ...LIB };
-  const text = 'cannot-run check-java-name: cannot run, no Java index at build/java-index.json (run `cargo xtask java-index --json` from rust/)';
+  const text = 'cannot-run check-java-name: cannot run, no Java index at java-index.json (run `cargo xtask java-api` from rust/)';
   assert.deepEqual(of(eslintMessages(project(files)), 'kafka/java-name'), linted(files).map((f) => `${f}:1 ${text}`));
 });
 
 test('a rule that checks nothing is reported on every file it visits', () => {
-  const files = { 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, 'src/index.ts': 'export {};\n', 'src/b.ts': 'const b = 1;\nvoid b;\n' };
+  const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, 'src/index.ts': 'export {};\n', 'src/b.ts': 'const b = 1;\nvoid b;\n' };
   assert.deepEqual(of(eslintMessages(project(files)), 'kafka/java-name'), [
     'src/b.ts:1 nothing-checked check-java-name: 0 item(s) checked; a rule that checks nothing cannot pass',
     'src/index.ts:1 nothing-checked check-java-name: 0 item(s) checked; a rule that checks nothing cannot pass',
@@ -82,7 +82,7 @@ test('a rule that checks nothing is reported on every file it visits', () => {
 test('a stale baseline line is reported on every file by the rule owning its kind', () => {
   const files = {
     'tsconfig.json': TSCONFIG,
-    'build/java-index.json': INDEX,
+    'java-index.json': INDEX,
     ...LIB,
     'eslint-baseline.txt': 'missing clients.producer.Rec#gone\nno-such-kind x\n',
   };
@@ -96,7 +96,7 @@ test('a stale baseline line is reported on every file by the rule owning its kin
 test('an unknown kind is reported on every file by kafka/baseline, once every rule ran', () => {
   const files = {
     'tsconfig.json': TSCONFIG,
-    'build/java-index.json': INDEX,
+    'java-index.json': INDEX,
     ...LIB,
     ...FILES,
     'eslint-baseline.txt': 'no-such-kind x\nprefix:nowhere/\n',
@@ -118,7 +118,7 @@ test('an unused allowlist entry is located on the entry, in the rule module that
 });
 
 test('kafka/directives: a disable names one rule, not a kafka/ one, with a reason; no inline configuration', () => {
-  const files = { 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, ...LIB };
+  const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB };
   const cases = [
     ['// eslint-disable-next-line no-console -- the reason', []],
     ['/* eslint-disable no-console -- a block, one rule, a reason */', []],
@@ -148,7 +148,7 @@ test('kafka/directives reads every inline form ESLint accepts, as ESLint itself 
   const { Linter } = require('eslint');
   const { config } = require('../../scripts/lint/eslint/config');
   const { eslintReading } = require('../../scripts/lint/rules/directives');
-  const files = { 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, ...LIB };
+  const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB };
   const R = 'kafka/java-name';
   // [comment, the check's kind, whether ESLint itself reads a configuration or a kafka/ rule in it]
   const forms = [
@@ -212,7 +212,7 @@ test('what ESLint reads but the check does not is directive-unread', () => {
 });
 
 test('a directive finding is also reported at 1:0 of its own file, which a file-wide disable does not reach', () => {
-  const files = { 'tsconfig.json': TSCONFIG, 'build/java-index.json': INDEX, ...LIB };
+  const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB };
   const root = project({ ...files, 'src/x.ts': '// header\n/* eslint-disable */\nconst x = 1;\nvoid x;\n' });
   const own = eslintMessages(root).filter((m) => m.ruleId === 'kafka/directives' && m.rel === 'src/x.ts');
   // Its own line (2) is covered by the disable; 1:0, before it, is not.
@@ -222,7 +222,7 @@ test('a directive finding is also reported at 1:0 of its own file, which a file-
 test('kafka/config: an ESLint configuration besides eslint.config.cjs is reported on every file', () => {
   const files = {
     'tsconfig.json': TSCONFIG,
-    'build/java-index.json': INDEX,
+    'java-index.json': INDEX,
     ...LIB,
     'eslint.config.cjs': "'use strict';\n",
     'src/producer/eslint.config.cjs': 'module.exports = [];\n',

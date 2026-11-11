@@ -25,7 +25,6 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const path = require('node:path');
 
 const root = require('@confluentinc/kafka-javascript');
@@ -45,8 +44,7 @@ const { ERRORS, FFI_NAMES } = require('../../../dist/internal/error_registry');
 const { LOCAL_NULL_POINTER, UNKNOWN_SERVER_ERROR, classForFfiId, errorClasses, errorFfiId, fromNative } = require('../../../dist/internal/errors');
 const { create, ownFfiId, ownForms } = require('../../../dist/internal/throwable');
 
-const REPO = path.join(__dirname, '..', '..', '..', '..');
-const JAVA = path.join(REPO, 'kafka', 'clients', 'src', 'main', 'java');
+const { javaClass } = require('../../_java_source');
 
 const { KafkaError } = common;
 const {
@@ -86,55 +84,51 @@ const JDK_FORMS = new Map([
 // (Java 11's `CancellationException extends IllegalStateException`).
 const JDK_PARENTS = new Map([['java.util.concurrent.CancellationException', 'java.lang.IllegalStateException']]);
 
+/** Whether Java parameter type `t` is the cause: a Throwable, whatever its class (InterruptedException). */
+function throwable(t) {
+  return t === 'Throwable' || /Exception$/.test(t);
+}
+
 /**
  * The message and cause forms of Java class `fqn`: its public constructors
  * (protected too, of an abstract class) that take only a String and a
- * Throwable, as parameter sets, read from its source. A constructor with any
- * other parameter takes a payload and has no form.
+ * Throwable, as parameter sets, read from the Java index. A constructor with
+ * any other parameter takes a payload and has no form.
  */
 function javaForms(fqn) {
   if (JDK_FORMS.has(fqn)) return JDK_FORMS.get(fqn);
-  const source = fs.readFileSync(path.join(JAVA, ...fqn.split('.')) + '.java', 'utf8');
-  const simple = fqn.split('.').pop();
-  const abstract = new RegExp(`abstract\\s+class\\s+${simple}\\b`).test(source);
-  const visibility = abstract ? '(?:public|protected)' : 'public';
+  const cls = javaClass(fqn);
+  const simple = cls.path[cls.path.length - 1];
+  const visible = cls.abstract ? ['public', 'protected'] : ['public'];
+  const ctors = cls.overloads.filter((o) => o.name === simple && o.return_type === null && visible.includes(o.visibility));
   const forms = [];
-  let any = false;
-  for (const m of source.matchAll(new RegExp(`(@Deprecated\\s+)?${visibility}\\s+${simple}\\s*\\(([^)]*)\\)`, 'g'))) {
-    any = true;
-    if (m[1] !== undefined) continue;
-    const types = m[2].trim() === '' ? [] : m[2].split(',').map((p) => p.trim().replace(/^final\s+/, '').split(/\s+/).slice(0, -1).join(' '));
-    // A Throwable parameter is the cause, whatever its class (InterruptedException).
-    const throwable = (t) => t === 'Throwable' || /Exception$/.test(t);
-    const strings = types.filter((t) => t === 'String').length;
-    const throwables = types.filter(throwable).length;
-    if (strings + throwables !== types.length || strings > 1 || throwables > 1) continue;
-    forms.push(types.map((t) => (t === 'String' ? 'message' : 'cause')));
+  for (const o of ctors) {
+    if (o.deprecated) continue;
+    const strings = o.params.filter((t) => t === 'String').length;
+    const throwables = o.params.filter(throwable).length;
+    if (strings + throwables !== o.params.length || strings > 1 || throwables > 1) continue;
+    forms.push(o.params.map((t) => (t === 'String' ? 'message' : 'cause')));
   }
   // A class that declares no constructor has Java's implicit no-argument one.
-  if (!any) forms.push([]);
+  if (ctors.length === 0) forms.push([]);
   return forms;
 }
 
 /**
- * The fixed messages of Java class `fqn`'s constructors, read from its
- * source: the form's parameter set (`message,cause`) -> the text of the
- * string literals its `super(...)` / `this(...)` call starts with
+ * The fixed messages of Java class `fqn`'s constructors, from the Java index:
+ * the form's parameter set (`message,cause`) -> the text of the string
+ * literals its `super(...)` / `this(...)` call starts with
  * (`super("Failing batch since transaction was aborted")`).
  */
 function javaFixedTexts(fqn) {
   const texts = new Map();
   if (fqn.startsWith('java.')) return texts;
-  const source = fs.readFileSync(path.join(JAVA, ...fqn.split('.')) + '.java', 'utf8');
-  const simple = fqn.split('.').pop();
-  const ctor = new RegExp(`(?:public|protected)\\s+${simple}\\s*\\(([^)]*)\\)\\s*\\{\\s*(?:super|this)\\(\\s*((?:"(?:[^"\\\\]|\\\\.)*"\\s*\\+?\\s*)+)`, 'g');
-  for (const m of source.matchAll(ctor)) {
-    const types = m[1].trim() === '' ? [] : m[1].split(',').map((p) => p.trim().replace(/^final\s+/, '').split(/\s+/).slice(0, -1).join(' '));
+  const cls = javaClass(fqn);
+  for (const o of cls.overloads) {
+    if (o.fixed_message === undefined) continue;
     // A constructor with a payload has no form (javaForms), so no fixed message.
-    if (!types.every((t) => t === 'String' || t === 'Throwable' || /Exception$/.test(t))) continue;
-    const params = types.map((t) => (t === 'String' ? 'message' : 'cause'));
-    const text = [...m[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((l) => JSON.parse(`"${l[1]}"`)).join('');
-    texts.set(params.join(','), text);
+    if (!o.params.every((t) => t === 'String' || throwable(t))) continue;
+    texts.set(o.params.map((t) => (t === 'String' ? 'message' : 'cause')).join(','), o.fixed_message);
   }
   return texts;
 }
@@ -142,8 +136,7 @@ function javaFixedTexts(fqn) {
 /** Whether Java class `fqn` is abstract. */
 function isAbstract(fqn) {
   if (fqn.startsWith('java.')) return false;
-  const source = fs.readFileSync(path.join(JAVA, ...fqn.split('.')) + '.java', 'utf8');
-  return new RegExp(`abstract\\s+class\\s+${fqn.split('.').pop()}\\b`).test(source);
+  return javaClass(fqn).abstract;
 }
 
 /** An instance of `cls`, as the core reports one. */
@@ -151,20 +144,14 @@ function instance(cls) {
   return create(cls, 'm');
 }
 
-/** The FQN of Java's `extends` parent of `fqn`, read from its source. */
+/** The FQN of Java's `extends` parent of `fqn`, from the Java index: a JDK class (`RuntimeException`) in java.lang. */
 function javaParent(fqn) {
-  const source = fs.readFileSync(path.join(JAVA, ...fqn.split('.')) + '.java', 'utf8');
-  const simple = fqn.split('.').pop();
-  const m = new RegExp(`class\\s+${simple}\\b[^{]*?\\bextends\\s+([\\w.]+)`).exec(source);
-  assert.ok(m, `${fqn} has no extends clause`);
-  const parent = m[1];
-  if (parent.includes('.')) return parent;
-  const imported = new RegExp(`^import\\s+([\\w.]+\\.${parent});`, 'm').exec(source);
-  if (imported) return imported[1];
-  if (['RuntimeException', 'Exception', 'IllegalStateException', 'IllegalArgumentException'].includes(parent)) {
-    return `java.lang.${parent}`;
-  }
-  return `${fqn.slice(0, fqn.lastIndexOf('.'))}.${parent}`;
+  const cls = javaClass(fqn);
+  assert.ok(cls.supertypes.length > 0, `${fqn} has no extends clause`);
+  const resolved = cls.supertype_fqns[0];
+  if (resolved !== null) return resolved;
+  const parent = cls.supertypes[0];
+  return parent.includes('.') ? parent : `java.lang.${parent}`;
 }
 
 /** The src/ folder of a Java package: `clients` dropped, `java.*` at the root. */

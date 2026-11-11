@@ -24,7 +24,7 @@ const { CLASSES, LIB, javaIndex } = require('./_java_fixture');
 
 const RULE = 'check-java-completeness';
 
-const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), ...LIB, ...files });
+const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), ...LIB, ...files });
 
 test('a class translating every public, live Java member passes', () => {
   const r = lint(fixture(), [RULE]);
@@ -51,7 +51,7 @@ test("an enum missing java.lang.Enum's members, or toJSON, is a finding, listed 
   const bare = CLASSES.map((c) =>
     c.fqn.endsWith('.Mode') ? { ...c, overloads: c.overloads.filter((o) => !['values', 'valueOf', 'name', 'ordinal'].includes(o.name)) } : c,
   );
-  r = lint(fixture({ 'build/java-index.json': javaIndex(bare), 'src/producer/mode.ts': mode.replace('  ordinal(): number { return 0; }\n', '') }), [RULE]);
+  r = lint(fixture({ 'java-index.json': javaIndex(bare), 'src/producer/mode.ts': mode.replace('  ordinal(): number { return 0; }\n', '') }), [RULE]);
   assert.deepEqual(findings(r), [
     'clients.producer.Mode#valueOf: Mode does not translate it',
     'clients.producer.Mode#name: Mode does not translate it',
@@ -96,7 +96,7 @@ test('cannot run without the Java index', () => {
 });
 
 test('no class to complete fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), 'src/producer/callback.ts': LIB['src/producer/callback.ts'] }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/producer/callback.ts': LIB['src/producer/callback.ts'] }), [RULE]);
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-completeness: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

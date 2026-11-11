@@ -38,6 +38,7 @@
 // (javascript/CLAUDE.md "Errors"): one class per Java exception the FFI enum
 // names, listed with its Java class in src/internal/error_registry.ts.
 
+const { SCHEMA } = require('./java_index');
 const path = require('node:path');
 
 const PREFIX = 'org.apache.kafka.';
@@ -104,10 +105,10 @@ function snakeCase(name) {
     .toLowerCase();
 }
 
-/** The Java index (`build/java-index.json`), with lookups. */
+/** The Java index (the committed java-index.json, scripts/lint/java_index.js), with lookups. */
 class JavaIndex {
   constructor(json) {
-    if (json.schema !== 1) throw new Error(`the Java index has schema ${json.schema}, not 1`);
+    if (json.schema !== SCHEMA) throw new Error(`the Java index has schema ${json.schema}, not ${SCHEMA}`);
     if (!Array.isArray(json.classes) || json.classes.length === 0) throw new Error('the Java index lists no class');
     this.classes = json.classes;
     this.byFqn = new Map(json.classes.map((c) => [c.fqn, c]));

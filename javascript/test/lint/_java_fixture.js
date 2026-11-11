@@ -14,8 +14,9 @@
 
 'use strict';
 
-// A hand-written Java index (build/java-index.json, `cargo xtask java-index
-// --json`'s schema 1) for the Java rules' fixture projects.
+// A hand-written Java index (java-index.json, schema 2, as `cargo xtask
+// java-api` writes it, but every key given) for the Java rules' fixture
+// projects.
 
 const PREFIX = 'org.apache.kafka.';
 
@@ -25,7 +26,7 @@ function method(name, params = [], extra = {}) {
     name,
     params,
     param_names: params.map((_, i) => `p${i}`),
-    // As cargo xtask java-index writes them: `params` erased, `param_types`
+    // As cargo xtask java-api writes them: `params` erased, `param_types`
     // as written (a test giving generic types sets both).
     param_types: params,
     // The type the tests of the type rule give it; none (as a constructor has) otherwise.
@@ -78,7 +79,7 @@ function javaClass(name, extra = {}) {
 
 /** The index file's text for `classes`. */
 function javaIndex(classes) {
-  return JSON.stringify({ schema: 1, audience_ref: '4.4.0-rc3', deprecation_refs: ['4.3.1', '4.4.0-rc3'], classes });
+  return JSON.stringify({ schema: 2, audience_ref: '4.4.0-rc3', deprecation_refs: ['4.3.1', '4.4.0-rc3'], classes });
 }
 
 /**

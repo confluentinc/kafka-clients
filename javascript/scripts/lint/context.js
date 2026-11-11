@@ -16,7 +16,7 @@
 
 // What every rule of the rule linter reads, loaded once and only when a rule
 // asks for it: the TypeScript program over src/ with its type checker, the
-// Java index (`cargo xtask java-index --json`), the addon's C sources and the
+// committed Java index (java-index.json, `cargo xtask java-api`), the addon's C sources and the
 // bindings header. A rule names the inputs it needs (`needs`); one that is
 // missing makes the rule fail with the reason, never skip.
 
@@ -24,6 +24,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { headerPath } = require('../header');
+const { SCHEMA, COMMAND, loadJavaIndex } = require('./java_index');
 
 /** The directories `files` and `allFiles` never enter: dependencies, outputs, git's and agents' notes. */
 const SKIPPED_DIRS = new Set(['node_modules', 'build', 'dist', '.git', '.claude']);
@@ -79,7 +80,7 @@ const INPUTS = {
   /** The Java index. */
   java: (ctx) => {
     if (!fs.existsSync(ctx.javaIndexPath)) {
-      return `no Java index at ${ctx.rel(ctx.javaIndexPath)} (run \`cargo xtask java-index --json\` from rust/)`;
+      return `no Java index at ${ctx.rel(ctx.javaIndexPath)} (run \`${COMMAND}\` from rust/)`;
     }
     let index;
     try {
@@ -87,8 +88,8 @@ const INPUTS = {
     } catch (e) {
       return `cannot read the Java index ${ctx.rel(ctx.javaIndexPath)}: ${e.message}`;
     }
-    if (index === null || typeof index !== 'object' || index.schema !== 1) {
-      return `the Java index ${ctx.rel(ctx.javaIndexPath)} is not schema 1 (rerun \`cargo xtask java-index --json\`)`;
+    if (index === null || typeof index !== 'object' || index.schema !== SCHEMA) {
+      return `the Java index ${ctx.rel(ctx.javaIndexPath)} is not schema ${SCHEMA} (rerun \`${COMMAND}\` from rust/)`;
     }
     if (!Array.isArray(index.classes) || index.classes.length === 0) {
       return `the Java index ${ctx.rel(ctx.javaIndexPath)} lists no class`;
@@ -106,7 +107,7 @@ const INPUTS = {
 class Context {
   /**
    * @param options.root - the client's directory (javascript/)
-   * @param options.javaIndexPath - the Java index (default `<root>/build/java-index.json`)
+   * @param options.javaIndexPath - the Java index (default `<root>/java-index.json`, the committed one)
    * @param options.headerPath - the bindings header (default the one the addon is built against)
    * @param options.loadTypescript - loads the `typescript` module (default `require`; tests replace it)
    */
@@ -115,7 +116,7 @@ class Context {
     this.srcDir = path.join(this.root, 'src');
     this.nativeDir = path.join(this.root, 'native');
     this.tsconfigPath = path.join(this.root, 'tsconfig.json');
-    this.javaIndexPath = javaIndexPath || path.join(this.root, 'build', 'java-index.json');
+    this.javaIndexPath = javaIndexPath || path.join(this.root, 'java-index.json');
     this.headerPath = header || headerPath();
     this.loadTypescript = loadTypescript || (() => require('typescript'));
     this.cache = new Map();
@@ -199,9 +200,9 @@ class Context {
     });
   }
 
-  /** The Java index (`build/java-index.json`). */
+  /** The Java index (`java-index.json`, scripts/lint/java_index.js), its defaults filled in. */
   javaIndex() {
-    return this.once('java', () => JSON.parse(fs.readFileSync(this.javaIndexPath, 'utf8')));
+    return this.once('java', () => loadJavaIndex(this.javaIndexPath));
   }
 
   /** The bindings header's text. */

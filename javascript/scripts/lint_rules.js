@@ -26,9 +26,9 @@
 //
 // Usage: node scripts/lint_rules.js [check-<name>] [--no-baseline]
 //
-// `make -C javascript lint-rules` writes the Java index first
-// (`cargo xtask java-index --json`). `--no-baseline` ignores
-// lint-baseline.txt, so every finding is shown.
+// The Java index is the committed java-index.json (`cargo xtask java-api`
+// writes it). `--no-baseline` ignores lint-baseline.txt, so every finding is
+// shown.
 
 const path = require('node:path');
 

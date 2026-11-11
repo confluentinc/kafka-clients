@@ -12,12 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `cargo xtask java-api <file>`: writes the public API of the Java client to
-//! `<file>`, one line per type and member, for the bindings' Java-name checks
-//! (the .NET binding's CKRDA0013 reads `dotnet/analyzers/java-api.txt`). The
-//! list depends only on the Java sources, so every binding can share it.
-//! `cargo xtask java-api --check <file>` writes nothing: it fails when `<file>`
-//! differs from what the command would write.
+//! `cargo xtask java-api`: scans the Java client once and writes every
+//! binding's committed copy of what it reads from Java ([`OUTPUTS`]):
+//!
+//! - `dotnet/analyzers/java-api.txt`, the public API, one line per type and
+//!   member, for the .NET binding's Java-name check (CKRDA0013);
+//! - `javascript/java-index.json`, the class index the Node.js client's rule
+//!   linter and unit tests read ([`crate::java_index_json`]), so nothing in
+//!   `javascript/` reads the `kafka` submodule.
+//!
+//! `cargo xtask java-api --check` writes nothing: it fails, naming the file and
+//! its first line that differs, when one is out of date; `cargo xtask
+//! check-generated` runs the same check. A `<file>` argument naming one of the
+//! outputs is accepted, as the list's header and older docs give it: the
+//! command still scans once and writes (or checks) every output.
 //!
 //! A type is listed when its top-level class is on the `@InterfaceAudience.Public`
 //! list, is one of [`TEST_JAR_CLASSES`], or is an exception class the error
@@ -33,13 +41,21 @@ use std::fs;
 
 use crate::error_hierarchy::{self, JdkCtor};
 use crate::java::{self, JavaClass, JavaIndex, JavaKind, Overload, Visibility};
+use crate::java_index_json;
 
 /// The `@InterfaceAudience.Public` list, relative to `rust/`.
 const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
 
-/// The bindings' copies of the list, relative to `rust/`: `cargo xtask check-generated`
-/// fails when one is out of date with the Java sources.
-pub(crate) const BINDING_COPIES: &[&str] = &["../dotnet/analyzers/java-api.txt"];
+/// The .NET binding's copy of the list, relative to `rust/`.
+pub(crate) const DOTNET_LIST: &str = "../dotnet/analyzers/java-api.txt";
+
+/// The Node.js client's class index, relative to `rust/`.
+pub(crate) const JAVASCRIPT_INDEX: &str = "../javascript/java-index.json";
+
+/// Every file the command writes from its one scan, relative to `rust/`:
+/// `cargo xtask check-generated` fails when one is out of date with the Java
+/// sources.
+pub(crate) const OUTPUTS: &[&str] = &[DOTNET_LIST, JAVASCRIPT_INDEX];
 
 /// Classes Java ships in its test jar that the bindings translate as public
 /// API: `MockAdminClient` (`.claude/rules/admin-client.md` §9).
@@ -63,59 +79,66 @@ const HEADER: &str = "\
 #   constant  <class>  <NAME>   (an enum constant)
 ";
 
-/// What the command was asked to do with its file.
+/// Whether the command writes its outputs or checks them.
 #[derive(Debug, PartialEq, Eq)]
-enum Mode<'a> {
-    /// Write the list to the file.
-    Write(&'a str),
-    /// Fail when the file differs from the list.
-    Check(&'a str),
+enum Mode {
+    /// Write every output.
+    Write,
+    /// Fail when an output differs from what the scan gives.
+    Check,
 }
 
-/// `<file>` or `--check <file>`.
-fn parse_args(args: &[String]) -> anyhow::Result<Mode<'_>> {
-    match args {
-        [flag, file] if flag == "--check" => Ok(Mode::Check(file)),
-        [file] if !file.starts_with("--") => Ok(Mode::Write(file)),
-        _ => anyhow::bail!(
-            "usage: cargo xtask java-api [--check] <file>, e.g. `cargo xtask java-api ../dotnet/analyzers/java-api.txt`"
-        ),
+/// `[--check] [<file>]`, `<file>` one of [`OUTPUTS`].
+fn parse_args(args: &[String]) -> anyhow::Result<Mode> {
+    let mut mode = Mode::Write;
+    for arg in args {
+        match arg.as_str() {
+            "--check" => mode = Mode::Check,
+            file if !file.starts_with("--") && OUTPUTS.contains(&file) => {},
+            _ => anyhow::bail!(
+                "usage: cargo xtask java-api [--check]: writes (or checks) {}; a <file> argument must be one of them",
+                OUTPUTS.join(" and ")
+            ),
+        }
     }
+    Ok(mode)
 }
 
-/// Writes the list to the file `args` names, or, with `--check`, fails when
-/// that file is out of date.
+/// Writes every output from one scan of the Java sources, or, with `--check`,
+/// fails when one is out of date.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mode = parse_args(args)?;
-    let (text, types, members) = generate()?;
-    match mode {
-        Mode::Write(file) => {
-            fs::write(file, text).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
-            println!("✅ Wrote {types} types and {members} members to {file}");
-        },
-        Mode::Check(file) => {
-            let on_disk = fs::read_to_string(file)
-                .map_err(|e| anyhow::anyhow!("{file}: {e}: run `cargo xtask java-api {file}`"))?;
-            check(file, &on_disk, &text)?;
-            println!("✅ {file} is up to date ({types} types and {members} members)");
-        },
+    let outputs = generate()?;
+    for (file, text, summary) in &outputs {
+        match mode {
+            Mode::Write => {
+                fs::write(file, text).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+                println!("✅ Wrote {summary} to {file}");
+            },
+            Mode::Check => {
+                let on_disk =
+                    fs::read_to_string(file).map_err(|e| anyhow::anyhow!("{file}: {e}: run `cargo xtask java-api`"))?;
+                check(file, &on_disk, text)?;
+                println!("✅ {file} is up to date ({summary})");
+            },
+        }
     }
     Ok(())
 }
 
-/// Fails, naming the file and its first line that differs, when a binding's copy
-/// of the list is out of date.
-pub(crate) fn check_binding_copies() -> anyhow::Result<()> {
-    let (text, _, _) = generate()?;
-    for file in BINDING_COPIES {
+/// Fails, naming the file and its first line that differs, when an output is
+/// out of date: every output, from one scan.
+pub(crate) fn check_outputs() -> anyhow::Result<()> {
+    for (file, text, _) in generate()? {
         let on_disk =
-            fs::read_to_string(file).map_err(|e| anyhow::anyhow!("{file}: {e}: run `cargo xtask java-api {file}`"))?;
+            fs::read_to_string(file).map_err(|e| anyhow::anyhow!("{file}: {e}: run `cargo xtask java-api`"))?;
         check(file, &on_disk, &text)?;
     }
     Ok(())
 }
 
-/// Fails, naming the first line that differs, when `on_disk` is not `expected`.
+/// Fails, naming the first line that differs, when `on_disk` is not `expected`: for the
+/// JSON index, by its class and first differing member rather than the whole line.
 fn check(file: &str, on_disk: &str, expected: &str) -> anyhow::Result<()> {
     if on_disk == expected {
         return Ok(());
@@ -128,12 +151,22 @@ fn check(file: &str, on_disk: &str, expected: &str) -> anyhow::Result<()> {
             (Some(w), Some(f)) if w == f => line += 1,
             (None, None) => anyhow::bail!(
                 "{file} is out of date with the Java sources: it differs only in its line endings or its final \
-                 newline; run `cargo xtask java-api {file}`"
+                 newline; run `cargo xtask java-api`"
             ),
             (w, f) => {
+                let described = match (w, f) {
+                    (Some(w), Some(f)) if file.ends_with(".json") => java_index_json::describe_difference(w, f),
+                    _ => None,
+                };
+                if let Some(difference) = described {
+                    anyhow::bail!(
+                        "{file} is out of date with the Java sources: line {line}, {difference}; \
+                         run `cargo xtask java-api`"
+                    );
+                }
                 anyhow::bail!(
                     "{file} is out of date with the Java sources: line {line} should be `{}` but is `{}`; \
-                     run `cargo xtask java-api {file}`",
+                     run `cargo xtask java-api`",
                     w.unwrap_or("<end of file>"),
                     f.unwrap_or("<end of file>"),
                 )
@@ -142,9 +175,10 @@ fn check(file: &str, on_disk: &str, expected: &str) -> anyhow::Result<()> {
     }
 }
 
-/// The list's text, with how many types and members it holds, read from the
-/// `kafka` submodule and the two lists.
-fn generate() -> anyhow::Result<(String, usize, usize)> {
+/// Every output's path, text and a summary of what it holds, from one scan of
+/// the `kafka` submodule (its working tree, and the Kafka ref whose
+/// unsupported-API disclaimers the index records) and the lists.
+fn generate() -> anyhow::Result<Vec<(&'static str, String, String)>> {
     let mut index = JavaIndex::load();
     anyhow::ensure!(
         !index.is_empty(),
@@ -153,12 +187,41 @@ fn generate() -> anyhow::Result<(String, usize, usize)> {
     let deprecated =
         fs::read_to_string(java::DEPRECATED_LIST).map_err(|e| anyhow::anyhow!("{}: {e}", java::DEPRECATED_LIST))?;
     index.merge_deprecation_list(&deprecated);
-    let mut public = parse_list(
-        &fs::read_to_string(PUBLIC_AUDIENCE_LIST).map_err(|e| anyhow::anyhow!("{PUBLIC_AUDIENCE_LIST}: {e}"))?,
+    let audience =
+        fs::read_to_string(PUBLIC_AUDIENCE_LIST).map_err(|e| anyhow::anyhow!("{PUBLIC_AUDIENCE_LIST}: {e}"))?;
+    let mut public = parse_list(&audience);
+    let audience_public = public.clone();
+    anyhow::ensure!(
+        !audience_public.is_empty(),
+        "the Public list `{PUBLIC_AUDIENCE_LIST}` names no class"
     );
     public.extend(error_hierarchy::generated_kafka_classes().map(str::to_string));
     let jdk: Vec<_> = error_hierarchy::jdk_exceptions().collect();
-    Ok(render(&index, &public, &jdk))
+    let (list, types, members) = render(&index, &public, &jdk);
+
+    let phantoms = java_index_json::phantom_fields(&index);
+    anyhow::ensure!(
+        phantoms.is_empty(),
+        "the Java scanner took {} non-field(s) for fields, which the index must not list:\n  {}",
+        phantoms.len(),
+        phantoms.join("\n  ")
+    );
+    let unsupported = java::unsupported_packages_at_ref(java::AUDIENCE_REF)
+        .filter(|packages| !packages.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no unsupported-API disclaimers at Kafka `{}`: the ref is not in the `kafka` submodule \
+                 (run `cargo xtask fetch-java-refs`)",
+                java::AUDIENCE_REF
+            )
+        })?;
+    let sources = |class: &JavaClass| java_index_json::source_of(class);
+    let json = java_index_json::to_json(&index, &audience_public, &unsupported, &sources);
+    let classes = index.classes.iter().filter(|c| !c.is_test).count();
+    Ok(vec![
+        (DOTNET_LIST, list, format!("{types} types and {members} members")),
+        (JAVASCRIPT_INDEX, json, format!("{classes} classes")),
+    ])
 }
 
 /// The fully qualified names of a list file: one per line, `#` comments.
@@ -579,22 +642,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_file_or_check_and_a_file() {
-        assert_eq!(parse_args(&args(&["out.txt"])).unwrap(), Mode::Write("out.txt"));
-        assert_eq!(parse_args(&args(&["--check", "out.txt"])).unwrap(), Mode::Check("out.txt"));
+    fn parses_check_and_an_output_file() {
+        assert_eq!(parse_args(&args(&[])).unwrap(), Mode::Write);
+        assert_eq!(parse_args(&args(&["--check"])).unwrap(), Mode::Check);
+        // An output named, as the list's header gives the command: still every output.
+        assert_eq!(parse_args(&args(&[DOTNET_LIST])).unwrap(), Mode::Write);
+        assert_eq!(parse_args(&args(&["--check", JAVASCRIPT_INDEX])).unwrap(), Mode::Check);
     }
 
     #[test]
     fn refuses_any_other_arguments() {
-        let usage = "usage: cargo xtask java-api [--check] <file>, \
-                     e.g. `cargo xtask java-api ../dotnet/analyzers/java-api.txt`";
-        for bad in [
-            &[][..],
-            &["--check"],
-            &["--write", "out.txt"],
-            &["a.txt", "b.txt"],
-            &["--check", "a", "b"],
-        ] {
+        let usage = "usage: cargo xtask java-api [--check]: writes (or checks) ../dotnet/analyzers/java-api.txt and \
+                     ../javascript/java-index.json; a <file> argument must be one of them";
+        for bad in [&["--write"][..], &["out.txt"], &["--check", "a"]] {
             assert_eq!(parse_args(&args(bad)).unwrap_err().to_string(), usage, "{bad:?}");
         }
     }
@@ -615,7 +675,7 @@ mod tests {
             check("java-api.txt", on_disk, expected).unwrap_err().to_string(),
             "java-api.txt is out of date with the Java sources: line 3 should be \
              `method\tx.A\tinstance\ta()` but is `method\tx.A\tinstance\told()`; \
-             run `cargo xtask java-api java-api.txt`"
+             run `cargo xtask java-api`"
         );
     }
 
@@ -625,14 +685,63 @@ mod tests {
         assert_eq!(
             check("f.txt", "# header\n", expected).unwrap_err().to_string(),
             "f.txt is out of date with the Java sources: line 2 should be `type\tx.A\tclass\t-` \
-             but is `<end of file>`; run `cargo xtask java-api f.txt`"
+             but is `<end of file>`; run `cargo xtask java-api`"
         );
         assert_eq!(
             check("f.txt", "# header\ntype\tx.A\tclass\t-\ntype\tx.B\tclass\t-\n", expected)
                 .unwrap_err()
                 .to_string(),
             "f.txt is out of date with the Java sources: line 3 should be `<end of file>` \
-             but is `type\tx.B\tclass\t-`; run `cargo xtask java-api f.txt`"
+             but is `type\tx.B\tclass\t-`; run `cargo xtask java-api`"
+        );
+    }
+
+    #[test]
+    fn check_names_the_class_and_member_of_a_stale_index_line() {
+        let head = "{\"schema\":2,\"classes\":[\n";
+        let line = |ret: &str| {
+            format!(
+                "{{\"package\":\"common\",\"path\":[\"Node\",\"Id\"],\"overloads\":[{{\"name\":\"a\",\"params\":[]}},\
+                 {{\"name\":\"id\",\"params\":[\"int\"],\"return_type\":\"{ret}\"}}],\"fields\":[]}}\n"
+            )
+        };
+        let expected = format!("{head}{}]}}\n", line("int"));
+        let on_disk = format!("{head}{}]}}\n", line("long"));
+        assert_eq!(
+            check("java-index.json", &on_disk, &expected).unwrap_err().to_string(),
+            "java-index.json is out of date with the Java sources: line 2, class \
+             org.apache.kafka.common.Node$Id: `overloads[1].return_type` should be `\"return_type\":\"int\"` \
+             but is `\"return_type\":\"long\"`; run `cargo xtask java-api`"
+        );
+        // A member added: the member where the lines part.
+        let expected = format!(
+            "{head}{}]}}\n",
+            line("int").replace("\"fields\":[]", "\"fields\":[],\"abstract\":true")
+        );
+        let on_disk = format!("{head}{}]}}\n", line("int"));
+        assert_eq!(
+            check("java-index.json", &on_disk, &expected).unwrap_err().to_string(),
+            "java-index.json is out of date with the Java sources: line 2, class \
+             org.apache.kafka.common.Node$Id: `abstract` should be `\"abstract\":true` but is nothing; \
+             run `cargo xtask java-api`"
+        );
+        // A class missing: the classes the line holds.
+        let other = line("int").replace("\"Node\",\"Id\"", "\"Uuid\"");
+        let expected = format!("{head}{}{other}]}}\n", line("int"));
+        let on_disk = format!("{head}{other}]}}\n");
+        assert_eq!(
+            check("java-index.json", &on_disk, &expected).unwrap_err().to_string(),
+            "java-index.json is out of date with the Java sources: line 2, it should hold class \
+             org.apache.kafka.common.Node$Id but holds class org.apache.kafka.common.Uuid; \
+             run `cargo xtask java-api`"
+        );
+        // A line with no class (the header) is quoted whole.
+        assert_eq!(
+            check("java-index.json", "{\"schema\":1,\"classes\":[\n]}\n", &format!("{head}]}}\n"))
+                .unwrap_err()
+                .to_string(),
+            "java-index.json is out of date with the Java sources: line 1 should be \
+             `{\"schema\":2,\"classes\":[` but is `{\"schema\":1,\"classes\":[`; run `cargo xtask java-api`"
         );
     }
 
@@ -643,7 +752,7 @@ mod tests {
             assert_eq!(
                 check("f.txt", on_disk, expected).unwrap_err().to_string(),
                 "f.txt is out of date with the Java sources: it differs only in its line endings or its final \
-                 newline; run `cargo xtask java-api f.txt`",
+                 newline; run `cargo xtask java-api`",
                 "{on_disk:?}"
             );
         }
