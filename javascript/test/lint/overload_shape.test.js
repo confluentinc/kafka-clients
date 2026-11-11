@@ -25,7 +25,7 @@ const { CLASSES, LIB, javaIndex, method } = require('./_java_fixture');
 const RULE = 'check-overload-shape';
 const REC = LIB['src/producer/rec.ts'];
 
-const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), ...LIB, ...files });
+const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), ...LIB, ...files });
 
 /** The fixture's Rec with one overload signature per Java form: Rec(p0), Rec(p0, p1); close(), close(p0). */
 const REC_PER_FORM = REC.replace(
@@ -61,7 +61,7 @@ test('one options signature for several Java forms is signature-per-form: each f
   const one = lint(
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': index,
+      'java-index.json': index,
       'src/producer/kafka_producer.ts':
         'export class KafkaProducer {\n  constructor(options: { configs: object });\n  constructor(configs: object);\n  constructor(options: unknown) { void options; }\n}\n',
     }),
@@ -132,7 +132,7 @@ test("one signature per Java form: each names exactly its form's parameters", ()
   const root = (signatures) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': index,
+      'java-index.json': index,
       'src/producer/producer_record.ts': `export class ProducerRecord {\n${signatures.map((t) => `  constructor(options: ${t});\n`).join('')}  constructor(options: unknown) { void options; }\n}\n`,
     });
   const FOUR = '{ topic: string; partition: number | null; key: unknown; value: unknown }';
@@ -174,7 +174,7 @@ test('a Java form the options object does not name is its own finding, keyed by 
   const root = (options) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': index,
+      'java-index.json': index,
       'src/producer/kafka_producer.ts': `export class KafkaProducer {\n  constructor(options: ${options});\n  constructor(configs: object);\n  constructor(options: unknown) { void options; }\n}\n`,
     });
   const missing =
@@ -214,7 +214,7 @@ test('a Java form a function taking no parameter leaves out is its own finding, 
   const root = (signature) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': index,
+      'java-index.json': index,
       'src/common/kafka_future.ts': `export class KafkaFuture {\n  ${signature} { return Promise.resolve(); }\n}\n`,
     });
   const missing = "KafkaFuture.get/get(long,TimeUnit): common.KafkaFuture#get's form get(long timeout, TimeUnit unit) has no translation: KafkaFuture.get takes ()";
@@ -224,12 +224,12 @@ test('a Java form a function taking no parameter leaves out is its own finding, 
   // wrong shape, of the whole set (so the baselined form is no longer the
   // finding, and its line goes stale).
   const baseline = { 'eslint-baseline.txt': 'overload-missing KafkaFuture.get/get(long,TimeUnit)\n' };
-  r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': index, ...baseline, 'src/common/kafka_future.ts': 'export class KafkaFuture {\n  get(): Promise<void> { return Promise.resolve(); }\n}\n' }), [RULE]);
+  r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': index, ...baseline, 'src/common/kafka_future.ts': 'export class KafkaFuture {\n  get(): Promise<void> { return Promise.resolve(); }\n}\n' }), [RULE]);
   assert.deepEqual(shapeFindings(r), [], r.text);
   r = lint(
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': index,
+      'java-index.json': index,
       ...baseline,
       'src/common/kafka_future.ts': 'export class KafkaFuture {\n  get(timeoutMs?: number): Promise<void> { void timeoutMs; return Promise.resolve(); }\n}\n',
     }),
@@ -274,7 +274,7 @@ test('an option every form takes is required, even one Java may take as null; sa
   const root = (options) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': javaIndex(classesWith()),
+      'java-index.json': javaIndex(classesWith()),
       ...LIB,
       // The forms have no one parameter: no bare value.
       'src/producer/rec.ts': REC.replace('constructor(options: { p0: string; p1?: number })', `constructor(options: ${options})`).replace(
@@ -315,7 +315,7 @@ test("ProducerRecord's six forms: K and V keep their own kinds, so key and value
   const root = (options) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'build/java-index.json': index,
+      'java-index.json': index,
       'src/producer/producer_record.ts': `export class ProducerRecord {\n  constructor(options: ${options}) { void options; }\n}\n`,
     });
   const T = (o) => `{ ${o}; }`;
@@ -344,6 +344,6 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing mapped fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': javaIndex(CLASSES), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-overload-shape: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

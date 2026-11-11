@@ -9,6 +9,8 @@ tools/java-perf-test/bin/
 *.png
 *.svg
 *.json
+# The Node.js client's committed Java index (`cargo xtask java-api`).
+!/javascript/java-index.json
 *.jsonl
 !design/current/img/*.svg
 # The Confluent.Kafka NuGet package's icon (dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj).

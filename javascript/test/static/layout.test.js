@@ -155,7 +155,7 @@ test('the build outputs are not committed: dist/, build/ and native/build/ are g
   const tracked = git(['ls-files', '--', 'dist', 'build', 'native/build']);
   assert.equal(tracked.status, 0, tracked.stderr);
   assert.equal(tracked.stdout, '', 'dist/, build/ or native/build/ has tracked files');
-  for (const output of ['dist/index.js', 'dist/index.d.ts', 'build/java-index.json', 'native/build/Release/confluent-kafka-javascript.node']) {
+  for (const output of ['dist/index.js', 'dist/index.d.ts', 'native/build/Release/confluent-kafka-javascript.node']) {
     assert.equal(git(['check-ignore', '-q', output]).status, 0, `${output} is not git-ignored`);
   }
   const libTracked = git(['ls-files', '--', 'src']).stdout.split('\n').filter(Boolean);

@@ -378,10 +378,10 @@ blocks:
             # @types/node, which compile the library (src/**/*.ts -> dist/) and
             # run the typing tests.
             - (cd javascript && npm ci --no-audit --no-fund)
-            # The submodule is a shallow clone; the rule linter's Java index
-            # (make lint-javascript, part of verify-javascript) reads the
-            # Kafka tags pinned in xtask and fails without them.
-            - (cd rust && cargo xtask fetch-java-refs)
+            # No Kafka refs here: the JavaScript side reads Java only from the
+            # committed javascript/java-index.json, which the Rust jobs check
+            # against the kafka submodule (cargo xtask check-generated, after
+            # their cargo xtask fetch-java-refs).
             - make verify-javascript
             # The static link of the release addon (native/binding.gyp's Linux
             # branch: the .a, --gc-sections, --as-needed, addon.exports.map)

@@ -34,7 +34,7 @@ const MARKERS = ['TO' + 'DO', 'FIX' + 'ME'];
 const PATTERN = new RegExp(`\\b(${MARKERS.join('|')})\\b`, 'g');
 
 /** Files never read, besides those under the skipped directories. */
-const SKIPPED_FILES = new Set(['package-lock.json']);
+const SKIPPED_FILES = new Set(['package-lock.json', 'java-index.json']);
 
 /** The sentences whose markers are not findings: file, sentence (whitespace runs matching any whitespace), reason. */
 const EXEMPT = [['CLAUDE.md', `No ${MARKERS[0]} or ${MARKERS[1]}.`, 'it states the rule itself']];

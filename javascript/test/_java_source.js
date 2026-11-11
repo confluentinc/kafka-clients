@@ -14,38 +14,32 @@
 
 'use strict';
 
-// Reads the Java sources the generated modules come from (kafka/, Apache
-// Kafka 4.3.1), for tests that check a generated value against Java's own.
+// What the tests read from Java: the committed Java index (java-index.json,
+// written by `cargo xtask java-api` from Apache Kafka's sources, read through
+// scripts/lint/java_index.js), never the kafka submodule.
 
-const fs = require('node:fs');
-const path = require('node:path');
+const { committedJavaIndex } = require('../scripts/lint/java_index');
 
-const REPO = path.join(__dirname, '..', '..');
-const JAVA = path.join(REPO, 'kafka', 'clients', 'src', 'main', 'java');
-const DEPRECATED = path.join(REPO, 'design', 'current', 'java-deprecated.txt');
+/** The index's class `fqn` (`org.apache.kafka.….Outer$Inner`); fails when the index has none. */
+function javaClass(fqn) {
+  const cls = committedJavaIndex().classes.find((c) => c.fqn === fqn);
+  if (cls === undefined) throw new Error(`the Java index has no class ${fqn}`);
+  return cls;
+}
 
 /**
  * Every `public static final String NAME = "literal";` of a Java class, as
- * `[name, value]`, and the names of its deprecated members
- * (design/current/java-deprecated.txt).
+ * `[name, value]`, and the names of its deprecated members (the index's
+ * deprecation: the source's and design/current/java-deprecated.txt's).
  *
  * @param {string} fqn
  * @returns {{literals: Array<[string, string]>, deprecated: Set<string>}}
  */
 function javaStringConstants(fqn) {
-  const source = fs.readFileSync(path.join(JAVA, ...fqn.split('.')) + '.java', 'utf8');
-  const literals = [...source.matchAll(/public static final String (\w+)\s*=\s*"((?:[^"\\]|\\.)*)";/g)].map((m) => [
-    m[1],
-    JSON.parse(`"${m[2]}"`),
-  ]);
-  const deprecated = new Set(
-    fs
-      .readFileSync(DEPRECATED, 'utf8')
-      .split('\n')
-      .filter((line) => line.startsWith(`${fqn}#`))
-      .map((line) => line.split('#')[1].trim()),
-  );
+  const cls = javaClass(fqn);
+  const literals = cls.fields.filter((f) => f.value !== undefined).map((f) => [f.name, f.value]);
+  const deprecated = new Set(cls.fields.filter((f) => f.deprecated).map((f) => f.name));
   return { literals, deprecated };
 }
 
-module.exports = { javaStringConstants };
+module.exports = { javaClass, javaStringConstants };

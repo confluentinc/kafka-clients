@@ -444,9 +444,8 @@ test-javascript-macos-docker: build-javascript
 # The Node.js client's rule linter (ESLint, javascript/eslint.config.cjs, and
 # the runner, javascript/scripts/lint_rules.js) and its own tests; ESLint is a
 # devDependency, so `npm ci` in javascript/ first, as for the build. It reads
-# the bindings header the Rust build writes and the Java
-# index `cargo xtask java-index` makes from the kafka submodule, which needs the
-# Kafka tags pinned in xtask (`cargo xtask fetch-java-refs` on a shallow clone).
+# the bindings header the Rust build writes and the committed Java index
+# (javascript/java-index.json, `cargo xtask java-api`), not the kafka submodule.
 lint-javascript: build-rust-all-features
 	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint
 
