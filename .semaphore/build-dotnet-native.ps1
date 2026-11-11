@@ -104,7 +104,9 @@ Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
 $header = Join-Path $repo 'rust\target\include\confluent_kafka_bindings.h'
 Push-Location (Join-Path $repo 'rust')
 try {
-    Invoke-Native cargo @('build', '--locked', '--features', 'ffi', '--release', '--target', $triple)
+    # A scanner can hold a build output for a moment (os error 32, or LNK1114 from the linker), which
+    # fails the build; the build is retried, and Cargo keeps what it already built.
+    Invoke-Retry { Invoke-Native cargo @('build', '--locked', '--features', 'ffi', '--release', '--target', $triple) }
 } finally {
     Pop-Location
 }

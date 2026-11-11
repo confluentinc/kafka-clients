@@ -1071,7 +1071,7 @@ internal sealed partial class NativeConsumer
             }
         }
 
-        int thread = Environment.CurrentManagedThreadId;
+        int thread = CurrentThreadNumber();
         try
         {
             ThrowIfHeldByAnotherThread(thread);
