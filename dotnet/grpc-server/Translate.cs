@@ -153,7 +153,7 @@ internal static class Translate
 
     private const int LocalIllegalArgumentCode = -3;
 
-    private const int LocalIllegalStateCode = -4;
+    internal const int LocalIllegalStateCode = -4;
 
     private const int LocalTimeoutCode = -5;
 

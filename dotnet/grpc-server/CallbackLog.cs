@@ -35,18 +35,39 @@ internal sealed class CallbackLog
     private readonly Dictionary<ulong, List<Proto.CallbackLogEntry>> _entries =
         new Dictionary<ulong, List<Proto.CallbackLogEntry>>();
 
+    // `exception` is the error the callback saw, logged as its message, code and detail; `error` a message of
+    // the server's own, for an error with no exception object, logged with LOCAL_ILLEGAL_STATE. `method`,
+    // `resultPartitions` and `step` are for the "listener_action" entries only.
     internal void Append(
         ulong clientId,
         string kind,
         IEnumerable<TopicPartition>? partitions = null,
         IReadOnlyDictionary<string, long>? offsets = null,
-        string? error = null)
+        Exception? exception = null,
+        string? error = null,
+        string method = "",
+        IEnumerable<TopicPartition>? resultPartitions = null,
+        string step = "")
     {
         Proto.CallbackLogEntry entry = new Proto.CallbackLogEntry
         {
             Kind = kind,
-            Error = error ?? string.Empty,
+            Method = method,
+            Step = step,
         };
+
+        if (exception is not null)
+        {
+            entry.ErrorDetail = Translate.ToProto(exception);
+            entry.Error = entry.ErrorDetail.Message;
+            entry.ErrorCode = entry.ErrorDetail.Code;
+        }
+        else if (!string.IsNullOrEmpty(error))
+        {
+            entry.ErrorDetail = new Proto.KafkaError { Code = Translate.LocalIllegalStateCode, Message = error };
+            entry.Error = error;
+            entry.ErrorCode = Translate.LocalIllegalStateCode;
+        }
 
         if (partitions is not null)
         {
@@ -63,6 +84,14 @@ internal sealed class CallbackLog
                 // Indexer, not Add: nothing here may throw inside a callback, where it would
                 // propagate out of the consumer call that ran it.
                 entry.Offsets[pair.Key] = pair.Value;
+            }
+        }
+
+        if (resultPartitions is not null)
+        {
+            foreach (TopicPartition partition in resultPartitions)
+            {
+                entry.ResultPartitions.Add(Translate.CallbackLogPartitionToProto(partition));
             }
         }
 
@@ -146,7 +175,7 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
             committed[Translate.OffsetKey(pair.Key.Topic(), pair.Key.Partition())] = pair.Value.Offset();
         }
 
-        _log.Append(_consumerId, Translate.KindCommit, partitions, committed, exception?.Message);
+        _log.Append(_consumerId, Translate.KindCommit, partitions, committed, exception);
     }
 }
 
@@ -177,6 +206,6 @@ internal sealed class LoggingDeliveryCallback : ICallback
             [Translate.OffsetKey(metadata.Topic(), metadata.Partition())] = metadata.Offset(),
         };
 
-        _log.Append(_producerId, Translate.KindDelivery, partitions, offsets, exception?.Message);
+        _log.Append(_producerId, Translate.KindDelivery, partitions, offsets, exception);
     }
 }
