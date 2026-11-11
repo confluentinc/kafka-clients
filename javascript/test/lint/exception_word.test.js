@@ -26,7 +26,7 @@ const RULE = 'check-exception-word';
 const KEPT =
   'export class F { isCompletedExceptionally(): boolean { return false; } }\n' +
   'export type C = (options: { exception: unknown }) => void;\n' +
-  'export class M { sendException = 0; flushException = 0; closeException = 0; }\n';
+  'export class MockProducer { sendException = 0; flushException = 0; closeException = 0; f(): number { return this.sendException; } }\n';
 
 test('identifiers without the word pass; comments and strings may name Java classes', () => {
   const root = project({
@@ -35,10 +35,10 @@ test('identifiers without the word pass; comments and strings may name Java clas
   });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 0, r.text);
-  // src: msg, t, msg, F, isCompletedExceptionally, C, options, exception, M, sendException,
-  // flushException, closeException; native (every word token): const, char, s, int, f, void, return,
-  // and the two Node-API calls.
-  assert.ok(r.out.includes('✅ check-exception-word: 21 item(s) checked'), r.text);
+  // src: msg, t, msg, F, isCompletedExceptionally, C, options, exception, MockProducer, sendException,
+  // flushException, closeException, f, sendException; native (every word token): const, char, s, int,
+  // f, void, return, and the two Node-API calls.
+  assert.ok(r.out.includes('✅ check-exception-word: 23 item(s) checked'), r.text);
 });
 
 test('an identifier with the word, in any case, is a finding: TypeScript and C', () => {
@@ -85,6 +85,25 @@ test('`exception` is exempt only as a property name: a local, a parameter or a c
   ]);
 });
 
+test("MockProducer's kept field names are exempt only as fields of MockProducer", () => {
+  const root = project({
+    'src/a.ts':
+      'export function g(): number { const flushException = 1; return flushException; }\n' +
+      'export function closeException(): number { return 0; }\n' +
+      'export class Other { sendException = 0; }\n' +
+      KEPT,
+    'native/a.c': 'int a;\n',
+  });
+  const r = lint(root, [RULE]);
+  assert.equal(r.status, 1);
+  assert.deepEqual(findings(r), [
+    'src/a.ts:1: identifier `flushException` contains "exception"',
+    'src/a.ts:1: identifier `flushException` contains "exception"',
+    'src/a.ts:2: identifier `closeException` contains "exception"',
+    'src/a.ts:3: identifier `sendException` contains "exception"',
+  ]);
+});
+
 test('an exemption no identifier uses is a finding', () => {
   const root = project({ 'src/a.ts': 'export const a = 1;\n', 'native/a.c': 'int a;\n' });
   const r = lint(root, [RULE]);
@@ -93,7 +112,7 @@ test('an exemption no identifier uses is a finding', () => {
     'isCompletedExceptionally: exempt as Java\'s KafkaFuture#isCompletedExceptionally, which javascript/CLAUDE.md keeps ("KafkaFuture is Java\'s"), but no src/ identifier is named so: delete the exemption',
     ...['sendException', 'flushException', 'closeException'].map(
       (name) =>
-        `${name}: exempt as Java's public field MockProducer#${name}, which the TypeScript MockProducer keeps as a field of the same name, but no src/ identifier is named so: delete the exemption`,
+        `${name}: exempt as Java's public field MockProducer#${name}, which the TypeScript MockProducer keeps as a field of the same name, as a field of MockProducer only, but no src/ identifier is named so: delete the exemption`,
     ),
     'exception: exempt as the parameter of Java\'s Callback#onCompletion, a named parameter of the send callback\'s one object (javascript/CLAUDE.md "Java shape, JS idiom": parameters are named as Java names them, as the Python client\'s are), as a property name only, but no src/ identifier is named so: delete the exemption',
   ]);
