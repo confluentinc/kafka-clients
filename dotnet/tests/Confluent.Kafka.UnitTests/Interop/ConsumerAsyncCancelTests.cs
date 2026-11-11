@@ -21,12 +21,15 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -116,7 +119,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledSubscribe_SendsNoWakeup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await AssertCancelSendsNoWakeup(consumer, token => consumer.Subscribe(new[] { Topic }, token));
@@ -130,7 +133,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledUnsubscribe_SendsNoWakeup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Subscribe(new[] { Topic }));
@@ -145,7 +148,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledWakeableOperation_PostsItsWakeDecisionToThePump()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -201,7 +204,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task CancellingAnAsyncPoll_WakesTheConsumerAndLetsItEnd()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Subscribe(new[] { Topic }));
@@ -229,7 +232,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task CancellingACallWhoseCompletionIsQueued_LeavesNoWakeupArmed()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -254,7 +257,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task CancellingAnAsyncPollReturningRecords_SeeksThemBack()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0, s_tp1 }));
@@ -277,7 +280,7 @@ public sealed class ConsumerAsyncCancelTests
             Assert.Equal(
                 new[] { (0, 3L), (0, 4L), (1, 7L) },
                 (await WithDeadline(consumer.Poll(TimeSpan.FromSeconds(30))))
-                    .Select(record => (record.Partition, record.Offset))
+                    .Select(record => (Partition: record.Partition(), Offset: record.Offset()))
                     .OrderBy(fetched => fetched)
                     .ToArray());
         }
@@ -290,12 +293,12 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task DisposeDuringAnOperationWhoseCompletionIsQueued_ClosesOnlyAfterTheCompletionRan()
     {
-        Thread warmUp = new Thread(new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray).Dispose);
+        Thread warmUp = new Thread(new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()).Dispose);
         warmUp.IsBackground = true;
         warmUp.Start();
         Assert.True(warmUp.Join(s_deadline));
 
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         SafeConsumerHandle handle = HandleOf(consumer);
         Task unsubscribe;
         Thread disposing = new Thread(consumer.Dispose);
@@ -307,7 +310,7 @@ public sealed class ConsumerAsyncCancelTests
             disposing.Start();
             WaitUntilParked(disposing);
 
-            KafkaException woken = Assert.IsType<KafkaException>(PollTheCore(handle));
+            WakeupException woken = Assert.IsType<WakeupException>(PollTheCore(handle));
             Assert.Equal(-18, woken.Code);
             Assert.False(unsubscribe.IsCompleted);
         }
@@ -320,7 +323,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task DisposeDuringAPendingOperation_Returns_AndTheOperationEndsWithItsOwnError()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         await WithDeadline(consumer.Assign(new[] { s_tp0 }));
         Task<IReadOnlyDictionary<TopicPartition, long>> pending = consumer.BeginningOffsets(new[] { s_tp0 });
         await Task.Delay(TimeSpan.FromMilliseconds(200));
@@ -329,7 +332,7 @@ public sealed class ConsumerAsyncCancelTests
         await WithDeadline(Task.Run(consumer.Dispose));
 
         Assert.True(pending.IsCompleted);
-        KafkaException ended = await Assert.ThrowsAsync<KafkaException>(() => pending);
+        KafkaTimeoutException ended = await Assert.ThrowsAsync<KafkaTimeoutException>(() => pending);
         Assert.Equal(7, ended.Code);
         TimedOutMessage.AssertCallerOrReaper("Failed to get offsets by times in 1500ms", ended.Message);
     }
@@ -368,7 +371,7 @@ public sealed class ConsumerAsyncCancelTests
     private static async Task AssertAssignedCancelSendsNoWakeup(
         Func<AsyncMockConsumer<byte[], byte[]>, CancellationToken, Task> operation)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -385,7 +388,7 @@ public sealed class ConsumerAsyncCancelTests
         Func<AsyncKafkaConsumer<byte[], byte[]>, CancellationToken, Task> operation)
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -441,7 +444,7 @@ public sealed class ConsumerAsyncCancelTests
     {
         if (await Task.WhenAny(task, Task.Delay(s_deadline)) != task)
         {
-            throw new TimeoutException("The operation did not end within " + s_deadline + ".");
+            throw new System.TimeoutException("The operation did not end within " + s_deadline + ".");
         }
 
         await task;

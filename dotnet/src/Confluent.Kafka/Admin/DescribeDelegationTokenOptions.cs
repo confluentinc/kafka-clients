@@ -28,32 +28,38 @@ public sealed class DescribeDelegationTokenOptions
     private int? _timeoutMs;
     private IReadOnlyList<KafkaPrincipal>? _owners;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DescribeDelegationTokenOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// The owners to filter by — Java's <c>owners()</c>.
     /// </summary>
+    /// <returns>The owners to filter by.</returns>
     /// <remarks>
     /// <see langword="null"/>, the default as in Java, describes every token the caller may
     /// see; an empty list matches none.
     /// </remarks>
-    public IReadOnlyList<KafkaPrincipal>? Owners
+    public IReadOnlyList<KafkaPrincipal>? Owners() => _owners;
+
+    /// <summary>
+    /// If owners is <see langword="null"/>, all the user owned tokens and tokens where user have Describe
+    /// permission will be returned.
+    /// </summary>
+    /// <param name="owners">The owners that we want to describe delegation tokens for.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DescribeDelegationTokenOptions Owners(IReadOnlyList<KafkaPrincipal>? owners)
     {
-        get => _owners;
-        set
-        {
-            _owners = value;
-            Setters.Ran(nameof(Owners));
-        }
+        _owners = owners;
+        Setters.Ran(nameof(Owners));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

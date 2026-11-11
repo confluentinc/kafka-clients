@@ -28,7 +28,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// How long each consumer keeps a rebalance listener, and the exception a listener throws, reachable: retained
 /// while subscribed and across <c>Unsubscribe</c>, released by a replacing or listenerless subscribe and by close;
-/// the listener a failed subscribe was given is released at once.
+/// the listeners failed subscribes were given are retained until a subscribe succeeds.
 /// </summary>
 public sealed class PublicConsumerListenerLifetimeTests
 {
@@ -94,7 +94,7 @@ public sealed class PublicConsumerListenerLifetimeTests
 
     [Theory]
     [MemberData(nameof(Kinds))]
-    public void TheListener_OfAFailedSubscribe_IsReleased(string kind)
+    public void TheListeners_OfFailedSubscribes_AreRetained_UntilASubscribeSucceeds(string kind)
     {
         Subject consumer = Subject.Create(kind);
         try
@@ -107,8 +107,13 @@ public sealed class PublicConsumerListenerLifetimeTests
             }
 
             Collect();
-            int alive = listeners.FindAll(listener => listener.IsAlive).Count;
-            Assert.True(alive <= 1, $"{alive} of {FailedSubscribes} listeners of failed subscribes are still reachable");
+            Assert.Equal(FailedSubscribes, listeners.FindAll(listener => listener.IsAlive).Count);
+
+            consumer.Unsubscribe();
+            WeakReference replacing = SubscribeAFreshListener(consumer);
+            Collect();
+            Assert.Empty(listeners.FindAll(listener => listener.IsAlive));
+            Assert.True(replacing.IsAlive, "the replacing listener was collected while subscribed");
         }
         finally
         {
@@ -146,7 +151,7 @@ public sealed class PublicConsumerListenerLifetimeTests
     private static WeakReference FailToSubscribeAFreshListener(Subject consumer)
     {
         Listener listener = new Listener(failure: null);
-        InvalidOperationException refused = Assert.Throws<InvalidOperationException>(() => consumer.Subscribe(listener));
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(listener));
         Assert.Equal(MutuallyExclusive, refused.Message);
         return new WeakReference(listener);
     }
@@ -204,9 +209,9 @@ public sealed class PublicConsumerListenerLifetimeTests
         internal static Subject Create(string kind) => kind switch
         {
             "KafkaConsumer" => new Subject(
-                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray), null, false),
+                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray()), null, false),
             "MockConsumer" => new Subject(
-                new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray), null, false),
+                new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()), null, false),
             "AsyncKafkaConsumer" => new Subject(null, Real(), false),
             "AsyncMockConsumer" => new Subject(null, Mock(), false),
             "AsyncKafkaConsumer+async" => new Subject(null, Real(), true),
@@ -286,10 +291,10 @@ public sealed class PublicConsumerListenerLifetimeTests
         }
 
         private static AsyncKafkaConsumer<byte[], byte[]> Real() =>
-            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
         private static AsyncMockConsumer<byte[], byte[]> Mock() =>
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
         {

@@ -23,6 +23,8 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>The async consumer's <see cref="TimeSpan"/> overloads: the timeout check, and the bound each one applies.</summary>
@@ -142,8 +144,8 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
             {
                 await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
 
-                AssertNegative(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = call(consumer, TimeSpan.FromSeconds(-1)); }), message, -1000);
-                AssertNegative(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = call(consumer, TimeSpan.FromTicks(-5000)); }), message, -1);
+                AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = call(consumer, TimeSpan.FromSeconds(-1)); }), message, -1000);
+                AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = call(consumer, TimeSpan.FromTicks(-5000)); }), message, -1);
                 Assert.Equal(new[] { s_tp0 }, consumer.Assignment());
             }
             finally
@@ -165,21 +167,21 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
 
             foreach (TimeSpan timeout in new[] { TimeSpan.FromSeconds(-1), TimeSpan.FromTicks(-1), TimeSpan.MinValue })
             {
-                Assert.Throws<ObjectDisposedException>(() => { _ = call(consumer, timeout); });
+                Assert.Throws<IllegalStateException>(() => { _ = call(consumer, timeout); });
             }
         }
     }
 
     [Fact]
-    public async Task Poll_NegativeTimeout_ThrowsArgumentOutOfRange()
+    public async Task Poll_NegativeTimeout_ThrowsIllegalArgument()
     {
         foreach (bool mock in new[] { true, false })
         {
             IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
             try
             {
-                AssertNegative(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = consumer.Poll(TimeSpan.FromMilliseconds(-1)); }), TimerNegative, -1);
-                AssertNegative(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = consumer.Poll(TimeSpan.FromTicks(-5000)); }), TimerNegative, -1);
+                AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Poll(TimeSpan.FromMilliseconds(-1)); }), TimerNegative, -1);
+                AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Poll(TimeSpan.FromTicks(-5000)); }), TimerNegative, -1);
             }
             finally
             {
@@ -196,8 +198,8 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
             IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
             await TestTimeout.DisposeAsync(consumer);
 
-            AssertNegative(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = consumer.Poll(TimeSpan.FromSeconds(-2)); }), TimerNegative, -2000);
-            Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Poll(TimeSpan.Zero); });
+            AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Poll(TimeSpan.FromSeconds(-2)); }), TimerNegative, -2000);
+            Assert.Throws<IllegalStateException>(() => { _ = consumer.Poll(TimeSpan.Zero); });
         }
     }
 
@@ -212,9 +214,9 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
             Stopwatch elapsed = Stopwatch.StartNew();
 
-            AssertTimedOut(await Assert.ThrowsAsync<KafkaException>(() => untimed(consumer)), message, 300);
-            AssertTimedOut(await Assert.ThrowsAsync<KafkaException>(() => timed(consumer, TimeSpan.FromMilliseconds(200))), message, 200);
-            AssertTimedOut(await Assert.ThrowsAsync<KafkaException>(() => timed(consumer, TimeSpan.FromTicks(1_509_000))), message, 150);
+            AssertTimedOut(await Assert.ThrowsAsync<KafkaTimeoutException>(() => untimed(consumer)), message, 300);
+            AssertTimedOut(await Assert.ThrowsAsync<KafkaTimeoutException>(() => timed(consumer, TimeSpan.FromMilliseconds(200))), message, 200);
+            AssertTimedOut(await Assert.ThrowsAsync<KafkaTimeoutException>(() => timed(consumer, TimeSpan.FromTicks(1_509_000))), message, 150);
 
             Assert.True(elapsed.Elapsed < s_wait, $"the timed calls took {elapsed.Elapsed}");
         }
@@ -234,9 +236,9 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
             await TestTimeout.Run(() => consumer.Seek(s_tp0, 1L), s_deadline);
             Stopwatch elapsed = Stopwatch.StartNew();
 
-            AssertTimedOut(await Assert.ThrowsAsync<KafkaException>(() => consumer.Commit()), s_timed["Commit"].Message, 300);
+            AssertTimedOut(await Assert.ThrowsAsync<KafkaTimeoutException>(() => consumer.Commit()), s_timed["Commit"].Message, 300);
             AssertTimedOut(
-                await Assert.ThrowsAsync<KafkaException>(() => consumer.Commit(TimeSpan.FromMilliseconds(200))),
+                await Assert.ThrowsAsync<KafkaTimeoutException>(() => consumer.Commit(TimeSpan.FromMilliseconds(200))),
                 s_timed["Commit"].Message,
                 200);
 
@@ -259,11 +261,11 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         {
             Stopwatch elapsed = Stopwatch.StartNew();
 
-            KafkaException atOnce = await Assert.ThrowsAsync<KafkaException>(() => timed(consumer, TimeSpan.Zero));
+            KafkaTimeoutException atOnce = await Assert.ThrowsAsync<KafkaTimeoutException>(() => timed(consumer, TimeSpan.Zero));
             Assert.Equal(RequestTimedOutCode, atOnce.Code);
             Assert.Equal(zero, atOnce.Message);
-            AssertExpired(await Assert.ThrowsAsync<KafkaException>(() => timed(consumer, TimeSpan.FromMilliseconds(200))), expired);
-            AssertExpired(await Assert.ThrowsAsync<KafkaException>(() => untimed(consumer)), expired);
+            AssertExpired(await Assert.ThrowsAsync<KafkaTimeoutException>(() => timed(consumer, TimeSpan.FromMilliseconds(200))), expired);
+            AssertExpired(await Assert.ThrowsAsync<KafkaTimeoutException>(() => untimed(consumer)), expired);
 
             Assert.True(elapsed.Elapsed < s_wait, $"the metadata calls took {elapsed.Elapsed}");
         }
@@ -299,7 +301,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     [Fact]
     public async Task OnTheMock_TheTimedOverloads_AnswerAsTheUntimedOnes()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             IAsyncConsumer<byte[], byte[]> async = consumer;
@@ -323,8 +325,8 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
                 Assert.Equal(2, (await async.PartitionsFor(Topic, timeout)).Count);
                 Assert.Equal(2, (await async.ListTopics(timeout))[Topic].Count);
 
-                NotSupportedException untimed = await Assert.ThrowsAsync<NotSupportedException>(() => async.OffsetsForTimes(Timestamps(0)));
-                NotSupportedException timed = await Assert.ThrowsAsync<NotSupportedException>(() => async.OffsetsForTimes(Timestamps(0), timeout));
+                UnsupportedOperationException untimed = await Assert.ThrowsAsync<UnsupportedOperationException>(() => async.OffsetsForTimes(Timestamps(0)));
+                UnsupportedOperationException timed = await Assert.ThrowsAsync<UnsupportedOperationException>(() => async.OffsetsForTimes(Timestamps(0), timeout));
                 Assert.Equal(untimed.Message, timed.Message);
             }
         }
@@ -334,10 +336,9 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         }
     }
 
-    private static void AssertNegative(ArgumentOutOfRangeException thrown, string message, long ms)
+    private static void AssertNegative(IllegalArgumentException thrown, string message, long ms)
     {
-        Assert.Equal("timeout", thrown.ParamName);
-        Assert.StartsWith(string.Format(CultureInfo.InvariantCulture, message, ms), thrown.Message, StringComparison.Ordinal);
+        Assert.Equal(string.Format(CultureInfo.InvariantCulture, message, ms), thrown.Message);
     }
 
     private static void AssertTimedOut(KafkaException thrown, string message, long ms)
@@ -359,7 +360,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         new Dictionary<TopicPartition, long> { [s_tp0] = timestamp };
 
     private static IAsyncConsumer<byte[], byte[]> Create(bool mock) => mock
-        ? new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray)
+        ? new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray())
         : Real(defaultApiTimeoutMs: 60_000);
 
     private static AsyncKafkaConsumer<byte[], byte[]> Real(int defaultApiTimeoutMs) => new AsyncKafkaConsumer<byte[], byte[]>(
@@ -370,6 +371,6 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
             ["group.id"] = "test-group",
             ["default.api.timeout.ms"] = defaultApiTimeoutMs.ToString(CultureInfo.InvariantCulture),
         },
-        Serdes.ByteArray,
-        Serdes.ByteArray);
+        Serdes.ByteArray(),
+        Serdes.ByteArray());
 }

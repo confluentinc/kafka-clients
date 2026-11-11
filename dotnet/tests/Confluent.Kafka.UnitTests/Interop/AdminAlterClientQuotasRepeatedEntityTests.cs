@@ -57,8 +57,8 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(
             admin.AlterClientQuotas(new[] { Alteration("dup", 1d), Alteration("dup", 2d) }, options: null));
 
-        Assert.Equal(Entity("dup"), Assert.Single(result.Values).Key);
-        await AssertNotImplemented(result.Values[Entity("dup")]);
+        Assert.Equal(Entity("dup"), Assert.Single(result.Values()).Key);
+        await AssertNotImplemented(result.Values()[Entity("dup")]);
     }
 
     [Fact]
@@ -72,8 +72,8 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
             new[] { new ClientQuotaAlteration(EmptyEntity(), noOps), new ClientQuotaAlteration(EmptyEntity(), noOps) },
             options: null));
 
-        Assert.Equal(EmptyEntity(), Assert.Single(result.Values).Key);
-        await AssertNotImplemented(result.Values[EmptyEntity()]);
+        Assert.Equal(EmptyEntity(), Assert.Single(result.Values()).Key);
+        await AssertNotImplemented(result.Values()[EmptyEntity()]);
     }
 
     [Fact]
@@ -86,17 +86,17 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
             new[] { Alteration("a", 1d), Alteration(null, 2d), Alteration("a", 3d), Alteration(string.Empty, 4d) },
             options: null));
 
-        Assert.Equal(3, result.Values.Count);
-        Assert.Contains(Entity("a"), result.Values.Keys);
-        Assert.Contains(Entity(null), result.Values.Keys);
-        Assert.Contains(Entity(string.Empty), result.Values.Keys);
-        await AssertNotImplemented(result.Values[Entity(null)]);
+        Assert.Equal(3, result.Values().Count);
+        Assert.Contains(Entity("a"), result.Values().Keys);
+        Assert.Contains(Entity(null), result.Values().Keys);
+        Assert.Contains(Entity(string.Empty), result.Values().Keys);
+        await AssertNotImplemented(result.Values()[Entity(null)]);
         await AssertNotImplemented(result.All());
     }
 
     private static async Task AssertNotImplemented(AsyncKafkaFuture future)
     {
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => future.Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

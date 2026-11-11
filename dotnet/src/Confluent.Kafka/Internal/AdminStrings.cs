@@ -17,66 +17,40 @@ using System;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// Rejects a string that cannot cross the C ABI unchanged, an admin request string or a producer record's topic or
-/// header key: one containing <c>'\0'</c>, which ends the C string, or an unpaired UTF-16 surrogate, which UTF-8
-/// encoding replaces.
+/// Rejects a string that cannot cross the C ABI unchanged, an admin request string, a producer record's topic or
+/// header key, or a consumer's subscription pattern: one containing <c>'\0'</c>, which ends the C string. An unpaired
+/// UTF-16 surrogate is not rejected: it crosses as <c>'?'</c>, as Java's <c>String.getBytes(UTF_8)</c> writes it
+/// (<see cref="Interop.Utf8Marshal.QuestionMarkUtf8"/>).
 /// </summary>
 /// <remarks>
-/// A recorded deviation: Java sends a NUL whole and writes <c>'?'</c> for an unpaired surrogate, with no error. Here
-/// the C ABI would cut the string at the NUL and the UTF-8 encoder replace the surrogate, so the string could act on
-/// another target, or merge two of the caller's keys into one; it is rejected with <see cref="ArgumentException"/>
-/// before anything is pinned.
+/// A recorded deviation: Java sends a NUL whole, with no error. Here the C ABI would cut the string at the NUL, so the
+/// string could act on another target; it is rejected with <see cref="ArgumentException"/> before anything is pinned.
 /// </remarks>
 internal static class AdminStrings
 {
     internal const string InvalidStringMessage =
-        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
+        "client unchanged.";
 
     internal const string InvalidTopicMessage =
-        "A topic must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "A topic must not contain a NUL character: such a string cannot be passed to the native client unchanged.";
 
     internal const string InvalidHeaderKeyMessage =
-        "A header key must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "A header key must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    internal const string InvalidSubscriptionPatternMessage =
+        "A subscription pattern must not contain a NUL character: such a string cannot be passed to the native " +
+        "client unchanged.";
 
     internal static void Validate(string? value, string parameterName) =>
         Validate(value, InvalidStringMessage, parameterName);
 
     internal static void Validate(string? value, string message, string parameterName)
     {
-        if (value is not null && !CrossesUnchanged(value))
+        if (value is not null && value.IndexOf('\0') >= 0)
         {
             throw new ArgumentException(message, parameterName);
         }
-    }
-
-    private static bool CrossesUnchanged(string value)
-    {
-        for (int i = 0; i < value.Length; i++)
-        {
-            char character = value[i];
-            if (character == '\0')
-            {
-                return false;
-            }
-
-            if (char.IsHighSurrogate(character))
-            {
-                if (i + 1 >= value.Length || !char.IsLowSurrogate(value[i + 1]))
-                {
-                    return false;
-                }
-
-                i++;
-            }
-            else if (char.IsLowSurrogate(character))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 }

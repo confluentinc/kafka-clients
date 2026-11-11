@@ -28,36 +28,42 @@ namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
 /// Library values obtained from a real <see cref="MockProducer{TKey, TValue}"/> round-trip, exactly as
-/// the servicer receives them: a delivery's <see cref="RecordMetadata"/> and a coded
-/// <see cref="KafkaException"/>.
+/// the servicer receives them: a delivery's <see cref="RecordMetadata"/> and the error class of a C id.
 /// </summary>
 internal static class TestValues
 {
     internal static RecordMetadata Metadata()
     {
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         RecordMetadata metadata = producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 })).Get();
         producer.Close();
         return metadata;
     }
 
+    /// <summary>
+    /// The class a core error of <paramref name="code"/> arrives as, built without a native error, so only for an id
+    /// whose class has no fields.
+    /// </summary>
+    internal static KafkaException OfClass(int code, string message) =>
+        (KafkaException)KafkaException.OfClass(code, isApiError: false, message, innerException: null, IntPtr.Zero);
+
     internal static KafkaException Coded(int code, string message)
     {
         using MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         CapturingCallback callback = new CapturingCallback();
         producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), callback);
-        Assert.True(producer.ErrorNext(new KafkaException(code, message, isRetriable: false)));
+        Assert.True(producer.ErrorNext(OfClass(code, message)));
         Exception? error = callback.Outcome.Wait(RecordingStreamWriter.DefaultTimeout)
             ? callback.Outcome.Result
-            : throw new TimeoutException("the mock's delivery callback never fired");
+            : throw new System.TimeoutException("the mock's delivery callback never fired");
         producer.Close();
         return error as KafkaException
             ?? throw new InvalidOperationException($"ErrorNext delivered {error?.GetType().Name ?? "a success"}");
     }
 
     /// <summary>A delivery callback that captures the outcome of the one send it is given.</summary>
-    private sealed class CapturingCallback : IDeliveryCallback
+    private sealed class CapturingCallback : ICallback
     {
         private readonly TaskCompletionSource<Exception?> _outcome =
             new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);

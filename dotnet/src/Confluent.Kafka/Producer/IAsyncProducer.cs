@@ -41,12 +41,23 @@ namespace Confluent.Kafka.Producer;
 /// </code>
 /// </para>
 /// <para>
+/// On <see cref="AsyncKafkaProducer{TKey, TValue}"/>, a serializer that throws an <see cref="ApiException"/> fails
+/// the record, as Java's <c>doSend</c> does: <c>Send</c> calls the delivery callback, if any, once on the caller's
+/// thread, with metadata whose offset is <c>-1</c> and that exception, and completes the first stage with a future
+/// that fails with it, after an <see cref="IAsyncCallback"/>'s task has ended. An
+/// <see cref="InvalidCastException"/> is wrapped in a <see cref="SerializationException"/>, and any other throw
+/// leaves <c>Send</c> unchanged, as does a delivery callback's own throw on that path. On
+/// <see cref="AsyncMockProducer{TKey, TValue}"/>, every serializer throw leaves <c>Send</c> unchanged, as Java's
+/// <c>MockProducer</c> lets it.
+/// </para>
+/// <para>
 /// Records reach the producer in <c>Send</c> order only when each first stage is awaited before the next
 /// <c>Send</c>, as Java's blocking <c>send</c> makes its caller wait. Without that await, a record the
 /// producer takes at once can overtake one that is still waiting.
 /// </para>
 /// <para>
-/// <see cref="Flush"/> and <c>Close</c> cover the records whose first stage had completed when they began.
+/// <see cref="Flush"/>, <c>Close</c> and the transaction methods cover the records whose first stage had completed
+/// when they began: a commit includes them and an abort discards them.
 /// A record still waiting inside the producer is a send in progress, and they do not wait for it.
 /// <c>Close</c> fails such a record with the <see cref="KafkaException"/> "Producer closed while send in
 /// progress", and its delivery callback does not run.
@@ -70,13 +81,175 @@ namespace Confluent.Kafka.Producer;
 /// <para>
 /// <see cref="IAsyncDisposable.DisposeAsync"/> closes and then frees the producer;
 /// <see cref="IDisposable.Dispose"/> is its blocking form. Both swallow a close error and are idempotent.
-/// What a delivery callback may call on its own producer is in <see cref="IDeliveryCallback"/>.
+/// What a delivery callback may call on its own producer is in <see cref="ICallback"/>.
+/// An <see cref="AsyncKafkaProducer{TKey, TValue}"/> disposes the serializers it was given when it closes, as its
+/// constructor says; an <see cref="AsyncMockProducer{TKey, TValue}"/> does not.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
 public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
 {
+    /// <summary>
+    /// Needs to be called before any other methods when the <c>transactional.id</c> is set in the configuration
+    /// (Java <c>initTransactions()</c>); <see cref="IProducer{TKey, TValue}.InitTransactions"/> describes what it
+    /// does, its errors and its retries.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The token ends only the wait: the task ends with <see cref="OperationCanceledException"/>, and the operation
+    /// keeps running in the producer. A token already cancelled at the call throws before anything reaches the
+    /// producer. Calling the same method again after a cancel has one of three outcomes, decided by the producer:
+    /// while the producer still runs the cancelled operation, the call throws
+    /// <see cref="ConcurrentModificationException"/> ("Transactional methods of KafkaProducer are not safe for
+    /// concurrent access."), where Java's retry would join
+    /// the pending operation; after it timed out, the call joins it, as Java's retry does; after it succeeded, the
+    /// call starts a new operation, and gets the producer's answer to it. The same holds for the other transaction
+    /// methods that take a token.
+    /// </para>
+    /// <para>
+    /// The transaction methods of one producer must not overlap: a call made while the producer still runs another
+    /// one's operation throws <see cref="ConcurrentModificationException"/>, where Java has no such check. The check
+    /// covers the operation only: a call made while a commit or an abort waits for the delivery callbacks is not
+    /// refused.
+    /// </para>
+    /// <para>
+    /// Called from inside a delivery callback's synchronous part, it waits at most <c>max.block.ms</c>, then throws
+    /// a <see cref="Common.Errors.TimeoutException"/>, because its completion is queued behind the callback that
+    /// waits; the operation may still take effect. The same holds for the other four transaction methods. On an
+    /// <see cref="AsyncMockProducer{TKey, TValue}"/>, called from a delivery callback, each of the five completes,
+    /// as Java's mock does, with one exception: <see cref="CommitTransaction"/> and
+    /// <see cref="AbortTransaction"/> wait for the calling callback's own report, so from a callback that ran
+    /// queued behind an async callback, or from an async callback after an <c>await</c>, they end after
+    /// <c>max.block.ms</c> (60000 on a mock) with that <see cref="Common.Errors.TimeoutException"/>.
+    /// </para>
+    /// </remarks>
+    /// <param name="cancellationToken">Ends the wait, never the operation.</param>
+    /// <returns>A task that completes when the transactional state is initialized.</returns>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, or the producer is
+    /// closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
+    /// producer.</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The time taken for initializing the transaction has
+    /// surpassed <c>max.block.ms</c>.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
+    /// error.</exception>
+    Task InitTransactions(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Should be called before the start of each new transaction (Java <c>beginTransaction()</c>). Note that prior
+    /// to the first invocation of this method, you must invoke <see cref="InitTransactions"/> exactly one time.
+    /// <see cref="IProducer{TKey, TValue}.BeginTransaction"/> describes its errors.
+    /// </summary>
+    /// <remarks>
+    /// The producer first hands over the records already sent, so this call can wait, where Java's returns at once;
+    /// it is awaitable, as Python's <c>begin_transaction</c>. The token ends only the wait, as for
+    /// <see cref="InitTransactions"/>, whose remarks also give the outcomes of a call made again after a cancel, and
+    /// what a call from inside a delivery callback does.
+    /// </remarks>
+    /// <param name="cancellationToken">Ends the wait, never the operation.</param>
+    /// <returns>A task that completes when the transaction has begun.</returns>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured,
+    /// <see cref="InitTransactions"/> has not yet been invoked, or the producer is closed.</exception>
+    /// <exception cref="ProducerFencedException">Another producer with the same <c>transactional.id</c> is
+    /// active.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
+    /// producer.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
+    /// error.</exception>
+    Task BeginTransaction(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends a list of specified offsets to the consumer group coordinator, and also marks those offsets as part of
+    /// the current transaction (Java <c>sendOffsetsToTransaction(offsets, groupMetadata)</c>). These offsets will be
+    /// considered committed only if the transaction is committed successfully.
+    /// <see cref="IProducer{TKey, TValue}.SendOffsetsToTransaction"/> describes its contract and errors.
+    /// </summary>
+    /// <remarks>
+    /// The token ends only the wait, as for <see cref="InitTransactions"/>, whose remarks also give the outcomes of
+    /// a call made again after a cancel, and what a call from inside a delivery callback does.
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit with the transaction.</param>
+    /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
+    /// <param name="cancellationToken">Ends the wait, never the operation.</param>
+    /// <returns>A task that completes when the coordinator has acknowledged the offsets.</returns>
+    /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
+    /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
+    /// been started, or the producer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
+    /// producer.</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The combined time taken for resolving topic metadata and
+    /// sending the offsets has surpassed <c>max.block.ms</c>.</exception>
+    /// <exception cref="BootstrapResolutionException">DNS resolution of the bootstrap servers fails within
+    /// <c>bootstrap.resolve.timeout.ms</c>.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
+    /// other unexpected error.</exception>
+    Task SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, Consumer.OffsetAndMetadata> offsets,
+        Consumer.ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Commits the ongoing transaction (Java <c>commitTransaction()</c>). This method will flush any unsent records
+    /// before actually committing the transaction. <see cref="IProducer{TKey, TValue}.CommitTransaction"/> describes
+    /// its contract and errors.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// If the transaction is committed successfully, the task completes after all delivery callbacks for records in
+    /// the transaction have been invoked and completed, an <see cref="IAsyncCallback"/>'s task included.
+    /// </para>
+    /// <para>
+    /// The token ends only the wait, as for <see cref="InitTransactions"/>, whose remarks also give the outcomes of
+    /// a call made again after a cancel. Called from inside a delivery callback, after an <c>await</c> too, it waits
+    /// at most <c>max.block.ms</c> and then throws a <see cref="Common.Errors.TimeoutException"/>, because it waits
+    /// for that callback's own report. On an <see cref="AsyncMockProducer{TKey, TValue}"/> it completes from a sync
+    /// callback, or an async callback's synchronous part, that did not run queued behind an async callback (see
+    /// <see cref="InitTransactions"/>).
+    /// </para>
+    /// </remarks>
+    /// <param name="cancellationToken">Ends the wait, never the operation.</param>
+    /// <returns>A task that completes when the transaction is committed.</returns>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
+    /// been started, or the producer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
+    /// producer.</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The time taken for committing the transaction has surpassed
+    /// <c>max.block.ms</c>.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
+    /// other unexpected error.</exception>
+    Task CommitTransaction(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Aborts the ongoing transaction (Java <c>abortTransaction()</c>). Any unflushed produce messages will be
+    /// aborted when this call is made. <see cref="IProducer{TKey, TValue}.AbortTransaction"/> describes its contract
+    /// and errors.
+    /// </summary>
+    /// <remarks>
+    /// The token ends only the wait, as for <see cref="InitTransactions"/>, whose remarks also give the outcomes of
+    /// a call made again after a cancel. Called from inside a delivery callback, after an <c>await</c> too, it waits
+    /// at most <c>max.block.ms</c> and then throws a <see cref="Common.Errors.TimeoutException"/>, and completes on
+    /// an <see cref="AsyncMockProducer{TKey, TValue}"/>, as <see cref="CommitTransaction"/> does.
+    /// </remarks>
+    /// <param name="cancellationToken">Ends the wait, never the operation.</param>
+    /// <returns>A task that completes when the transaction is aborted.</returns>
+    /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
+    /// been started, or the producer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
+    /// producer.</exception>
+    /// <exception cref="Common.Errors.TimeoutException">The time taken for aborting the transaction has surpassed
+    /// <c>max.block.ms</c>.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    /// <exception cref="KafkaException">The producer has encountered a previous fatal error, or any other unexpected
+    /// error.</exception>
+    Task AbortTransaction(CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Serializes <paramref name="record"/> on the caller's thread and sends it (Java <c>send(record)</c>);
     /// the type's remarks describe the two stages.
@@ -94,14 +267,17 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>
     /// The first stage, which completes once the producer has the record, yielding the record's
     /// <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get()"/> for the
-    /// <see cref="RecordMetadata"/>, or for the delivery failure. Await the <see cref="ValueTask{TResult}"/>
-    /// once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
+    /// <see cref="RecordMetadata"/>, or for an <c>ExecutionException</c> around the delivery failure. Await the
+    /// <see cref="ValueTask{TResult}"/> once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
-    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
-    /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
+    /// cannot receive unchanged (thrown synchronously).</exception>
+    /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value (thrown synchronously); any other
+    /// serializer throw except an <see cref="ApiException"/>, and every serializer throw on
+    /// <c>AsyncMockProducer</c>, is rethrown unchanged (see the type's remarks).</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -114,7 +290,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="ValueTask{TResult}"/> it returns has completed. A <see langword="null"/>
     /// <paramref name="callback"/> is rejected, where Java accepts it:
     /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> already sends without one. The
-    /// callback's contract is in <see cref="IDeliveryCallback"/>.
+    /// callback's contract is in <see cref="ICallback"/>.
     /// </remarks>
     /// <param name="record">The record to publish.</param>
     /// <param name="callback">The delivery callback (non-null).</param>
@@ -126,19 +302,22 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>
     /// The first stage, which completes once the producer has the record, yielding the record's
     /// <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get()"/> for the
-    /// <see cref="RecordMetadata"/>, or for the delivery failure. Await the <see cref="ValueTask{TResult}"/>
-    /// once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
+    /// <see cref="RecordMetadata"/>, or for an <c>ExecutionException</c> around the delivery failure. Await the
+    /// <see cref="ValueTask{TResult}"/> once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
-    /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
+    /// cannot receive unchanged (thrown synchronously).</exception>
+    /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value (thrown synchronously); any other
+    /// serializer throw except an <see cref="ApiException"/>, and every serializer throw on
+    /// <c>AsyncMockProducer</c>, is rethrown unchanged (see the type's remarks).</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -160,13 +339,16 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>The first stage, which hands back the record's future.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> or <paramref name="callback"/> is
     /// <c>null</c>.</exception>
-    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
-    /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
+    /// cannot receive unchanged (thrown synchronously).</exception>
+    /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value (thrown synchronously); any other
+    /// serializer throw except an <see cref="ApiException"/>, and every serializer throw on
+    /// <c>AsyncMockProducer</c>, is rethrown unchanged (see the type's remarks).</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncDeliveryCallback callback,
+        IAsyncCallback callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -218,10 +400,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// closes fails with the <see cref="KafkaException"/> "Producer closed while send in progress", or
     /// with <see cref="OperationCanceledException"/> if its token has fired. A <c>Send</c> whose record
     /// the close has not yet handed to the producer when the timeout expires fails as a send after close
-    /// does, with <see cref="InvalidOperationException"/>. Neither record's delivery callback runs.
+    /// does, with <see cref="IllegalStateException"/>. Neither record's delivery callback runs.
     /// </remarks>
     /// <returns>A task that completes when the close resolves, or faults with a <see cref="KafkaException"/>.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative, on <c>AsyncKafkaProducer</c>.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative, on <c>AsyncKafkaProducer</c>.</exception>
     Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -243,6 +425,6 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// empty snapshot.
     /// </summary>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 }

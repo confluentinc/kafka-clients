@@ -1483,6 +1483,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                     // for a declaration, it overwrote the visibility of the real
                     // field of that name with the implicit one.
                     && matches!(toks.get(i.wrapping_sub(1)), Some(Tok::Ident(_) | Tok::Punct('>' | ']')))
+                    // Nor does the exception a body-less method declares
+                    // (`Headers add(Header header) throws IllegalStateException;`).
+                    && !matches!(toks.get(i.wrapping_sub(1)), Some(Tok::Ident(t)) if t == "throws")
                     && name != "\"\""
                     && name != "0"
                     && !KEYWORDS.contains(&name.as_str())
@@ -1717,6 +1720,23 @@ mod tests {
         }
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-C", KAFKA_SUBMODULE]);
+    }
+
+    #[test]
+    fn a_throws_clause_of_a_body_less_method_is_not_a_field() {
+        let src = r#"
+            package x;
+            public interface Headers {
+                String NAME = "n";
+                Headers add(Header header) throws IllegalStateException;
+                void close() throws IOException, InterruptedException;
+            }
+        "#;
+        let mut classes = Vec::new();
+        push_classes(&["common".into(), "header".into()], src, false, &mut classes);
+        let fields: Vec<&String> = classes[0].fields.keys().collect();
+        assert_eq!(fields, ["NAME"]);
+        assert!(classes[0].methods.contains("add") && classes[0].methods.contains("close"));
     }
 
     #[test]

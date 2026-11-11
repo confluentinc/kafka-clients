@@ -93,8 +93,8 @@ public sealed class PublicProducerFirstStageTests
                 KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(exception);
                 Assert.Equal(7, timeout.Code);
                 Assert.Equal($"Topic {topic} not present in metadata after 2000 ms.", timeout.Message);
-                Assert.Equal(topic, metadata.Topic);
-                Assert.Equal(-1L, metadata.Offset);
+                Assert.Equal(topic, metadata.Topic());
+                Assert.Equal(-1L, metadata.Offset());
             }
             else
             {
@@ -114,7 +114,7 @@ public sealed class PublicProducerFirstStageTests
     {
         string topic = "first-stage-token-after-" + Guid.NewGuid().ToString("N");
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -122,24 +122,24 @@ public sealed class PublicProducerFirstStageTests
         ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(
             new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v")), callback, cts.Token);
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
-        Assert.False(future.IsDone, "the record's future was done before the token fired");
+        Assert.False(future.IsDone(), "the record's future was done before the token fired");
 
         cts.Cancel();
         await Task.Delay(s_settle);
-        Assert.False(future.IsDone, "the token ended the record's future");
+        Assert.False(future.IsDone(), "the token ended the record's future");
         Assert.Empty(callback.Calls());
 
         Assert.True(producer.CompleteNext());
         RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), s_deadline);
-        Assert.Equal(topic, metadata.Topic);
-        Assert.Equal(0L, metadata.Offset);
-        Assert.False(future.IsCancelled);
+        Assert.Equal(topic, metadata.Topic());
+        Assert.Equal(0L, metadata.Offset());
+        Assert.False(future.IsCancelled());
 
         await callback.WaitForFirst(s_deadline);
         await Task.Delay(s_settle);
         (RecordMetadata delivered, Exception? exception) = Assert.Single(callback.Calls());
         Assert.Null(exception);
-        Assert.Equal(0L, delivered.Offset);
+        Assert.Equal(0L, delivered.Offset());
     }
 
     [Fact]
@@ -155,7 +155,7 @@ public sealed class PublicProducerFirstStageTests
                 new ProducerRecord<byte[], byte[]>("first-stage-closed", Encoding.UTF8.GetBytes("v")), callback);
 
             Assert.True(stage.IsFaulted, "the refusal did not fault the first stage inside the call");
-            InvalidOperationException refused = await Assert.ThrowsAsync<InvalidOperationException>(() => stage.AsTask());
+            IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(() => stage.AsTask());
             Assert.Equal("Cannot perform operation after producer has been closed", refused.Message);
 
             await Task.Delay(s_settle);
@@ -186,7 +186,7 @@ public sealed class PublicProducerFirstStageTests
             Assert.True(elapsed.ElapsedMilliseconds < 1000, $"Send took {elapsed.ElapsedMilliseconds} ms");
 
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
-            KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(
+            KafkaException failure = await FutureAssert.ThrowsAnyAsync<KafkaException>(
                 () => TestTimeout.Run(() => future.Get(), s_deadline));
             Assert.Equal(7, failure.Code);
             Assert.Equal($"Topic {topic} not present in metadata after 1000 ms.", failure.Message);
@@ -206,7 +206,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_RecordTakenAtOnce_FirstStageIsCompleteWhenSendReturns()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         UnreachableProducers.HoldingCallback hold = new UnreachableProducers.HoldingCallback();
         try
@@ -219,7 +219,7 @@ public sealed class PublicProducerFirstStageTests
 
             Assert.True(stage.IsCompletedSuccessfully, "the hand-over did not run inside the call while the pump was held");
             AsyncKafkaFuture<RecordMetadata> future = await stage;
-            Assert.False(future.IsDone);
+            Assert.False(future.IsDone());
         }
         finally
         {
@@ -231,7 +231,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_NotifyHookFiredOnTheSendingThread_WakesThePump_WithoutADeadlock()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: true);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: true);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         NativeProducer native = NativeOf(producer);
         CompletionThread completion = (CompletionThread)typeof(NativeProducer)
@@ -266,8 +266,8 @@ public sealed class PublicProducerFirstStageTests
                 ["bootstrap.servers"] = "localhost:1",
                 ["max.block.ms"] = maxBlockMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
             },
-            Serdes.ByteArray,
-            Serdes.ByteArray);
+            Serdes.ByteArray(),
+            Serdes.ByteArray());
 
     private static ProducerRecord<byte[], byte[]> MockRecord(string prefix) =>
         new ProducerRecord<byte[], byte[]>(prefix + "-" + Guid.NewGuid().ToString("N"), Encoding.UTF8.GetBytes("v"));
@@ -292,7 +292,7 @@ public sealed class PublicProducerFirstStageTests
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (ValueTask<AsyncKafkaFuture<RecordMetadata>> Stage, WeakReference Value) SendUnreferenced(
-        AsyncKafkaProducer<byte[], byte[]> producer, string topic, IDeliveryCallback callback, CancellationToken token)
+        AsyncKafkaProducer<byte[], byte[]> producer, string topic, ICallback callback, CancellationToken token)
     {
         byte[] value = Encoding.UTF8.GetBytes("value-" + topic);
         return (producer.Send(new ProducerRecord<byte[], byte[]>(topic, value), callback, token), new WeakReference(value));
@@ -342,7 +342,7 @@ public sealed class PublicProducerFirstStageTests
     }
 
     /// <summary>Records every delivery callback, with the thread it ran on.</summary>
-    internal sealed class RecordingCallback : IDeliveryCallback
+    internal sealed class RecordingCallback : ICallback
     {
         private readonly List<(RecordMetadata Metadata, Exception? Exception)> _calls =
             new List<(RecordMetadata Metadata, Exception? Exception)>();

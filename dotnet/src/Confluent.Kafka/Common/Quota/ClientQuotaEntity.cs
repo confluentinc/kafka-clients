@@ -60,7 +60,8 @@ public sealed class ClientQuotaEntity
     /// Entity type to entity name — Java's <c>entries()</c>. A null value names the built-in
     /// default entity for that type.
     /// </summary>
-    public IReadOnlyDictionary<string, string?> Entries => _entries;
+    /// <returns>Entity type to entity name.</returns>
+    public IReadOnlyDictionary<string, string?> Entries() => _entries;
 
     /// <summary>
     /// Whether <paramref name="entityType"/> is one of the three known types — Java's

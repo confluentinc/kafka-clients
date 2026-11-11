@@ -143,7 +143,7 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
         foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> pair in applied)
         {
             partitions.Add(pair.Key);
-            committed[Translate.OffsetKey(pair.Key.Topic, pair.Key.Partition)] = pair.Value.Offset;
+            committed[Translate.OffsetKey(pair.Key.Topic(), pair.Key.Partition())] = pair.Value.Offset();
         }
 
         _log.Append(_consumerId, Translate.KindCommit, partitions, committed, exception?.Message);
@@ -151,10 +151,10 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
 }
 
 /// <summary>
-/// An <see cref="IDeliveryCallback"/> that logs each record's metadata and error in a
+/// An <see cref="ICallback"/> that logs each record's metadata and error in a
 /// <see cref="CallbackLog"/>, the C# port of Python's <c>make_logging_delivery_callback</c>.
 /// </summary>
-internal sealed class LoggingDeliveryCallback : IDeliveryCallback
+internal sealed class LoggingDeliveryCallback : ICallback
 {
     private readonly CallbackLog _log;
     private readonly ulong _producerId;
@@ -169,12 +169,12 @@ internal sealed class LoggingDeliveryCallback : IDeliveryCallback
     {
         List<TopicPartition> partitions = new List<TopicPartition>(1)
         {
-            new TopicPartition(metadata.Topic, metadata.Partition),
+            new TopicPartition(metadata.Topic(), metadata.Partition()),
         };
 
         Dictionary<string, long> offsets = new Dictionary<string, long>(1)
         {
-            [Translate.OffsetKey(metadata.Topic, metadata.Partition)] = metadata.Offset,
+            [Translate.OffsetKey(metadata.Topic(), metadata.Partition())] = metadata.Offset(),
         };
 
         _log.Append(_producerId, Translate.KindDelivery, partitions, offsets, exception?.Message);

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 namespace Confluent.Kafka.Performance;
 
@@ -59,19 +60,24 @@ internal readonly struct BucketRollover
 
 /// <summary>
 /// A per-window accumulator (total, count, max), Python's <c>Bucket</c>, or with a histogram its <c>LatencyBucket</c>.
-/// Measurements and the sampler's rollover run on different threads, so both take a lock.
+/// Measurements and the sampler's rollover run on different threads, so both take a lock. The histogram is dense up to
+/// the producer's top bucket and sparse above it, so a window with the consumer's 600,000 ms top bucket costs memory
+/// only for the high buckets it touched.
 /// </summary>
 internal sealed class Bucket
 {
     private readonly object _lock = new object();
     private readonly long[]? _hist;
+    private readonly int _topBucket;
+    private Dictionary<long, long>? _sparse;
     private double _total;
     private long _count;
     private double _max = double.NegativeInfinity;
 
-    internal Bucket(bool withHistogram = false)
+    internal Bucket(bool withHistogram = false, int topBucket = LatencyHistogram.ProducerTopBucket)
     {
-        _hist = withHistogram ? LatencyHistogram.New() : null;
+        _topBucket = topBucket;
+        _hist = withHistogram ? LatencyHistogram.New(Math.Min(topBucket, LatencyHistogram.ProducerTopBucket)) : null;
     }
 
     internal void AddMeasurement(double measurement)
@@ -87,7 +93,17 @@ internal sealed class Bucket
 
             if (_hist is not null)
             {
-                LatencyHistogram.Record(_hist, measurement);
+                long bucket = LatencyHistogram.Bucket(measurement, _topBucket);
+                if (bucket < _hist.Length)
+                {
+                    _hist[bucket]++;
+                }
+                else
+                {
+                    _sparse ??= new Dictionary<long, long>();
+                    _sparse.TryGetValue(bucket, out long count);
+                    _sparse[bucket] = count + 1;
+                }
             }
         }
     }
@@ -104,12 +120,13 @@ internal sealed class Bucket
             long p50 = 0, p90 = 0, p95 = 0, p99 = 0, p999 = 0;
             if (_hist is not null)
             {
-                p50 = LatencyHistogram.PercentileFromHist(_hist, 0.50);
-                p90 = LatencyHistogram.PercentileFromHist(_hist, 0.90);
-                p95 = LatencyHistogram.PercentileFromHist(_hist, 0.95);
-                p99 = LatencyHistogram.PercentileFromHist(_hist, 0.99);
-                p999 = LatencyHistogram.PercentileFromHist(_hist, 0.999);
+                p50 = LatencyHistogram.PercentileFromHist(_hist, _sparse, 0.50);
+                p90 = LatencyHistogram.PercentileFromHist(_hist, _sparse, 0.90);
+                p95 = LatencyHistogram.PercentileFromHist(_hist, _sparse, 0.95);
+                p99 = LatencyHistogram.PercentileFromHist(_hist, _sparse, 0.99);
+                p999 = LatencyHistogram.PercentileFromHist(_hist, _sparse, 0.999);
                 Array.Clear(_hist, 0, _hist.Length);
+                _sparse = null;
             }
 
             _total = 0;

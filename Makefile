@@ -184,9 +184,9 @@ test-integration-c: build-rust-all-features
 
 # .NET's container arm, like python's and c's: dotnet/'s `test-integration` builds
 # the sync and async .NET gRPC images and runs the `__grpc_dotnet` tests (through
-# rust/Makefile's test-integration-grpc-dotnet, which also carries the .NET-only
-# DOTNET_GRPC_SKIPS). It self-skips off Linux, with test-integration-dotnet-native
-# below as the fallback the macOS CI verify-dotnet job runs; see dotnet/Makefile.
+# rust/Makefile's test-integration-grpc-dotnet). It self-skips off Linux, with
+# test-integration-dotnet-native below as the fallback the macOS CI verify-dotnet
+# job runs; see dotnet/Makefile.
 test-integration-dotnet: build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) test-integration
 
@@ -247,8 +247,6 @@ test-integration-python-native: build-grpc-native-python
 test-integration-c-native: build-grpc-native-c
 	$(MAKE) -C rust test-integration-grpc-c-native
 
-# Skips the same .NET-only tests as test-integration-dotnet
-# (DOTNET_GRPC_SKIPS, see rust/Makefile).
 test-integration-dotnet-native: build-grpc-native-dotnet
 	$(MAKE) -C rust test-integration-grpc-dotnet-native
 

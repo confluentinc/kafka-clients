@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,6 +24,8 @@ using Confluent.Kafka.Producer;
 using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -42,27 +45,27 @@ public sealed class PublicProducerCloseWithTimeoutTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public async Task Close_NegativeTimeout_ThrowsArgumentOutOfRangeException(string flavor)
+    public async Task Close_NegativeTimeout_ThrowsIllegalArgumentException(string flavor)
     {
         if (flavor == SyncFlavor)
         {
             KafkaProducer<byte[], byte[]> producer = Sync(60000);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => producer.Close(s_negative)));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => producer.Close(s_negative)));
 
             Assert.NotNull(producer.Metrics());
             TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => producer.Send(Record(Topic("negative-close"))));
+            Assert.Throws<IllegalStateException>(() => producer.Send(Record(Topic("negative-close"))));
         }
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = producer.Close(s_negative); }));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
 
             Assert.NotNull(producer.Metrics());
             await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record(Topic("negative-close"))); });
+            Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(Topic("negative-close"))); });
         }
     }
 
@@ -76,14 +79,14 @@ public sealed class PublicProducerCloseWithTimeoutTests
             KafkaProducer<byte[], byte[]> producer = Sync(60000);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             TestTimeout.Run(producer.Close, Deadline);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => producer.Close(s_negative)));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => producer.Close(s_negative)));
         }
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             await TestTimeout.Run(() => producer.Close(), Deadline);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = producer.Close(s_negative); }));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
         }
     }
 
@@ -116,7 +119,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         Assert.All(
             outcomes,
             outcome => Assert.True(
-                outcome is KafkaException || (outcome is InvalidOperationException && outcome is not ObjectDisposedException),
+                outcome is KafkaException || outcome is IllegalStateException,
                 $"a send the close ended had {outcome?.GetType().Name ?? "no error"}: {outcome?.Message}"));
     }
 
@@ -128,37 +131,81 @@ public sealed class PublicProducerCloseWithTimeoutTests
         string topic = Topic("mock-negative-close");
         if (flavor == SyncFlavor)
         {
-            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-            Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset);
+            Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset());
 
             TestTimeout.Run(() => producer.Close(s_negative), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => producer.Send(Record(topic)));
+            Assert.Throws<IllegalStateException>(() => producer.Send(Record(topic)));
             TestTimeout.Run(() => producer.Close(s_negative), Deadline);
         }
         else
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => producer.Send(Record(topic)).AsTask(), Deadline);
-            Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset);
+            Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset());
 
             await TestTimeout.Run(() => producer.Close(s_negative), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record(topic)); });
+            Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(topic)); });
             await TestTimeout.Run(() => producer.Close(s_negative), Deadline);
         }
     }
 
-    [Fact(Skip = "transactions are not exposed (dotnet/CLAUDE.md:65)")]
-    public void OnlyCanExecuteCloseAfterInitTransactionsTimeout()
+    [Theory]
+    [InlineData(SyncFlavor)]
+    [InlineData(AsyncFlavor)]
+    public async Task OnlyCanExecuteCloseAfterInitTransactionsTimeout(string flavor)
     {
+        const string initTransactionsTimeout =
+            "InitTransactions timed out - did not complete coordinator discovery or receive the InitProducerId " +
+            "response within max.block.ms.";
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["transactional.id"] = "bad-transaction",
+            ["max.block.ms"] = 5,
+            ["bootstrap.servers"] = "localhost:1",
+        };
+
+        if (flavor == SyncFlavor)
+        {
+            KafkaProducer<byte[], byte[]> producer =
+                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            using IDisposable disposal = TestTimeout.Disposal(producer);
+            KafkaTimeoutException timeout = Assert.Throws<KafkaTimeoutException>(producer.InitTransactions);
+            Assert.Contains(initTransactionsTimeout, timeout.Message);
+            try
+            {
+                Assert.Throws<IllegalStateException>(producer.BeginTransaction);
+            }
+            finally
+            {
+                TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
+            }
+        }
+        else
+        {
+            AsyncKafkaProducer<byte[], byte[]> producer =
+                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
+            KafkaTimeoutException timeout = await Assert.ThrowsAsync<KafkaTimeoutException>(
+                () => TestTimeout.Run(() => producer.InitTransactions(), Deadline));
+            Assert.Contains(initTransactionsTimeout, timeout.Message);
+            try
+            {
+                await Assert.ThrowsAsync<IllegalStateException>(() => producer.BeginTransaction());
+            }
+            finally
+            {
+                await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
+            }
+        }
     }
 
-    private static void AssertNegativeTimeout(ArgumentOutOfRangeException thrown)
+    private static void AssertNegativeTimeout(IllegalArgumentException thrown)
     {
-        Assert.Equal("timeout", thrown.ParamName);
-        Assert.StartsWith(NegativeTimeout, thrown.Message, StringComparison.Ordinal);
+        Assert.Equal(NegativeTimeout, thrown.Message);
     }
 
     private static Exception? SendOutcome(KafkaProducer<byte[], byte[]> producer, string topic)

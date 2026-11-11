@@ -67,13 +67,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
             map.Keys.OrderBy(name => name, StringComparer.Ordinal),
             names.OrderBy(name => name, StringComparer.Ordinal));
         Assert.Equal(
-            map.Values.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal),
-            listings.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal));
+            map.Values.Select(listing => listing.Name()).OrderBy(name => name, StringComparer.Ordinal),
+            listings.Select(listing => listing.Name()).OrderBy(name => name, StringComparer.Ordinal));
 
         TopicListing a = map["p2b-list-a"];
-        Assert.Equal("p2b-list-a", a.Name);
-        Assert.False(a.IsInternal);
-        Assert.NotEqual(Uuid.ZERO_UUID, a.TopicId);
+        Assert.Equal("p2b-list-a", a.Name());
+        Assert.False(a.IsInternal());
+        Assert.NotEqual(Uuid.ZERO_UUID, a.TopicId());
     }
 
     [Fact]
@@ -88,13 +88,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
         AsyncCreatePartitionsResult result = admin.CreatePartitions(
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
-        Task perTopic = Assert.Single(result.Values).Value.Get();
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        Task perTopic = Assert.Single(result.Values()).Value.Get();
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -106,7 +106,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         AsyncDeleteRecordsResult result = admin.DeleteRecords(
             new Dictionary<TopicPartition, RecordsToDelete>());
 
-        Assert.Empty(result.LowWatermarks);
+        Assert.Empty(result.LowWatermarks());
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal(TaskStatus.RanToCompletion, result.All().Get().Status);
@@ -125,13 +125,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 [partition] = RecordsToDelete.BeforeOffset(10),
             });
 
-        Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value.Get();
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks()).Value.Get();
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perPartition, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
 
-        Assert.Equal(partition, Assert.Single(result.LowWatermarks).Key);
+        Assert.Equal(partition, Assert.Single(result.LowWatermarks()).Key);
     }
 
     [Fact]
@@ -141,10 +141,10 @@ public sealed class PublicAdminListPartitionsRecordsTests
         NewPartitions empty = NewPartitions.IncreaseTo(3, Array.Empty<IReadOnlyList<int>>());
         NewPartitions explicitAssignment = NewPartitions.IncreaseTo(3, new[] { new[] { 0 } });
 
-        Assert.Null(broker.Assignments);
-        Assert.NotNull(empty.Assignments);
-        Assert.Empty(empty.Assignments!);
-        Assert.Single(explicitAssignment.Assignments!);
+        Assert.Null(broker.Assignments());
+        Assert.NotNull(empty.Assignments());
+        Assert.Empty(empty.Assignments()!);
+        Assert.Single(explicitAssignment.Assignments()!);
 
         Assert.False(NewPartitionsMarshal.HasAssignments(broker));
         Assert.True(NewPartitionsMarshal.HasAssignments(empty));
@@ -152,10 +152,10 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         // Java's increaseTo(n, null) is increaseTo(n): a null list asks the broker to choose, not for no assignments.
         NewPartitions viaNull = NewPartitions.IncreaseTo(3, null);
-        Assert.Null(viaNull.Assignments);
+        Assert.Null(viaNull.Assignments());
         Assert.False(NewPartitionsMarshal.HasAssignments(viaNull));
 
-        Assert.Empty(empty.Assignments!);
+        Assert.Empty(empty.Assignments()!);
 
         Assert.Equal((3, (IReadOnlyList<IReadOnlyList<int>>?)null), ReadBack(broker));
         Assert.Equal((3, (IReadOnlyList<IReadOnlyList<int>>?)null), ReadBack(viaNull));
@@ -176,7 +176,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         List<IReadOnlyList<int>> mutable = new List<IReadOnlyList<int>> { new[] { 1, 2 } };
         NewPartitions copied = NewPartitions.IncreaseTo(4, mutable);
         mutable.Clear();
-        Assert.Equal(new[] { 1, 2 }, Assert.Single(copied.Assignments!));
+        Assert.Equal(new[] { 1, 2 }, Assert.Single(copied.Assignments()!));
     }
 
     [Fact]
@@ -192,7 +192,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             [Copy(Topic)] = NewPartitions.IncreaseTo(3),
         };
         Assert.Equal(2, grow.Count);
-        Assert.Equal(Topic, Assert.Single(admin.CreatePartitions(grow).Values).Key);
+        Assert.Equal(Topic, Assert.Single(admin.CreatePartitions(grow).Values()).Key);
 
         Dictionary<TopicPartition, RecordsToDelete> delete =
             new Dictionary<TopicPartition, RecordsToDelete>(TopicIdentityComparer.Instance)
@@ -201,7 +201,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 [new TopicPartition(Copy(Topic), 0)] = RecordsToDelete.BeforeOffset(2),
             };
         Assert.Equal(2, delete.Count);
-        Assert.Equal(new TopicPartition(Topic, 0), Assert.Single(admin.DeleteRecords(delete).LowWatermarks).Key);
+        Assert.Equal(new TopicPartition(Topic, 0), Assert.Single(admin.DeleteRecords(delete).LowWatermarks()).Key);
 
         Dictionary<TopicPartition, OffsetSpec> offsets =
             new Dictionary<TopicPartition, OffsetSpec>(TopicIdentityComparer.Instance)
@@ -211,7 +211,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             };
         Assert.Equal(2, offsets.Count);
         AsyncListOffsetsResult listed = admin.ListOffsets(offsets);
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => listed.PartitionResult(new TopicPartition(Topic, 0)).Get(), s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }
@@ -231,28 +231,26 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((0, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions { TimeoutMs = -5 }));
-        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreatePartitionsOptions { ValidateOnly = true }));
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreatePartitionsOptions { RetryOnQuotaViolation = false }));
+        Assert.Equal((0, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions().TimeoutMs(-5)));
+        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreatePartitionsOptions().ValidateOnly(true)));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreatePartitionsOptions().RetryOnQuotaViolation(false)));
 
-        CreatePartitionsOptions create = new CreatePartitionsOptions
-        {
-            TimeoutMs = 10,
-            ValidateOnly = true,
-            RetryOnQuotaViolation = false,
-        };
-        create.TimeoutMs = 20;
-        create.ValidateOnly = false;
-        create.RetryOnQuotaViolation = true;
+        CreatePartitionsOptions create = new CreatePartitionsOptions()
+            .TimeoutMs(10)
+            .ValidateOnly(true)
+            .RetryOnQuotaViolation(false);
+        create.TimeoutMs(20);
+        create.ValidateOnly(false);
+        create.RetryOnQuotaViolation(true);
         Assert.Equal((20, (sbyte)0, (sbyte)1), ReadBack(create));
-        create.TimeoutMs = null;
+        create.TimeoutMs(null);
         Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(create));
 
-        Assert.Equal(0, ReadBack(new DeleteRecordsOptions { TimeoutMs = -5 }));
-        DeleteRecordsOptions delete = new DeleteRecordsOptions { TimeoutMs = 10 };
-        delete.TimeoutMs = 30;
+        Assert.Equal(0, ReadBack(new DeleteRecordsOptions().TimeoutMs(-5)));
+        DeleteRecordsOptions delete = new DeleteRecordsOptions().TimeoutMs(10);
+        delete.TimeoutMs(30);
         Assert.Equal(30, ReadBack(delete));
-        delete.TimeoutMs = null;
+        delete.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(delete));
     }
 
@@ -287,13 +285,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
         // A negative timeout is not a precondition: it is sent as 0, as Java clamps the deadline.
         foreach (Action negative in new Action[]
                  {
-                     () => admin.ListTopics(new ListTopicsOptions { TimeoutMs = -1 }),
+                     () => admin.ListTopics(new ListTopicsOptions().TimeoutMs(-1)),
                      () => admin.CreatePartitions(
                          new Dictionary<string, NewPartitions>(),
-                         new CreatePartitionsOptions { TimeoutMs = -1 }),
+                         new CreatePartitionsOptions().TimeoutMs(-1)),
                      () => admin.DeleteRecords(
                          new Dictionary<TopicPartition, RecordsToDelete>(),
-                         new DeleteRecordsOptions { TimeoutMs = -1 }),
+                         new DeleteRecordsOptions().TimeoutMs(-1)),
                  })
         {
             Assert.Null(Record.Exception(negative));
@@ -301,15 +299,15 @@ public sealed class PublicAdminListPartitionsRecordsTests
     }
 
     [Fact]
-    public void AfterClose_EveryNewRpcThrowsObjectDisposed()
+    public void AfterClose_EveryNewRpcThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(
             () => admin.CreatePartitions(new Dictionary<string, NewPartitions>()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DeleteRecords(new Dictionary<TopicPartition, RecordsToDelete>()));
     }
 
@@ -328,7 +326,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             await TestTimeout.Run(() => admin.ListTopics().NamesToListings().Get(), s_deadline);
 
         Assert.True(map.ContainsKey(Topic));
-        Assert.Equal(Topic, map[Topic].Name);
+        Assert.Equal(Topic, map[Topic].Name());
     }
 
     [Fact]
@@ -342,7 +340,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline));
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(
                 () => admin.CreatePartitions(
                     new Dictionary<string, NewPartitions> { ["p2b-smoke"] = NewPartitions.IncreaseTo(2) }).All().Get(),
@@ -461,9 +459,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
         public static readonly TopicIdentityComparer Instance = new TopicIdentityComparer();
 
         public bool Equals(TopicPartition x, TopicPartition y) =>
-            ReferenceEquals(x.Topic, y.Topic) && x.Partition == y.Partition;
+            ReferenceEquals(x.Topic(), y.Topic()) && x.Partition() == y.Partition();
 
-        public int GetHashCode(TopicPartition obj) => RuntimeHelpers.GetHashCode(obj.Topic) ^ obj.Partition;
+        public int GetHashCode(TopicPartition obj) => RuntimeHelpers.GetHashCode(obj.Topic()) ^ obj.Partition();
     }
 
     /// <summary>The getters the binding never reads, declared for the read-back tests.</summary>

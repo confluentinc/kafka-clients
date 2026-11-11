@@ -29,7 +29,7 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Serves <c>ConsumerService</c> over the sync <see cref="KafkaConsumer{TKey, TValue}"/> and
-/// <see cref="MockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>),
+/// <see cref="MockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>),
 /// the C# port of the consumer half of Python's <c>grpc_server.py</c>.
 /// </summary>
 internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServiceBase, IDisposable
@@ -75,11 +75,11 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             // An empty or all-blank config selects a MockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
             }
             else
             {
-                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
+                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
             }
         }
         catch (Exception ex)
@@ -92,14 +92,20 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = id });
     }
 
-    // Without with_listener the plain Subscribe(topics) replaces, and so releases, a listener an
-    // earlier subscribe registered, as in Python.
+    // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe
+    // registered, as in Python.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
-        // Pattern subscription is not ported: answer -31 rather than subscribe to no topic.
         if (request.HasPattern)
         {
-            return RunStatus(request.ConsumerId, _ => throw new NotSupportedException(Translate.PatternSubscribeUnsupported));
+            SubscriptionPattern pattern = new SubscriptionPattern(request.Pattern);
+            if (request.WithListener)
+            {
+                LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
+                return RunStatus(request.ConsumerId, c => c.Subscribe(pattern, listener));
+            }
+
+            return RunStatus(request.ConsumerId, c => c.Subscribe(pattern));
         }
 
         List<string> topics = new List<string>(request.Topics);

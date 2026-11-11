@@ -32,9 +32,12 @@ public sealed class RemoveMembersFromConsumerGroupResult
 {
     private readonly SafeAdminResultHandle _native;
 
-    private RemoveMembersFromConsumerGroupResult(SafeAdminResultHandle native)
+    private readonly bool _removeAll;
+
+    private RemoveMembersFromConsumerGroupResult(SafeAdminResultHandle native, bool removeAll)
     {
         _native = native;
+        _removeAll = removeAll;
     }
 
     internal SafeAdminResultHandle Native => _native;
@@ -56,20 +59,17 @@ public sealed class RemoveMembersFromConsumerGroupResult
     /// A new future that completes when the member was removed, and fails with the member's error, or with the call's
     /// error when the whole request failed.
     /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="member"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// The request removed every member, or <paramref name="member"/> was not part of it, as Java throws at the call;
-    /// or its group instance id has a NUL character or an unpaired surrogate.
+    /// <exception cref="IllegalArgumentException">
+    /// The request removed every member, or <paramref name="member"/> (a null one included) was not part of it, as Java
+    /// throws at the call.
     /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="member"/>'s group instance id has a NUL character.</exception>
     public KafkaFuture MemberResult(MemberToRemove member)
     {
-        if (member is null)
-        {
-            throw new ArgumentNullException(nameof(member));
-        }
-
+        NativeAdminClient.RequireRequestedMember(member, _removeAll);
         return new KafkaFuture(NativeAdminClient.RemoveMembersFromConsumerGroupMemberResult(_native, member));
     }
 
-    internal static RemoveMembersFromConsumerGroupResult OfClient(SafeAdminResultHandle native) => new RemoveMembersFromConsumerGroupResult(native);
+    internal static RemoveMembersFromConsumerGroupResult OfClient(SafeAdminResultHandle native, RemoveMembersFromConsumerGroupOptions options) =>
+        new RemoveMembersFromConsumerGroupResult(native, options.RemoveAll());
 }

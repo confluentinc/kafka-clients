@@ -83,25 +83,25 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public async Task UnsubscribeWithCallback_AfterDispose_ThrowsObjectDisposed()
+    public async Task UnsubscribeWithCallback_AfterDispose_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.UnsubscribeWithCallback());
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.UnsubscribeWithCallback());
     }
 
     [Fact]
-    public void Seek_NegativeOffset_ThrowsWithExactJavaMessage()
+    public void Seek_NegativeOffset_OnTheMock_ThrowsTheUnassignedPartitionsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        // Java's MockConsumer.seek checks no offset; the core mock refuses the unassigned partition.
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Seek("proof-topic", 0, offset: -1));
 
-        Assert.Equal("offset", ex.ParamName);
-        Assert.Contains("seek offset must not be a negative number", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("No current assignment for partition proof-topic-0", ex.Message);
     }
 
     [Fact]
@@ -110,18 +110,18 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Seek("proof-topic", 0, offset: -5));
+        Assert.Throws<IllegalStateException>(() => consumer.Seek("proof-topic", 0, offset: -5));
     }
 
     [Fact]
-    public void Seek_NegativePartition_ThrowsArgumentOutOfRange()
+    public void Seek_NegativePartition_TheCoreAnswersAsJava()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Seek("proof-topic", partition: -1, offset: 0));
-        Assert.Equal("partition", ex.ParamName);
+        Assert.Equal("No current assignment for partition proof-topic--1", ex.Message);
     }
 
     [Fact]
@@ -132,10 +132,10 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("proof-group", meta.GroupId);
-        Assert.Equal(-1, meta.GenerationId);
-        Assert.Equal(string.Empty, meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("proof-group", meta.GroupId());
+        Assert.Equal(-1, meta.GenerationId());
+        Assert.Equal(string.Empty, meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("grüße-café-Ω-日本語-😀", meta.GroupId);
+        Assert.Equal("grüße-café-Ω-日本語-😀", meta.GroupId());
     }
 
     [Fact]
@@ -158,8 +158,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("static-group", meta.GroupId);
-        Assert.Equal("instance-7", meta.GroupInstanceId);
+        Assert.Equal("static-group", meta.GroupId());
+        Assert.Equal("instance-7", meta.GroupInstanceId());
     }
 
     [Fact]
@@ -170,19 +170,19 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("dummy.group.id", meta.GroupId);
-        Assert.Equal(1, meta.GenerationId);
-        Assert.Equal("1", meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("dummy.group.id", meta.GroupId());
+        Assert.Equal(1, meta.GenerationId());
+        Assert.Equal("1", meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Fact]
-    public void GroupMetadata_AfterDispose_ThrowsObjectDisposed()
+    public void GroupMetadata_AfterDispose_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
     }
 
     [Fact]
@@ -204,11 +204,11 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public async Task CloseWithCallback_UseAfterClose_ThrowsObjectDisposed()
+    public async Task CloseWithCallback_UseAfterClose_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await consumer.CloseWithCallback();
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SubscribeWithCallback(ProofTopic()));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.SubscribeWithCallback(ProofTopic()));
     }
 }

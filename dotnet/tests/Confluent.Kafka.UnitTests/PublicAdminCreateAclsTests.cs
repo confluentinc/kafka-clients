@@ -43,11 +43,11 @@ public sealed class PublicAdminCreateAclsTests
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("keyed-by-value") });
 
         AclBinding lookup = Binding("keyed-by-value");
-        Assert.NotSame(lookup, Assert.Single(result.Values).Key);
-        Assert.True(result.Values.ContainsKey(lookup));
+        Assert.NotSame(lookup, Assert.Single(result.Values()).Key);
+        Assert.True(result.Values().ContainsKey(lookup));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
-            () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => TestTimeout.Run(() => result.Values()[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -67,16 +67,16 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { alpha, beta });
 
-        Assert.Equal(2, result.Values.Count);
-        Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
+        Assert.Equal(2, result.Values().Count);
+        Assert.NotSame(result.Values()[alpha].Get(), result.Values()[beta].Get());
 
-        Assert.Contains(alpha, result.Values.Keys);
-        Assert.Contains(beta, result.Values.Keys);
+        Assert.Contains(alpha, result.Values().Keys);
+        Assert.Contains(beta, result.Values().Keys);
 
-        await Assert.ThrowsAsync<NotSupportedException>(
-            () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
-        await Assert.ThrowsAsync<NotSupportedException>(
-            () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => TestTimeout.Run(() => result.Values()[alpha].Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => TestTimeout.Run(() => result.Values()[beta].Get(), s_deadline));
     }
 
     [Fact]
@@ -88,12 +88,12 @@ public sealed class PublicAdminCreateAclsTests
         AclBinding first = Binding("solo-first");
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { first, Binding("solo-second") });
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
-            () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => TestTimeout.Run(() => result.Values()[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -104,7 +104,7 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("all-a"), Binding("all-b") });
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -117,7 +117,7 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(Array.Empty<AclBinding>());
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -129,8 +129,8 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
 
-        Assert.Single(result.Values);
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        Assert.Single(result.Values());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -142,11 +142,11 @@ public sealed class PublicAdminCreateAclsTests
         AclBinding binding = Binding("tópico-café-日本");
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { binding });
 
-        AclBinding key = Assert.Single(result.Values).Key;
-        Assert.Equal("tópico-café-日本", key.Pattern.Name);
+        AclBinding key = Assert.Single(result.Values()).Key;
+        Assert.Equal("tópico-café-日本", key.Pattern().Name());
         Assert.Equal(binding, key);
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -167,7 +167,7 @@ public sealed class PublicAdminCreateAclsTests
 
         Assert.Null(Record.Exception(
             () => admin.CreateAcls(
-                new[] { Binding("ok") }, new CreateAclsOptions { TimeoutMs = -1 })));
+                new[] { Binding("ok") }, new CreateAclsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -176,11 +176,11 @@ public sealed class PublicAdminCreateAclsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.CreateAcls(new[] { Binding("gone") }));
+        Assert.Throws<IllegalStateException>(() => admin.CreateAcls(new[] { Binding("gone") }));
     }
 
     [Fact]
-    public void Options_DefaultToJavasDefaults() => Assert.Null(new CreateAclsOptions().TimeoutMs);
+    public void Options_DefaultToJavasDefaults() => Assert.Null(new CreateAclsOptions().TimeoutMs());
 
     private static AclBinding Binding(string name) =>
         new AclBinding(

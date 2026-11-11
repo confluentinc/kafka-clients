@@ -67,9 +67,9 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null) =>
         AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(
-            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
+            topics ?? throw new ArgumentNullException(nameof(topics)),
             options));
 
     /// <inheritdoc/>
@@ -226,7 +226,7 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     public AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         AsyncRemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

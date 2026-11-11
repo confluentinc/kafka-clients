@@ -21,6 +21,8 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -66,10 +68,10 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (TopicPartition partition in s_partitions)
         {
-            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.PartitionResult(partition).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.PartitionResult(partition).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -82,10 +84,10 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.Description(id).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.Description(id).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -94,9 +96,9 @@ public sealed class PublicAdminTransactionsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AbortTransactionResult result = admin.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 1000 });
+        AbortTransactionResult result = admin.AbortTransaction(s_spec, new AbortTransactionOptions().TimeoutMs(1000));
 
-        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -105,17 +107,17 @@ public sealed class PublicAdminTransactionsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FenceProducersResult result = admin.FenceProducers(s_transactionalIds, new FenceProducersOptions { TimeoutMs = 1000 });
+        FenceProducersResult result = admin.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(1000));
 
-        Assert.Equal(s_transactionalIds.Length, result.FencedProducers.Count);
+        Assert.Equal(s_transactionalIds.Length, result.FencedProducers().Count);
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.FencedProducers[id].Get(s_deadline)));
-            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.ProducerId(id).Get(s_deadline)));
-            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.EpochId(id).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.FencedProducers()[id].Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.ProducerId(id).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.EpochId(id).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -125,9 +127,9 @@ public sealed class PublicAdminTransactionsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TerminateTransactionResult result =
-            admin.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 1000 });
+            admin.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions().TimeoutMs(1000));
 
-        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.Result().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.Result().Get(s_deadline)));
     }
 
     [Fact]
@@ -137,28 +139,28 @@ public sealed class PublicAdminTransactionsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeProducersResult producers = admin.DescribeProducers(
-            s_partitions, new DescribeProducersOptions { BrokerId = 1 });
+            s_partitions, new DescribeProducersOptions().BrokerId(1));
         AsyncDescribeTransactionsResult transactions = admin.DescribeTransactions(s_transactionalIds);
         AsyncAbortTransactionResult abort = admin.AbortTransaction(s_spec);
 
         foreach (TopicPartition partition in s_partitions)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => producers.PartitionResult(partition).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => producers.PartitionResult(partition).Get()), s_deadline));
         }
 
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => transactions.Description(id).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => transactions.Description(id).Get()), s_deadline));
         }
 
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => producers.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => producers.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => transactions.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => transactions.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => abort.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => abort.All().Get()), s_deadline));
     }
 
     [Fact]
@@ -173,17 +175,17 @@ public sealed class PublicAdminTransactionsTests
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => fence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers()[id].Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => fence.ProducerId(id).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.ProducerId(id).Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => fence.EpochId(id).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.EpochId(id).Get()), s_deadline));
         }
 
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => fence.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => terminate.Result().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => terminate.Result().Get()), s_deadline));
     }
 
     [Fact]
@@ -218,24 +220,24 @@ public sealed class PublicAdminTransactionsTests
 
             if (round == 0)
             {
-                AssertNotImplemented(Assert.Throws<NotSupportedException>(() => producers.All().Get(s_deadline)));
-                AssertNotImplemented(Assert.Throws<NotSupportedException>(() => transactions.All().Get(s_deadline)));
-                AssertNotImplemented(Assert.Throws<NotSupportedException>(() => abort.All().Get(s_deadline)));
+                AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => producers.All().Get(s_deadline)));
+                AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => transactions.All().Get(s_deadline)));
+                AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => abort.All().Get(s_deadline)));
                 AssertNotImplemented(await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<NotSupportedException>(() => asyncProducers.All().Get()), s_deadline));
+                    () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => asyncProducers.All().Get()), s_deadline));
                 AssertNotImplemented(await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<NotSupportedException>(() => asyncTransactions.All().Get()), s_deadline));
+                    () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => asyncTransactions.All().Get()), s_deadline));
                 AssertNotImplemented(await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<NotSupportedException>(() => asyncAbort.All().Get()), s_deadline));
+                    () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => asyncAbort.All().Get()), s_deadline));
             }
         }
 
-        Assert.True(producers.All().IsDone);
-        Assert.True(transactions.All().IsDone);
-        Assert.True(abort.All().IsDone);
-        Assert.True(asyncProducers.All().IsDone);
-        Assert.True(asyncTransactions.All().IsDone);
-        Assert.True(asyncAbort.All().IsDone);
+        Assert.True(producers.All().IsDone());
+        Assert.True(transactions.All().IsDone());
+        Assert.True(abort.All().IsDone());
+        Assert.True(asyncProducers.All().IsDone());
+        Assert.True(asyncTransactions.All().IsDone());
+        Assert.True(asyncAbort.All().IsDone());
     }
 
     [Fact]
@@ -254,10 +256,10 @@ public sealed class PublicAdminTransactionsTests
         Assert.True(terminate.Result() == terminate.Result());
         Assert.True(asyncTerminate.Result() == asyncTerminate.Result());
 
-        Assert.NotSame(fence.FencedProducers, fence.FencedProducers);
-        Assert.NotSame(asyncFence.FencedProducers, asyncFence.FencedProducers);
-        Assert.False(fence.FencedProducers["txn-a"] == fence.FencedProducers["txn-a"]);
-        Assert.False(asyncFence.FencedProducers["txn-a"] == asyncFence.FencedProducers["txn-a"]);
+        Assert.NotSame(fence.FencedProducers(), fence.FencedProducers());
+        Assert.NotSame(asyncFence.FencedProducers(), asyncFence.FencedProducers());
+        Assert.False(fence.FencedProducers()["txn-a"] == fence.FencedProducers()["txn-a"]);
+        Assert.False(asyncFence.FencedProducers()["txn-a"] == asyncFence.FencedProducers()["txn-a"]);
         Assert.False(fence.ProducerId("txn-a") == fence.ProducerId("txn-a"));
         Assert.False(fence.EpochId("txn-a") == fence.EpochId("txn-a"));
         Assert.False(asyncFence.ProducerId("txn-a") == asyncFence.ProducerId("txn-a"));
@@ -275,26 +277,26 @@ public sealed class PublicAdminTransactionsTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         DescribeProducersResult producers =
-            sync.DescribeProducers(s_partitions, new DescribeProducersOptions { TimeoutMs = 10 });
+            sync.DescribeProducers(s_partitions, new DescribeProducersOptions().TimeoutMs(10));
         DescribeTransactionsResult transactions =
-            sync.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions { TimeoutMs = 10 });
-        AbortTransactionResult abort = sync.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 10 });
+            sync.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions().TimeoutMs(10));
+        AbortTransactionResult abort = sync.AbortTransaction(s_spec, new AbortTransactionOptions().TimeoutMs(10));
         AsyncDescribeProducersResult asyncProducers =
-            async.DescribeProducers(s_partitions, new DescribeProducersOptions { TimeoutMs = 10 });
+            async.DescribeProducers(s_partitions, new DescribeProducersOptions().TimeoutMs(10));
         AsyncDescribeTransactionsResult asyncTransactions =
-            async.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions { TimeoutMs = 10 });
+            async.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions().TimeoutMs(10));
         AsyncAbortTransactionResult asyncAbort =
-            async.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 10 });
+            async.AbortTransaction(s_spec, new AbortTransactionOptions().TimeoutMs(10));
 
-        AssertTimedOut(ProducersCall, Assert.Throws<KafkaException>(() => producers.All().Get(s_deadline)));
-        AssertTimedOut(TransactionsCall, Assert.Throws<KafkaException>(() => transactions.All().Get(s_deadline)));
-        AssertTimedOut(AbortCall, Assert.Throws<KafkaException>(() => abort.All().Get(s_deadline)));
+        AssertTimedOut(ProducersCall, FutureAssert.Throws<KafkaTimeoutException>(() => producers.All().Get(s_deadline)));
+        AssertTimedOut(TransactionsCall, FutureAssert.Throws<KafkaTimeoutException>(() => transactions.All().Get(s_deadline)));
+        AssertTimedOut(AbortCall, FutureAssert.Throws<KafkaTimeoutException>(() => abort.All().Get(s_deadline)));
         AssertTimedOut(ProducersCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncProducers.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncProducers.All().Get()), s_deadline));
         AssertTimedOut(TransactionsCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncTransactions.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncTransactions.All().Get()), s_deadline));
         AssertTimedOut(AbortCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncAbort.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncAbort.All().Get()), s_deadline));
     }
 
     [Fact]
@@ -305,33 +307,33 @@ public sealed class PublicAdminTransactionsTests
         AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(Unreachable());
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        FenceProducersResult fence = sync.FenceProducers(s_transactionalIds, new FenceProducersOptions { TimeoutMs = 10 });
+        FenceProducersResult fence = sync.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(10));
         TerminateTransactionResult terminate =
-            sync.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 10 });
+            sync.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions().TimeoutMs(10));
         AsyncFenceProducersResult asyncFence =
-            async.FenceProducers(s_transactionalIds, new FenceProducersOptions { TimeoutMs = 10 });
+            async.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(10));
         AsyncTerminateTransactionResult asyncTerminate =
-            async.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 10 });
+            async.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions().TimeoutMs(10));
 
         foreach (string id in s_transactionalIds)
         {
-            AssertTimedOut(FenceCall, Assert.Throws<KafkaException>(() => fence.FencedProducers[id].Get(s_deadline)));
-            AssertTimedOut(FenceCall, Assert.Throws<KafkaException>(() => fence.ProducerId(id).Get(s_deadline)));
-            AssertTimedOut(FenceCall, Assert.Throws<KafkaException>(() => fence.EpochId(id).Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.FencedProducers()[id].Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.ProducerId(id).Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.EpochId(id).Get(s_deadline)));
             AssertTimedOut(FenceCall, await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => asyncFence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers()[id].Get()), s_deadline));
         }
 
-        AssertTimedOut(FenceCall, Assert.Throws<KafkaException>(() => fence.All().Get(s_deadline)));
-        AssertTimedOut(FenceCall, Assert.Throws<KafkaException>(() => terminate.Result().Get(s_deadline)));
+        AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.All().Get(s_deadline)));
+        AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => terminate.Result().Get(s_deadline)));
         AssertTimedOut(FenceCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncFence.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.All().Get()), s_deadline));
         AssertTimedOut(FenceCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncTerminate.Result().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncTerminate.Result().Get()), s_deadline));
     }
 
     [Fact]
-    public void AfterDispose_EveryCallThrowsObjectDisposed()
+    public void AfterDispose_EveryCallThrowsIllegalState()
     {
         MockAdminClient mock = MockAdminClient.Create().Build();
         AsyncMockAdminClient asyncMock = AsyncMockAdminClient.Create().Build();
@@ -342,29 +344,29 @@ public sealed class PublicAdminTransactionsTests
         TestTimeout.Run(real.Dispose, s_deadline);
         TestTimeout.Run(asyncReal.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => mock.DescribeProducers(s_partitions));
-        Assert.Throws<ObjectDisposedException>(() => mock.DescribeTransactions(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => mock.AbortTransaction(s_spec));
-        Assert.Throws<ObjectDisposedException>(() => asyncMock.DescribeProducers(s_partitions));
-        Assert.Throws<ObjectDisposedException>(() => asyncMock.DescribeTransactions(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => asyncMock.AbortTransaction(s_spec));
-        Assert.Throws<ObjectDisposedException>(() => real.DescribeProducers(s_partitions));
-        Assert.Throws<ObjectDisposedException>(() => real.DescribeTransactions(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => real.AbortTransaction(s_spec));
-        Assert.Throws<ObjectDisposedException>(() => asyncReal.DescribeProducers(s_partitions));
-        Assert.Throws<ObjectDisposedException>(() => asyncReal.DescribeTransactions(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => asyncReal.AbortTransaction(s_spec));
-        Assert.Throws<ObjectDisposedException>(() => mock.FenceProducers(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => mock.ForceTerminateTransaction("txn-a"));
-        Assert.Throws<ObjectDisposedException>(() => asyncMock.FenceProducers(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => asyncMock.ForceTerminateTransaction("txn-a"));
-        Assert.Throws<ObjectDisposedException>(() => real.FenceProducers(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => real.ForceTerminateTransaction("txn-a"));
-        Assert.Throws<ObjectDisposedException>(() => asyncReal.FenceProducers(s_transactionalIds));
-        Assert.Throws<ObjectDisposedException>(() => asyncReal.ForceTerminateTransaction("txn-a"));
+        Assert.Throws<IllegalStateException>(() => mock.DescribeProducers(s_partitions));
+        Assert.Throws<IllegalStateException>(() => mock.DescribeTransactions(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => mock.AbortTransaction(s_spec));
+        Assert.Throws<IllegalStateException>(() => asyncMock.DescribeProducers(s_partitions));
+        Assert.Throws<IllegalStateException>(() => asyncMock.DescribeTransactions(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => asyncMock.AbortTransaction(s_spec));
+        Assert.Throws<IllegalStateException>(() => real.DescribeProducers(s_partitions));
+        Assert.Throws<IllegalStateException>(() => real.DescribeTransactions(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => real.AbortTransaction(s_spec));
+        Assert.Throws<IllegalStateException>(() => asyncReal.DescribeProducers(s_partitions));
+        Assert.Throws<IllegalStateException>(() => asyncReal.DescribeTransactions(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => asyncReal.AbortTransaction(s_spec));
+        Assert.Throws<IllegalStateException>(() => mock.FenceProducers(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => mock.ForceTerminateTransaction("txn-a"));
+        Assert.Throws<IllegalStateException>(() => asyncMock.FenceProducers(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => asyncMock.ForceTerminateTransaction("txn-a"));
+        Assert.Throws<IllegalStateException>(() => real.FenceProducers(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => real.ForceTerminateTransaction("txn-a"));
+        Assert.Throws<IllegalStateException>(() => asyncReal.FenceProducers(s_transactionalIds));
+        Assert.Throws<IllegalStateException>(() => asyncReal.ForceTerminateTransaction("txn-a"));
     }
 
-    private static void AssertNotImplemented(NotSupportedException exception)
+    private static void AssertNotImplemented(UnsupportedOperationException exception)
     {
         Assert.Equal(NotImplementedMessage, exception.Message);
     }
@@ -372,7 +374,7 @@ public sealed class PublicAdminTransactionsTests
     private static void AssertTimedOut(string call, KafkaException exception)
     {
         Assert.Equal(RequestTimedOutCode, exception.Code);
-        Assert.True(exception.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(exception);
         Assert.Equal("Timed out waiting for a node assignment. Call: " + call, exception.Message);
     }
 

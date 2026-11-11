@@ -54,36 +54,49 @@ internal readonly struct SerializedProducerRecord
 
     internal Headers? Headers { get; }
 
+    // wrapInvalidCast is true for KafkaProducer and AsyncKafkaProducer, whose Java doSend wraps a
+    // ClassCastException in a SerializationException, and false for the mocks: Java's MockProducer calls the
+    // serializers with no try, so every throw leaves send unchanged.
     internal static SerializedProducerRecord Serialize<TKey, TValue>(
         ProducerRecord<TKey, TValue> record,
         ISerializer<TKey> keySerializer,
-        ISerializer<TValue> valueSerializer)
+        ISerializer<TValue> valueSerializer,
+        bool wrapInvalidCast)
     {
-        byte[]? keyBytes = SerializeField(keySerializer, record.Topic, record.Key, isKey: true);
-        byte[]? valueBytes = SerializeField(valueSerializer, record.Topic, record.Value, isKey: false);
+        ReadOnlyMemory<byte>? keyBytes = wrapInvalidCast
+            ? SerializeField(keySerializer, record.Topic(), record.Key(), isKey: true)
+            : keySerializer.Serialize(record.Topic(), record.Key()!);
+        ReadOnlyMemory<byte>? valueBytes = wrapInvalidCast
+            ? SerializeField(valueSerializer, record.Topic(), record.Value(), isKey: false)
+            : valueSerializer.Serialize(record.Topic(), record.Value()!);
 
         return new SerializedProducerRecord(
-            record.Topic,
-            record.Partition,
-            record.Timestamp,
-            keyBytes is null ? (ReadOnlyMemory<byte>?)null : keyBytes,
-            valueBytes is null ? (ReadOnlyMemory<byte>?)null : valueBytes,
-            record.Headers);
+            record.Topic(),
+            record.Partition(),
+            record.Timestamp(),
+            keyBytes,
+            valueBytes,
+            record.Headers());
     }
 
-    private static byte[]? SerializeField<T>(ISerializer<T> serializer, string topic, T? data, bool isKey)
+    private static ReadOnlyMemory<byte>? SerializeField<T>(ISerializer<T> serializer, string topic, T? data, bool isKey)
     {
         try
         {
             // The serializer is called also for a null key or value, as Java's doSend calls it.
             return serializer.Serialize(topic, data!);
         }
-        catch (Exception exception)
+        catch (InvalidCastException exception)
         {
-            // Every throw is wrapped, a SerializationException included, so each failure names the topic.
+            // Java's doSend wraps only a ClassCastException; any other throw, an ApiException included, leaves
+            // the serializer unchanged.
+            string field = isKey ? "key" : "value";
             throw new SerializationException(
-                $"Error serializing {(isKey ? "key" : "value")} for topic '{topic}'.",
+                $"Can't convert {field} of class {ClassName(data?.GetType())} to class "
+                + $"{ClassName(serializer.GetType())} specified as the {field} serializer",
                 exception);
         }
     }
+
+    private static string ClassName(Type? type) => type is null ? "null" : type.FullName ?? type.Name;
 }

@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 using Grpc.Core;
 
@@ -30,7 +31,7 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// The async twin of <see cref="ProducerServiceImpl"/>: serves <c>ProducerService</c> over
 /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> and <see cref="AsyncMockProducer{TKey, TValue}"/>
-/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>), the C# port of the producer half of
+/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>), the C# port of the producer half of
 /// Python's <c>grpc_server_async.py</c>. Handlers await the binding's tasks and take no per-id lock.
 /// </summary>
 internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerServiceBase, IDisposable
@@ -42,7 +43,14 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
     private readonly TimeSpan _sendTimeout = TimeSpan.FromSeconds(120);
 
+    private readonly GroupMetadataStore _groupMetadata;
+
     private long _nextId;
+
+    public AsyncProducerServiceImpl(GroupMetadataStore groupMetadata)
+    {
+        _groupMetadata = groupMetadata;
+    }
 
     public void Dispose()
     {
@@ -72,11 +80,11 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             // An empty or all-blank config selects an AsyncMockProducer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             }
             else
             {
-                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
+                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
             }
         }
         catch (Exception ex)
@@ -112,7 +120,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             RecordMetadata metadata = await send.WaitAsync(_sendTimeout).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
-        catch (TimeoutException) when (send is { IsCompleted: false })
+        catch (System.TimeoutException) when (send is { IsCompleted: false })
         {
             // Only the server's own bound is code 7: a send that failed with a TimeoutException
             // (the core's -5) is completed, and goes out through ToProto.
@@ -199,11 +207,69 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
+    public override Task<Proto.StatusResponse> InitTransactions(Proto.TransactionRequest request, ServerCallContext context) =>
+        Transaction(request.ProducerId, producer => producer.InitTransactions());
+
+    public override Task<Proto.StatusResponse> BeginTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
+        Transaction(request.ProducerId, producer => producer.BeginTransaction());
+
+    public override async Task<Proto.StatusResponse> SendOffsetsToTransaction(
+        Proto.SendOffsetsToTransactionRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) };
+        }
+
+        ConsumerGroupMetadata? groupMetadata = _groupMetadata.Get(request.GroupMetadataId);
+        if (groupMetadata is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownGroupMetadata(request.GroupMetadataId) };
+        }
+
+        try
+        {
+            await producer.SendOffsetsToTransaction(Translate.OffsetEntriesToDictionary(request.Offsets), groupMetadata)
+                .ConfigureAwait(false);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    public override Task<Proto.StatusResponse> CommitTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
+        Transaction(request.ProducerId, producer => producer.CommitTransaction());
+
+    public override Task<Proto.StatusResponse> AbortTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
+        Transaction(request.ProducerId, producer => producer.AbortTransaction());
+
     public override Task<Proto.StatusResponse> Close(Proto.CloseRequest request, ServerCallContext context) =>
         CloseProducer(request.ProducerId, null);
 
     public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
         CloseProducer(request.ProducerId, TimeSpan.FromMilliseconds(request.TimeoutMs));
+
+    private async Task<Proto.StatusResponse> Transaction(ulong producerId, Func<IAsyncProducer<byte[], byte[]>, Task> operation)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(producerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(producerId) };
+        }
+
+        try
+        {
+            await operation(producer).ConfigureAwait(false);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
 
     private async Task<Proto.StatusResponse> CloseProducer(ulong producerId, TimeSpan? timeout)
     {

@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// <see cref="IConsumerCommon.Metrics"/> on the four consumer classes: an empty map on the mocks, as Java's
 /// MockConsumer; well-formed entries on a real consumer without a broker, keyed by <see cref="MetricName"/> value
-/// identity; <see cref="ObjectDisposedException"/> after Dispose; and, while a poll holds the consumer, a state read
+/// identity; <see cref="IllegalStateException"/> after Dispose; and, while a poll holds the consumer, a state read
 /// refused beside an answered Metrics.
 /// </summary>
 public sealed class PublicConsumerMetricsTests
@@ -43,7 +43,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_AsyncMock_IsEmpty()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IReadOnlyDictionary<MetricName, IMetric> metrics = consumer.Metrics();
         Assert.NotNull(metrics);
@@ -53,7 +53,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_SyncMock_IsEmpty()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Assert.Empty(consumer.Metrics());
     }
@@ -62,7 +62,7 @@ public sealed class PublicConsumerMetricsTests
     public void Metrics_AsyncRealConsumer_IsPopulatedAndWellFormed()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-async"), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig("metrics-async"), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         AssertPopulatedAndWellFormed(consumer.Metrics());
@@ -72,7 +72,7 @@ public sealed class PublicConsumerMetricsTests
     public void Metrics_SyncRealConsumer_IsPopulatedAndWellFormed()
     {
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-sync"), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig("metrics-sync"), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         AssertPopulatedAndWellFormed(consumer.Metrics());
@@ -83,7 +83,7 @@ public sealed class PublicConsumerMetricsTests
     {
         // A key rebuilt with another description finds the same entry: MetricName equality ignores the description.
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-key-identity"), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig("metrics-key-identity"), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<MetricName, IMetric> metrics = consumer.Metrics();
@@ -93,10 +93,10 @@ public sealed class PublicConsumerMetricsTests
         {
             MetricName original = entry.Key;
             MetricName rebuilt = new MetricName(
-                original.Name,
-                original.Group,
-                original.Description + "-mutated",
-                new Dictionary<string, string>(RebuildTags(original.Tags), StringComparer.Ordinal));
+                original.Name(),
+                original.Group(),
+                original.Description() + "-mutated",
+                new Dictionary<string, string>(RebuildTags(original.Tags()), StringComparer.Ordinal));
 
             Assert.True(metrics.ContainsKey(rebuilt));
             Assert.Same(entry.Value, metrics[rebuilt]);
@@ -105,25 +105,25 @@ public sealed class PublicConsumerMetricsTests
     }
 
     [Fact]
-    public void Metrics_AfterDispose_ThrowsObjectDisposed()
+    public void Metrics_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Metrics());
+        Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
 
     [Fact]
-    public async Task Metrics_AfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Metrics_AfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Metrics());
+        Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
 
     [Fact]
     public void Metrics_ReachableViaIConsumerCommon()
     {
-        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IConsumerCommon consumer = mock;
         Assert.Empty(consumer.Metrics());
@@ -133,7 +133,7 @@ public sealed class PublicConsumerMetricsTests
     public async Task Metrics_ConcurrentWithInFlightPoll_AnswersWhileThePollHoldsTheConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            RealConfig("metrics-concurrent"), Serdes.ByteArray, Serdes.ByteArray);
+            RealConfig("metrics-concurrent"), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         // Subscribe completes without a broker, so the poll that follows waits.
@@ -142,7 +142,7 @@ public sealed class PublicConsumerMetricsTests
         Task<ConsumerRecords<byte[], byte[]>> inFlight = consumer.Poll(TimeSpan.FromSeconds(20));
         try
         {
-            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => consumer.Assignment());
+            ConcurrentModificationException ex = Assert.Throws<ConcurrentModificationException>(() => consumer.Assignment());
             Assert.Equal("KafkaConsumer is not safe for multi-threaded access.", ex.Message);
 
             AssertPopulatedAndWellFormed(consumer.Metrics());
@@ -165,19 +165,19 @@ public sealed class PublicConsumerMetricsTests
             IMetric metric = entry.Value;
 
             Assert.NotNull(name);
-            Assert.NotNull(name.Name);
-            Assert.NotNull(name.Group);
-            Assert.NotNull(name.Description);
-            Assert.NotNull(name.Tags);
+            Assert.NotNull(name.Name());
+            Assert.NotNull(name.Group());
+            Assert.NotNull(name.Description());
+            Assert.NotNull(name.Tags());
 
             Assert.NotNull(metric);
-            Assert.Equal(name, metric.Name);
+            Assert.Equal(name, metric.MetricName());
 
-            object value = metric.Value;
+            object value = metric.MetricValue();
             Assert.NotNull(value);
             Assert.True(
                 value is double || value is string || value is long || value is int,
-                $"Unexpected metric value type {value.GetType()} for {name.Name}");
+                $"Unexpected metric value type {value.GetType()} for {name.Name()}");
         }
     }
 
@@ -210,7 +210,7 @@ public sealed class PublicConsumerMetricsTests
                 },
                 s_deadline);
         }
-        catch (TimeoutException)
+        catch (System.TimeoutException)
         {
         }
     }

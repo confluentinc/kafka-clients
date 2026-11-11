@@ -308,6 +308,44 @@ public sealed class PublicMockConsumerOwnerWaitTests
         }
     }
 
+    [Fact]
+    public async Task AsyncMock_AnotherThreadsSubscribe_WaitsForThisThreadsSubscribe_ThenIsAccepted()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        try
+        {
+            int[] state = new int[2];
+            Exception? failure = null;
+            Task? second = null;
+            Task first;
+            Thread other;
+            bool waited;
+            using (new ConsumerPumpStall(consumer))
+            {
+                first = consumer.Subscribe(new[] { Topic });
+                other = StartThread(() =>
+                {
+                    Volatile.Write(ref state[0], 1);
+                    failure = Record.Exception(() => { second = consumer.Subscribe(new[] { Topic }); });
+                    Volatile.Write(ref state[1], 1);
+                });
+                SpinUntilWaitingOrEnded(other, () => Volatile.Read(ref state[0]) == 1, () => Volatile.Read(ref state[1]) == 1);
+                waited = Volatile.Read(ref state[1]) == 0;
+            }
+
+            await TestTimeout.Run(() => first, s_deadline);
+
+            Assert.True(other.Join(s_bound), "the other thread's subscribe never returned");
+            Assert.True(waited, "the other thread's subscribe did not wait for this thread's subscribe");
+            Assert.Null(failure);
+            await TestTimeout.Run(() => second!, s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -596,7 +634,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
 
     private static void AssertRefused(Exception? thrown)
     {
-        InvalidOperationException refused = Assert.IsType<InvalidOperationException>(thrown);
+        ConcurrentModificationException refused = Assert.IsType<ConcurrentModificationException>(thrown);
         Assert.Equal(ConcurrentMessage, refused.Message);
     }
 
@@ -614,7 +652,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
         Thread other = StartThread(() => failure = Record.Exception(action));
         if (!other.Join(s_bound))
         {
-            throw new TimeoutException("the other thread's calls did not return");
+            throw new System.TimeoutException("the other thread's calls did not return");
         }
 
         if (failure is not null)
@@ -630,7 +668,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();
@@ -652,7 +690,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
     private static void Block(Func<Task> operation) => TestTimeout.Run(operation, s_deadline).GetAwaiter().GetResult();
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets() =>
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(1) };
@@ -674,7 +712,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
 
         internal static Mock Create(bool asyncMock) => asyncMock
             ? new Mock(null, NewAsyncMock())
-            : new Mock(new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray), null);
+            : new Mock(new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()), null);
 
         internal void Subscribe(IConsumerRebalanceListener listener)
         {

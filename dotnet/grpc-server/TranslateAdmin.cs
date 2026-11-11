@@ -192,7 +192,7 @@ internal static class TranslateAdmin
             {
                 foreach (string value in topicIds.Values)
                 {
-                    ids.Add(Uuid.Parse(value));
+                    ids.Add(Uuid.FromString(value));
                 }
             }
 
@@ -227,7 +227,7 @@ internal static class TranslateAdmin
                     proto.ReplicationFactor < 0 ? (short?)null : (short)proto.ReplicationFactor);
             }
 
-            topic.Configs = new Dictionary<string, string>(proto.Configs);
+            topic.Configs(new Dictionary<string, string>(proto.Configs));
             topics.Add(topic);
         }
 
@@ -276,14 +276,14 @@ internal static class TranslateAdmin
     {
         Proto.ConfigEntry proto = new Proto.ConfigEntry
         {
-            Name = entry.Name,
-            IsDefault = entry.IsDefault,
-            IsSensitive = entry.IsSensitive,
-            IsReadOnly = entry.IsReadOnly,
+            Name = entry.Name(),
+            IsDefault = entry.IsDefault(),
+            IsSensitive = entry.IsSensitive(),
+            IsReadOnly = entry.IsReadOnly(),
         };
-        if (entry.Value is not null)
+        if (entry.Value() is not null)
         {
-            proto.Value = entry.Value;
+            proto.Value = entry.Value();
         }
 
         return proto;
@@ -292,28 +292,28 @@ internal static class TranslateAdmin
     internal static Proto.ConfigEntry FullConfigEntryToProto(ConfigEntry entry)
     {
         Proto.ConfigEntry proto = ConfigEntryToProto(entry);
-        proto.Source = ConfigSourceName(entry.Source);
-        if (entry.Type is ConfigEntry.ConfigType type)
+        proto.Source = ConfigSourceName(entry.Source());
+        if (entry.Type() is ConfigEntry.ConfigType type)
         {
             proto.ConfigType = ConfigTypeName(type);
         }
 
-        if (entry.Documentation is not null)
+        if (entry.Documentation() is not null)
         {
-            proto.Documentation = entry.Documentation;
+            proto.Documentation = entry.Documentation();
         }
 
         // Java's precedence order is meaningful — do not sort.
-        foreach (ConfigEntry.ConfigSynonym synonym in entry.Synonyms)
+        foreach (ConfigEntry.ConfigSynonym synonym in entry.Synonyms())
         {
             Proto.ConfigSynonym protoSynonym = new Proto.ConfigSynonym
             {
-                Name = synonym.Name,
-                Source = ConfigSourceName(synonym.Source),
+                Name = synonym.Name(),
+                Source = ConfigSourceName(synonym.Source()),
             };
-            if (synonym.Value is not null)
+            if (synonym.Value() is not null)
             {
-                protoSynonym.Value = synonym.Value;
+                protoSynonym.Value = synonym.Value();
             }
 
             proto.Synonyms.Add(protoSynonym);
@@ -325,7 +325,7 @@ internal static class TranslateAdmin
     internal static Proto.AdminConfig ConfigToProto(Config config)
     {
         Proto.AdminConfig proto = new Proto.AdminConfig();
-        foreach (ConfigEntry entry in config.Entries)
+        foreach (ConfigEntry entry in config.Entries())
         {
             proto.Entries.Add(FullConfigEntryToProto(entry));
         }
@@ -334,7 +334,7 @@ internal static class TranslateAdmin
     }
 
     internal static Proto.ConfigResource ConfigResourceToProto(ConfigResource resource) =>
-        new Proto.ConfigResource { ResourceType = (int)resource.Type, Name = resource.Name };
+        new Proto.ConfigResource { ResourceType = (int)resource.Type(), Name = resource.Name() };
 
     internal static List<ConfigResource> ConfigResources(IEnumerable<Proto.ConfigResource> protos)
     {
@@ -383,9 +383,9 @@ internal static class TranslateAdmin
     internal static Proto.TopicPartitionReplica ReplicaToProto(TopicPartitionReplica replica) =>
         new Proto.TopicPartitionReplica
         {
-            Topic = replica.Topic,
-            Partition = replica.Partition,
-            BrokerId = replica.BrokerId,
+            Topic = replica.Topic(),
+            Partition = replica.Partition(),
+            BrokerId = replica.BrokerId(),
         };
 
     internal static List<TopicPartitionReplica> Replicas(IEnumerable<Proto.TopicPartitionReplica> protos)
@@ -414,30 +414,30 @@ internal static class TranslateAdmin
 
     internal static Proto.LogDirDescription LogDirDescriptionToProto(LogDirDescription description)
     {
-        Proto.LogDirDescription proto = new Proto.LogDirDescription { IsCordoned = description.IsCordoned };
-        if (description.Error is not null)
+        Proto.LogDirDescription proto = new Proto.LogDirDescription { IsCordoned = description.IsCordoned() };
+        if (description.Error() is { } error)
         {
-            proto.Error = Translate.ToProto(description.Error);
+            proto.Error = Translate.ToProto(error);
         }
 
-        if (description.TotalBytes.HasValue)
+        if (description.TotalBytes() is { } totalBytes)
         {
-            proto.TotalBytes = description.TotalBytes.Value;
+            proto.TotalBytes = totalBytes;
         }
 
-        if (description.UsableBytes.HasValue)
+        if (description.UsableBytes() is { } usableBytes)
         {
-            proto.UsableBytes = description.UsableBytes.Value;
+            proto.UsableBytes = usableBytes;
         }
 
-        foreach (KeyValuePair<TopicPartition, ReplicaInfo> pair in description.ReplicaInfos)
+        foreach (KeyValuePair<TopicPartition, ReplicaInfo> pair in description.ReplicaInfos())
         {
             proto.ReplicaInfos.Add(new Proto.ReplicaInfoEntry
             {
                 Partition = Translate.TpToProto(pair.Key),
-                Size = pair.Value.Size,
-                OffsetLag = pair.Value.OffsetLag,
-                IsFuture = pair.Value.IsFuture,
+                Size = pair.Value.Size(),
+                OffsetLag = pair.Value.OffsetLag(),
+                IsFuture = pair.Value.IsFuture(),
             });
         }
 
@@ -473,31 +473,31 @@ internal static class TranslateAdmin
 
     internal static Proto.TopicPartitionInfo PartitionInfoToProto(TopicPartitionInfo info)
     {
-        Proto.TopicPartitionInfo proto = new Proto.TopicPartitionInfo { Partition = info.Partition };
-        if (info.Leader is not null)
+        Proto.TopicPartitionInfo proto = new Proto.TopicPartitionInfo { Partition = info.Partition() };
+        if (info.Leader() is { } leader)
         {
-            proto.Leader = Translate.NodeToProto(info.Leader);
+            proto.Leader = Translate.NodeToProto(leader);
         }
 
-        foreach (Node node in info.Replicas)
+        foreach (Node node in info.Replicas())
         {
             proto.Replicas.Add(Translate.NodeToProto(node));
         }
 
-        foreach (Node node in info.InSyncReplicas)
+        foreach (Node node in info.Isr())
         {
             proto.Isr.Add(Translate.NodeToProto(node));
         }
 
         // Absent (not reported) is not the same as reported-empty.
-        if (info.Elr is not null)
+        if (info.Elr() is { } elr)
         {
-            proto.Elr = NodeListToProto(info.Elr);
+            proto.Elr = NodeListToProto(elr);
         }
 
-        if (info.LastKnownElr is not null)
+        if (info.LastKnownElr() is { } lastKnownElr)
         {
-            proto.LastKnownElr = NodeListToProto(info.LastKnownElr);
+            proto.LastKnownElr = NodeListToProto(lastKnownElr);
         }
 
         return proto;
@@ -507,19 +507,19 @@ internal static class TranslateAdmin
     {
         Proto.TopicDescription proto = new Proto.TopicDescription
         {
-            Name = description.Name,
-            TopicId = description.TopicId.ToString(),
-            IsInternal = description.IsInternal,
+            Name = description.Name(),
+            TopicId = description.TopicId().ToString(),
+            IsInternal = description.IsInternal(),
         };
-        foreach (TopicPartitionInfo info in description.Partitions)
+        foreach (TopicPartitionInfo info in description.Partitions())
         {
             proto.Partitions.Add(PartitionInfoToProto(info));
         }
 
         // Absent (not reported) is not the same as reported-empty.
-        if (description.AuthorizedOperations is not null)
+        if (description.AuthorizedOperations() is { } authorizedOperations)
         {
-            proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
+            proto.AuthorizedOperations = AclOperationsToProto(authorizedOperations);
         }
 
         return proto;
@@ -527,9 +527,9 @@ internal static class TranslateAdmin
 
     internal static Proto.AdminTopicListing ListingToProto(TopicListing listing) => new Proto.AdminTopicListing
     {
-        Name = listing.Name,
-        TopicId = listing.TopicId.ToString(),
-        IsInternal = listing.IsInternal,
+        Name = listing.Name(),
+        TopicId = listing.TopicId().ToString(),
+        IsInternal = listing.IsInternal(),
     };
 
     internal static Proto.KafkaError RequestError(string message) => new Proto.KafkaError
@@ -572,9 +572,9 @@ internal static class TranslateAdmin
     internal static Proto.PartitionReassignment ReassignmentToProto(PartitionReassignment reassignment)
     {
         Proto.PartitionReassignment proto = new Proto.PartitionReassignment();
-        proto.Replicas.AddRange(reassignment.Replicas);
-        proto.AddingReplicas.AddRange(reassignment.AddingReplicas);
-        proto.RemovingReplicas.AddRange(reassignment.RemovingReplicas);
+        proto.Replicas.AddRange(reassignment.Replicas());
+        proto.AddingReplicas.AddRange(reassignment.AddingReplicas());
+        proto.RemovingReplicas.AddRange(reassignment.RemovingReplicas());
         return proto;
     }
 
@@ -631,12 +631,12 @@ internal static class TranslateAdmin
     {
         Proto.ListOffsetsResultInfo proto = new Proto.ListOffsetsResultInfo
         {
-            Offset = info.Offset,
-            Timestamp = info.Timestamp,
+            Offset = info.Offset(),
+            Timestamp = info.Timestamp(),
         };
-        if (info.LeaderEpoch.HasValue)
+        if (info.LeaderEpoch() is { } leaderEpoch)
         {
-            proto.LeaderEpoch = info.LeaderEpoch.Value;
+            proto.LeaderEpoch = leaderEpoch;
         }
 
         return proto;
@@ -646,19 +646,19 @@ internal static class TranslateAdmin
     {
         Proto.ProducerState proto = new Proto.ProducerState
         {
-            ProducerId = state.ProducerId,
-            ProducerEpoch = state.ProducerEpoch,
-            LastSequence = state.LastSequence,
-            LastTimestamp = state.LastTimestamp,
+            ProducerId = state.ProducerId(),
+            ProducerEpoch = state.ProducerEpoch(),
+            LastSequence = state.LastSequence(),
+            LastTimestamp = state.LastTimestamp(),
         };
-        if (state.CoordinatorEpoch.HasValue)
+        if (state.CoordinatorEpoch() is { } coordinatorEpoch)
         {
-            proto.CoordinatorEpoch = state.CoordinatorEpoch.Value;
+            proto.CoordinatorEpoch = coordinatorEpoch;
         }
 
-        if (state.CurrentTransactionStartOffset.HasValue)
+        if (state.CurrentTransactionStartOffset() is { } currentTransactionStartOffset)
         {
-            proto.CurrentTransactionStartOffset = state.CurrentTransactionStartOffset.Value;
+            proto.CurrentTransactionStartOffset = currentTransactionStartOffset;
         }
 
         return proto;
@@ -668,7 +668,7 @@ internal static class TranslateAdmin
         DescribeProducersResult.PartitionProducerState value)
     {
         Proto.PartitionProducerState proto = new Proto.PartitionProducerState();
-        foreach (ProducerState state in value.ActiveProducers)
+        foreach (ProducerState state in value.ActiveProducers())
         {
             proto.ActiveProducers.Add(ProducerStateToProto(state));
         }
@@ -680,18 +680,18 @@ internal static class TranslateAdmin
     {
         Proto.TransactionDescription proto = new Proto.TransactionDescription
         {
-            CoordinatorId = description.CoordinatorId,
-            State = TransactionStateName(description.State),
-            ProducerId = description.ProducerId,
-            ProducerEpoch = description.ProducerEpoch,
-            TransactionTimeoutMs = description.TransactionTimeoutMs,
+            CoordinatorId = description.CoordinatorId(),
+            State = TransactionStateName(description.State()),
+            ProducerId = description.ProducerId(),
+            ProducerEpoch = description.ProducerEpoch(),
+            TransactionTimeoutMs = description.TransactionTimeoutMs(),
         };
-        if (description.TransactionStartTimeMs.HasValue)
+        if (description.TransactionStartTimeMs() is { } transactionStartTimeMs)
         {
-            proto.TransactionStartTimeMs = description.TransactionStartTimeMs.Value;
+            proto.TransactionStartTimeMs = transactionStartTimeMs;
         }
 
-        foreach (TopicPartition partition in description.TopicPartitions)
+        foreach (TopicPartition partition in description.TopicPartitions())
         {
             proto.TopicPartitions.Add(Translate.TpToProto(partition));
         }
@@ -702,9 +702,9 @@ internal static class TranslateAdmin
     internal static Proto.TransactionListing TransactionListingToProto(TransactionListing listing) =>
         new Proto.TransactionListing
         {
-            TransactionalId = listing.TransactionalId,
-            ProducerId = listing.ProducerId,
-            State = TransactionStateName(listing.State),
+            TransactionalId = listing.TransactionalId(),
+            ProducerId = listing.ProducerId(),
+            State = TransactionStateName(listing.State()),
         };
 
     internal static List<TransactionState> TransactionStates(IEnumerable<string> names)
@@ -763,18 +763,18 @@ internal static class TranslateAdmin
     {
         Proto.GroupListing proto = new Proto.GroupListing
         {
-            GroupId = listing.GroupId,
-            Protocol = listing.Protocol,
-            IsSimpleConsumerGroup = listing.IsSimpleConsumerGroup,
+            GroupId = listing.GroupId(),
+            Protocol = listing.Protocol(),
+            IsSimpleConsumerGroup = listing.IsSimpleConsumerGroup(),
         };
-        if (listing.Type.HasValue)
+        if (listing.Type() is { } type)
         {
-            proto.GroupType = GroupTypeName(listing.Type.Value);
+            proto.GroupType = GroupTypeName(type);
         }
 
-        if (listing.GroupState.HasValue)
+        if (listing.GroupState() is { } groupState)
         {
-            proto.GroupState = GroupStateName(listing.GroupState.Value);
+            proto.GroupState = GroupStateName(groupState);
         }
 
         return proto;
@@ -783,7 +783,7 @@ internal static class TranslateAdmin
     internal static Proto.MemberAssignment MemberAssignmentToProto(MemberAssignment assignment)
     {
         Proto.MemberAssignment proto = new Proto.MemberAssignment();
-        foreach (TopicPartition partition in assignment.TopicPartitions)
+        foreach (TopicPartition partition in assignment.TopicPartitions())
         {
             proto.TopicPartitions.Add(Translate.TpToProto(partition));
         }
@@ -795,34 +795,34 @@ internal static class TranslateAdmin
     {
         Proto.MemberDescription proto = new Proto.MemberDescription
         {
-            ConsumerId = member.ConsumerId,
-            ClientId = member.ClientId,
-            Host = member.Host,
-            Assignment = MemberAssignmentToProto(member.Assignment),
+            ConsumerId = member.ConsumerId(),
+            ClientId = member.ClientId(),
+            Host = member.Host(),
+            Assignment = MemberAssignmentToProto(member.Assignment()),
         };
-        if (member.GroupInstanceId is not null)
+        if (member.GroupInstanceId() is not null)
         {
-            proto.GroupInstanceId = member.GroupInstanceId;
+            proto.GroupInstanceId = member.GroupInstanceId();
         }
 
-        if (member.RackId is not null)
+        if (member.RackId() is not null)
         {
-            proto.RackId = member.RackId;
+            proto.RackId = member.RackId();
         }
 
-        if (member.TargetAssignment is not null)
+        if (member.TargetAssignment() is { } targetAssignment)
         {
-            proto.TargetAssignment = MemberAssignmentToProto(member.TargetAssignment);
+            proto.TargetAssignment = MemberAssignmentToProto(targetAssignment);
         }
 
-        if (member.MemberEpoch.HasValue)
+        if (member.MemberEpoch() is { } memberEpoch)
         {
-            proto.MemberEpoch = member.MemberEpoch.Value;
+            proto.MemberEpoch = memberEpoch;
         }
 
-        if (member.Upgraded.HasValue)
+        if (member.Upgraded() is { } upgraded)
         {
-            proto.Upgraded = member.Upgraded.Value;
+            proto.Upgraded = upgraded;
         }
 
         return proto;
@@ -833,36 +833,36 @@ internal static class TranslateAdmin
     {
         Proto.ConsumerGroupDescription proto = new Proto.ConsumerGroupDescription
         {
-            GroupId = description.GroupId,
-            IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
-            PartitionAssignor = description.PartitionAssignor,
-            GroupType = GroupTypeName(description.Type),
-            GroupState = GroupStateName(description.GroupState),
+            GroupId = description.GroupId(),
+            IsSimpleConsumerGroup = description.IsSimpleConsumerGroup(),
+            PartitionAssignor = description.PartitionAssignor(),
+            GroupType = GroupTypeName(description.Type()),
+            GroupState = GroupStateName(description.GroupState()),
         };
-        foreach (MemberDescription member in description.Members)
+        foreach (MemberDescription member in description.Members())
         {
             proto.Members.Add(MemberDescriptionToProto(member));
         }
 
-        if (description.Coordinator is not null)
+        if (description.Coordinator() is { } coordinator)
         {
-            proto.Coordinator = Translate.NodeToProto(description.Coordinator);
+            proto.Coordinator = Translate.NodeToProto(coordinator);
         }
 
         // Absent (not reported) is not the same as reported-empty.
-        if (description.AuthorizedOperations is not null)
+        if (description.AuthorizedOperations() is { } authorizedOperations)
         {
-            proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
+            proto.AuthorizedOperations = AclOperationsToProto(authorizedOperations);
         }
 
-        if (description.GroupEpoch.HasValue)
+        if (description.GroupEpoch() is { } groupEpoch)
         {
-            proto.GroupEpoch = description.GroupEpoch.Value;
+            proto.GroupEpoch = groupEpoch;
         }
 
-        if (description.TargetAssignmentEpoch.HasValue)
+        if (description.TargetAssignmentEpoch() is { } targetAssignmentEpoch)
         {
-            proto.TargetAssignmentEpoch = description.TargetAssignmentEpoch.Value;
+            proto.TargetAssignmentEpoch = targetAssignmentEpoch;
         }
 
         return proto;
@@ -875,25 +875,25 @@ internal static class TranslateAdmin
     {
         Proto.ClassicGroupDescription proto = new Proto.ClassicGroupDescription
         {
-            GroupId = description.GroupId,
-            Protocol = description.Protocol!,
-            ProtocolData = description.ProtocolData,
-            IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
-            State = ClassicGroupStateName(description.State),
+            GroupId = description.GroupId(),
+            Protocol = description.Protocol()!,
+            ProtocolData = description.ProtocolData(),
+            IsSimpleConsumerGroup = description.IsSimpleConsumerGroup(),
+            State = ClassicGroupStateName(description.State()),
         };
-        foreach (MemberDescription member in description.Members)
+        foreach (MemberDescription member in description.Members())
         {
             proto.Members.Add(MemberDescriptionToProto(member));
         }
 
-        if (description.Coordinator is not null)
+        if (description.Coordinator() is { } coordinator)
         {
-            proto.Coordinator = Translate.NodeToProto(description.Coordinator);
+            proto.Coordinator = Translate.NodeToProto(coordinator);
         }
 
-        if (description.AuthorizedOperations is not null)
+        if (description.AuthorizedOperations() is { } authorizedOperations)
         {
-            proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
+            proto.AuthorizedOperations = AclOperationsToProto(authorizedOperations);
         }
 
         return proto;
@@ -913,10 +913,8 @@ internal static class TranslateAdmin
                 return null;
             }
 
-            map[proto.GroupId] = new ListConsumerGroupOffsetsSpec
-            {
-                TopicPartitions = OptionalPartitions(proto.TopicPartitions),
-            };
+            map[proto.GroupId] = new ListConsumerGroupOffsetsSpec()
+                .TopicPartitions(OptionalPartitions(proto.TopicPartitions));
         }
 
         invalid = null;
@@ -1022,37 +1020,37 @@ internal static class TranslateAdmin
 
     internal static Proto.AclBinding AclBindingToProto(AclBinding binding) => new Proto.AclBinding
     {
-        ResourceType = (int)binding.Pattern.ResourceType,
-        ResourceName = binding.Pattern.Name,
-        PatternType = (int)binding.Pattern.PatternType,
-        Principal = binding.Entry.Principal,
-        Host = binding.Entry.Host,
-        Operation = (int)binding.Entry.Operation,
-        PermissionType = (int)binding.Entry.PermissionType,
+        ResourceType = (int)binding.Pattern().ResourceType(),
+        ResourceName = binding.Pattern().Name(),
+        PatternType = (int)binding.Pattern().PatternType(),
+        Principal = binding.Entry().Principal(),
+        Host = binding.Entry().Host(),
+        Operation = (int)binding.Entry().Operation(),
+        PermissionType = (int)binding.Entry().PermissionType(),
     };
 
     internal static Proto.AclBindingFilter AclFilterToProto(AclBindingFilter filter)
     {
         Proto.AclBindingFilter proto = new Proto.AclBindingFilter
         {
-            ResourceType = (int)filter.PatternFilter.ResourceType,
-            PatternType = (int)filter.PatternFilter.PatternType,
-            Operation = (int)filter.EntryFilter.Operation,
-            PermissionType = (int)filter.EntryFilter.PermissionType,
+            ResourceType = (int)filter.PatternFilter().ResourceType(),
+            PatternType = (int)filter.PatternFilter().PatternType(),
+            Operation = (int)filter.EntryFilter().Operation(),
+            PermissionType = (int)filter.EntryFilter().PermissionType(),
         };
-        if (filter.PatternFilter.Name is not null)
+        if (filter.PatternFilter().Name() is not null)
         {
-            proto.ResourceName = filter.PatternFilter.Name;
+            proto.ResourceName = filter.PatternFilter().Name();
         }
 
-        if (filter.EntryFilter.Principal is not null)
+        if (filter.EntryFilter().Principal() is not null)
         {
-            proto.Principal = filter.EntryFilter.Principal;
+            proto.Principal = filter.EntryFilter().Principal();
         }
 
-        if (filter.EntryFilter.Host is not null)
+        if (filter.EntryFilter().Host() is not null)
         {
-            proto.Host = filter.EntryFilter.Host;
+            proto.Host = filter.EntryFilter().Host();
         }
 
         return proto;
@@ -1061,7 +1059,7 @@ internal static class TranslateAdmin
     internal static Proto.ClientQuotaEntity QuotaEntityToProto(ClientQuotaEntity entity)
     {
         Proto.ClientQuotaEntity proto = new Proto.ClientQuotaEntity();
-        foreach (KeyValuePair<string, string?> pair in entity.Entries)
+        foreach (KeyValuePair<string, string?> pair in entity.Entries())
         {
             Proto.ClientQuotaEntityEntry entry = new Proto.ClientQuotaEntityEntry { EntityType = pair.Key };
             if (pair.Value is not null)
@@ -1147,16 +1145,16 @@ internal static class TranslateAdmin
     internal static Proto.ScramCredentialInfo ScramInfoToProto(ScramCredentialInfo info) =>
         new Proto.ScramCredentialInfo
         {
-            Mechanism = (int)info.Mechanism,
-            Iterations = info.Iterations,
+            Mechanism = (int)info.Mechanism(),
+            Iterations = info.Iterations(),
         };
 
     internal static Proto.UserScramCredentialsDescription ScramDescriptionToProto(
         UserScramCredentialsDescription description)
     {
         Proto.UserScramCredentialsDescription proto =
-            new Proto.UserScramCredentialsDescription { Name = description.Name };
-        foreach (ScramCredentialInfo info in description.CredentialInfos)
+            new Proto.UserScramCredentialsDescription { Name = description.Name() };
+        foreach (ScramCredentialInfo info in description.CredentialInfos())
         {
             proto.CredentialInfos.Add(ScramInfoToProto(info));
         }
@@ -1176,11 +1174,12 @@ internal static class TranslateAdmin
                 continue;
             }
 
-            alterations.Add(new UserScramCredentialUpsertion(
-                proto.User,
-                new ScramCredentialInfo((ScramMechanism)proto.Mechanism, proto.Iterations),
-                proto.HasPassword ? proto.Password.ToByteArray() : Array.Empty<byte>(),
-                proto.HasSalt ? proto.Salt.ToByteArray() : null));
+            ScramCredentialInfo info = new ScramCredentialInfo((ScramMechanism)proto.Mechanism, proto.Iterations);
+            byte[] password = proto.HasPassword ? proto.Password.ToByteArray() : Array.Empty<byte>();
+            alterations.Add(
+                proto.HasSalt
+                    ? new UserScramCredentialUpsertion(proto.User, info, password, proto.Salt.ToByteArray())
+                    : new UserScramCredentialUpsertion(proto.User, info, password));
         }
 
         return alterations;
@@ -1200,9 +1199,9 @@ internal static class TranslateAdmin
     internal static Proto.KafkaPrincipal PrincipalToProto(KafkaPrincipal principal) =>
         new Proto.KafkaPrincipal
         {
-            PrincipalType = principal.PrincipalType,
-            Name = principal.Name,
-            TokenAuthenticated = principal.TokenAuthenticated,
+            PrincipalType = principal.GetPrincipalType(),
+            Name = principal.GetName(),
+            TokenAuthenticated = principal.TokenAuthenticated(),
         };
 
     internal static IReadOnlyList<KafkaPrincipal>? TokenOwners(Proto.KafkaPrincipalList? owners) =>
@@ -1210,17 +1209,17 @@ internal static class TranslateAdmin
 
     internal static Proto.DelegationToken DelegationTokenToProto(DelegationToken token)
     {
-        TokenInformation info = token.TokenInfo;
+        TokenInformation info = token.TokenInfo();
         Proto.TokenInformation protoInfo = new Proto.TokenInformation
         {
-            TokenId = info.TokenId,
-            Owner = PrincipalToProto(info.Owner),
-            TokenRequester = PrincipalToProto(info.TokenRequester),
-            IssueTimestamp = info.IssueTimestamp,
-            MaxTimestamp = info.MaxTimestamp,
-            ExpiryTimestamp = info.ExpiryTimestamp,
+            TokenId = info.TokenId(),
+            Owner = PrincipalToProto(info.Owner()),
+            TokenRequester = PrincipalToProto(info.TokenRequester()),
+            IssueTimestamp = info.IssueTimestamp(),
+            MaxTimestamp = info.MaxTimestamp(),
+            ExpiryTimestamp = info.ExpiryTimestamp(),
         };
-        foreach (KafkaPrincipal renewer in info.Renewers)
+        foreach (KafkaPrincipal renewer in info.Renewers())
         {
             protoInfo.Renewers.Add(PrincipalToProto(renewer));
         }
@@ -1228,35 +1227,35 @@ internal static class TranslateAdmin
         return new Proto.DelegationToken
         {
             TokenInformation = protoInfo,
-            Hmac = ByteString.CopyFrom(token.Hmac),
-            HmacAsBase64 = token.HmacAsBase64String,
+            Hmac = ByteString.CopyFrom(token.Hmac()),
+            HmacAsBase64 = token.HmacAsBase64String(),
         };
     }
 
     internal static Proto.FeatureMetadata FeatureMetadataToProto(FeatureMetadata metadata)
     {
         Proto.FeatureMetadata proto = new Proto.FeatureMetadata();
-        foreach (KeyValuePair<string, FinalizedVersionRange> pair in metadata.FinalizedFeatures)
+        foreach (KeyValuePair<string, FinalizedVersionRange> pair in metadata.FinalizedFeatures())
         {
             proto.FinalizedFeatures[pair.Key] = new Proto.FinalizedVersionRange
             {
-                MinVersionLevel = pair.Value.MinVersionLevel,
-                MaxVersionLevel = pair.Value.MaxVersionLevel,
+                MinVersionLevel = pair.Value.MinVersionLevel(),
+                MaxVersionLevel = pair.Value.MaxVersionLevel(),
             };
         }
 
-        foreach (KeyValuePair<string, SupportedVersionRange> pair in metadata.SupportedFeatures)
+        foreach (KeyValuePair<string, SupportedVersionRange> pair in metadata.SupportedFeatures())
         {
             proto.SupportedFeatures[pair.Key] = new Proto.SupportedVersionRange
             {
-                MinVersion = pair.Value.MinVersion,
-                MaxVersion = pair.Value.MaxVersion,
+                MinVersion = pair.Value.MinVersion(),
+                MaxVersion = pair.Value.MaxVersion(),
             };
         }
 
-        if (metadata.FinalizedFeaturesEpoch.HasValue)
+        if (metadata.FinalizedFeaturesEpoch() is { } finalizedFeaturesEpoch)
         {
-            proto.FinalizedFeaturesEpoch = metadata.FinalizedFeaturesEpoch.Value;
+            proto.FinalizedFeaturesEpoch = finalizedFeaturesEpoch;
         }
 
         return proto;

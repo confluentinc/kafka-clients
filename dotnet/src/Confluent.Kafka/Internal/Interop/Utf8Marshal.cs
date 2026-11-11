@@ -24,6 +24,12 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class Utf8Marshal
 {
+    /// <summary>
+    /// UTF-8 as Java's <c>String.getBytes(UTF_8)</c> writes it: an unpaired surrogate becomes <c>'?'</c>
+    /// (<c>0x3F</c>), where <see cref="Encoding.UTF8"/> writes <c>U+FFFD</c>. Decoding is unchanged.
+    /// </summary>
+    internal static readonly Encoding QuestionMarkUtf8 = CreateQuestionMarkUtf8();
+
     internal static PinnedUtf8String Pin(string value) => new PinnedUtf8String(value);
 
     internal static unsafe string? PtrToString(IntPtr ptr)
@@ -75,6 +81,13 @@ internal static class Utf8Marshal
 #endif
     }
 
+    private static Encoding CreateQuestionMarkUtf8()
+    {
+        Encoding encoding = (Encoding)new UTF8Encoding(false, false).Clone();
+        encoding.EncoderFallback = new EncoderReplacementFallback("?");
+        return encoding;
+    }
+
     /// <summary>A NUL-terminated UTF-8 copy of a string, pinned until it is disposed.</summary>
     /// <remarks>A class, not a struct, so that no copy of it can free the pin a second time.</remarks>
     internal sealed class PinnedUtf8String : IDisposable
@@ -83,7 +96,7 @@ internal static class Utf8Marshal
 
         internal PinnedUtf8String(string value)
         {
-            byte[] encoded = Encoding.UTF8.GetBytes(value);
+            byte[] encoded = QuestionMarkUtf8.GetBytes(value);
 
             byte[] buffer = new byte[encoded.Length + 1];
             Array.Copy(encoded, buffer, encoded.Length);

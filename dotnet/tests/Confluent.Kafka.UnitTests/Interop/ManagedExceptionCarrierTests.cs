@@ -148,19 +148,19 @@ public sealed class ManagedExceptionCarrierTests
     }
 
     [Fact]
-    public void FromHandle_DestroysTheErrorItReads()
+    public void AnOwnedRead_DestroysTheErrorItReads()
     {
         WeakReference carried = ReadAndDiscard();
 
         Collect();
-        Assert.False(carried.IsAlive, "FromHandle must destroy the owned error, releasing its GCHandle");
+        Assert.False(carried.IsAlive, "An owned read must destroy the error, releasing its GCHandle");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference ReadAndDiscard()
     {
         (WeakReference carried, IntPtr error) = CarryAnUnreferencedException();
-        _ = KafkaException.FromHandle(error);
+        _ = KafkaException.FromFfiError(error, owned: true);
         return carried;
     }
 

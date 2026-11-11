@@ -61,7 +61,8 @@ public sealed class DescribeClassicGroupsResult
     /// <summary>
     /// The future of each group's description, keyed by group id.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>> DescribedGroups => _futures;
+    /// <returns>The future of each group's description, keyed by group id.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>> DescribedGroups() => _futures;
 
     /// <summary>
     /// A future that yields every group's description once all of them succeeded; it fails with the
@@ -82,7 +83,7 @@ public sealed class DescribeClassicGroupsResult
             Dictionary<string, ClassicGroupDescription> descriptions = new Dictionary<string, ClassicGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<ClassicGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;

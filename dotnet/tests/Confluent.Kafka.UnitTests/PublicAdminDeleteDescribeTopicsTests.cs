@@ -21,9 +21,12 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -45,21 +48,21 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }).All().Get(), s_deadline);
 
         AsyncDescribeTopicsResult byName = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
-        TopicDescription described = await TestTimeout.Run(() => byName.TopicNameValues![Topic].Get(), s_deadline);
+        TopicDescription described = await TestTimeout.Run(() => byName.TopicNameValues()![Topic].Get(), s_deadline);
 
-        Uuid topicId = described.TopicId;
+        Uuid topicId = described.TopicId();
         Assert.NotEqual(Uuid.ZERO_UUID, topicId);
 
         AsyncDescribeTopicsResult byId = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId }));
-        Assert.True(byId.TopicIdValues!.ContainsKey(topicId));
+        Assert.True(byId.TopicIdValues()!.ContainsKey(topicId));
 
-        TopicDescription again = await TestTimeout.Run(() => byId.TopicIdValues![topicId].Get(), s_deadline);
-        Assert.Equal(Topic, again.Name);
-        Assert.Equal(topicId, again.TopicId);
+        TopicDescription again = await TestTimeout.Run(() => byId.TopicIdValues()![topicId].Get(), s_deadline);
+        Assert.Equal(Topic, again.Name());
+        Assert.Equal(topicId, again.TopicId());
 
         AsyncDeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId }));
-        Assert.True(deleted.TopicIdValues!.ContainsKey(topicId));
-        await TestTimeout.Run(() => deleted.TopicIdValues![topicId].Get(), s_deadline);
+        Assert.True(deleted.TopicIdValues()!.ContainsKey(topicId));
+        await TestTimeout.Run(() => deleted.TopicIdValues()![topicId].Get(), s_deadline);
     }
 
     [Fact]
@@ -76,31 +79,31 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         AsyncDescribeTopicsResult describedByName =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Alpha }));
-        Assert.NotNull(describedByName.TopicNameValues);
-        Assert.Null(describedByName.TopicIdValues);
+        Assert.NotNull(describedByName.TopicNameValues());
+        Assert.Null(describedByName.TopicIdValues());
         Assert.NotNull(describedByName.AllTopicNames());
         Assert.Null(describedByName.AllTopicIds());
 
         Uuid alphaId = (await TestTimeout.Run(
-            () => describedByName.TopicNameValues![Alpha].Get(), s_deadline)).TopicId;
+            () => describedByName.TopicNameValues()![Alpha].Get(), s_deadline)).TopicId();
 
         AsyncDescribeTopicsResult describedById = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { alphaId }));
-        Assert.NotNull(describedById.TopicIdValues);
-        Assert.Null(describedById.TopicNameValues);
+        Assert.NotNull(describedById.TopicIdValues());
+        Assert.Null(describedById.TopicNameValues());
         Assert.NotNull(describedById.AllTopicIds());
         Assert.Null(describedById.AllTopicNames());
 
         AsyncDeleteTopicsResult deletedByName = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Alpha }));
-        Assert.NotNull(deletedByName.TopicNameValues);
-        Assert.Null(deletedByName.TopicIdValues);
+        Assert.NotNull(deletedByName.TopicNameValues());
+        Assert.Null(deletedByName.TopicIdValues());
         await TestTimeout.Run(() => deletedByName.All().Get(), s_deadline);
 
         AsyncDescribeTopicsResult betaByName = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Beta }));
-        Uuid betaId = (await TestTimeout.Run(() => betaByName.TopicNameValues![Beta].Get(), s_deadline)).TopicId;
+        Uuid betaId = (await TestTimeout.Run(() => betaByName.TopicNameValues()![Beta].Get(), s_deadline)).TopicId();
 
         AsyncDeleteTopicsResult deletedById = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { betaId }));
-        Assert.NotNull(deletedById.TopicIdValues);
-        Assert.Null(deletedById.TopicNameValues);
+        Assert.NotNull(deletedById.TopicIdValues());
+        Assert.Null(deletedById.TopicNameValues());
         await TestTimeout.Run(() => deletedById.All().Get(), s_deadline);
     }
 
@@ -122,24 +125,24 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         AsyncDeleteTopicsResult deleted =
             admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Present, Absent }));
 
-        await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
+        await TestTimeout.Run(() => deleted.TopicNameValues()![Present].Get(), s_deadline);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            () => TestTimeout.Run(() => deleted.TopicNameValues()![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", failure.Message);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
 
         AsyncDescribeTopicsResult described =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Absent, StillPresent }));
         Assert.Equal(StillPresent, (await TestTimeout.Run(
-            () => described.TopicNameValues![StillPresent].Get(), s_deadline)).Name);
+            () => described.TopicNameValues()![StillPresent].Get(), s_deadline)).Name());
 
-        KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => described.TopicNameValues![Absent].Get(), s_deadline));
+        UnknownTopicOrPartitionException describeFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            () => TestTimeout.Run(() => described.TopicNameValues()![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline));
     }
 
@@ -153,19 +156,19 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 3) }).All().Get(), s_deadline);
 
         AsyncDescribeTopicsResult result = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
-        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic].Get(), s_deadline);
+        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues()![Topic].Get(), s_deadline);
 
-        Assert.Equal(Topic, description.Name);
-        Assert.False(description.IsInternal);
-        Assert.Equal(2, description.Partitions.Count);
+        Assert.Equal(Topic, description.Name());
+        Assert.False(description.IsInternal());
+        Assert.Equal(2, description.Partitions().Count);
 
-        TopicPartitionInfo partition = description.Partitions[0];
-        Assert.Equal(0, partition.Partition);
-        Assert.NotNull(partition.Leader);
-        Assert.Equal(3, partition.Replicas.Count);
+        TopicPartitionInfo partition = description.Partitions()[0];
+        Assert.Equal(0, partition.Partition());
+        Assert.NotNull(partition.Leader());
+        Assert.Equal(3, partition.Replicas().Count);
 
-        Assert.NotEmpty(partition.Leader!.Host);
-        Assert.True(partition.Leader.Port > 0);
+        Assert.NotEmpty(partition.Leader()!.Host());
+        Assert.True(partition.Leader()!.Port() > 0);
 
         Assert.Contains("partition=0", partition.ToString(), StringComparison.Ordinal);
     }
@@ -181,19 +184,19 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         AsyncDescribeTopicsResult result = admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
-            new DescribeTopicsOptions { IncludeAuthorizedOperations = true });
+            new DescribeTopicsOptions().IncludeAuthorizedOperations(true));
 
-        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic].Get(), s_deadline);
+        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues()![Topic].Get(), s_deadline);
 
-        Assert.NotNull(description.AuthorizedOperations);
-        Assert.Empty(description.AuthorizedOperations!);
+        Assert.NotNull(description.AuthorizedOperations());
+        Assert.Empty(description.AuthorizedOperations()!);
 
-        TopicPartitionInfo partition = description.Partitions[0];
-        Assert.NotNull(partition.Elr);
-        Assert.Empty(partition.Elr!);
-        Assert.NotNull(partition.LastKnownElr);
-        Assert.Empty(partition.LastKnownElr!);
-        Assert.NotNull(partition.InSyncReplicas);
+        TopicPartitionInfo partition = description.Partitions()[0];
+        Assert.NotNull(partition.Elr());
+        Assert.Empty(partition.Elr()!);
+        Assert.NotNull(partition.LastKnownElr());
+        Assert.Empty(partition.LastKnownElr()!);
+        Assert.NotNull(partition.Isr());
     }
 
     [Fact]
@@ -207,13 +210,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         AsyncDescribeTopicsResult byName =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic, Topic, Topic }));
-        Assert.Single(byName.TopicNameValues!);
+        Assert.Single(byName.TopicNameValues()!);
 
-        Uuid topicId = (await TestTimeout.Run(() => byName.TopicNameValues![Topic].Get(), s_deadline)).TopicId;
+        Uuid topicId = (await TestTimeout.Run(() => byName.TopicNameValues()![Topic].Get(), s_deadline)).TopicId();
 
         AsyncDescribeTopicsResult byId =
             admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId, topicId }));
-        Assert.Single(byId.TopicIdValues!);
+        Assert.Single(byId.TopicIdValues()!);
     }
 
     [Fact]
@@ -223,13 +226,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // The cast picks the TopicCollection overload: a lone literal null matches the name-collection one too (CS0121).
-        ArgumentException nullDelete = Assert.Throws<ArgumentException>(() => admin.DeleteTopics((TopicCollection)null!));
+        IllegalArgumentException nullDelete = Assert.Throws<IllegalArgumentException>(() => admin.DeleteTopics((TopicCollection)null!));
         Assert.Equal(
             "The TopicCollection: null provided did not match any supported classes for deleteTopics.",
             nullDelete.Message);
         Assert.Null(nullDelete.ParamName);
-        ArgumentException nullDescribe =
-            Assert.Throws<ArgumentException>(() => admin.DescribeTopics((TopicCollection)null!));
+        IllegalArgumentException nullDescribe =
+            Assert.Throws<IllegalArgumentException>(() => admin.DescribeTopics((TopicCollection)null!));
         Assert.Equal(
             "The TopicCollection: null provided did not match any supported classes for describeTopics.",
             nullDescribe.Message);
@@ -244,20 +247,20 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Null(Record.Exception(
             () => admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DeleteTopicsOptions { TimeoutMs = -1 })));
+                new DeleteTopicsOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { TimeoutMs = -5 })));
+                new DescribeTopicsOptions().TimeoutMs(-5))));
 
         Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 })));
+                new DescribeTopicsOptions().PartitionSizeLimitPerResponse(-1))));
         Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = 0 })));
+                new DescribeTopicsOptions().PartitionSizeLimitPerResponse(0))));
     }
 
     [Fact]
@@ -275,38 +278,36 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((0, (sbyte)1), ReadBack(new DeleteTopicsOptions { TimeoutMs = -5 }));
-        Assert.Equal((-1, (sbyte)0), ReadBack(new DeleteTopicsOptions { RetryOnQuotaViolation = false }));
+        Assert.Equal((0, (sbyte)1), ReadBack(new DeleteTopicsOptions().TimeoutMs(-5)));
+        Assert.Equal((-1, (sbyte)0), ReadBack(new DeleteTopicsOptions().RetryOnQuotaViolation(false)));
 
-        DeleteTopicsOptions delete = new DeleteTopicsOptions { TimeoutMs = 10, RetryOnQuotaViolation = false };
-        delete.TimeoutMs = 20;
-        delete.RetryOnQuotaViolation = true;
+        DeleteTopicsOptions delete = new DeleteTopicsOptions().TimeoutMs(10).RetryOnQuotaViolation(false);
+        delete.TimeoutMs(20);
+        delete.RetryOnQuotaViolation(true);
         Assert.Equal((20, (sbyte)1), ReadBack(delete));
 
-        Assert.Equal((-1, (sbyte)1, 2000), ReadBack(new DescribeTopicsOptions { IncludeAuthorizedOperations = true }));
-        Assert.Equal((-1, (sbyte)0, -7), ReadBack(new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -7 }));
+        Assert.Equal((-1, (sbyte)1, 2000), ReadBack(new DescribeTopicsOptions().IncludeAuthorizedOperations(true)));
+        Assert.Equal((-1, (sbyte)0, -7), ReadBack(new DescribeTopicsOptions().PartitionSizeLimitPerResponse(-7)));
 
-        DescribeTopicsOptions describe = new DescribeTopicsOptions
-        {
-            TimeoutMs = 10,
-            IncludeAuthorizedOperations = true,
-            PartitionSizeLimitPerResponse = 5,
-        };
-        describe.TimeoutMs = null;
-        describe.IncludeAuthorizedOperations = false;
-        describe.PartitionSizeLimitPerResponse = 6;
+        DescribeTopicsOptions describe = new DescribeTopicsOptions()
+            .TimeoutMs(10)
+            .IncludeAuthorizedOperations(true)
+            .PartitionSizeLimitPerResponse(5);
+        describe.TimeoutMs(null);
+        describe.IncludeAuthorizedOperations(false);
+        describe.PartitionSizeLimitPerResponse(6);
         Assert.Equal((-1, (sbyte)0, 6), ReadBack(describe));
     }
 
     [Fact]
-    public void AfterClose_BothRpcsThrowObjectDisposed()
+    public void AfterClose_BothRpcsThrowIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "alpha" })));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "alpha" })));
     }
 
@@ -321,10 +322,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
         Assert.Equal(Topic, (await TestTimeout.Run(
-            () => described.TopicNameValues![Topic].Get(), s_deadline)).Name);
+            () => described.TopicNameValues()![Topic].Get(), s_deadline)).Name());
 
         AsyncDeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Topic }));
-        Assert.True(deleted.TopicNameValues!.ContainsKey(Topic));
+        Assert.True(deleted.TopicNameValues()!.ContainsKey(Topic));
         await TestTimeout.Run(() => deleted.All().Get(), s_deadline);
     }
 
@@ -374,7 +375,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         foreach (MethodInfo method in new[] { delete, describe })
         {
             ParameterInfo[] parameters = method.GetParameters();
-            Assert.Equal("topicNames", parameters[0].Name);
+            Assert.Equal(method == delete ? "topics" : "topicNames", parameters[0].Name);
             Assert.False(parameters[0].IsOptional);
             Assert.True(parameters[1].IsOptional);
             Assert.Null(parameters[1].DefaultValue);
@@ -398,31 +399,31 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         AsyncDescribeTopicsResult byName = admin.DescribeTopics(new[] { Present, Absent });
         AsyncDescribeTopicsResult byCollection =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Present, Absent }));
-        Assert.Null(byName.TopicIdValues);
+        Assert.Null(byName.TopicIdValues());
         Assert.Equal(
-            byCollection.TopicNameValues!.Keys.OrderBy(name => name, StringComparer.Ordinal),
-            byName.TopicNameValues!.Keys.OrderBy(name => name, StringComparer.Ordinal));
+            byCollection.TopicNameValues()!.Keys.OrderBy(name => name, StringComparer.Ordinal),
+            byName.TopicNameValues()!.Keys.OrderBy(name => name, StringComparer.Ordinal));
 
-        TopicDescription named = await TestTimeout.Run(() => byName.TopicNameValues![Present].Get(), s_deadline);
-        TopicDescription collected = await TestTimeout.Run(() => byCollection.TopicNameValues![Present].Get(), s_deadline);
-        Assert.Equal(Present, named.Name);
-        Assert.Equal(collected.Partitions.Count, named.Partitions.Count);
-        Assert.Equal(collected.TopicId, named.TopicId);
+        TopicDescription named = await TestTimeout.Run(() => byName.TopicNameValues()![Present].Get(), s_deadline);
+        TopicDescription collected = await TestTimeout.Run(() => byCollection.TopicNameValues()![Present].Get(), s_deadline);
+        Assert.Equal(Present, named.Name());
+        Assert.Equal(collected.Partitions().Count, named.Partitions().Count);
+        Assert.Equal(collected.TopicId(), named.TopicId());
 
-        KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => byName.TopicNameValues![Absent].Get(), s_deadline));
+        UnknownTopicOrPartitionException describeFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            () => TestTimeout.Run(() => byName.TopicNameValues()![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
         AsyncDeleteTopicsResult deleted = admin.DeleteTopics(new[] { Present, Absent }, new DeleteTopicsOptions());
-        Assert.Null(deleted.TopicIdValues);
-        await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
-        KafkaException deleteFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
+        Assert.Null(deleted.TopicIdValues());
+        await TestTimeout.Run(() => deleted.TopicNameValues()![Present].Get(), s_deadline);
+        UnknownTopicOrPartitionException deleteFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            () => TestTimeout.Run(() => deleted.TopicNameValues()![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", deleteFailure.Message);
 
         AsyncDescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
-        KafkaException gone = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present].Get(), s_deadline));
+        UnknownTopicOrPartitionException gone = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            () => TestTimeout.Run(() => afterDelete.TopicNameValues()![Present].Get(), s_deadline));
         Assert.Equal($"Topic {Present} not found.", gone.Message);
     }
 
@@ -434,12 +435,12 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         try
         {
             string[] names = { "alpha" };
-            DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
+            DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions().TimeoutMs(-1);
             AssertSameTimeout(
                 await Failure(() => real.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout).All().Get()),
                 await Failure(() => real.DeleteTopics(names, deleteTimeout).All().Get()));
 
-            DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions { TimeoutMs = -1 };
+            DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions().TimeoutMs(-1);
             AssertSameTimeout(
                 await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!.Value.Get()),
                 await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!.Value.Get()));
@@ -450,10 +451,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
     }
 
-    private static Task<KafkaException> Failure(Func<Task> call) =>
-        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(call), s_deadline);
+    private static Task<KafkaTimeoutException> Failure(Func<Task> call) =>
+        TestTimeout.Run(() => FutureAssert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
 
-    private static void AssertSameTimeout(KafkaException expected, KafkaException actual)
+    private static void AssertSameTimeout(KafkaTimeoutException expected, KafkaTimeoutException actual)
     {
         Assert.Equal(7, expected.Code);
         Assert.Equal(expected.Code, actual.Code);
@@ -472,7 +473,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             {
                 ArgumentNullException delete = Assert.Throws<ArgumentNullException>(
                     () => admin.DeleteTopics((IReadOnlyCollection<string>)null!));
-                Assert.Equal("topicNames", delete.ParamName);
+                Assert.Equal("topics", delete.ParamName);
                 Assert.StartsWith("Value cannot be null.", delete.Message, StringComparison.Ordinal);
 
                 ArgumentNullException describe = Assert.Throws<ArgumentNullException>(

@@ -45,13 +45,13 @@ internal static class UnreachableProducers
         Sync((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
     internal static KafkaProducer<byte[], byte[]> Sync(object maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     internal static AsyncKafkaProducer<byte[], byte[]> Async(int maxBlockMs) =>
         Async((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
     internal static AsyncKafkaProducer<byte[], byte[]> Async(object maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     internal static string Topic(string prefix) => prefix + "-" + Guid.NewGuid().ToString("N");
 
@@ -117,11 +117,15 @@ internal static class UnreachableProducers
         }
     }
 
-    /// <summary>Captures the trace lines that contain a given text, with the thread that wrote each.</summary>
+    /// <summary>
+    /// Captures the trace lines that contain a given text, with the thread that wrote each, and the trace events whose
+    /// message contains it, with their level.
+    /// </summary>
     internal sealed class TraceCapture : TraceListener
     {
         private readonly string _text;
         private readonly List<(int Thread, string Line)> _lines = new List<(int Thread, string Line)>();
+        private readonly List<(TraceEventType Type, string Message)> _events = new List<(TraceEventType Type, string Message)>();
 
         internal TraceCapture(string text)
         {
@@ -133,11 +137,44 @@ internal static class UnreachableProducers
 
         public override void WriteLine(string? message) => Capture(message);
 
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string source,
+            TraceEventType eventType,
+            int id,
+            string? message)
+        {
+            CaptureEvent(eventType, message);
+            base.TraceEvent(eventCache, source, eventType, id, message);
+        }
+
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string source,
+            TraceEventType eventType,
+            int id,
+            string? format,
+            params object?[]? args)
+        {
+            CaptureEvent(
+                eventType,
+                args is null || format is null ? format : string.Format(CultureInfo.InvariantCulture, format, args));
+            base.TraceEvent(eventCache, source, eventType, id, format, args);
+        }
+
         internal IReadOnlyList<string> Lines()
         {
             lock (_lines)
             {
                 return _lines.ConvertAll(line => line.Line);
+            }
+        }
+
+        internal IReadOnlyList<(TraceEventType Type, string Message)> Events()
+        {
+            lock (_events)
+            {
+                return _events.ToArray();
             }
         }
 
@@ -165,10 +202,21 @@ internal static class UnreachableProducers
                 }
             }
         }
+
+        private void CaptureEvent(TraceEventType eventType, string? message)
+        {
+            if (message is not null && message.Contains(_text))
+            {
+                lock (_events)
+                {
+                    _events.Add((eventType, message));
+                }
+            }
+        }
     }
 
     /// <summary>A delivery callback that runs a test's body on the producer's thread and records its own end.</summary>
-    internal sealed class ProbeCallback : IDeliveryCallback
+    internal sealed class ProbeCallback : ICallback
     {
         private readonly Action<RecordMetadata, Exception?> _body;
         private readonly ManualResetEventSlim _done = new ManualResetEventSlim();
@@ -210,7 +258,7 @@ internal static class UnreachableProducers
     /// A delivery callback that holds the producer's completion thread until released, so the completions queued
     /// behind it, the delivery of a later record included, wait.
     /// </summary>
-    internal sealed class HoldingCallback : IDeliveryCallback
+    internal sealed class HoldingCallback : ICallback
     {
         private readonly ManualResetEventSlim _entered = new ManualResetEventSlim();
         private readonly ManualResetEventSlim _release = new ManualResetEventSlim();

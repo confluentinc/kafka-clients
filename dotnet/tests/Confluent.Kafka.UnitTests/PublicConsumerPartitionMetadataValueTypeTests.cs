@@ -24,7 +24,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// <see cref="Node"/> and <see cref="PartitionInfo"/>: their fields, the null rack and leader the mock never
-/// produces, <see cref="Node.IsFenced"/>, and Java's <c>ToString</c> forms.
+/// produces, <see cref="Node.IsFenced()"/>, and Java's <c>ToString</c> forms.
 /// </summary>
 public sealed class PublicConsumerPartitionMetadataValueTypeTests
 {
@@ -33,10 +33,10 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     {
         Node node = new Node(1, "host-a", 9092, "rack-1");
 
-        Assert.Equal(1, node.Id);
-        Assert.Equal("host-a", node.Host);
-        Assert.Equal(9092, node.Port);
-        Assert.Equal("rack-1", node.Rack);
+        Assert.Equal(1, node.Id());
+        Assert.Equal("host-a", node.Host());
+        Assert.Equal(9092, node.Port());
+        Assert.Equal("rack-1", node.Rack());
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     {
         Node node = new Node(2, "host-b", 9093, null);
 
-        Assert.Null(node.Rack);
+        Assert.Null(node.Rack());
     }
 
     [Fact]
@@ -72,14 +72,14 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     }
 
     [Fact]
-    public void Node_IsFenced_IsAGetOnlyPublicBool_AndJavasThreeConstructorsArePublic()
+    public void Node_IsFenced_IsAPublicBoolGetter_AndJavasThreeConstructorsArePublic()
     {
-        PropertyInfo? property = typeof(Node).GetProperty(nameof(Node.IsFenced), BindingFlags.Public | BindingFlags.Instance);
+        MethodInfo? getter = typeof(Node).GetMethod(
+            nameof(Node.IsFenced), BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
 
-        Assert.NotNull(property);
-        Assert.Equal(typeof(bool), property!.PropertyType);
-        Assert.NotNull(property.GetGetMethod(nonPublic: false));
-        Assert.Null(property.GetSetMethod(nonPublic: true));
+        Assert.NotNull(getter);
+        Assert.Equal(typeof(bool), getter!.ReturnType);
+        Assert.Empty(typeof(Node).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
 
         Assert.Equal(
             new[] { "Int32,String,Int32", "Int32,String,Int32,String", "Int32,String,Int32,String,Boolean" },
@@ -99,9 +99,65 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     [Fact]
     public void Node_FourArgumentConstructor_IsUnfenced()
     {
-        Assert.False(new Node(5, "kafka-1", 9092, "r").IsFenced);
-        Assert.False(new Node(5, "kafka-1", 9092, "r", isFenced: false).IsFenced);
-        Assert.True(new Node(5, "kafka-1", 9092, "r", isFenced: true).IsFenced);
+        Assert.False(new Node(5, "kafka-1", 9092, "r").IsFenced());
+        Assert.False(new Node(5, "kafka-1", 9092, "r", isFenced: false).IsFenced());
+        Assert.True(new Node(5, "kafka-1", 9092, "r", isFenced: true).IsFenced());
+    }
+
+    [Fact]
+    public void Node_NoNode_IsTheEmptyPlaceholder()
+    {
+        Node none = Node.NoNode();
+
+        Assert.Same(none, Node.NoNode());
+        Assert.True(none.IsEmpty());
+        Assert.Equal(-1, none.Id());
+        Assert.Equal("-1", none.IdString());
+        Assert.Equal(":-1 (id: -1 rack: null isFenced: false)", none.ToString());
+    }
+
+    [Fact]
+    public void Node_IsEmpty_WhenTheHostIsEmptyOrThePortIsNegative()
+    {
+        Assert.True(new Node(1, string.Empty, 9092).IsEmpty());
+        Assert.True(new Node(1, "h", -1).IsEmpty());
+        Assert.False(new Node(1, "h", 0).IsEmpty());
+    }
+
+    [Fact]
+    public void Node_IdString_IsTheIdInDecimal()
+    {
+        Assert.Equal("5", new Node(5, "h", 9092).IdString());
+        Assert.Equal("-7", new Node(-7, "h", 9092).IdString());
+    }
+
+    [Fact]
+    public void Node_HasRack_WhenTheRackIsNotNull()
+    {
+        Assert.True(new Node(5, "h", 9092, "r1").HasRack());
+        Assert.True(new Node(5, "h", 9092, string.Empty).HasRack());
+        Assert.False(new Node(5, "h", 9092, null).HasRack());
+        Assert.False(new Node(5, "h", 9092, null, isFenced: true).HasRack());
+    }
+
+    [Fact]
+    public void Node_Equality_ComparesTheIdHostPortRackAndFencedFlag()
+    {
+        Node node = new Node(5, "h", 9092, "r1", isFenced: false);
+
+        Assert.Equal(node, new Node(5, "h", 9092, "r1"));
+        Assert.Equal(node.GetHashCode(), new Node(5, "h", 9092, "r1").GetHashCode());
+        Assert.Equal(new Node(5, "h", 9092), new Node(5, "h", 9092, null));
+        Assert.Equal(new Node(5, "h", 9092).GetHashCode(), new Node(5, "h", 9092, null).GetHashCode());
+
+        Assert.NotEqual(node, new Node(6, "h", 9092, "r1"));
+        Assert.NotEqual(node, new Node(5, "g", 9092, "r1"));
+        Assert.NotEqual(node, new Node(5, "h", 9093, "r1"));
+        Assert.NotEqual(node, new Node(5, "h", 9092, "r2"));
+        Assert.NotEqual(node, new Node(5, "h", 9092, null));
+        Assert.NotEqual(node, new Node(5, "h", 9092, "r1", isFenced: true));
+        Assert.False(node.Equals(null));
+        Assert.False(node.Equals("h:9092"));
     }
 
     [Fact]
@@ -114,12 +170,62 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
 
         PartitionInfo info = new PartitionInfo("t", 3, leader, replicas, isr, offline);
 
-        Assert.Equal("t", info.Topic);
-        Assert.Equal(3, info.Partition);
-        Assert.Same(leader, info.Leader);
-        Assert.Same(replicas, info.Replicas);
-        Assert.Same(isr, info.InSyncReplicas);
-        Assert.Same(offline, info.OfflineReplicas);
+        Assert.Equal("t", info.Topic());
+        Assert.Equal(3, info.Partition());
+        Assert.Same(leader, info.Leader());
+        Assert.Same(replicas, info.Replicas());
+        Assert.Same(isr, info.InSyncReplicas());
+        Assert.Same(offline, info.OfflineReplicas());
+    }
+
+    [Fact]
+    public void PartitionInfo_ReplicaGetters_ReturnJavasNodeArrays()
+    {
+        foreach (string name in new[] { "Replicas", "InSyncReplicas", "OfflineReplicas" })
+        {
+            Assert.Equal(typeof(Node[]), typeof(PartitionInfo).GetMethod(name, Type.EmptyTypes)!.ReturnType);
+        }
+    }
+
+    [Fact]
+    public void PartitionInfo_FiveArgumentConstructor_HasNoOfflineReplicas()
+    {
+        Node leader = new Node(1, "h", 9092, null);
+        Node[] replicas = { leader };
+
+        PartitionInfo info = new PartitionInfo("t", 3, leader, replicas, replicas);
+
+        Assert.Same(replicas, info.Replicas());
+        Assert.Same(replicas, info.InSyncReplicas());
+        Assert.Empty(info.OfflineReplicas());
+        Assert.Equal(new PartitionInfo("t", 3, leader, replicas, replicas, Array.Empty<Node>()), info);
+    }
+
+    [Fact]
+    public void PartitionInfo_PublicConstructors_KeepANullTopicAndArrays_AsJavaDoes()
+    {
+        PartitionInfo info = new PartitionInfo(null!, 0, null, null!, null!, null!);
+
+        Assert.Null(info.Topic());
+        Assert.Null(info.Replicas());
+        Assert.Null(info.InSyncReplicas());
+        Assert.Null(info.OfflineReplicas());
+        Assert.Null(new PartitionInfo("t", 0, null, null!, null!).Replicas());
+
+        // Java's toString prints a null topic as null and a null array as [] (formatNodeIds).
+        Assert.Equal(
+            "Partition(topic = null, partition = 0, leader = none, replicas = [], isr = [], offlineReplicas = [])",
+            info.ToString());
+
+        // Java's equals and hashCode: Objects.equals, Objects.deepEquals and Arrays.hashCode, all null-safe.
+        PartitionInfo same = new PartitionInfo(null!, 0, null, null!, null!, null!);
+        Assert.Equal(same, info);
+        Assert.Equal(same.GetHashCode(), info.GetHashCode());
+
+        Node[] none = Array.Empty<Node>();
+        Assert.NotEqual(new PartitionInfo(null!, 0, null, none, null!, null!), info);
+        Assert.NotEqual(info, new PartitionInfo(null!, 0, null, none, null!, null!));
+        Assert.NotEqual(new PartitionInfo("t", 0, null, null!, null!, null!), info);
     }
 
     [Fact]
@@ -128,7 +234,7 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
         PartitionInfo info = new PartitionInfo(
             "t", 0, leader: null, Array.Empty<Node>(), Array.Empty<Node>(), Array.Empty<Node>());
 
-        Assert.Null(info.Leader);
+        Assert.Null(info.Leader());
     }
 
     [Fact]
@@ -140,8 +246,8 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
             "topic-x",
             2,
             leader: n0,
-            replicas: new List<Node> { n0, n1 },
-            inSyncReplicas: new List<Node> { n0 },
+            replicas: new[] { n0, n1 },
+            inSyncReplicas: new[] { n0 },
             offlineReplicas: Array.Empty<Node>());
 
         Assert.Equal(

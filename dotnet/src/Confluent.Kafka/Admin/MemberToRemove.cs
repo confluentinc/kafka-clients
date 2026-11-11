@@ -21,10 +21,12 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.MemberToRemove</c>.
 /// </summary>
 /// <remarks>
-/// Equality is by <see cref="GroupInstanceId"/> alone, ordinal, as Java's.
+/// Equality is by <see cref="GroupInstanceId()"/> alone, ordinal, as Java's.
 /// </remarks>
 public sealed class MemberToRemove : IEquatable<MemberToRemove>
 {
+    private readonly string _groupInstanceId;
+
     /// <summary>
     /// Creates a member to remove, identified by its <c>group.instance.id</c> — Java's
     /// constructor.
@@ -41,21 +43,22 @@ public sealed class MemberToRemove : IEquatable<MemberToRemove>
             throw new ArgumentNullException(nameof(groupInstanceId));
         }
 
-        GroupInstanceId = groupInstanceId;
+        _groupInstanceId = groupInstanceId;
     }
 
     /// <summary>
     /// The static member's <c>group.instance.id</c> — Java's <c>groupInstanceId()</c>.
     /// </summary>
-    public string GroupInstanceId { get; }
+    /// <returns>The static member's <c>group.instance.id</c>.</returns>
+    public string GroupInstanceId() => _groupInstanceId;
 
     /// <inheritdoc/>
     public bool Equals(MemberToRemove? other) =>
-        other is not null && string.Equals(GroupInstanceId, other.GroupInstanceId, StringComparison.Ordinal);
+        other is not null && string.Equals(GroupInstanceId(), other.GroupInstanceId(), StringComparison.Ordinal);
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => Equals(obj as MemberToRemove);
 
     /// <inheritdoc/>
-    public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(GroupInstanceId);
+    public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(GroupInstanceId());
 }

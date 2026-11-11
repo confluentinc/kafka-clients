@@ -44,8 +44,8 @@ internal static unsafe class DelegationTokenMarshal
 
     internal static IntPtr NewPrincipal(KafkaPrincipal principal)
     {
-        using Utf8Marshal.PinnedUtf8String principalType = Utf8Marshal.Pin(principal.PrincipalType);
-        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(principal.Name);
+        using Utf8Marshal.PinnedUtf8String principalType = Utf8Marshal.Pin(principal.GetPrincipalType());
+        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(principal.GetName());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.KafkaPrincipalNew(principalType.Pointer, name.Pointer, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -107,7 +107,8 @@ internal static unsafe class DelegationTokenMarshal
     {
         if (token == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no delegation token.");
+            // Python's binding reads a missing token as None, so the result holds null.
+            return null!;
         }
 
         IntPtr outErr = IntPtr.Zero;
@@ -134,14 +135,14 @@ internal static unsafe class DelegationTokenMarshal
     {
         if (info == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced a delegation token with no metadata.");
+            throw new InvalidOperationException("The admin result produced a delegation token with no metadata.");
         }
 
         IntPtr outErr = IntPtr.Zero;
         IntPtr tokenIdPointer = NativeMethods.TokenInformationTokenId(info, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        string tokenId = Utf8Marshal.PtrToString(tokenIdPointer)
-            ?? throw new KafkaException("The admin result produced a delegation token with no token id.");
+        // Python's binding reads a missing token id as an empty string.
+        string tokenId = Utf8Marshal.PtrToString(tokenIdPointer) ?? string.Empty;
         IntPtr owner = NativeMethods.TokenInformationOwner(info, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         IntPtr requester = NativeMethods.TokenInformationTokenRequester(info, ref outErr);
@@ -171,18 +172,18 @@ internal static unsafe class DelegationTokenMarshal
     {
         if (principal == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no principal.");
+            throw new InvalidOperationException("The admin result produced no principal.");
         }
 
         IntPtr outErr = IntPtr.Zero;
         IntPtr typePointer = NativeMethods.KafkaPrincipalPrincipalType(principal, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         string principalType = Utf8Marshal.PtrToString(typePointer)
-            ?? throw new KafkaException("The admin result produced a principal with no type.");
+            ?? throw new InvalidOperationException("The admin result produced a principal with no type.");
         IntPtr namePointer = NativeMethods.KafkaPrincipalName(principal, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         string name = Utf8Marshal.PtrToString(namePointer)
-            ?? throw new KafkaException("The admin result produced a principal with no name.");
+            ?? throw new InvalidOperationException("The admin result produced a principal with no name.");
         sbyte tokenAuthenticated = NativeMethods.KafkaPrincipalTokenAuthenticated(principal, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return new KafkaPrincipal(principalType, name, tokenAuthenticated != 0);

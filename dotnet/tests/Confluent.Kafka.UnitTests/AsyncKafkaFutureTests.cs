@@ -39,7 +39,8 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
         var impl = new KafkaFutureImpl<string>();
         var future = new AsyncKafkaFuture<string>(impl);
         Task<string> stage = future.ToCompletionStage();
-        Assert.Same(future.Get(), stage);
+        Assert.Same(impl.GetAsync(), stage);
+        Assert.NotSame(future.Get(), stage);
         MethodInfo[] completers = stage.GetType()
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
             .Where(method => method.Name.StartsWith("Set", StringComparison.Ordinal)
@@ -52,7 +53,7 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.False(stage.IsCompleted);
         Assert.False(derived.IsCompleted);
 
@@ -73,7 +74,7 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
         completer.Start();
         Assert.Equal(7, await Value(inner));
         Assert.True(completer.Join(s_deadline));
-        Assert.True(future.IsDone);
+        Assert.True(future.IsDone());
     }
 
     private protected override FutureView<T> Wrap<T>(KafkaFutureImpl<T> impl) =>
@@ -105,11 +106,11 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
 
         internal override KafkaFutureImpl<T> Impl => (KafkaFutureImpl<T>)s_impl.GetValue(Future)!;
 
-        internal override bool IsDone => Future.IsDone;
+        internal override bool IsDone => Future.IsDone();
 
-        internal override bool IsCancelled => Future.IsCancelled;
+        internal override bool IsCancelled => Future.IsCancelled();
 
-        internal override bool IsCompletedExceptionally => Future.IsCompletedExceptionally;
+        internal override bool IsCompletedExceptionally => Future.IsCompletedExceptionally();
 
         internal override bool Cancel(bool mayInterruptIfRunning) => Future.Cancel(mayInterruptIfRunning);
 
@@ -137,11 +138,11 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
 
         internal ErasedView(AsyncKafkaFuture future) => _future = future;
 
-        internal override bool IsDone => _future.IsDone;
+        internal override bool IsDone => _future.IsDone();
 
-        internal override bool IsCancelled => _future.IsCancelled;
+        internal override bool IsCancelled => _future.IsCancelled();
 
-        internal override bool IsCompletedExceptionally => _future.IsCompletedExceptionally;
+        internal override bool IsCompletedExceptionally => _future.IsCompletedExceptionally();
 
         internal override bool Cancel(bool mayInterruptIfRunning) => _future.Cancel(mayInterruptIfRunning);
 

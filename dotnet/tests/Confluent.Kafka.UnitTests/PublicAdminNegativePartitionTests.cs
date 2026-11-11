@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -60,13 +61,13 @@ public sealed class PublicAdminNegativePartitionTests
                 [zero] = new NewPartitionReassignment(new[] { 0, 1 }),
             });
 
-        Assert.Equal(2, result.Values.Count);
-        Assert.Contains(negative, result.Values.Keys);
+        Assert.Equal(2, result.Values().Count);
+        Assert.Contains(negative, result.Values().Keys);
 
-        await TestTimeout.Run(() => result.Values[zero].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[zero].Get(), s_deadline);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[negative].Get()), s_deadline);
+        UnknownTopicOrPartitionException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values()[negative].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
         Assert.Equal(UnknownTopicOrPartitionMessage, failure.Message);
     }
@@ -80,8 +81,8 @@ public sealed class PublicAdminNegativePartitionTests
         AsyncListPartitionReassignmentsResult result =
             admin.ListPartitionReassignments(new[] { new TopicPartition("neg-lpr", -1) });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Reassignments().Get()), s_deadline);
+        InvalidTopicException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.Reassignments().Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
     }
@@ -99,15 +100,15 @@ public sealed class PublicAdminNegativePartitionTests
                 [negative] = new NewPartitionReassignment(new[] { 0 }),
             });
 
-        Assert.Contains(negative, result.Values.Keys);
+        Assert.Contains(negative, result.Values().Keys);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[negative].Get()), s_deadline);
+        InvalidTopicException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.Values()[negative].Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
 
-        KafkaException allFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        InvalidTopicException allFailure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.All().Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, allFailure.Code);
         Assert.Equal(InvalidPartitionMessage, allFailure.Message);
     }

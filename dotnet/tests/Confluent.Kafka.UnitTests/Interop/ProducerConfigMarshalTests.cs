@@ -95,7 +95,6 @@ public sealed class ProducerConfigMarshalTests
 
         Assert.Equal(UnparseableBatchSize, failure.Message);
         Assert.Equal(ConfigErrorCode, failure.Code);
-        Assert.False(failure.IsRetriable);
     }
 
     [Fact]
@@ -135,7 +134,6 @@ public sealed class ProducerConfigMarshalTests
 
         Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", failure.Message);
         Assert.Equal(ConfigErrorCode, failure.Code);
-        Assert.False(failure.IsRetriable);
     }
 
     [Fact]

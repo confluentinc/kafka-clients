@@ -50,12 +50,12 @@ public sealed class PublicAdminClusterConfigResourcesTests
         AsyncDescribeClusterResult result = admin.DescribeCluster();
 
         IReadOnlyCollection<Node> nodes = await TestTimeout.Run(() => result.Nodes().Get(), s_deadline);
-        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(node => node.Id).OrderBy(id => id));
-        Assert.Equal(new[] { 1000, 1001, 1002 }, nodes.Select(node => node.Port).OrderBy(port => port));
+        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(node => node.Id()).OrderBy(id => id));
+        Assert.Equal(new[] { 1000, 1001, 1002 }, nodes.Select(node => node.Port()).OrderBy(port => port));
 
         Node? controller = await TestTimeout.Run(() => result.Controller().Get(), s_deadline);
         Assert.NotNull(controller);
-        Assert.Equal(0, controller!.Id);
+        Assert.Equal(0, controller!.Id());
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => result.ClusterId().Get(), s_deadline));
     }
@@ -69,16 +69,16 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
-            new DescribeClusterOptions { IncludeFencedBrokers = includeFencedBrokers });
+            new DescribeClusterOptions().IncludeFencedBrokers(includeFencedBrokers));
 
         IReadOnlyCollection<Node> nodes = await TestTimeout.Run(() => result.Nodes().Get(), s_deadline);
         Assert.Equal(3, nodes.Count);
-        Assert.All(nodes, node => Assert.False(node.IsFenced));
+        Assert.All(nodes, node => Assert.False(node.IsFenced()));
         Assert.All(nodes, node => Assert.EndsWith(" isFenced: false)", node.ToString(), StringComparison.Ordinal));
 
         Node? controller = await TestTimeout.Run(() => result.Controller().Get(), s_deadline);
         Assert.NotNull(controller);
-        Assert.False(controller!.IsFenced);
+        Assert.False(controller!.IsFenced());
     }
 
     [Fact]
@@ -88,7 +88,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
-            new DescribeClusterOptions { IncludeAuthorizedOperations = true });
+            new DescribeClusterOptions().IncludeAuthorizedOperations(true));
 
         IReadOnlyCollection<AclOperation>? operations =
             await TestTimeout.Run(() => result.AuthorizedOperations().Get(), s_deadline);
@@ -115,7 +115,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Equal(Sorted(byDefault), Sorted(empty));
 
         // A one-broker mock reports its broker's config and logger resources even with no topics.
-        Assert.True(byDefault.Select(resource => resource.Type).Distinct().Count() > 1);
+        Assert.True(byDefault.Select(resource => resource.Type()).Distinct().Count() > 1);
     }
 
     [Fact]
@@ -135,8 +135,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
         IReadOnlyCollection<ConfigResource> brokers = await TestTimeout.Run(
             () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }).All().Get(), s_deadline);
-        Assert.DoesNotContain(brokers, resource => resource.Type == ConfigResourceType.TOPIC);
-        Assert.Contains(brokers, resource => resource.Type == ConfigResourceType.BROKER);
+        Assert.DoesNotContain(brokers, resource => resource.Type() == ConfigResourceType.TOPIC);
+        Assert.Contains(brokers, resource => resource.Type() == ConfigResourceType.BROKER);
     }
 
     [Fact]
@@ -167,15 +167,15 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             KafkaFuture<IReadOnlyCollection<ConfigResource>> stored =
                 StoredFuture<KafkaFuture<IReadOnlyCollection<ConfigResource>>>(result);
             KafkaFuture<IReadOnlyCollection<ConfigResource>> after = result.All();
             Assert.NotEqual(cancelled, after);
-            Assert.False(stored.IsCancelled);
-            Assert.False(stored.IsDone);
-            Assert.False(before.IsDone);
-            Assert.False(after.IsDone);
+            Assert.False(stored.IsCancelled());
+            Assert.False(stored.IsDone());
+            Assert.False(before.IsDone());
+            Assert.False(after.IsDone());
 
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
 
@@ -203,15 +203,15 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> stored =
                 StoredFuture<AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>>>(result);
             AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> after = result.All();
             Assert.NotEqual(cancelled, after);
-            Assert.False(stored.IsCancelled);
-            Assert.False(stored.IsDone);
-            Assert.False(before.IsDone);
-            Assert.False(after.IsDone);
+            Assert.False(stored.IsCancelled());
+            Assert.False(stored.IsDone());
+            Assert.False(before.IsDone());
+            Assert.False(after.IsDone());
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
 
@@ -238,19 +238,19 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
-            () => admin.DescribeCluster(new DescribeClusterOptions { TimeoutMs = -1 })));
+            () => admin.DescribeCluster(new DescribeClusterOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
-            () => admin.ListConfigResources(null, new ListConfigResourcesOptions { TimeoutMs = -5 })));
+            () => admin.ListConfigResources(null, new ListConfigResourcesOptions().TimeoutMs(-5))));
     }
 
     [Fact]
-    public void AfterDispose_EveryNewRpcThrowsObjectDisposed()
+    public void AfterDispose_EveryNewRpcThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeCluster());
-        Assert.Throws<ObjectDisposedException>(() => admin.ListConfigResources());
+        Assert.Throws<IllegalStateException>(() => admin.DescribeCluster());
+        Assert.Throws<IllegalStateException>(() => admin.ListConfigResources());
     }
 
     [Fact]
@@ -274,7 +274,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     private static IEnumerable<ConfigResource> Sorted(IEnumerable<ConfigResource> resources) =>
-        resources.OrderBy(resource => (int)resource.Type).ThenBy(resource => resource.Name, StringComparer.Ordinal);
+        resources.OrderBy(resource => (int)resource.Type()).ThenBy(resource => resource.Name(), StringComparer.Ordinal);
 
     private static void AssertListConfigResourcesThreadExited(object? thrown) =>
         BlockingCall.AssertThrew(thrown, 7, ListConfigResourcesThreadExited);

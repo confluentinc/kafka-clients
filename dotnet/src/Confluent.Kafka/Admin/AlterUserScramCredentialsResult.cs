@@ -51,7 +51,8 @@ public sealed class AlterUserScramCredentialsResult
     internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>One future per requested user — Java's <c>values()</c>.</summary>
-    public IReadOnlyDictionary<string, KafkaFuture> Values => _values;
+    /// <returns>One future per requested user.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every user's alteration has been applied, and fails with the first failure to complete if

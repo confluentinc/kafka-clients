@@ -39,22 +39,23 @@ public sealed class ConsumerServiceTests
     [InlineData("async", false)]
     [InlineData("sync", true)]
     [InlineData("async", true)]
-    public async Task Subscribe_WithAPattern_IsUnsupportedAndKeepsTheSubscription(string flavour, bool withListener)
+    public async Task Subscribe_WithAPattern_SubscribesWithIt(string flavour, bool withListener)
     {
         using ConsumerServer server = ConsumerServer.Create(flavour);
         ulong consumerId = await server.CreateMockConsumer();
-        Proto.SubscribeRequest topics = new Proto.SubscribeRequest { ConsumerId = consumerId };
-        topics.Topics.Add("a");
-        Assert.Null((await server.Service.Subscribe(topics, server.Context)).Error);
 
         Proto.StatusResponse response = await server.Service.Subscribe(
             new Proto.SubscribeRequest { ConsumerId = consumerId, Pattern = "a.*", WithListener = withListener }, server.Context);
         Proto.SubscriptionResponse subscription = await server.Service.Subscription(
             new Proto.ConsumerIdRequest { ConsumerId = consumerId }, server.Context);
+        Proto.SubscribeRequest topics = new Proto.SubscribeRequest { ConsumerId = consumerId };
+        topics.Topics.Add("a");
+        Proto.StatusResponse refused = await server.Service.Subscribe(topics, server.Context);
 
-        Assert.Equal(-31, response.Error.Code);
-        Assert.Equal("pattern subscribe is not supported by the .NET binding yet", response.Error.Message);
-        Assert.Equal(new[] { "a" }, subscription.Topics.Values);
+        Assert.Null(response.Error);
+        Assert.Empty(subscription.Topics.Values);
+        Assert.Equal(-4, refused.Error.Code);
+        Assert.Equal("Subscription to topics, partitions and pattern are mutually exclusive", refused.Error.Message);
     }
 
     [Theory]
@@ -106,7 +107,7 @@ public sealed class ConsumerServiceTests
         Assert.False(first.GroupMetadata.HasGroupInstanceId);
 
         ConsumerGroupMetadata stored = Assert.IsType<ConsumerGroupMetadata>(server.GroupMetadata.Get(first.GroupMetadataId));
-        Assert.Equal("dummy.group.id", stored.GroupId);
+        Assert.Equal("dummy.group.id", stored.GroupId());
         Assert.NotNull(server.GroupMetadata.Get(second.GroupMetadataId));
     }
 

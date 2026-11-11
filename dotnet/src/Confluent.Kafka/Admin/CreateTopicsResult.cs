@@ -15,7 +15,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -54,42 +56,40 @@ public sealed class CreateTopicsResult
     /// <summary>
     /// One future per requested topic, keyed by topic name — Java's <c>values()</c>.
     /// </summary>
+    /// <returns>One future per requested topic, keyed by topic name.</returns>
     /// <remarks>
     /// A topic's future completes when the topic was created and fails with that topic's error. It
     /// carries no metadata, as in Java: read that through <see cref="Config"/>, <see cref="TopicId"/>,
-    /// <see cref="NumPartitions"/> or <see cref="ReplicationFactor"/>. Each access returns a new
-    /// dictionary, as Java's <c>values()</c> collects a new map on every call.
+    /// <see cref="NumPartitions"/> or <see cref="ReplicationFactor"/>. Each call returns a new
+    /// dictionary, as Java's <c>values()</c> collects a new map.
     /// </remarks>
-    public IReadOnlyDictionary<string, KafkaFuture> Values
+    public IReadOnlyDictionary<string, KafkaFuture> Values()
     {
-        get
+        // The client's result hands out a fresh dependant of each topic's future per call, as Java's
+        // `thenApply(v -> null)`, so cancelling one leaves the topic's future, which All() and the typed
+        // accessors read, alone.
+        if (_native is not null)
         {
-            // The client's result hands out a fresh dependant of each topic's future per access, as Java's
-            // `thenApply(v -> null)`, so cancelling one leaves the topic's future, which All() and the typed
-            // accessors read, alone.
-            if (_native is not null)
+            Dictionary<string, KafkaFuture> futures =
+                new Dictionary<string, KafkaFuture>(_native.Values.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in _native.Values)
             {
-                Dictionary<string, KafkaFuture> futures =
-                    new Dictionary<string, KafkaFuture>(_native.Values.Count, StringComparer.Ordinal);
-                foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in _native.Values)
-                {
-                    futures.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply(static _ => (object?)null)));
-                }
-
-                return futures;
+                futures.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply(static _ => (object?)null)));
             }
 
-            // Rebuilt from the caller's map on every access; `Add` throws on two ordinally equal keys,
-            // as Java's `Collectors.toMap` does.
-            Dictionary<string, KafkaFuture> erased =
-                new Dictionary<string, KafkaFuture>(_values!.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, KafkaFuture<TopicMetadataAndConfig>> entry in _values)
-            {
-                erased.Add(entry.Key, entry.Value.Erase());
-            }
-
-            return erased;
+            return futures;
         }
+
+        // Rebuilt from the caller's map on every access; `Add` throws on two ordinally equal keys,
+        // as Java's `Collectors.toMap` does.
+        Dictionary<string, KafkaFuture> erased =
+            new Dictionary<string, KafkaFuture>(_values!.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFuture<TopicMetadataAndConfig>> entry in _values)
+        {
+            erased.Add(entry.Key, entry.Value.Erase());
+        }
+
+        return erased;
     }
 
     /// <summary>
@@ -105,7 +105,7 @@ public sealed class CreateTopicsResult
     /// <summary>
     /// The topic's configuration once it is created — Java's <c>config(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The topic's configuration.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -115,7 +115,7 @@ public sealed class CreateTopicsResult
     /// <summary>
     /// The topic's id once it is created — Java's <c>topicId(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The topic id the broker assigned.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -126,7 +126,7 @@ public sealed class CreateTopicsResult
     /// The topic's partition count once it is created — Java's
     /// <c>numPartitions(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The number of partitions the topic was created with.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -137,7 +137,7 @@ public sealed class CreateTopicsResult
     /// The topic's replication factor once it is created — Java's
     /// <c>replicationFactor(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The replication factor the topic was created with.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -170,22 +170,13 @@ public sealed class CreateTopicsResult
     /// <c>CreateTopicsResult.TopicMetadataAndConfig</c>.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// Creation can succeed while the metadata is unavailable (an older broker, or a
     /// <c>validateOnly</c> request): the per-topic future then succeeds with an instance whose
-    /// accessors throw, as Java's do. So each accessor is a method; <see cref="HasMetadata"/> tests
-    /// for that state without the throw.
-    /// </para>
-    /// <para>
-    /// Each throw is a fresh <see cref="KafkaException"/> with the stored error's
-    /// <see cref="KafkaException.Code"/>, message and <see cref="KafkaException.IsRetriable"/>, and
-    /// the stored error as its <see cref="System.Exception.InnerException"/>, where Java rethrows the
-    /// stored exception itself: a recorded deviation, so that each call has its own stack trace.
-    /// </para>
+    /// accessors throw the stored exception itself, as Java's do.
     /// </remarks>
     public sealed class TopicMetadataAndConfig
     {
-        private readonly KafkaException? _exception;
+        private readonly ApiException? _exception;
         private readonly Uuid _topicId;
         private readonly int _numPartitions;
 
@@ -215,20 +206,14 @@ public sealed class CreateTopicsResult
         /// </summary>
         /// <param name="exception">The reason the metadata is unavailable.</param>
         /// <exception cref="ArgumentNullException"><paramref name="exception"/> is null.</exception>
-        public TopicMetadataAndConfig(KafkaException exception)
+        public TopicMetadataAndConfig(ApiException exception)
         {
             _exception = exception ?? throw new ArgumentNullException(nameof(exception));
         }
 
-        /// <summary>
-        /// Whether the broker returned metadata, so that the accessors return rather than throw.
-        /// Java has no counterpart.
-        /// </summary>
-        public bool HasMetadata => _exception is null;
-
         /// <summary>The topic id — Java's <c>topicId()</c>.</summary>
         /// <returns>The topic id the broker assigned.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public Uuid TopicId()
         {
             EnsureSuccess();
@@ -237,7 +222,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The partition count — Java's <c>numPartitions()</c>.</summary>
         /// <returns>The number of partitions the topic was created with.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public int NumPartitions()
         {
             EnsureSuccess();
@@ -246,7 +231,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The replication factor — Java's <c>replicationFactor()</c>.</summary>
         /// <returns>The replication factor the topic was created with.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public int ReplicationFactor()
         {
             EnsureSuccess();
@@ -255,7 +240,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The topic's configuration — Java's <c>config()</c>.</summary>
         /// <returns>The configuration the broker reported for the topic.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public Config Config()
         {
             EnsureSuccess();
@@ -266,7 +251,7 @@ public sealed class CreateTopicsResult
         {
             if (_exception is not null)
             {
-                throw new KafkaException(_exception.Code, _exception.Message, _exception.IsRetriable, _exception);
+                ExceptionDispatchInfo.Capture(_exception).Throw();
             }
         }
     }

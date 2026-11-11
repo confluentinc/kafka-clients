@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
@@ -36,14 +37,14 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: behaviour.FailEach is null);
+        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: behaviour.FailEach is null);
     }
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record) => _inner.Send(record);
 
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, ICallback callback)
     {
-        ulong index = ProducerProbe.IndexOf(record.Key);
+        ulong index = ProducerProbe.IndexOf(record.Key());
         _sends++;
         if (_behaviour.DisposeAfterSends is int disposeAfter && _sends == disposeAfter + 1)
         {
@@ -55,7 +56,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
             KafkaFuture<RecordMetadata> future = _inner.Send(record, new CountingCallback(callback, index, _probe));
             if (_behaviour.FailEach is (int code, string message))
             {
-                _inner.ErrorNext(new KafkaException(code, message, isRetriable: false));
+                _inner.ErrorNext(TestValues.OfClass(code, message));
             }
 
             return future;
@@ -72,6 +73,18 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _inner.PartitionsFor(topic);
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
+
+    public void InitTransactions() => _inner.InitTransactions();
+
+    public void BeginTransaction() => _inner.BeginTransaction();
+
+    public void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, ConsumerGroupMetadata groupMetadata) =>
+        _inner.SendOffsetsToTransaction(offsets, groupMetadata);
+
+    public void CommitTransaction() => _inner.CommitTransaction();
+
+    public void AbortTransaction() => _inner.AbortTransaction();
 
     public void Close()
     {
@@ -97,13 +110,13 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     }
 
     /// <summary>Counts each delivery-callback invocation, then forwards it unchanged.</summary>
-    private sealed class CountingCallback : IDeliveryCallback
+    private sealed class CountingCallback : ICallback
     {
-        private readonly IDeliveryCallback _target;
+        private readonly ICallback _target;
         private readonly ulong _index;
         private readonly ProducerProbe _probe;
 
-        internal CountingCallback(IDeliveryCallback target, ulong index, ProducerProbe probe)
+        internal CountingCallback(ICallback target, ulong index, ProducerProbe probe)
         {
             _target = target;
             _index = index;

@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> but never publishes that
-/// pair: <see cref="FencedProducers"/> erases it and <see cref="ProducerId"/> /
+/// pair: <see cref="FencedProducers()"/> erases it and <see cref="ProducerId"/> /
 /// <see cref="EpochId"/> project one field each, so there is no public <c>ProducerIdAndEpoch</c>
 /// type here.
 /// </remarks>
@@ -51,31 +51,28 @@ public sealed class FenceProducersResult
     /// One payload-free future per requested transactional id — Java's
     /// <c>fencedProducers()</c>, whose values are <see cref="KafkaFuture"/>s, as here.
     /// </summary>
-    /// <remarks>Each access builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
-    public IReadOnlyDictionary<string, KafkaFuture> FencedProducers
+    /// <returns>One payload-free future per requested transactional id.</returns>
+    /// <remarks>Each call builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
+    public IReadOnlyDictionary<string, KafkaFuture> FencedProducers()
     {
-        get
+        Dictionary<string, KafkaFuture> fenced = new Dictionary<string, KafkaFuture>(_futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
         {
-            Dictionary<string, KafkaFuture> fenced = new Dictionary<string, KafkaFuture>(_futures.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
-            {
-                fenced.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
-            }
-
-            return fenced;
+            fenced.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
         }
+
+        return fenced;
     }
 
     /// <summary>
     /// The producer id generated while initializing that transaction — Java's
     /// <c>producerId(String)</c>.
     /// </summary>
-    /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
+    /// <param name="transactionalId">An id from <see cref="FencedProducers()"/>.</param>
     /// <returns>A new future over that id's producer id.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> was not included in the request — Java's
-    /// <c>IllegalArgumentException</c>, thrown synchronously as Java's is.
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="transactionalId"/> was not included in the request, or is null, thrown synchronously
+    /// with Java's message, as Java's is.
     /// </exception>
     public KafkaFuture<long> ProducerId(string transactionalId) =>
         new KafkaFuture<long>(Find(_futures, transactionalId).ThenApply(static value => value.ProducerId));
@@ -84,11 +81,10 @@ public sealed class FenceProducersResult
     /// The epoch generated while initializing that transaction — Java's
     /// <c>epochId(String)</c>, a <see langword="short"/> as Java's is.
     /// </summary>
-    /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
+    /// <param name="transactionalId">An id from <see cref="FencedProducers()"/>.</param>
     /// <returns>A new future over that id's epoch.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> was not included in the request — see
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="transactionalId"/> was not included in the request, or is null — see
     /// <see cref="ProducerId"/>.
     /// </exception>
     public KafkaFuture<short> EpochId(string transactionalId) =>
@@ -109,18 +105,10 @@ public sealed class FenceProducersResult
     internal static KafkaFutureImpl<ProducerIdAndEpoch> Find(
         IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, string transactionalId)
     {
-        if (transactionalId is null)
-        {
-            throw new ArgumentNullException(nameof(transactionalId));
-        }
-
-        return futures.TryGetValue(transactionalId, out KafkaFutureImpl<ProducerIdAndEpoch>? future)
+        // Java's map holds no null key, so a null id was not requested either.
+        return transactionalId is not null && futures.TryGetValue(transactionalId, out KafkaFutureImpl<ProducerIdAndEpoch>? future)
             ? future
-            : throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "TransactionalId `{0}` was not included in the request",
-                    transactionalId),
-                nameof(transactionalId));
+            : throw new IllegalArgumentException(
+                "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");
     }
 }

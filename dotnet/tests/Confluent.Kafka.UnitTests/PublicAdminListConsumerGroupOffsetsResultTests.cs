@@ -148,7 +148,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
             await result.PartitionsToOffsetAndMetadata().Get();
 
-        Assert.Equal(7L, offsets[s_committed]!.Offset);
+        Assert.Equal(7L, offsets[s_committed]!.Offset());
         Assert.Same(result.PartitionsToOffsetAndMetadata("g").Get(), result.PartitionsToOffsetAndMetadata().Get());
     }
 
@@ -165,8 +165,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
                 .ToArray());
 
         // Block-bodied, so this binds xUnit's Action overload and asserts a synchronous throw, not a faulted task.
-        InvalidOperationException error =
-            Assert.Throws<InvalidOperationException>(() => { _ = result.PartitionsToOffsetAndMetadata(); });
+        IllegalStateException error =
+            Assert.Throws<IllegalStateException>(() => { _ = result.PartitionsToOffsetAndMetadata(); });
         Assert.Equal(
             "Offsets from multiple consumer groups were requested. " +
             "Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.",
@@ -178,8 +178,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     {
         AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)), ("b", Completed(2)));
 
-        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("a").Get())[s_committed]!.Offset);
-        Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b").Get())[s_committed]!.Offset);
+        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("a").Get())[s_committed]!.Offset());
+        Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b").Get())[s_committed]!.Offset());
     }
 
     [Fact]
@@ -188,16 +188,15 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)));
 
         // Block-bodied, so this asserts a synchronous throw, not a faulted task.
-        ArgumentException error =
-            Assert.Throws<ArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("missing"); });
-        Assert.Equal("groupId", error.ParamName);
-        Assert.Contains("Offsets for consumer group 'missing' were not requested.", error.Message, StringComparison.Ordinal);
+        IllegalArgumentException error =
+            Assert.Throws<IllegalArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("missing"); });
+        Assert.Equal("Offsets for consumer group 'missing' were not requested.", error.Message);
 
-        Assert.Throws<ArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("A"); });
+        Assert.Throws<IllegalArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("A"); });
 
-        ArgumentNullException nullError =
-            Assert.Throws<ArgumentNullException>(() => { _ = result.PartitionsToOffsetAndMetadata(null!); });
-        Assert.Equal("groupId", nullError.ParamName);
+        IllegalArgumentException nullError =
+            Assert.Throws<IllegalArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata(null!); });
+        Assert.Equal("Offsets for consumer group 'null' were not requested.", nullError.Message);
     }
 
     [Fact]
@@ -226,8 +225,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> all = await first;
 
         Assert.Equal(2, all.Count);
-        Assert.Equal(1L, all["a"][s_committed]!.Offset);
-        Assert.Equal(2L, all["A"][s_committed]!.Offset);
+        Assert.Equal(1L, all["a"][s_committed]!.Offset());
+        Assert.Equal(2L, all["A"][s_committed]!.Offset());
         Assert.Null(all["a"][s_uncommitted]);
     }
 
@@ -240,12 +239,12 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         KafkaException failure = new KafkaException("nope");
         broken.CompleteWithError(failure);
 
-        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok").Get())[s_committed]!.Offset);
+        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok").Get())[s_committed]!.Offset());
 
         Assert.Same(
             failure,
-            await Assert.ThrowsAsync<KafkaException>(() => result.PartitionsToOffsetAndMetadata("bad").Get()));
-        Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+            await FutureAssert.ThrowsAsync<KafkaException>(() => result.PartitionsToOffsetAndMetadata("bad").Get()));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -261,7 +260,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.False(all.IsCompleted);
 
         slow.Complete(Offsets(3));
-        await Assert.ThrowsAsync<KafkaException>(() => all);
+        await FutureAssert.ThrowsAsync<KafkaException>(() => all);
     }
 
     [Fact]
@@ -270,7 +269,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         AsyncListConsumerGroupOffsetsResult result = Result();
 
         Assert.Empty(await result.All().Get());
-        Assert.Throws<InvalidOperationException>(() => { _ = result.PartitionsToOffsetAndMetadata(); });
-        Assert.Throws<ArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("g"); });
+        Assert.Throws<IllegalStateException>(() => { _ = result.PartitionsToOffsetAndMetadata(); });
+        Assert.Throws<IllegalArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("g"); });
     }
 }

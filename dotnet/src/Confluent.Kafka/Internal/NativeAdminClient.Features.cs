@@ -51,9 +51,9 @@ internal sealed partial class NativeAdminClient
 
     private static readonly ResultFuture s_updateFeaturesValues = NativeMethods.UpdateFeaturesResultValues;
 
-    private static readonly Func<IntPtr, FeatureMetadata> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
+    private static readonly Func<IntPtr, FeatureMetadata?> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
 
-    internal (KafkaFutureImpl<FeatureMetadata> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
+    internal (KafkaFutureImpl<FeatureMetadata?> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
         DescribeFeaturesOptions? options)
     {
         EnterUse();
@@ -92,7 +92,7 @@ internal sealed partial class NativeAdminClient
                 // A null name cannot cross; the core checks every other name.
                 if (entry.Key is null)
                 {
-                    throw new ArgumentException("Provided feature can not be empty.", nameof(featureUpdates));
+                    throw new IllegalArgumentException("Provided feature can not be empty.");
                 }
 
                 AdminStrings.Validate(entry.Key, nameof(featureUpdates));
@@ -158,9 +158,9 @@ internal sealed partial class NativeAdminClient
     internal static IntPtr NewFeatureUpdate(FeatureUpdate update)
     {
         IntPtr outErr = IntPtr.Zero;
-        IntPtr upgradeType = NativeMethods.UpgradeTypeFromCode((int)update.Type, ref outErr);
+        IntPtr upgradeType = NativeMethods.UpgradeTypeFromCode((int)update.UpgradeType(), ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        IntPtr native = NativeMethods.FeatureUpdateNew(update.MaxVersionLevel, upgradeType, ref outErr);
+        IntPtr native = NativeMethods.FeatureUpdateNew(update.MaxVersionLevel(), upgradeType, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return native;
     }
@@ -208,10 +208,10 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeFeaturesOptions.TimeoutMs):
-                NativeMethods.DescribeFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeFeaturesOptions.NodeId):
-                NativeMethods.DescribeFeaturesOptionsSetNodeId(native, options.NodeId.GetValueOrDefault(), ref outErr);
+                NativeMethods.DescribeFeaturesOptionsSetNodeId(native, options.NodeId().GetValueOrDefault(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeFeaturesOptions has no C setter for " + setter + ".");
@@ -224,11 +224,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(UpdateFeaturesOptions.TimeoutMs):
-                NativeMethods.UpdateFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.UpdateFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(UpdateFeaturesOptions.ValidateOnly):
                 NativeMethods.UpdateFeaturesOptionsSetValidateOnly(
-                    native, options.ValidateOnly ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("UpdateFeaturesOptions has no C setter for " + setter + ".");

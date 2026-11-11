@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -41,7 +42,7 @@ public sealed class DeliveryReportTests
             new ProcessResourceSampler(),
             new CancellationTokenSource(),
             producer,
-            new AsyncMockConsumer<byte[], SoakRecord>(Serdes.ByteArray, new SoakRecordDeserializer()),
+            new AsyncMockConsumer<byte[], SoakRecord>(Serdes.ByteArray(), new SoakRecordDeserializer()),
             "h",
             0,
             0);
@@ -54,7 +55,7 @@ public sealed class DeliveryReportTests
     {
         var sink = new CapturingSink();
         using SoakClient client = NewClient(
-            new AsyncMockProducer<byte[], SoakRecord>(Serdes.ByteArray, new SoakRecordSerializer(50)),
+            new AsyncMockProducer<byte[], SoakRecord>(Serdes.ByteArray(), new SoakRecordSerializer(50)),
             sink);
 
         await client.ProduceRecordAsync();
@@ -70,13 +71,13 @@ public sealed class DeliveryReportTests
     {
         var sink = new CapturingSink();
         var producer = new AsyncMockProducer<byte[], SoakRecord>(
-            Serdes.ByteArray, new SoakRecordSerializer(50), autoComplete: false);
+            Serdes.ByteArray(), new SoakRecordSerializer(50), autoComplete: false);
         using SoakClient client = NewClient(producer, sink);
 
         await client.ProduceRecordAsync();
         Assert.Equal((0L, 0L, 1L, 1L), client.ProducerCounts);
 
-        Assert.True(producer.ErrorNext(SoakTestSupport.KafkaError(16, "x")));
+        Assert.True(producer.ErrorNext(new NotCoordinatorException("x")));
         await AwaitTheDeliveryReport(client);
 
         Assert.Equal((0L, 1L, 0L, 0L), client.ProducerCounts);

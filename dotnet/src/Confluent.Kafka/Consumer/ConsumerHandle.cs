@@ -25,9 +25,9 @@ namespace Confluent.Kafka.Consumer;
 /// <see cref="IOffsetCommitCallback"/>); the consumer's own calls made there go through the consumer's own handle,
 /// which also has the forms this class lacks. On a <see cref="KafkaConsumer{TKey, TValue}"/> every operation other
 /// than <see cref="Wakeup"/>, <see cref="Assignment"/> and <see cref="Paused"/> works only inside such a callback, and
-/// throws <see cref="InvalidOperationException"/> elsewhere. The handle holds its consumer weakly: once the consumer is
-/// destroyed, <see cref="Wakeup"/> does nothing, <see cref="Assignment"/> and <see cref="Paused"/> still return, and
-/// every other operation throws <see cref="InvalidOperationException"/>.
+/// throws <see cref="ConcurrentModificationException"/> elsewhere. The handle holds its consumer weakly: once the
+/// consumer is destroyed, <see cref="Wakeup"/> does nothing, <see cref="Assignment"/> and <see cref="Paused"/> still
+/// return, and every other operation throws <see cref="IllegalStateException"/>.
 /// </summary>
 public sealed class ConsumerHandle : IDisposable
 {
@@ -69,14 +69,14 @@ public sealed class ConsumerHandle : IDisposable
     public void Pause(IReadOnlyCollection<TopicPartition> partitions)
     {
         ThrowIfDisposed();
-        _native.Pause(NativeConsumer.SnapshotPartitions(partitions));
+        _native.Pause(NativeConsumer.SnapshotPartitions(partitions, nullTopicIsUnassigned: true));
     }
 
     /// <summary>Resumes fetching from <paramref name="partitions"/>.</summary>
     public void Resume(IReadOnlyCollection<TopicPartition> partitions)
     {
         ThrowIfDisposed();
-        _native.Resume(NativeConsumer.SnapshotPartitions(partitions));
+        _native.Resume(NativeConsumer.SnapshotPartitions(partitions, nullTopicIsUnassigned: true));
     }
 
     /// <summary>Seeks <paramref name="partitions"/> to their first offset.</summary>
@@ -97,13 +97,13 @@ public sealed class ConsumerHandle : IDisposable
     public void Seek(TopicPartition partition, long offset)
     {
         ThrowIfDisposed();
-        ValidatePartition(partition);
         if (offset < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(offset), offset, "seek offset must not be a negative number");
+            throw new IllegalArgumentException("seek offset must not be a negative number");
         }
 
-        _native.Seek(partition.Topic, partition.Partition, offset);
+        RequireAssigned(partition);
+        _native.Seek(partition.Topic(), partition.Partition(), offset);
     }
 
     /// <summary>
@@ -112,21 +112,22 @@ public sealed class ConsumerHandle : IDisposable
     public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata)
     {
         ThrowIfDisposed();
-        ValidatePartition(partition);
         if (offsetAndMetadata is null)
         {
             throw new ArgumentNullException(nameof(offsetAndMetadata));
         }
 
-        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+        RequireAssigned(partition);
+
+        _native.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata);
     }
 
     /// <summary>Returns the offset the consumer fetches next from <paramref name="partition"/>.</summary>
     public long Position(TopicPartition partition)
     {
         ThrowIfDisposed();
-        ValidatePartition(partition);
-        return _native.Position(partition.Topic, partition.Partition, timeoutMs: null);
+        RequirePositionAssigned(partition);
+        return _native.Position(partition.Topic(), partition.Partition(), timeoutMs: null);
     }
 
     /// <summary>
@@ -136,20 +137,20 @@ public sealed class ConsumerHandle : IDisposable
     public long Position(TopicPartition partition, TimeSpan timeout)
     {
         ThrowIfDisposed();
+        RequirePositionAssigned(partition);
         long timeoutMs = NativeConsumer.TimerTimeoutMs(timeout);
-        ValidatePartition(partition);
-        return _native.Position(partition.Topic, partition.Partition, timeoutMs);
+        return _native.Position(partition.Topic(), partition.Partition(), timeoutMs);
     }
 
     /// <summary>
-    /// Returns how far the consumer's position in <paramref name="partition"/> is behind its end, or
+    /// Returns how far the consumer's position in <paramref name="topicPartition"/> is behind its end, or
     /// <see langword="null"/> when the consumer does not know.
     /// </summary>
-    public long? CurrentLag(TopicPartition partition)
+    public long? CurrentLag(TopicPartition topicPartition)
     {
         ThrowIfDisposed();
-        ValidatePartition(partition);
-        return _native.CurrentLag(partition.Topic, partition.Partition);
+        RequireAssigned(topicPartition);
+        return _native.CurrentLag(topicPartition.Topic(), topicPartition.Partition());
     }
 
     /// <summary>
@@ -198,7 +199,7 @@ public sealed class ConsumerHandle : IDisposable
     public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
         ThrowIfDisposed();
-        _native.CommitSync(NativeConsumer.SnapshotCommitOffsets(offsets), timeoutMs: null);
+        _native.CommitSync(OffsetsSnapshot.Of(offsets), timeoutMs: null);
     }
 
     /// <summary>Starts a commit of the consumed offsets and returns without waiting for it.</summary>
@@ -234,7 +235,7 @@ public sealed class ConsumerHandle : IDisposable
     public void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IOffsetCommitCallback? callback)
     {
         ThrowIfDisposed();
-        _native.CommitAsync(NativeConsumer.SnapshotCommitOffsets(offsets), callback);
+        _native.CommitAsync(OffsetsSnapshot.Of(offsets), callback);
     }
 
     /// <summary>Destroys the handle. The consumer is unaffected; a second call does nothing.</summary>
@@ -248,16 +249,16 @@ public sealed class ConsumerHandle : IDisposable
         _native.Dispose();
     }
 
-    private static void ValidatePartition(TopicPartition partition)
-    {
-        if (partition.Topic is null)
-        {
-            throw new ArgumentNullException(nameof(partition), "TopicPartition.Topic must not be null.");
-        }
+    // A null topic is never assigned and cannot cross the C ABI, so the handle throws what KafkaConsumer throws for a
+    // partition that is not assigned; a partition number goes to the core.
+    private static void RequireAssigned(TopicPartition partition) =>
+        NativeConsumer.RequireAssignedTopic(partition.Topic(), partition.Partition());
 
-        if (partition.Partition < 0)
+    private static void RequirePositionAssigned(TopicPartition partition)
+    {
+        if (partition.Topic() is null)
         {
-            throw new ArgumentOutOfRangeException(nameof(partition), partition.Partition, "Partition must not be negative.");
+            throw new IllegalStateException(NativeConsumer.PositionNotAssigned);
         }
     }
 

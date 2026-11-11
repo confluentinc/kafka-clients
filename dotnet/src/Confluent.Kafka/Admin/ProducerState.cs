@@ -21,12 +21,19 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.ProducerState</c>.
 /// </summary>
 /// <remarks>
-/// The two nullable properties are Java's <c>OptionalInt</c> and <c>OptionalLong</c>: absent is
-/// <see langword="null"/>, never <c>0</c> or <c>-1</c>, although the four scalar properties use
+/// The two nullable getters are Java's <c>OptionalInt</c> and <c>OptionalLong</c>: absent is
+/// <see langword="null"/>, never <c>0</c> or <c>-1</c>, although the four scalar getters use
 /// <c>-1</c> as their sentinel.
 /// </remarks>
 public sealed class ProducerState
 {
+    private readonly long _producerId;
+    private readonly int _producerEpoch;
+    private readonly int _lastSequence;
+    private readonly long _lastTimestamp;
+    private readonly long? _currentTransactionStartOffset;
+    private readonly int? _coordinatorEpoch;
+
     /// <summary>Creates a producer state — Java's constructor.</summary>
     /// <param name="producerId">The producer id.</param>
     /// <param name="producerEpoch">The producer epoch.</param>
@@ -44,52 +51,59 @@ public sealed class ProducerState
         int? coordinatorEpoch,
         long? currentTransactionStartOffset)
     {
-        ProducerId = producerId;
-        ProducerEpoch = producerEpoch;
-        LastSequence = lastSequence;
-        LastTimestamp = lastTimestamp;
-        CoordinatorEpoch = coordinatorEpoch;
-        CurrentTransactionStartOffset = currentTransactionStartOffset;
+        _producerId = producerId;
+        _producerEpoch = producerEpoch;
+        _lastSequence = lastSequence;
+        _lastTimestamp = lastTimestamp;
+        _coordinatorEpoch = coordinatorEpoch;
+        _currentTransactionStartOffset = currentTransactionStartOffset;
     }
 
     /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
-    public long ProducerId { get; }
+    /// <returns>The producer id.</returns>
+    public long ProducerId() => _producerId;
 
     /// <summary>
     /// The producer epoch — Java's <c>producerEpoch()</c>, an <see langword="int"/> here as in
-    /// Java, unlike <see cref="AbortTransactionSpec.ProducerEpoch"/>.
+    /// Java, unlike <see cref="AbortTransactionSpec.ProducerEpoch()"/>.
     /// </summary>
-    public int ProducerEpoch { get; }
+    /// <returns>The producer epoch.</returns>
+    public int ProducerEpoch() => _producerEpoch;
 
     /// <summary>The last written sequence number — Java's <c>lastSequence()</c>.</summary>
-    public int LastSequence { get; }
+    /// <returns>The last written sequence number.</returns>
+    public int LastSequence() => _lastSequence;
 
     /// <summary>The last written timestamp — Java's <c>lastTimestamp()</c>.</summary>
-    public long LastTimestamp { get; }
+    /// <returns>The last written timestamp.</returns>
+    public long LastTimestamp() => _lastTimestamp;
 
     /// <summary>
     /// The first offset of the in-progress transaction, or <see langword="null"/> when none is
     /// in progress — Java's <c>currentTransactionStartOffset()</c>.
     /// </summary>
-    public long? CurrentTransactionStartOffset { get; }
+    /// <returns>The first offset of the in-progress transaction, or <see langword="null"/> when none is in
+    /// progress.</returns>
+    public long? CurrentTransactionStartOffset() => _currentTransactionStartOffset;
 
     /// <summary>
     /// The transaction coordinator epoch, or <see langword="null"/> when absent — Java's
     /// <c>coordinatorEpoch()</c>.
     /// </summary>
-    public int? CoordinatorEpoch { get; }
+    /// <returns>The transaction coordinator epoch, or <see langword="null"/> when absent.</returns>
+    public int? CoordinatorEpoch() => _coordinatorEpoch;
 
     /// <summary>Value equality over all six fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same producer state.</returns>
     public override bool Equals(object? obj) =>
         obj is ProducerState other
-        && ProducerId == other.ProducerId
-        && ProducerEpoch == other.ProducerEpoch
-        && LastSequence == other.LastSequence
-        && LastTimestamp == other.LastTimestamp
-        && CoordinatorEpoch == other.CoordinatorEpoch
-        && CurrentTransactionStartOffset == other.CurrentTransactionStartOffset;
+        && ProducerId() == other.ProducerId()
+        && ProducerEpoch() == other.ProducerEpoch()
+        && LastSequence() == other.LastSequence()
+        && LastTimestamp() == other.LastTimestamp()
+        && CoordinatorEpoch() == other.CoordinatorEpoch()
+        && CurrentTransactionStartOffset() == other.CurrentTransactionStartOffset();
 
     /// <summary>The hash of all six fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -97,12 +111,12 @@ public sealed class ProducerState
     {
         unchecked
         {
-            int hash = ProducerId.GetHashCode();
-            hash = (hash * 31) + ProducerEpoch;
-            hash = (hash * 31) + LastSequence;
-            hash = (hash * 31) + LastTimestamp.GetHashCode();
-            hash = (hash * 31) + (CoordinatorEpoch?.GetHashCode() ?? 0);
-            return (hash * 31) + (CurrentTransactionStartOffset?.GetHashCode() ?? 0);
+            int hash = ProducerId().GetHashCode();
+            hash = (hash * 31) + ProducerEpoch();
+            hash = (hash * 31) + LastSequence();
+            hash = (hash * 31) + LastTimestamp().GetHashCode();
+            hash = (hash * 31) + (CoordinatorEpoch()?.GetHashCode() ?? 0);
+            return (hash * 31) + (CurrentTransactionStartOffset()?.GetHashCode() ?? 0);
         }
     }
 
@@ -116,14 +130,14 @@ public sealed class ProducerState
             CultureInfo.InvariantCulture,
             "ProducerState(producerId={0}, producerEpoch={1}, lastSequence={2}, lastTimestamp={3}"
                 + ", coordinatorEpoch={4}, currentTransactionStartOffset={5})",
-            ProducerId,
-            ProducerEpoch,
-            LastSequence,
-            LastTimestamp,
-            CoordinatorEpoch.HasValue
-                ? "OptionalInt[" + CoordinatorEpoch.Value.ToString(CultureInfo.InvariantCulture) + "]"
+            _producerId,
+            _producerEpoch,
+            _lastSequence,
+            _lastTimestamp,
+            _coordinatorEpoch.HasValue
+                ? "OptionalInt[" + _coordinatorEpoch.Value.ToString(CultureInfo.InvariantCulture) + "]"
                 : "OptionalInt.empty",
-            CurrentTransactionStartOffset.HasValue
-                ? "OptionalLong[" + CurrentTransactionStartOffset.Value.ToString(CultureInfo.InvariantCulture) + "]"
+            _currentTransactionStartOffset.HasValue
+                ? "OptionalLong[" + _currentTransactionStartOffset.Value.ToString(CultureInfo.InvariantCulture) + "]"
                 : "OptionalLong.empty");
 }

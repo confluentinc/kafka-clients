@@ -21,7 +21,10 @@ namespace Confluent.Kafka.Consumer;
 /// The callbacks run when the partitions assigned to the consumer change, Java's
 /// <c>org.apache.kafka.clients.consumer.ConsumerRebalanceListener</c>. Pass an implementation to
 /// <see cref="IConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener)"/>
-/// or <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>.
+/// or <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(IReadOnlyCollection{string}, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>,
+/// or to their pattern forms
+/// <see cref="IConsumer{TKey, TValue}.Subscribe(SubscriptionPattern, IConsumerRebalanceListener)"/> and
+/// <see cref="IAsyncConsumer{TKey, TValue}.Subscribe(SubscriptionPattern, IConsumerRebalanceListener, System.Threading.CancellationToken)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -33,14 +36,14 @@ namespace Confluent.Kafka.Consumer;
 /// </para>
 /// <para>
 /// A listener can call back into its own consumer, as a Java listener calls the consumer it captured. <c>Poll</c>,
-/// <c>Subscribe</c>, <c>Unsubscribe</c> and <c>Assign</c> throw <see cref="System.InvalidOperationException"/> at
+/// <c>Subscribe</c>, <c>Unsubscribe</c> and <c>Assign</c> throw <see cref="ConcurrentModificationException"/> at
 /// once, and so does <c>Close</c>, which leaves the consumer open. <c>Seek</c>, <c>SeekToBeginning</c>,
 /// <c>SeekToEnd</c>, <c>Pause</c>, <c>Resume</c>, <c>Position</c>, <c>CurrentLag</c>, <c>Commit</c>,
 /// <c>CommitAsync</c>, <c>Committed</c>, <c>BeginningOffsets</c>, <c>EndOffsets</c>, <c>OffsetsForTimes</c>,
 /// <c>PartitionsFor</c>, <c>ListTopics</c>, <c>Assignment</c>, <c>Paused</c> and <c>GroupMetadata</c>, timed or not,
 /// go to the consumer's own handle and block, also where <see cref="ConsumerHandle"/> lacks the form. On a mock
 /// consumer only the commits, timed or not, <c>CurrentLag</c>, <c>Assignment</c>, <c>Paused</c> and
-/// <c>GroupMetadata</c> work there; every other routed call throws <see cref="System.NotSupportedException"/>
+/// <c>GroupMetadata</c> work there; every other routed call throws <see cref="UnsupportedOperationException"/>
 /// ("ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer
 /// directly."). A thread the listener starts is not inside the listener.
 /// </para>
@@ -49,9 +52,13 @@ namespace Confluent.Kafka.Consumer;
 /// the listener, as a Java listener's does.
 /// </para>
 /// <para>
-/// A listener is bound to a subscription and fires many times. A replacing subscribe, a listener-less one
-/// included, releases it, as does disposing the consumer; <c>Unsubscribe()</c> and <c>Close()</c> keep it, as
-/// Java's <c>SubscriptionState.unsubscribe()</c> does.
+/// A listener is bound to a subscription and fires many times. A subscribe that succeeds, a listener-less one
+/// included, releases it, as does closing or disposing the consumer (closing once its callbacks have run);
+/// <c>Unsubscribe()</c> keeps it, as Java's <c>SubscriptionState.unsubscribe()</c> does, and so does a subscribe to no
+/// topics on a <c>KafkaConsumer</c> or <c>AsyncKafkaConsumer</c>, which is <c>Unsubscribe()</c>.
+/// Java's <c>MockConsumer</c> keeps firing the listener after <c>close()</c>; a closed
+/// <see cref="MockConsumer{TKey, TValue}"/> or <see cref="AsyncMockConsumer{TKey, TValue}"/> has released it, and its
+/// <c>Rebalance</c> throws <see cref="IllegalStateException"/>.
 /// </para>
 /// <para>
 /// Java's <c>onPartitionsLost</c> defaults to <c>onPartitionsRevoked</c>. A C# default interface method needs

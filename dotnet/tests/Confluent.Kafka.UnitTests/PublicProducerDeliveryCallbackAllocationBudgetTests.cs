@@ -53,9 +53,9 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     // real per-send regression raises every attempt.
     private const int MeasurementAttempts = 4;
 
-    // The absolute per-send budget of the callback overload: the measured 464 B (net8.0, net10.0; the delivery
-    // state, which holds the callback, its KafkaFutureImpl, the delivery task, the record and the record's Headers)
-    // plus 16 B, less than one more object (24 B).
+    // The absolute per-send budget of the callback overload: the measured 472 B (net8.0, net10.0; the delivery
+    // state, which holds the callback, its KafkaFutureImpl with the field that caches the Get() task, the delivery
+    // task, the record and the record's Headers) plus 8 B, less than one more object (24 B).
     private const long CallbackFastPathPerSendBudgetBytes = 480;
 
     // More attempts than the paired tests, as an absolute figure has no matched pair to cancel a one-off allocation.
@@ -68,7 +68,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback: null);
@@ -98,7 +98,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback: null);
@@ -141,7 +141,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, smallValue, key, callback);
@@ -183,7 +183,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await Warmup(producer, value, key, callback);
@@ -205,7 +205,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     }
 
     private static async Task Warmup(
-        AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, IDeliveryCallback? callback)
+        AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, ICallback? callback)
     {
         // Warm up so the measured runs are steady-state.
         for (int i = 0; i < 3; i++)
@@ -219,7 +219,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
         AsyncMockProducer<byte[], byte[]> producer,
         byte[] value,
         byte[] key,
-        IDeliveryCallback? callback,
+        ICallback? callback,
         out Task<RecordMetadata>[] sends)
     {
         // Pre-allocate the task array OUTSIDE the measured window (its allocation is not per-send).
@@ -264,7 +264,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     /// <summary>
     /// A do-nothing delivery callback — allocation tests must not have the callback itself allocate.
     /// </summary>
-    private sealed class CountingDeliveryCallback : IDeliveryCallback
+    private sealed class CountingDeliveryCallback : ICallback
     {
         private int _count;
 

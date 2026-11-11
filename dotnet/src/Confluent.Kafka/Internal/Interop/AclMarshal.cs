@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Resource;
 
 namespace Confluent.Kafka.Internal.Interop;
@@ -32,10 +33,10 @@ internal static class AclMarshal
 
     internal static IntPtr NewBinding(AclBinding binding)
     {
-        IntPtr pattern = NewPattern(binding.Pattern);
+        IntPtr pattern = NewPattern(binding.Pattern());
         try
         {
-            IntPtr entry = NewEntry(binding.Entry);
+            IntPtr entry = NewEntry(binding.Entry());
             try
             {
                 IntPtr outErr = IntPtr.Zero;
@@ -56,10 +57,10 @@ internal static class AclMarshal
 
     internal static IntPtr NewFilter(AclBindingFilter filter)
     {
-        IntPtr pattern = NewPatternFilter(filter.PatternFilter);
+        IntPtr pattern = NewPatternFilter(filter.PatternFilter());
         try
         {
-            IntPtr entry = NewEntryFilter(filter.EntryFilter);
+            IntPtr entry = NewEntryFilter(filter.EntryFilter());
             try
             {
                 IntPtr outErr = IntPtr.Zero;
@@ -157,15 +158,16 @@ internal static class AclMarshal
                 IntPtr borrowedError = NativeMethods.DeleteAclsFilterResultError(result, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
 
-                // A FilterResult holds a KafkaException, so a deletion error of another type fails the filter's future.
+                // A FilterResult holds an ApiException, as Java's does, so a deletion error of another class fails
+                // the filter's future.
                 Exception? error = KafkaException.FromFfiError(borrowedError, owned: false);
-                if (error is not null and not KafkaException)
+                if (error is not null and not ApiException)
                 {
                     throw error;
                 }
 
                 copied.Add(new DeleteAclsResult.FilterResult(
-                    binding == IntPtr.Zero ? null : CopyOutBinding(binding), (KafkaException?)error));
+                    binding == IntPtr.Zero ? null : CopyOutBinding(binding), (ApiException?)error));
             }
 
             return new DeleteAclsResult.FilterResults(copied);
@@ -183,9 +185,9 @@ internal static class AclMarshal
 
     private static IntPtr NewPattern(ResourcePattern pattern)
     {
-        IntPtr resourceType = ResourceTypeSingleton(pattern.ResourceType);
-        IntPtr patternType = PatternTypeSingleton(pattern.PatternType);
-        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(pattern.Name);
+        IntPtr resourceType = ResourceTypeSingleton(pattern.ResourceType());
+        IntPtr patternType = PatternTypeSingleton(pattern.PatternType());
+        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(pattern.Name());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.ResourcePatternNew(resourceType, name.Pointer, patternType, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -194,10 +196,10 @@ internal static class AclMarshal
 
     private static IntPtr NewEntry(AccessControlEntry entry)
     {
-        IntPtr operation = OperationSingleton(entry.Operation);
-        IntPtr permissionType = PermissionTypeSingleton(entry.PermissionType);
-        using Utf8Marshal.PinnedUtf8String principal = Utf8Marshal.Pin(entry.Principal);
-        using Utf8Marshal.PinnedUtf8String host = Utf8Marshal.Pin(entry.Host);
+        IntPtr operation = OperationSingleton(entry.Operation());
+        IntPtr permissionType = PermissionTypeSingleton(entry.PermissionType());
+        using Utf8Marshal.PinnedUtf8String principal = Utf8Marshal.Pin(entry.Principal());
+        using Utf8Marshal.PinnedUtf8String host = Utf8Marshal.Pin(entry.Host());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.AccessControlEntryNew(
             principal.Pointer, host.Pointer, operation, permissionType, ref outErr);
@@ -207,9 +209,9 @@ internal static class AclMarshal
 
     private static IntPtr NewPatternFilter(ResourcePatternFilter pattern)
     {
-        IntPtr resourceType = ResourceTypeSingleton(pattern.ResourceType);
-        IntPtr patternType = PatternTypeSingleton(pattern.PatternType);
-        using Utf8Marshal.PinnedUtf8String? name = PinOrNull(pattern.Name);
+        IntPtr resourceType = ResourceTypeSingleton(pattern.ResourceType());
+        IntPtr patternType = PatternTypeSingleton(pattern.PatternType());
+        using Utf8Marshal.PinnedUtf8String? name = PinOrNull(pattern.Name());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.ResourcePatternFilterNew(
             resourceType, name?.Pointer ?? IntPtr.Zero, patternType, ref outErr);
@@ -219,10 +221,10 @@ internal static class AclMarshal
 
     private static IntPtr NewEntryFilter(AccessControlEntryFilter entry)
     {
-        IntPtr operation = OperationSingleton(entry.Operation);
-        IntPtr permissionType = PermissionTypeSingleton(entry.PermissionType);
-        using Utf8Marshal.PinnedUtf8String? principal = PinOrNull(entry.Principal);
-        using Utf8Marshal.PinnedUtf8String? host = PinOrNull(entry.Host);
+        IntPtr operation = OperationSingleton(entry.Operation());
+        IntPtr permissionType = PermissionTypeSingleton(entry.PermissionType());
+        using Utf8Marshal.PinnedUtf8String? principal = PinOrNull(entry.Principal());
+        using Utf8Marshal.PinnedUtf8String? host = PinOrNull(entry.Host());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.AccessControlEntryFilterNew(
             principal?.Pointer ?? IntPtr.Zero, host?.Pointer ?? IntPtr.Zero, operation, permissionType, ref outErr);

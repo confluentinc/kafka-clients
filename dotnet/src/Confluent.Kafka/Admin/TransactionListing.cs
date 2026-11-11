@@ -24,41 +24,48 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class TransactionListing
 {
+    private readonly string _transactionalId;
+    private readonly long _producerId;
+    private readonly TransactionState _state;
+
     /// <summary>Creates a transaction listing — Java's constructor.</summary>
     /// <param name="transactionalId">The transactional id.</param>
     /// <param name="producerId">The producer id.</param>
-    /// <param name="state">The transaction state.</param>
+    /// <param name="transactionState">The transaction state.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="transactionalId"/> is null: stricter than Java, whose constructor stores
     /// it unchecked, a recorded deviation.
     /// </exception>
-    public TransactionListing(string transactionalId, long producerId, TransactionState state)
+    public TransactionListing(string transactionalId, long producerId, TransactionState transactionState)
     {
-        TransactionalId = transactionalId ?? throw new ArgumentNullException(nameof(transactionalId));
-        ProducerId = producerId;
-        State = state;
+        _transactionalId = transactionalId ?? throw new ArgumentNullException(nameof(transactionalId));
+        _producerId = producerId;
+        _state = transactionState;
     }
 
     /// <summary>The transactional id — Java's <c>transactionalId()</c>.</summary>
-    public string TransactionalId { get; }
+    /// <returns>The transactional id.</returns>
+    public string TransactionalId() => _transactionalId;
 
     /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
-    public long ProducerId { get; }
+    /// <returns>The producer id.</returns>
+    public long ProducerId() => _producerId;
 
     /// <summary>
     /// The transaction state — Java's <c>state()</c>, named for the accessor, not for Java's
     /// <c>transactionState</c> field.
     /// </summary>
-    public TransactionState State { get; }
+    /// <returns>The transaction state.</returns>
+    public TransactionState State() => _state;
 
     /// <summary>Value equality over all three fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same listing.</returns>
     public override bool Equals(object? obj) =>
         obj is TransactionListing other
-        && ProducerId == other.ProducerId
-        && string.Equals(TransactionalId, other.TransactionalId, StringComparison.Ordinal)
-        && State == other.State;
+        && ProducerId() == other.ProducerId()
+        && string.Equals(TransactionalId(), other.TransactionalId(), StringComparison.Ordinal)
+        && State() == other.State();
 
     /// <summary>The hash of all three fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -66,9 +73,9 @@ public sealed class TransactionListing
     {
         unchecked
         {
-            int hash = StringComparer.Ordinal.GetHashCode(TransactionalId);
-            hash = (hash * 31) + ProducerId.GetHashCode();
-            return (hash * 31) + (int)State;
+            int hash = StringComparer.Ordinal.GetHashCode(TransactionalId());
+            hash = (hash * 31) + ProducerId().GetHashCode();
+            return (hash * 31) + (int)State();
         }
     }
 
@@ -78,7 +85,7 @@ public sealed class TransactionListing
         string.Format(
             CultureInfo.InvariantCulture,
             "TransactionListing(transactionalId='{0}', producerId={1}, transactionState={2})",
-            TransactionalId,
-            ProducerId,
-            TransactionMarshal.NameFromState(State) ?? State.ToString());
+            TransactionalId(),
+            ProducerId(),
+            TransactionMarshal.NameFromState(State()) ?? State().ToString());
 }

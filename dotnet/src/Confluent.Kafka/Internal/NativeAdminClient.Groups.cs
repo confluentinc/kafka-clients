@@ -80,7 +80,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, IReadOnlyCollection<GroupListing>> s_copyOutGroupListings =
         GroupDescriptionMarshal.CopyOutListings;
 
-    private static readonly Func<IntPtr, IReadOnlyCollection<KafkaException>> s_copyOutGroupErrors =
+    private static readonly Func<IntPtr, IReadOnlyCollection<Exception>> s_copyOutGroupErrors =
         GroupDescriptionMarshal.CopyOutErrors;
 
     private static readonly Func<IntPtr, ConsumerGroupDescription> s_copyOutConsumerGroupDescription =
@@ -92,7 +92,7 @@ internal sealed partial class NativeAdminClient
     internal (
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> Errors,
+        KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
         SafeAdminResultHandle Result) ListGroups(ListGroupsOptions? options)
     {
         EnterUse();
@@ -100,13 +100,13 @@ internal sealed partial class NativeAdminClient
         {
             if (options is not null)
             {
-                foreach (string protocolType in options.ProtocolTypes)
+                foreach (string protocolType in options.ProtocolTypes())
                 {
                     AdminStrings.Validate(protocolType, nameof(options));
                 }
 
-                RequireDefinedFilter(options.GroupStates, GroupMarshal.NameFromState, nameof(ListGroupsOptions.GroupStates));
-                RequireDefinedFilter(options.Types, GroupMarshal.NameFromType, nameof(ListGroupsOptions.Types));
+                RequireDefinedFilter(options.GroupStates(), GroupMarshal.NameFromState, nameof(ListGroupsOptions.GroupStates));
+                RequireDefinedFilter(options.Types(), GroupMarshal.NameFromType, nameof(ListGroupsOptions.Types));
             }
 
             SafeAdminResultHandle result = CallWithOptions(
@@ -119,7 +119,7 @@ internal sealed partial class NativeAdminClient
                 StartOwnedFuture(result, s_listGroupsAll, s_copyOutGroupListings);
             KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid =
                 StartOwnedFuture(result, s_listGroupsValid, s_copyOutGroupListings);
-            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors =
+            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors =
                 StartOwnedFuture(result, s_listGroupsErrors, s_copyOutGroupErrors);
             return (all, valid, errors, result);
         }
@@ -141,16 +141,16 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListGroupsOptions.TimeoutMs):
-                NativeMethods.ListGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
-            case nameof(ListGroupsOptions.GroupStates):
-                SetSingletonList(native, options.GroupStates, GroupMarshal.StateSingleton, s_listGroupsOptionsInGroupStates, ref outErr);
+            case nameof(ListGroupsOptions.InGroupStates):
+                SetSingletonList(native, options.GroupStates(), GroupMarshal.StateSingleton, s_listGroupsOptionsInGroupStates, ref outErr);
                 break;
-            case nameof(ListGroupsOptions.Types):
-                SetSingletonList(native, options.Types, GroupMarshal.TypeSingleton, s_listGroupsOptionsWithTypes, ref outErr);
+            case nameof(ListGroupsOptions.WithTypes):
+                SetSingletonList(native, options.Types(), GroupMarshal.TypeSingleton, s_listGroupsOptionsWithTypes, ref outErr);
                 break;
-            case nameof(ListGroupsOptions.ProtocolTypes):
-                SetProtocolTypes(native, options.ProtocolTypes, ref outErr);
+            case nameof(ListGroupsOptions.WithProtocolTypes):
+                SetProtocolTypes(native, options.ProtocolTypes(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListGroupsOptions has no C setter for " + setter + ".");
@@ -271,11 +271,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeConsumerGroupsOptions.TimeoutMs):
-                NativeMethods.DescribeConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeConsumerGroupsOptions.IncludeAuthorizedOperations):
                 NativeMethods.DescribeConsumerGroupsOptionsSetIncludeAuthorizedOperations(
-                    native, options.IncludeAuthorizedOperations ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeAuthorizedOperations() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeConsumerGroupsOptions has no C setter for " + setter + ".");
@@ -332,11 +332,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeClassicGroupsOptions.TimeoutMs):
-                NativeMethods.DescribeClassicGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeClassicGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeClassicGroupsOptions.IncludeAuthorizedOperations):
                 NativeMethods.DescribeClassicGroupsOptionsSetIncludeAuthorizedOperations(
-                    native, options.IncludeAuthorizedOperations ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeAuthorizedOperations() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeClassicGroupsOptions has no C setter for " + setter + ".");

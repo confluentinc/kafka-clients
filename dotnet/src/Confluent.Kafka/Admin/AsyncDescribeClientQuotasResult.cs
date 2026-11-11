@@ -59,7 +59,7 @@ public sealed class AsyncDescribeClientQuotasResult
     /// <returns>
     /// A future yielding the map, or faulting with the call's own
     /// <see cref="KafkaException"/>; on <see cref="AsyncMockAdminClient"/>, which does not implement the
-    /// call, with a <see cref="NotSupportedException"/>.
+    /// call, with an <see cref="UnsupportedOperationException"/>.
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities() => _future;

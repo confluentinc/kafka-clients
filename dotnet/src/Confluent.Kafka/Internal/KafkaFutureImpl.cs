@@ -25,7 +25,10 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// A <see cref="KafkaFutureImpl{T}"/> seen without its value type, which is how a future of no value (Java's
 /// <c>KafkaFuture&lt;Void&gt;</c>) and <c>AllOf</c> over futures of different types hold one. It also holds the timed
-/// and cancellable waits on a task, which the async futures share.
+/// and cancellable waits on a task, which the async futures share. The wrapped waits (<c>GetWrapped</c>,
+/// <c>GetNowWrapped</c>, <c>WaitWrapped</c>) are what the public futures call: they fail as Java's <c>get</c> and
+/// <c>getNow</c> do, with an <see cref="ExecutionException"/> around the future's failure. The other waits rethrow the
+/// failure itself, for the binding's own reads of a future.
 /// </summary>
 internal abstract class KafkaFutureImpl
 {
@@ -126,6 +129,20 @@ internal abstract class KafkaFutureImpl
 
     internal abstract Task WaitAsync(CancellationToken cancellationToken);
 
+    internal abstract void WaitWrapped();
+
+    internal abstract void WaitWrapped(TimeSpan timeout);
+
+    internal abstract void WaitWrapped(CancellationToken cancellationToken);
+
+    internal abstract void GetNowWrapped();
+
+    internal abstract Task WaitWrappedAsync();
+
+    internal abstract Task WaitWrappedAsync(TimeSpan timeout);
+
+    internal abstract Task WaitWrappedAsync(CancellationToken cancellationToken);
+
     internal abstract KafkaFutureImpl<TResult> ThenApply<TResult>(Func<TResult> function);
 
     internal abstract KafkaFutureImpl WhenComplete(Action<Exception?> action);
@@ -143,7 +160,7 @@ internal abstract class KafkaFutureImpl
         return left <= TimeSpan.Zero ? 0 : (long)Math.Ceiling(left.TotalMilliseconds);
     }
 
-    private protected static async Task AwaitWithin(Task task, TimeSpan timeout)
+    private protected static async Task<bool> CompletesWithin(Task task, TimeSpan timeout)
     {
         var clock = Stopwatch.StartNew();
         using var stopDelay = new CancellationTokenSource();
@@ -152,14 +169,14 @@ internal abstract class KafkaFutureImpl
             long left = RemainingMilliseconds(clock, timeout);
             if (left <= 0)
             {
-                throw new TimeoutException();
+                return false;
             }
 
             Task delay = Task.Delay((int)Math.Min(left, int.MaxValue), stopDelay.Token);
             if (await Task.WhenAny(task, delay).ConfigureAwait(false) == task)
             {
                 stopDelay.Cancel();
-                return;
+                return true;
             }
         }
     }
@@ -184,11 +201,13 @@ internal abstract class KafkaFutureImpl
 /// own cancellation, not one a dependant took from its source or its function. A future made unable to cancel is never
 /// cancelled: <c>Cancel</c> does nothing and such an error is an ordinary failure. Its dependants and
 /// <c>WhenComplete</c> actions run inline on the completing thread, outside its lock, or inside the registering call
-/// once it is done. An optional value source is read first by every state read but <c>IsDone</c> and <c>Cancel</c>,
+/// once it is done. An optional value source is read first by every state read but <c>IsDone()</c> and <c>Cancel</c>,
 /// and by every wait, while it is pending, settling it on the reading thread, and waits on it re-read the source in
-/// slices. <c>IsDone</c> and <c>Cancel</c> only ask the source whether it is done, so they settle nothing and run no
+/// slices. <c>IsDone()</c> and <c>Cancel</c> only ask the source whether it is done, so they settle nothing and run no
 /// listener, and while the future is pending and its source is done <c>Cancel</c> answers false. The
-/// <see cref="Task{TResult}"/> of the async waits is made on the first of them and is the same every time.
+/// <see cref="Task{TResult}"/> of the async waits is made on the first of them and is the same every time, and so is
+/// the one of the wrapped async waits. A timed wait that ends first throws Java's <see cref="TimeoutException"/>,
+/// with no message, or for a send's future with the message of Java's <c>FutureRecordMetadata</c>.
 /// </summary>
 internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 {
@@ -214,6 +233,8 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
     private readonly IFutureValueSource<T>? _source;
 
+    private readonly bool _send;
+
     private volatile int _state;
 
     private bool _propagated;
@@ -226,10 +247,20 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
     private TaskCompletionSource<T>? _task;
 
+    // The Java Get's task, one field for the send's footprint: its completion source when it was taken while the
+    // future was pending, which the completion sets, or else the finished task itself.
+    private object? _wrapped;
+
     internal KafkaFutureImpl(bool mayCancel = true, IFutureValueSource<T>? source = null)
+        : this(mayCancel, source, send: false)
+    {
+    }
+
+    private KafkaFutureImpl(bool mayCancel, IFutureValueSource<T>? source, bool send)
     {
         _mayCancel = mayCancel;
         _source = source;
+        _send = send;
     }
 
     internal override bool IsDone => _state != Pending || (_source is not null && _source.IsDone);
@@ -259,6 +290,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     internal bool Complete(T value)
     {
         TaskCompletionSource<T>? task;
+        TaskCompletionSource<T>? wrapped;
         List<Action<KafkaFutureImpl<T>>>? listeners;
         lock (this)
         {
@@ -270,18 +302,25 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             _value = value;
             _state = Succeeded;
             task = _task;
+            wrapped = _wrapped as TaskCompletionSource<T>;
             listeners = _listeners;
             _listeners = null;
             Monitor.PulseAll(this);
         }
 
-        Settled(task, listeners);
+        Settled(task, wrapped, listeners);
         return true;
     }
 
     internal bool CompleteWithError(Exception error) => Fail(StateFor(error), error, propagated: false);
 
     internal bool Propagate(Exception error) => Fail(StateFor(error), error, propagated: true);
+
+    /// <summary>
+    /// The future a send returns, Java's <c>FutureRecordMetadata</c>: it is never cancelled, and its timed wait names
+    /// the time it waited.
+    /// </summary>
+    internal static KafkaFutureImpl<T> ForSend() => new KafkaFutureImpl<T>(mayCancel: false, source: null, send: true);
 
     internal override bool Cancel(bool mayInterruptIfRunning)
     {
@@ -304,7 +343,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     {
         if (!AwaitSettled(timeout, CancellationToken.None))
         {
-            throw new TimeoutException();
+            throw TimedOut(timeout);
         }
 
         return Answer();
@@ -312,26 +351,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
     internal T Get(CancellationToken cancellationToken)
     {
-        if (!cancellationToken.CanBeCanceled)
-        {
-            return Get();
-        }
-
-        ReadSource();
-        if (_state == Pending)
-        {
-            bool settled;
-            using (cancellationToken.Register(s_pulseWaiters, this))
-            {
-                settled = AwaitSettled(Timeout.InfiniteTimeSpan, cancellationToken);
-            }
-
-            if (!settled)
-            {
-                throw new OperationCanceledException(cancellationToken);
-            }
-        }
-
+        AwaitSettled(cancellationToken);
         return Answer();
     }
 
@@ -340,6 +360,42 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
         ReadSource();
         return _state == Pending ? valueIfAbsent : Answer();
     }
+
+    internal T GetWrapped()
+    {
+        AwaitSettled(Timeout.InfiniteTimeSpan, CancellationToken.None);
+        return WrappedAnswer();
+    }
+
+    internal T GetWrapped(TimeSpan timeout)
+    {
+        if (!AwaitSettled(timeout, CancellationToken.None))
+        {
+            throw TimedOut(timeout);
+        }
+
+        return WrappedAnswer();
+    }
+
+    internal T GetWrapped(CancellationToken cancellationToken)
+    {
+        AwaitSettled(cancellationToken);
+        return WrappedAnswer();
+    }
+
+    internal T GetNowWrapped(T valueIfAbsent)
+    {
+        ReadSource();
+        return _state == Pending ? valueIfAbsent : WrappedAnswer();
+    }
+
+    internal override void WaitWrapped() => _ = GetWrapped();
+
+    internal override void WaitWrapped(TimeSpan timeout) => _ = GetWrapped(timeout);
+
+    internal override void WaitWrapped(CancellationToken cancellationToken) => _ = GetWrapped(cancellationToken);
+
+    internal override void GetNowWrapped() => _ = GetNowWrapped(default!);
 
     internal override void Wait() => _ = Get();
 
@@ -379,7 +435,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
         return task.Task;
     }
 
-    internal static Task<T> WaitFor(Task<T> task, TimeSpan timeout)
+    internal Task<T> WaitFor(Task<T> task, TimeSpan timeout)
     {
         if (task.IsCompleted || timeout == Timeout.InfiniteTimeSpan)
         {
@@ -388,7 +444,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
         if (timeout <= TimeSpan.Zero)
         {
-            return Task.FromException<T>(new TimeoutException());
+            return Task.FromException<T>(TimedOut(timeout));
         }
 
         return WithTimeout(task, timeout);
@@ -418,6 +474,53 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     internal override Task WaitAsync(TimeSpan timeout) => GetAsync(timeout);
 
     internal override Task WaitAsync(CancellationToken cancellationToken) => GetAsync(cancellationToken);
+
+    /// <summary>
+    /// The task the public async <c>Get</c> returns, the same every time: it completes as <see cref="GetAsync()"/>'s
+    /// does, but a failure faults it with an <see cref="ExecutionException"/> around the future's failure. Taken while
+    /// the future is pending, it is a completion source of its own, which the completion sets directly; taken after,
+    /// it is that outcome at once, the task of <see cref="GetAsync()"/> itself for a value or a cancellation. It is
+    /// made on the caller's thread, never the completing one.
+    /// </summary>
+    internal Task<T> GetWrappedAsync()
+    {
+        Task<T>? task = WrappedTask(Volatile.Read(ref _wrapped));
+        if (task is not null)
+        {
+            return task;
+        }
+
+        ReadSource();
+        lock (this)
+        {
+            task = WrappedTask(_wrapped);
+            if (task is null && _state == Pending)
+            {
+                var wrapped = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Volatile.Write(ref _wrapped, wrapped);
+                return wrapped.Task;
+            }
+        }
+
+        if (task is not null)
+        {
+            return task;
+        }
+
+        // Settled: the outcome needs no completion source, and the first of two racing callers wins.
+        Task<T> done = _state == Failed ? Task.FromException<T>(new ExecutionException(Failure)) : GetAsync();
+        return WrappedTask(Interlocked.CompareExchange(ref _wrapped, done, null)) ?? done;
+    }
+
+    internal Task<T> GetWrappedAsync(TimeSpan timeout) => WaitFor(GetWrappedAsync(), timeout);
+
+    internal Task<T> GetWrappedAsync(CancellationToken cancellationToken) => WaitFor(GetWrappedAsync(), cancellationToken);
+
+    internal override Task WaitWrappedAsync() => GetWrappedAsync();
+
+    internal override Task WaitWrappedAsync(TimeSpan timeout) => GetWrappedAsync(timeout);
+
+    internal override Task WaitWrappedAsync(CancellationToken cancellationToken) => GetWrappedAsync(cancellationToken);
 
     internal KafkaFutureImpl<TResult> ThenApply<TResult>(Func<T, TResult> function)
     {
@@ -502,16 +605,29 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             ? Convert.ToString(_value, CultureInfo.InvariantCulture) ?? "null"
             : "null";
         Exception? error = state >= Failed ? Failure : null;
-        string exception = error is null ? "null" : error.GetType().FullName + ": " + error.Message;
+        string exception = error is null ? "null" : JavaText.ToString(error);
         bool done = error is not null || (state == Succeeded && _value is not null);
         return "KafkaFuture{value=" + value + ",exception=" + exception + ",done=" + (done ? "true" : "false") + "}";
     }
 
-    private static async Task<T> WithTimeout(Task<T> task, TimeSpan timeout)
+    private async Task<T> WithTimeout(Task<T> task, TimeSpan timeout)
     {
-        await AwaitWithin(task, timeout).ConfigureAwait(false);
+        if (!await CompletesWithin(task, timeout).ConfigureAwait(false))
+        {
+            throw TimedOut(timeout);
+        }
+
         return await task.ConfigureAwait(false);
     }
+
+    // Java's FutureRecordMetadata names the wait in milliseconds, its TimeUnit.toMillis truncating as Ticks do here;
+    // Java's KafkaFutureImpl throws CompletableFuture's TimeoutException, which has no message.
+    private Exception TimedOut(TimeSpan timeout) =>
+        _send
+            ? new Confluent.Kafka.TimeoutException(
+                "Timeout after waiting for " +
+                (timeout.Ticks / TimeSpan.TicksPerMillisecond).ToString(CultureInfo.InvariantCulture) + " ms.")
+            : new Confluent.Kafka.TimeoutException();
 
     private static async Task<T> WithCancellation(Task<T> task, CancellationToken cancellationToken)
     {
@@ -526,6 +642,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     {
         var failure = ExceptionDispatchInfo.Capture(error);
         TaskCompletionSource<T>? task;
+        TaskCompletionSource<T>? wrapped;
         List<Action<KafkaFutureImpl<T>>>? listeners;
         lock (this)
         {
@@ -538,20 +655,27 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             _propagated = propagated;
             _state = state;
             task = _task;
+            wrapped = _wrapped as TaskCompletionSource<T>;
             listeners = _listeners;
             _listeners = null;
             Monitor.PulseAll(this);
         }
 
-        Settled(task, listeners);
+        Settled(task, wrapped, listeners);
         return true;
     }
 
-    private void Settled(TaskCompletionSource<T>? task, List<Action<KafkaFutureImpl<T>>>? listeners)
+    private void Settled(
+        TaskCompletionSource<T>? task, TaskCompletionSource<T>? wrapped, List<Action<KafkaFutureImpl<T>>>? listeners)
     {
         if (task is not null)
         {
             SetTask(task);
+        }
+
+        if (wrapped is not null)
+        {
+            SetWrappedTask(wrapped);
         }
 
         if (listeners is not null)
@@ -576,6 +700,22 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             default:
                 task.TrySetException(_failure!.SourceException);
                 break;
+        }
+    }
+
+    private static Task<T>? WrappedTask(object? wrapped) =>
+        wrapped is TaskCompletionSource<T> source ? source.Task : (Task<T>?)wrapped;
+
+    // The Get task's outcome: a failure inside an ExecutionException, a value or a cancellation as SetTask gives it.
+    private void SetWrappedTask(TaskCompletionSource<T> wrapped)
+    {
+        if (_state == Failed)
+        {
+            wrapped.TrySetException(new ExecutionException(_failure!.SourceException));
+        }
+        else
+        {
+            SetTask(wrapped);
         }
     }
 
@@ -655,6 +795,44 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     {
         _failure?.Throw();
         return _value;
+    }
+
+    // Java's get and getNow: a cancelled future throws its cancellation as it is, and a failure goes inside an
+    // ExecutionException. An OperationCanceledException given as the error of a future that can be cancelled cancels
+    // it, so it is thrown as it is, as Java's KafkaFutureImpl throws a stored CancellationException; on a send's
+    // future, which cannot be, it is a failure like any other, as Java's FutureRecordMetadata wraps every error.
+    private T WrappedAnswer()
+    {
+        if (_state == Failed)
+        {
+            throw new ExecutionException(_failure!.SourceException);
+        }
+
+        return Answer();
+    }
+
+    private void AwaitSettled(CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled)
+        {
+            AwaitSettled(Timeout.InfiniteTimeSpan, CancellationToken.None);
+            return;
+        }
+
+        ReadSource();
+        if (_state == Pending)
+        {
+            bool settled;
+            using (cancellationToken.Register(s_pulseWaiters, this))
+            {
+                settled = AwaitSettled(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            if (!settled)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+        }
     }
 }
 

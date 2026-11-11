@@ -46,7 +46,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
     /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    public static IReadOnlyList<string> DEFAULT_LOG_DIRS { get; } = MockAdminClient.DEFAULT_LOG_DIRS;
+    public static readonly IReadOnlyList<string> DEFAULT_LOG_DIRS = MockAdminClient.DEFAULT_LOG_DIRS;
 
     private readonly NativeAdminClient _native;
 
@@ -96,9 +96,9 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null) =>
         AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(
-            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
+            topics ?? throw new ArgumentNullException(nameof(topics)),
             options));
 
     /// <inheritdoc/>
@@ -248,7 +248,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every group id's future fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so every group id's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncDeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
@@ -258,17 +258,17 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so the call's one future fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so the call's one future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         AsyncRemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every binding's future fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so every binding's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
         AsyncCreateAclsResult.OfClient(_native.CreateAcls(acls, options));
@@ -276,7 +276,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every filter's future fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so every filter's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncDeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
@@ -285,7 +285,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so <see cref="AsyncDescribeAclsResult.Values"/> fails with a <see cref="NotSupportedException"/>
+    /// so <see cref="AsyncDescribeAclsResult.Values"/> fails with an <see cref="UnsupportedOperationException"/>
     /// carrying that message.
     /// </remarks>
     public AsyncDescribeAclsResult DescribeAcls(
@@ -295,7 +295,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implement yet")</c> here, Java's own typo kept,
-    /// so <see cref="AsyncDescribeClientQuotasResult.Entities"/> fails with a <see cref="NotSupportedException"/>
+    /// so <see cref="AsyncDescribeClientQuotasResult.Entities"/> fails with an <see cref="UnsupportedOperationException"/>
     /// carrying that message.
     /// </remarks>
     public AsyncDescribeClientQuotasResult DescribeClientQuotas(
@@ -305,7 +305,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implement yet")</c> here, Java's own typo kept,
-    /// so every entity's future fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so every entity's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncAlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
@@ -314,7 +314,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every accessor fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so every accessor fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users = null,
@@ -325,7 +325,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every user's future fails with a <see cref="NotSupportedException"/> carrying that message.
+    /// so every user's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
@@ -334,9 +334,20 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
             _native.AlterUserScramCredentials(alterations, options));
 
     /// <inheritdoc/>
+    /// <exception cref="IndexOutOfBoundsException">
+    /// No renewer is given: Java's mock makes the first renewer the token's owner.
+    /// </exception>
     public AsyncCreateDelegationTokenResult CreateDelegationToken(
-        CreateDelegationTokenOptions? options = null) =>
-        AsyncCreateDelegationTokenResult.OfClient(_native.CreateDelegationToken(options));
+        CreateDelegationTokenOptions? options = null)
+    {
+        // Java's mock reads renewers().get(0) as the token's owner, out of bounds for its default LinkedList.
+        if (options is null || options.Renewers() is { Count: 0 })
+        {
+            throw new IndexOutOfBoundsException("Index: 0, Size: 0");
+        }
+
+        return AsyncCreateDelegationTokenResult.OfClient(_native.CreateDelegationToken(options));
+    }
 
     /// <inheritdoc/>
     public AsyncRenewDelegationTokenResult RenewDelegationToken(
@@ -443,7 +454,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// Java's <c>MockAdminClient.timeoutNextRequest(int)</c>.
     /// </summary>
     /// <param name="numberOfRequest">How many subsequent operations to time out.</param>
-    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void TimeoutNextRequest(int numberOfRequest) =>
         _native.TimeoutNextRequest(numberOfRequest);
 
@@ -455,10 +466,10 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <param name="newOffsets">The beginning offset per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// A key has a null topic, or a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateBeginningOffsets(newOffsets);
 
@@ -470,10 +481,10 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <param name="newOffsets">The end offset per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// A key has a null topic, or a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateEndOffsets(newOffsets);
 
@@ -488,10 +499,10 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// A key has a null topic, or a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateConsumerGroupOffsets(newOffsets);
 

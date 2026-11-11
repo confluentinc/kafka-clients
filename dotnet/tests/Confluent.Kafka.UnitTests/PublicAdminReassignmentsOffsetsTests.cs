@@ -23,6 +23,8 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -59,8 +61,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 [viaEarliest] = OffsetSpec.Earliest(),
             });
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
         Assert.Equal(NotImplemented, failure.Message);
 
         ListOffsetsResult.ListOffsetsResultInfo earliest =
@@ -99,11 +101,11 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         // The mock seeds no offsets, so -1 is expected: what is under test is that the kind is accepted.
         ListOffsetsResult.ListOffsetsResultInfo info =
             await TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline);
-        Assert.Equal(-1, info.Offset);
-        Assert.Equal(-1, info.Timestamp);
+        Assert.Equal(-1, info.Offset());
+        Assert.Equal(-1, info.Timestamp());
 
         // The mock builds every info without a leader epoch, so it reads as null.
-        Assert.Null(info.LeaderEpoch);
+        Assert.Null(info.LeaderEpoch());
     }
 
     [Fact]
@@ -126,8 +128,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
 
         Assert.NotNull(await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline));
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(bad).Get()), s_deadline);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(bad).Get()), s_deadline);
+        await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]
@@ -144,13 +146,9 @@ public sealed class PublicAdminReassignmentsOffsetsTests
 
         // A statement lambda, so xUnit binds the Action overload: PartitionResult throws synchronously, as Java's
         // does, instead of returning a faulted task.
-        ArgumentException rejected = Assert.Throws<ArgumentException>(
+        IllegalArgumentException rejected = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.PartitionResult(new TopicPartition("p4s2-unrequested", 7)); });
-        Assert.Equal("partition", rejected.ParamName);
-        Assert.Contains(
-            "List Offsets for partition \"p4s2-unrequested-7\" was not attempted",
-            rejected.Message,
-            StringComparison.Ordinal);
+        Assert.Equal("List Offsets for partition \"p4s2-unrequested-7\" was not attempted", rejected.Message);
 
         await TestTimeout.Run(() => result.PartitionResult(requested).Get(), s_deadline);
     }
@@ -177,10 +175,10 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 () => admin.ListPartitionReassignments(new[] { partition }).Reassignments().Get(), s_deadline);
 
         PartitionReassignment reassignment = Assert.Contains(partition, reassignments);
-        Assert.NotEmpty(reassignment.Replicas);
+        Assert.NotEmpty(reassignment.Replicas());
 
-        Assert.All(reassignment.AddingReplicas, broker => Assert.DoesNotContain(broker, reassignment.Replicas));
-        Assert.All(reassignment.RemovingReplicas, broker => Assert.Contains(broker, reassignment.Replicas));
+        Assert.All(reassignment.AddingReplicas(), broker => Assert.DoesNotContain(broker, reassignment.Replicas()));
+        Assert.All(reassignment.RemovingReplicas(), broker => Assert.Contains(broker, reassignment.Replicas()));
     }
 
     [Fact]
@@ -228,7 +226,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     }
 
     [Fact]
-    public async Task BothRpcs_ThrowObjectDisposedAfterClose_AndAreReachableThroughTheInterface()
+    public async Task BothRpcs_ThrowIllegalStateAfterClose_AndAreReachableThroughTheInterface()
     {
         AsyncMockAdminClient live = AsyncMockAdminClient.Create().Build();
         await using (TestTimeout.AsyncDisposal(live))
@@ -242,10 +240,10 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         AsyncMockAdminClient closed = AsyncMockAdminClient.Create().Build();
         TestTimeout.Dispose(closed);
 
-        Assert.Throws<ObjectDisposedException>(() => closed.ListPartitionReassignments());
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => closed.ListPartitionReassignments());
+        Assert.Throws<IllegalStateException>(
             () => closed.ListPartitionReassignments(new ListPartitionReassignmentsOptions()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => closed.ListOffsets(new Dictionary<TopicPartition, OffsetSpec>()));
 
         Assert.Contains(
@@ -311,7 +309,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         Assert.Equal(new[] { partition }, explicitNull.Keys);
         Assert.Equal(new[] { partition }, zeroArg.Keys);
         Assert.Equal(new[] { partition }, optionsOnly.Keys);
-        Assert.Equal(explicitNull[partition].Replicas, optionsOnly[partition].Replicas);
+        Assert.Equal(explicitNull[partition].Replicas(), optionsOnly[partition].Replicas());
 
         // The control: an empty selection is a different request, and lists nothing.
         Assert.Empty(await TestTimeout.Run(
@@ -325,13 +323,13 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
-        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
+        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions().TimeoutMs(-1);
 
-        KafkaException explicitNull = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),
+        KafkaTimeoutException explicitNull = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),
             s_deadline);
-        KafkaException optionsOnly = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(options).Reassignments().Get()),
+        KafkaTimeoutException optionsOnly = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(options).Reassignments().Get()),
             s_deadline);
 
         // 7 is REQUEST_TIMED_OUT, the same on both forms: a form that dropped its options would wait out the client

@@ -48,20 +48,20 @@ public sealed class PublicAdminListGroupsTests
 
         IReadOnlyCollection<GroupListing> valid =
             await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
-        IReadOnlyCollection<KafkaException> errors =
+        IReadOnlyCollection<Exception> errors =
             await TestTimeout.Run(() => result.Errors().Get(), s_deadline);
 
         Assert.Equal(
             new[] { "public-lg-a", "public-lg-b", "public-lg-c" },
-            valid.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal));
+            valid.Select(listing => listing.GroupId()).OrderBy(id => id, StringComparer.Ordinal));
         Assert.Empty(errors);
 
         foreach (GroupListing listing in valid)
         {
-            Assert.Equal(GroupType.CONSUMER, listing.Type);
-            Assert.Equal(GroupState.STABLE, listing.GroupState);
-            Assert.Equal(ConsumerProtocol, listing.Protocol);
-            Assert.False(listing.IsSimpleConsumerGroup);
+            Assert.Equal(GroupType.CONSUMER, listing.Type());
+            Assert.Equal(GroupState.STABLE, listing.GroupState());
+            Assert.Equal(ConsumerProtocol, listing.Protocol());
+            Assert.False(listing.IsSimpleConsumerGroup());
         }
     }
 
@@ -79,8 +79,8 @@ public sealed class PublicAdminListGroupsTests
         IReadOnlyCollection<GroupListing> valid = await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
 
         Assert.Equal(
-            valid.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal),
-            all.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal));
+            valid.Select(listing => listing.GroupId()).OrderBy(id => id, StringComparer.Ordinal),
+            all.Select(listing => listing.GroupId()).OrderBy(id => id, StringComparer.Ordinal));
         Assert.Equal(2, all.Count);
     }
 
@@ -109,7 +109,7 @@ public sealed class PublicAdminListGroupsTests
         IReadOnlyCollection<GroupListing> valid =
             await TestTimeout.Run(() => admin.ListGroups().Valid().Get(), s_deadline);
 
-        Assert.Equal("public-lg-iface", Assert.Single(valid).GroupId);
+        Assert.Equal("public-lg-iface", Assert.Single(valid).GroupId());
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public sealed class PublicAdminListGroupsTests
             admin.ListGroups(new ListGroupsOptions()),
         })
         {
-            Assert.Equal("public-lg-nofilter", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
+            Assert.Equal("public-lg-nofilter", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId());
         }
     }
 
@@ -139,15 +139,13 @@ public sealed class PublicAdminListGroupsTests
 
         await SeedGroups(admin, "public-lg-filtered");
 
-        AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions
-        {
-            GroupStates = new[] { GroupState.STABLE, GroupState.EMPTY },
-            ProtocolTypes = new[] { ConsumerProtocol },
-            Types = new[] { GroupType.CONSUMER },
-            TimeoutMs = 30_000,
-        });
+        AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions()
+            .InGroupStates(new[] { GroupState.STABLE, GroupState.EMPTY })
+            .WithProtocolTypes(new[] { ConsumerProtocol })
+            .WithTypes(new[] { GroupType.CONSUMER })
+            .TimeoutMs(30_000));
 
-        Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
+        Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId());
     }
 
     [Fact]
@@ -175,7 +173,7 @@ public sealed class PublicAdminListGroupsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions { TimeoutMs = -1 })));
+        Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -185,12 +183,12 @@ public sealed class PublicAdminListGroupsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentOutOfRangeException state = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }));
+            () => admin.ListGroups(new ListGroupsOptions().InGroupStates(new[] { (GroupState)(-1) })));
         Assert.Equal("options", state.ParamName);
         Assert.Contains("ListGroupsOptions.GroupStates", state.Message, StringComparison.Ordinal);
 
         ArgumentOutOfRangeException type = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(new ListGroupsOptions { Types = new[] { (GroupType)99 } }));
+            () => admin.ListGroups(new ListGroupsOptions().WithTypes(new[] { (GroupType)99 })));
         Assert.Equal("options", type.ParamName);
         Assert.Contains("ListGroupsOptions.Types", type.Message, StringComparison.Ordinal);
     }
@@ -201,7 +199,7 @@ public sealed class PublicAdminListGroupsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ListGroups());
+        Assert.Throws<IllegalStateException>(() => admin.ListGroups());
     }
 
     private static Task SeedGroups(AsyncMockAdminClient admin, params string[] groupIds) =>

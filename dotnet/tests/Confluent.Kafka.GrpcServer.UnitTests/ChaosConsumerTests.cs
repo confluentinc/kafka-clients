@@ -100,7 +100,7 @@ public sealed class ChaosConsumerTests
         Proto.WorkloadEvent pollError = Assert.Single(EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.ConsumerError));
         Assert.Equal(Proto.ConsumerOp.Poll, pollError.ConsumerError.Op);
         Assert.Equal("injected poll failure", pollError.ConsumerError.Error.Message);
-        Assert.Equal(0, pollError.ConsumerError.Error.Code);
+        Assert.Equal(-1, pollError.ConsumerError.Error.Code);
     }
 
     [Theory]
@@ -337,9 +337,9 @@ public sealed class ChaosConsumerTests
         // The flavour's own real client, built the way its servicer builds it.
         ConfigException expected = flavour == ChaosFlavour.Async
             ? Assert.Throws<ConfigException>(
-                () => new AsyncKafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray, Serdes.ByteArray))
+                () => new AsyncKafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray(), Serdes.ByteArray()))
             : Assert.Throws<ConfigException>(
-                () => new KafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray, Serdes.ByteArray));
+                () => new KafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray(), Serdes.ByteArray()));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);
         Proto.RunConsumerRequest request = ChaosHarness.ConsumerRequest("c-real");
         request.Config.Clear();

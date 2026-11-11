@@ -49,13 +49,13 @@ public sealed class AdminP7ResultMarshalTests
         UserScramCredentialsDescription emptyCopy = UserScramCredentialMarshal.CopyOutDescription(empty);
         UserScramCredentialsDescription aliceCopy = UserScramCredentialMarshal.CopyOutDescription(alice);
 
-        Assert.Equal("empty", emptyCopy.Name);
-        Assert.Empty(emptyCopy.CredentialInfos);
-        Assert.Equal("alice", aliceCopy.Name);
+        Assert.Equal("empty", emptyCopy.Name());
+        Assert.Empty(emptyCopy.CredentialInfos());
+        Assert.Equal("alice", aliceCopy.Name());
         Assert.Equal(
             new[] { ScramMechanism.SCRAM_SHA_256, ScramMechanism.SCRAM_SHA_512, ScramMechanism.SCRAM_SHA_256 },
-            aliceCopy.CredentialInfos.Select(info => info.Mechanism));
-        Assert.Equal(new[] { 4096, 8192, 16384 }, aliceCopy.CredentialInfos.Select(info => info.Iterations));
+            aliceCopy.CredentialInfos().Select(info => info.Mechanism()));
+        Assert.Equal(new[] { 4096, 8192, 16384 }, aliceCopy.CredentialInfos().Select(info => info.Iterations()));
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public sealed class AdminP7ResultMarshalTests
         UserScramCredentialsDescription second = UserScramCredentialMarshal.CopyOutDescription(alice);
 
         Assert.Equal(first, second);
-        Assert.Equal(ScramMechanism.SCRAM_SHA_512, second.CredentialInfos.Single().Mechanism);
+        Assert.Equal(ScramMechanism.SCRAM_SHA_512, second.CredentialInfos().Single().Mechanism());
     }
 
     [Fact]
@@ -77,10 +77,10 @@ public sealed class AdminP7ResultMarshalTests
         using NativeScramDescriptions native = new NativeScramDescriptions();
         IntPtr user = native.Description("u", (99, 4096));
 
-        ScramCredentialInfo info = UserScramCredentialMarshal.CopyOutDescription(user).CredentialInfos.Single();
+        ScramCredentialInfo info = UserScramCredentialMarshal.CopyOutDescription(user).CredentialInfos().Single();
 
-        Assert.Equal(ScramMechanism.UNKNOWN, info.Mechanism);
-        Assert.Equal(4096, info.Iterations);
+        Assert.Equal(ScramMechanism.UNKNOWN, info.Mechanism());
+        Assert.Equal(4096, info.Iterations());
     }
 
     [Fact]
@@ -90,7 +90,7 @@ public sealed class AdminP7ResultMarshalTests
 
         Assert.Equal(
             "ålice-ü-世",
-            UserScramCredentialMarshal.CopyOutDescription(native.Description("ålice-ü-世")).Name);
+            UserScramCredentialMarshal.CopyOutDescription(native.Description("ålice-ü-世")).Name());
     }
 
     [Fact]
@@ -105,12 +105,12 @@ public sealed class AdminP7ResultMarshalTests
             UserScramCredentialMarshal.CopyOutDescriptions(map);
 
         Assert.Equal(new[] { "alice", "bob" }, copied.Keys.OrderBy(key => key, StringComparer.Ordinal));
-        Assert.Equal("alice", copied["alice"].Name);
-        Assert.Equal(4096, copied["alice"].CredentialInfos.Single().Iterations);
-        Assert.Equal("bob", copied["bob"].Name);
+        Assert.Equal("alice", copied["alice"].Name());
+        Assert.Equal(4096, copied["alice"].CredentialInfos().Single().Iterations());
+        Assert.Equal("bob", copied["bob"].Name());
         Assert.Equal(
             new[] { ScramMechanism.SCRAM_SHA_512, ScramMechanism.SCRAM_SHA_256 },
-            copied["bob"].CredentialInfos.Select(info => info.Mechanism));
+            copied["bob"].CredentialInfos().Select(info => info.Mechanism()));
         Assert.False(copied.ContainsKey("Alice"));
     }
 
@@ -155,7 +155,7 @@ public sealed class AdminP7ResultMarshalTests
 
         DelegationToken token = DelegationTokenMarshal.CopyOutToken(natives.Token("token-1", mac));
 
-        Assert.Equal(mac, token.Hmac);
+        Assert.Equal(mac, token.Hmac());
     }
 
     [Fact]
@@ -163,7 +163,7 @@ public sealed class AdminP7ResultMarshalTests
     {
         using NativeTokens natives = new NativeTokens();
 
-        byte[] hmac = DelegationTokenMarshal.CopyOutToken(natives.Token("token-1", new byte[6])).Hmac;
+        byte[] hmac = DelegationTokenMarshal.CopyOutToken(natives.Token("token-1", new byte[6])).Hmac();
 
         Assert.Equal(6, hmac.Length);
         Assert.All(hmac, value => Assert.Equal(0, value));
@@ -206,17 +206,17 @@ public sealed class AdminP7ResultMarshalTests
 
         DelegationToken token = DelegationTokenMarshal.CopyOutToken(native);
 
-        TokenInformation info = token.TokenInfo;
-        Assert.Equal("token-ü", info.TokenId);
-        Assert.Equal(new KafkaPrincipal("User", "ownér"), info.Owner);
-        Assert.Equal(new KafkaPrincipal("User", "ownér"), info.TokenRequester);
+        TokenInformation info = token.TokenInfo();
+        Assert.Equal("token-ü", info.TokenId());
+        Assert.Equal(new KafkaPrincipal("User", "ownér"), info.Owner());
+        Assert.Equal(new KafkaPrincipal("User", "ownér"), info.TokenRequester());
         Assert.Equal(
             new[] { new KafkaPrincipal("User", "bob"), new KafkaPrincipal("Group", "ops") },
-            info.Renewers);
-        Assert.Equal(11, info.IssueTimestamp);
-        Assert.Equal(33, info.MaxTimestamp);
-        Assert.Equal(22, info.ExpiryTimestamp);
-        Assert.Equal(new byte[] { 1, 2, 3 }, token.Hmac);
+            info.Renewers());
+        Assert.Equal(11, info.IssueTimestamp());
+        Assert.Equal(33, info.MaxTimestamp());
+        Assert.Equal(22, info.ExpiryTimestamp());
+        Assert.Equal(new byte[] { 1, 2, 3 }, token.Hmac());
     }
 
     [Fact]
@@ -233,11 +233,11 @@ public sealed class AdminP7ResultMarshalTests
             maxTimestamp: 3,
             expiryTimestamp: 2);
 
-        TokenInformation info = DelegationTokenMarshal.CopyOutToken(native).TokenInfo;
+        TokenInformation info = DelegationTokenMarshal.CopyOutToken(native).TokenInfo();
 
-        Assert.Equal(new KafkaPrincipal("User", "alice"), info.Owner);
-        Assert.Equal(new KafkaPrincipal("User", "admin"), info.TokenRequester);
-        Assert.Empty(info.Renewers);
+        Assert.Equal(new KafkaPrincipal("User", "alice"), info.Owner());
+        Assert.Equal(new KafkaPrincipal("User", "admin"), info.TokenRequester());
+        Assert.Empty(info.Renewers());
     }
 
     [Fact]
@@ -248,19 +248,14 @@ public sealed class AdminP7ResultMarshalTests
 
         IReadOnlyList<DelegationToken> tokens = DelegationTokenMarshal.CopyOutTokens(list);
 
-        Assert.Equal(new[] { "b", "a" }, tokens.Select(token => token.TokenInfo.TokenId));
+        Assert.Equal(new[] { "b", "a" }, tokens.Select(token => token.TokenInfo().TokenId()));
     }
 
     [Fact]
     public void CopyOutTokens_ANullList_IsEmpty() => Assert.Empty(DelegationTokenMarshal.CopyOutTokens(IntPtr.Zero));
 
     [Fact]
-    public void CopyOutToken_NoToken_ThrowsKafkaException()
-    {
-        KafkaException exception = Assert.Throws<KafkaException>(() => DelegationTokenMarshal.CopyOutToken(IntPtr.Zero));
-
-        Assert.Equal("The admin result produced no delegation token.", exception.Message);
-    }
+    public void CopyOutToken_NoToken_IsNull() => Assert.Null(DelegationTokenMarshal.CopyOutToken(IntPtr.Zero));
 
     [Fact]
     public void CopyOutFinalized_CopiesEachRangeUnderItsName()
@@ -271,10 +266,10 @@ public sealed class AdminP7ResultMarshalTests
         Dictionary<string, FinalizedVersionRange> copied = FeatureMetadataMarshal.CopyOutFinalized(map);
 
         Assert.Equal(new[] { "group.version", "metadata.version" }, copied.Keys.OrderBy(k => k, StringComparer.Ordinal));
-        Assert.Equal(3, copied["metadata.version"].MinVersionLevel);
-        Assert.Equal(7, copied["metadata.version"].MaxVersionLevel);
-        Assert.Equal(0, copied["group.version"].MinVersionLevel);
-        Assert.Equal(1, copied["group.version"].MaxVersionLevel);
+        Assert.Equal(3, copied["metadata.version"].MinVersionLevel());
+        Assert.Equal(7, copied["metadata.version"].MaxVersionLevel());
+        Assert.Equal(0, copied["group.version"].MinVersionLevel());
+        Assert.Equal(1, copied["group.version"].MaxVersionLevel());
     }
 
     [Fact]
@@ -288,9 +283,9 @@ public sealed class AdminP7ResultMarshalTests
         Assert.Equal(
             new[] { "group.version", "metadata.version", "transaction.version" },
             copied.Keys.OrderBy(k => k, StringComparer.Ordinal));
-        Assert.Equal(1, copied["metadata.version"].MinVersion);
-        Assert.Equal(9, copied["metadata.version"].MaxVersion);
-        Assert.Equal(2, copied["group.version"].MaxVersion);
+        Assert.Equal(1, copied["metadata.version"].MinVersion());
+        Assert.Equal(9, copied["metadata.version"].MaxVersion());
+        Assert.Equal(2, copied["group.version"].MaxVersion());
     }
 
     [Fact]
@@ -316,12 +311,7 @@ public sealed class AdminP7ResultMarshalTests
     }
 
     [Fact]
-    public void CopyOut_NoMetadata_ThrowsKafkaException()
-    {
-        KafkaException thrown = Assert.Throws<KafkaException>(() => FeatureMetadataMarshal.CopyOut(IntPtr.Zero));
-
-        Assert.Equal("The describeFeatures result produced no feature metadata.", thrown.Message);
-    }
+    public void CopyOut_NoMetadata_IsNull() => Assert.Null(FeatureMetadataMarshal.CopyOut(IntPtr.Zero));
 
     [Theory]
     [InlineData(0L, 0L)]

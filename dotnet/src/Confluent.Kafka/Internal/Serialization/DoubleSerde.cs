@@ -19,14 +19,14 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Double"/>: the 8 big-endian bytes of Java's <c>Double.doubleToLongBits</c>
+/// The serde behind <see cref="Serdes.Double()"/>: the 8 big-endian bytes of Java's <c>Double.doubleToLongBits</c>
 /// (NaN canonicalized), as Java's <c>DoubleSerializer</c> and <c>DoubleDeserializer</c>.
 /// </summary>
 internal sealed class DoubleSerde : ISerde<double>
 {
     private const long CanonicalNaNBits = 0x7ff8000000000000L;
 
-    public byte[]? Serialize(string topic, double data)
+    public ReadOnlyMemory<byte>? Serialize(string topic, double data)
     {
         long bits = double.IsNaN(data) ? CanonicalNaNBits : BitConverter.DoubleToInt64Bits(data);
         return new[]

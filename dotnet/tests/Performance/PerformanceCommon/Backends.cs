@@ -83,11 +83,11 @@ public readonly struct PerfSendHandle
 /// <summary>
 /// The engine's delivery notification, Java's <c>Callback.onCompletion</c>: a backend calls it once for each record
 /// whose callback-taking send returned, on its client's delivery thread, and for none whose send threw. It must not
-/// throw.
+/// throw. <c>sendStartTicks</c> is the <see cref="System.Diagnostics.Stopwatch"/> timestamp taken just before the send.
 /// </summary>
 public interface IPerfDeliveryCallback
 {
-    void OnCompletion(long sendStartMs, PerfRecordMetadata metadata, Exception? exception);
+    void OnCompletion(long sendStartTicks, PerfRecordMetadata metadata, Exception? exception);
 }
 
 /// <summary>
@@ -98,7 +98,7 @@ public interface IProducerBackend : IDisposable
 {
     PerfSendHandle Send(string topic, byte[]? key, byte[]? value);
 
-    void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs);
+    void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks);
 
     void Flush(CancellationToken cancellationToken);
 
@@ -113,7 +113,7 @@ public interface IAsyncProducerBackend : IDisposable, IAsyncDisposable
 {
     ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value);
 
-    ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs);
+    ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks);
 
     Task Flush(CancellationToken cancellationToken);
 

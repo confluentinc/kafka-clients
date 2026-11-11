@@ -30,7 +30,7 @@ public sealed class ProducerAcceptanceModeTests
 {
     private const string Topic = "acceptance-topic";
 
-    // The engine recognizes QUEUE_FULL by the message alone (ProducerBenchmark.IsQueueFull), not by the exception type.
+    // A failed acceptance is a failed delivery whatever its error; the engine gives a full queue no special treatment.
     private const string QueueFullMessage = "Local: Queue full";
 
     private static readonly TimeSpan s_returnBudget = TimeSpan.FromSeconds(30);
@@ -44,8 +44,8 @@ public sealed class ProducerAcceptanceModeTests
         NotAwaitingKeepsSendingAsync();
 
     [Fact]
-    public Task RunAsync_NotAwaitingAcceptance_SubtractsALaterQueueFull_AndDoesNotCountASendThatThrows() =>
-        NotAwaitingCountsQueueFullAsync();
+    public Task RunAsync_NotAwaitingAcceptance_CountsALaterFailedAcceptance_AndNotARejectedSend() =>
+        NotAwaitingCountsFailedAcceptanceAsync();
 
     [Theory]
     [InlineData(null, true)]
@@ -140,10 +140,11 @@ public sealed class ProducerAcceptanceModeTests
         Assert.Equal(5, result.MeasuredSent);
     }
 
-    private static async Task NotAwaitingCountsQueueFullAsync()
+    private static async Task NotAwaitingCountsFailedAcceptanceAsync()
     {
-        // A failure reaches the loop in two shapes: a pending acceptance that fails later (counted, then subtracted as
-        // QUEUE_FULL), or a call that throws (never counted).
+        // A failure reaches the loop in three shapes: a pending acceptance that fails later (counted as sent, and
+        // reported as a failed delivery), or a call that throws or returns an already-failed acceptance (never
+        // counted).
         Apply(awaitAccepted: "False");
         using var cts = new CancellationTokenSource();
         TaskCompletionSource<Task<PerfRecordMetadata>>? second = null;
@@ -159,6 +160,9 @@ public sealed class ProducerAcceptanceModeTests
                     break;
                 case 4:
                     throw new InvalidOperationException(QueueFullMessage);
+                case 5:
+                    return new ValueTask<Task<PerfRecordMetadata>>(
+                        Task.FromException<Task<PerfRecordMetadata>>(new InvalidOperationException(QueueFullMessage)));
                 case 6:
                     cts.Cancel();
                     break;
@@ -169,8 +173,8 @@ public sealed class ProducerAcceptanceModeTests
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        // Sends 1, 2, 3, 5 and 6 are counted as sent (the 6th cancels the run, after it was accepted); the 2nd
-        // is subtracted as QUEUE_FULL, and the 4th, which threw, was never counted.
+        // Sends 1, 2, 3 and 6 are counted as sent (the 6th cancels the run, after it was accepted), the 2nd
+        // included although its acceptance failed later; the 4th, which threw, and the 5th, already refused, were not.
         Assert.Equal(6, backend.SendCount);
         Assert.Equal(4, result.MeasuredSent);
     }
@@ -227,29 +231,29 @@ public sealed class ProducerAcceptanceModeTests
     /// </summary>
     private static class StagedDeliveryBridge
     {
-        internal static ValueTask Send(ValueTask<Task<PerfRecordMetadata>> staged, IPerfDeliveryCallback callback, long sendStartMs) =>
+        internal static ValueTask Send(ValueTask<Task<PerfRecordMetadata>> staged, IPerfDeliveryCallback callback, long sendStartTicks) =>
             staged.IsCompletedSuccessfully
-                ? Report(staged.Result, callback, sendStartMs)
-                : AwaitAcceptance(staged, callback, sendStartMs);
+                ? Report(staged.Result, callback, sendStartTicks)
+                : AwaitAcceptance(staged, callback, sendStartTicks);
 
-        private static async ValueTask AwaitAcceptance(ValueTask<Task<PerfRecordMetadata>> staged, IPerfDeliveryCallback callback, long sendStartMs)
+        private static async ValueTask AwaitAcceptance(ValueTask<Task<PerfRecordMetadata>> staged, IPerfDeliveryCallback callback, long sendStartTicks)
         {
             Task<PerfRecordMetadata> delivery = await staged.ConfigureAwait(false);
-            await Report(delivery, callback, sendStartMs).ConfigureAwait(false);
+            await Report(delivery, callback, sendStartTicks).ConfigureAwait(false);
         }
 
-        private static ValueTask Report(Task<PerfRecordMetadata> delivery, IPerfDeliveryCallback callback, long sendStartMs)
+        private static ValueTask Report(Task<PerfRecordMetadata> delivery, IPerfDeliveryCallback callback, long sendStartTicks)
         {
             _ = delivery.ContinueWith(
                 t =>
                 {
                     if (t.Status == TaskStatus.RanToCompletion)
                     {
-                        callback.OnCompletion(sendStartMs, t.Result, null);
+                        callback.OnCompletion(sendStartTicks, t.Result, null);
                     }
                     else
                     {
-                        callback.OnCompletion(sendStartMs, default, t.Exception?.InnerException ?? new OperationCanceledException());
+                        callback.OnCompletion(sendStartTicks, default, t.Exception?.InnerException ?? new OperationCanceledException());
                     }
                 },
                 CancellationToken.None,
@@ -275,8 +279,8 @@ public sealed class ProducerAcceptanceModeTests
         public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value) =>
             _send(Interlocked.Increment(ref _sendCount));
 
-        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs) =>
-            StagedDeliveryBridge.Send(_send(Interlocked.Increment(ref _sendCount)), callback, sendStartMs);
+        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks) =>
+            StagedDeliveryBridge.Send(_send(Interlocked.Increment(ref _sendCount)), callback, sendStartTicks);
 
         public Task Flush(CancellationToken cancellationToken) => Task.CompletedTask;
 

@@ -34,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <remarks>
 /// Four result shapes across eight RPCs: two per-key void (<c>AlterUserScramCredentials</c>, <c>UpdateFeatures</c>),
 /// one a collection, four a single value, and one deriving three accessors from one snapshot. Each discriminant is a
-/// nullable property, not a sentinel.
+/// nullable getter, not a sentinel.
 /// </remarks>
 public sealed class PublicAdminP7ShapeParityTests
 {
@@ -109,7 +109,7 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(
             typeof(IReadOnlyDictionary<,>).MakeGenericType(typeof(string), futureType),
-            resultType.GetProperty("Values")!.PropertyType);
+            Getters.Get(resultType, "Values").ReturnType);
         Assert.Equal(futureType, resultType.GetMethod("All", Type.EmptyTypes)!.ReturnType);
 
         Assert.Equal(
@@ -183,41 +183,45 @@ public sealed class PublicAdminP7ShapeParityTests
     }
 
     [Fact]
-    public void OptionBorneDiscriminants_AreNullableProperties()
+    public void OptionBorneDiscriminants_AreNullableGetters()
     {
         Assert.Equal(
             typeof(IReadOnlyList<KafkaPrincipal>),
-            typeof(DescribeDelegationTokenOptions).GetProperty(
-                nameof(DescribeDelegationTokenOptions.Owners))!.PropertyType);
+            Getters.Get(
+                typeof(DescribeDelegationTokenOptions), nameof(DescribeDelegationTokenOptions.Owners)).ReturnType);
 
         Assert.Equal(
             typeof(int?),
-            typeof(DescribeFeaturesOptions).GetProperty(nameof(DescribeFeaturesOptions.NodeId))!.PropertyType);
+            Getters.Get(typeof(DescribeFeaturesOptions), nameof(DescribeFeaturesOptions.NodeId)).ReturnType);
 
         // The owner is optional too — absent means "the caller's own principal".
         Assert.Equal(
             typeof(KafkaPrincipal),
-            typeof(CreateDelegationTokenOptions).GetProperty(
-                nameof(CreateDelegationTokenOptions.Owner))!.PropertyType);
+            Getters.Get(typeof(CreateDelegationTokenOptions), nameof(CreateDelegationTokenOptions.Owner)).ReturnType);
 
         // But the renewer list is not nullable: Java defaults it to an empty list.
         Assert.Equal(
             Array.Empty<KafkaPrincipal>(),
-            new CreateDelegationTokenOptions().Renewers);
+            new CreateDelegationTokenOptions().Renewers());
     }
 
     [Fact]
-    public void Salt_IsNullableOnTheUpsertion()
+    public void Salt_IsNeverNull_AsInJava()
     {
-        UserScramCredentialUpsertion generated = new UserScramCredentialUpsertion(
-            "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 }, null);
+        ScramCredentialInfo info = new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096);
+        UserScramCredentialUpsertion generated = new UserScramCredentialUpsertion("u", info, new byte[] { 1 });
+        UserScramCredentialUpsertion fromString = new UserScramCredentialUpsertion("u", info, "p");
         UserScramCredentialUpsertion literal = new UserScramCredentialUpsertion(
-            "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 },
-            Array.Empty<byte>());
+            "u", info, new byte[] { 1 }, Array.Empty<byte>());
 
-        Assert.Null(generated.Salt);
-        Assert.NotNull(literal.Salt);
-        Assert.Empty(literal.Salt!);
+        Assert.NotEmpty(generated.Salt());
+        Assert.NotEmpty(fromString.Salt());
+        Assert.NotEqual(generated.Salt(), fromString.Salt());
+        Assert.Empty(literal.Salt());
+        Assert.Equal(
+            "salt",
+            Assert.Throws<ArgumentNullException>(
+                () => new UserScramCredentialUpsertion("u", info, new byte[] { 1 }, null!)).ParamName);
     }
 
     [Fact]
@@ -228,8 +232,8 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.Equal(typeof(UserScramCredentialAlteration), typeof(UserScramCredentialDeletion).BaseType);
         Assert.Equal(
             typeof(string),
-            typeof(UserScramCredentialAlteration).GetProperty(
-                nameof(UserScramCredentialAlteration.User))!.PropertyType);
+            typeof(UserScramCredentialAlteration).GetMethod(
+                nameof(UserScramCredentialAlteration.User), Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]
@@ -237,23 +241,23 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(
             typeof(short),
-            typeof(FinalizedVersionRange).GetProperty(
-                nameof(FinalizedVersionRange.MinVersionLevel))!.PropertyType);
+            typeof(FinalizedVersionRange).GetMethod(
+                nameof(FinalizedVersionRange.MinVersionLevel), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(FinalizedVersionRange).GetProperty(
-                nameof(FinalizedVersionRange.MaxVersionLevel))!.PropertyType);
+            typeof(FinalizedVersionRange).GetMethod(
+                nameof(FinalizedVersionRange.MaxVersionLevel), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(SupportedVersionRange).GetProperty(
-                nameof(SupportedVersionRange.MinVersion))!.PropertyType);
+            typeof(SupportedVersionRange).GetMethod(
+                nameof(SupportedVersionRange.MinVersion), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(SupportedVersionRange).GetProperty(
-                nameof(SupportedVersionRange.MaxVersion))!.PropertyType);
+            typeof(SupportedVersionRange).GetMethod(
+                nameof(SupportedVersionRange.MaxVersion), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(FeatureUpdate).GetProperty(nameof(FeatureUpdate.MaxVersionLevel))!.PropertyType);
+            typeof(FeatureUpdate).GetMethod(nameof(FeatureUpdate.MaxVersionLevel), Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]
@@ -261,25 +265,27 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, FinalizedVersionRange>),
-            typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.FinalizedFeatures))!.PropertyType);
+            typeof(FeatureMetadata).GetMethod(nameof(FeatureMetadata.FinalizedFeatures), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, SupportedVersionRange>),
-            typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.SupportedFeatures))!.PropertyType);
+            typeof(FeatureMetadata).GetMethod(nameof(FeatureMetadata.SupportedFeatures), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(long?),
-            typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.FinalizedFeaturesEpoch))!.PropertyType);
+            typeof(FeatureMetadata).GetMethod(nameof(FeatureMetadata.FinalizedFeaturesEpoch), Type.EmptyTypes)!.ReturnType);
 
         Assert.Empty(typeof(FeatureMetadata).GetConstructors());
     }
 
     [Fact]
-    public void UpgradeType_IsNested_WithJavasConstants()
+    public void UpgradeType_SitsBesideFeatureUpdate_WithJavasConstants()
     {
-        Assert.Equal(typeof(FeatureUpdate), typeof(FeatureUpdate.UpgradeType).DeclaringType);
+        Assert.Null(typeof(UpgradeType).DeclaringType);
+        Assert.Equal(typeof(FeatureUpdate).Namespace, typeof(UpgradeType).Namespace);
+        Assert.Equal(typeof(UpgradeType), typeof(FeatureUpdate).GetMethod(nameof(FeatureUpdate.UpgradeType), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             new[] { "UNKNOWN", "UPGRADE", "SAFE_DOWNGRADE", "UNSAFE_DOWNGRADE" },
-            Enum.GetValues(typeof(FeatureUpdate.UpgradeType))
-                .Cast<FeatureUpdate.UpgradeType>()
+            Enum.GetValues(typeof(UpgradeType))
+                .Cast<UpgradeType>()
                 .OrderBy(value => (int)value)
                 .Select(value => value.ToString()));
     }
@@ -303,4 +309,41 @@ public sealed class PublicAdminP7ShapeParityTests
             .Select(member => member.Name)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(name => name, StringComparer.Ordinal);
+
+    [Fact]
+    public void TokenInformation_FromRecord_IsTheSevenArgumentConstructor()
+    {
+        KafkaPrincipal owner = new KafkaPrincipal("User", "owner");
+        KafkaPrincipal requester = new KafkaPrincipal("User", "req");
+        KafkaPrincipal renewer = new KafkaPrincipal("User", "renewer");
+
+        TokenInformation fromRecord = TokenInformation.FromRecord("id1", owner, requester, new[] { renewer }, 1, 3, 2);
+
+        Assert.Equal(new TokenInformation("id1", owner, requester, new[] { renewer }, 1, 3, 2), fromRecord);
+        Assert.Equal(requester, fromRecord.TokenRequester());
+        Assert.Equal(2, fromRecord.ExpiryTimestamp());
+        Assert.Equal(
+            "renewers",
+            Assert.Throws<ArgumentNullException>(() => TokenInformation.FromRecord("id1", owner, requester, null!, 1, 3, 2))
+                .ParamName);
+    }
+
+    [Fact]
+    public void TokenInformation_SetExpiryTimestamp_ChangesNeitherEqualityNorTheHash()
+    {
+        KafkaPrincipal owner = new KafkaPrincipal("User", "owner");
+        KafkaPrincipal renewer = new KafkaPrincipal("User", "renewer");
+        TokenInformation info = new TokenInformation("id1", owner, new[] { renewer }, 1, 3, 2);
+        TokenInformation same = new TokenInformation("id1", owner, new[] { renewer }, 1, 3, 2);
+        HashSet<TokenInformation> set = new HashSet<TokenInformation> { same };
+
+        same.SetExpiryTimestamp(9);
+
+        Assert.Equal(9, same.ExpiryTimestamp());
+        Assert.Equal(info, same);
+        Assert.Equal(info.GetHashCode(), same.GetHashCode());
+        Assert.Contains(same, set);
+        Assert.Equal(new DelegationToken(info, new byte[] { 1 }), new DelegationToken(same, new byte[] { 1 }));
+        Assert.NotEqual(info, new TokenInformation("id1", owner, new[] { renewer }, 1, 4, 2));
+    }
 }

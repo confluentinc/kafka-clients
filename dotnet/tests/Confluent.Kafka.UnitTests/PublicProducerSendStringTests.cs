@@ -28,20 +28,20 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// A topic or a header key the C ABI would change, one holding a NUL character or an unpaired UTF-16 surrogate, makes
+/// A topic or a header key the C ABI would change, one holding a NUL character, makes
 /// the send throw <see cref="ArgumentException"/> on all four producers, before the record reaches the core: the Kafka
 /// producers have sealed the headers by then, the mocks leave them writable, no callback fires for the record, and the
-/// producer still sends. A non-ASCII topic and header key, a surrogate pair included, are sent.
+/// producer still sends. A non-ASCII topic and header key, a surrogate pair included, are sent, and so is one with an
+/// unpaired surrogate, which crosses as Java's <c>String.getBytes(UTF_8)</c> encodes it, as <c>?</c>.
 /// </summary>
 public sealed class PublicProducerSendStringTests
 {
     private const string TopicMessage =
-        "A topic must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "A topic must not contain a NUL character: such a string cannot be passed to the native client unchanged.";
 
     private const string HeaderKeyMessage =
-        "A header key must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "A header key must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
 
     private const string Topic = "topic";
 
@@ -73,6 +73,11 @@ public sealed class PublicProducerSendStringTests
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["nul"] = "t\0u",
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> s_loneSurrogates =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
             ["lone-high"] = "t\uD800u",
             ["lone-low"] = "t\uDC00u",
         };
@@ -89,8 +94,8 @@ public sealed class PublicProducerSendStringTests
     public void LabelTable_HoldsTheStringsItsNamesSay()
     {
         Assert.Equal('\0', s_altered["nul"][1]);
-        Assert.True(char.IsHighSurrogate(s_altered["lone-high"][1]));
-        Assert.True(char.IsLowSurrogate(s_altered["lone-low"][1]));
+        Assert.True(char.IsHighSurrogate(s_loneSurrogates["lone-high"][1]));
+        Assert.True(char.IsLowSurrogate(s_loneSurrogates["lone-low"][1]));
         Assert.True(char.IsSurrogatePair(NonAsciiTopic[NonAsciiTopic.Length - 2], NonAsciiTopic[NonAsciiTopic.Length - 1]));
         Assert.True(char.IsSurrogatePair(NonAsciiKey[NonAsciiKey.Length - 2], NonAsciiKey[NonAsciiKey.Length - 1]));
     }
@@ -109,13 +114,13 @@ public sealed class PublicProducerSendStringTests
         string message = field == TopicField ? TopicMessage : HeaderKeyMessage;
         Assert.Equal(new ArgumentException(message, "record").Message, rejected.Message);
 
-        Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
 
         if (subject.IsMock)
         {
             Assert.Equal(0, subject.HistoryCount());
             RecordMetadata? metadata = await subject.Deliver(Record(Topic, "h"));
-            Assert.Equal(0L, metadata!.Offset);
+            Assert.Equal(0L, metadata!.Offset());
             Assert.Equal(1, subject.HistoryCount());
         }
         else
@@ -133,7 +138,7 @@ public sealed class PublicProducerSendStringTests
         try
         {
             subject.Reject(Record(s_altered["nul"], "h"), callback);
-            subject.Reject(Record(Topic, s_altered["lone-low"]), callback);
+            subject.Reject(Record(Topic, s_altered["nul"]), callback);
             await subject.Deliver(Record(Topic, "h"));
         }
         finally
@@ -155,11 +160,33 @@ public sealed class PublicProducerSendStringTests
 
         RecordMetadata? metadata = await subject.Deliver(record);
 
-        Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
         if (subject.IsMock)
         {
-            Assert.Equal(NonAsciiTopic, metadata!.Topic);
+            Assert.Equal(NonAsciiTopic, metadata!.Topic());
             Assert.Equal(1, subject.HistoryCount());
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Producers))]
+    public async Task Send_ATopicAndHeaderKeyWithAnUnpairedSurrogate_IsSent(string producer)
+    {
+        foreach (string label in s_loneSurrogates.Keys)
+        {
+            await using Subject subject = Create(producer);
+            string lone = s_loneSurrogates[label];
+            ProducerRecord<string, string> record = Record(lone, lone);
+
+            RecordMetadata? metadata = await subject.Deliver(record);
+
+            Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
+            if (subject.IsMock)
+            {
+                // The topic the core holds, read back: the surrogate crossed as '?'.
+                Assert.Equal("t?u", metadata!.Topic());
+                Assert.Equal(1, subject.HistoryCount());
+            }
         }
     }
 
@@ -169,17 +196,17 @@ public sealed class PublicProducerSendStringTests
         {
             case Kafka:
                 return new SyncSubject(
-                    new KafkaProducer<string, string>(Unreachable(), Serdes.String, Serdes.String), historyCount: null);
+                    new KafkaProducer<string, string>(Unreachable(), Serdes.String(), Serdes.String()), historyCount: null);
             case AsyncKafka:
                 return new AsyncSubject(
-                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String, Serdes.String),
+                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String(), Serdes.String()),
                     historyCount: null);
             case Mock:
-                MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String, Serdes.String);
+                MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String(), Serdes.String());
                 return new SyncSubject(mock, mock.HistoryCount);
             case AsyncMock:
                 AsyncMockProducer<string, string> asyncMock =
-                    new AsyncMockProducer<string, string>(Serdes.String, Serdes.String);
+                    new AsyncMockProducer<string, string>(Serdes.String(), Serdes.String());
                 return new AsyncSubject(asyncMock, asyncMock.HistoryCount);
             default:
                 throw new ArgumentOutOfRangeException(nameof(producer), producer, null);
@@ -213,7 +240,7 @@ public sealed class PublicProducerSendStringTests
 
         internal int HistoryCount() => _historyCount!();
 
-        internal abstract ArgumentException Reject(ProducerRecord<string, string> record, IDeliveryCallback? callback);
+        internal abstract ArgumentException Reject(ProducerRecord<string, string> record, ICallback? callback);
 
         internal abstract Task<RecordMetadata?> Deliver(ProducerRecord<string, string> record);
 
@@ -228,7 +255,7 @@ public sealed class PublicProducerSendStringTests
         internal SyncSubject(IProducer<string, string> producer, Func<int>? historyCount)
             : base(historyCount) => _producer = producer;
 
-        internal override ArgumentException Reject(ProducerRecord<string, string> record, IDeliveryCallback? callback) =>
+        internal override ArgumentException Reject(ProducerRecord<string, string> record, ICallback? callback) =>
             Assert.Throws<ArgumentException>(
                 () => callback is null ? _producer.Send(record) : _producer.Send(record, callback));
 
@@ -241,7 +268,7 @@ public sealed class PublicProducerSendStringTests
                 return Task.FromResult<RecordMetadata?>(future.Get(s_deadline));
             }
 
-            KafkaException failure = Assert.Throws<KafkaException>(() => future.Get(s_deadline));
+            Common.Errors.TimeoutException failure = FutureAssert.Throws<Common.Errors.TimeoutException>(() => future.Get(s_deadline));
             Assert.Equal(TimeoutCode, failure.Code);
             return Task.FromResult<RecordMetadata?>(null);
         }
@@ -261,7 +288,7 @@ public sealed class PublicProducerSendStringTests
         internal AsyncSubject(IAsyncProducer<string, string> producer, Func<int>? historyCount)
             : base(historyCount) => _producer = producer;
 
-        internal override ArgumentException Reject(ProducerRecord<string, string> record, IDeliveryCallback? callback) =>
+        internal override ArgumentException Reject(ProducerRecord<string, string> record, ICallback? callback) =>
             Assert.Throws<ArgumentException>(
                 () => { _ = callback is null ? _producer.Send(record) : _producer.Send(record, callback); });
 
@@ -272,7 +299,7 @@ public sealed class PublicProducerSendStringTests
                 return await TestTimeout.Run(() => _producer.Send(record).Delivery(), s_deadline);
             }
 
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            Common.Errors.TimeoutException failure = await FutureAssert.ThrowsAsync<Common.Errors.TimeoutException>(
                 () => TestTimeout.Run(() => _producer.Send(record).Delivery(), s_deadline));
             Assert.Equal(TimeoutCode, failure.Code);
             return null;
@@ -282,7 +309,7 @@ public sealed class PublicProducerSendStringTests
     }
 
     /// <summary>A delivery callback that counts its calls.</summary>
-    private sealed class CountingCallback : IDeliveryCallback
+    private sealed class CountingCallback : ICallback
     {
         private int _count;
 

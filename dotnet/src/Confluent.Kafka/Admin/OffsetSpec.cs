@@ -26,20 +26,26 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="Earliest"/> would collapse onto one number.
 /// </para>
 /// <para>
-/// The hierarchy is closed, a recorded deviation: Java's is open, and Java queries an
-/// unrecognised subclass silently as <see cref="Latest"/>. The seven kinds here are exhaustive.
+/// The base class is open, as Java's is: a bare <see cref="OffsetSpec"/>, or a subclass of it that is not one of the
+/// seven kinds here, is queried as <see cref="Latest"/>, as Java's admin client queries it. The seven kinds
+/// themselves are sealed.
 /// </para>
 /// </remarks>
 public class OffsetSpec
 {
-    private protected OffsetSpec()
+    /// <summary>
+    /// Creates a spec of no particular kind, Java's implicit <c>OffsetSpec()</c>: the admin client reads it, and any
+    /// other subclass it does not know, as <see cref="Latest"/>, as Java's does.
+    /// </summary>
+    public OffsetSpec()
     {
     }
 
     /// <summary>The earliest available offset — Java's <c>EarliestSpec</c>.</summary>
     public sealed class EarliestSpec : OffsetSpec
     {
-        internal EarliestSpec()
+        /// <summary>Creates the spec, Java's implicit <c>EarliestSpec()</c>.</summary>
+        public EarliestSpec()
         {
         }
     }
@@ -47,7 +53,8 @@ public class OffsetSpec
     /// <summary>The latest available offset — Java's <c>LatestSpec</c>.</summary>
     public sealed class LatestSpec : OffsetSpec
     {
-        internal LatestSpec()
+        /// <summary>Creates the spec, Java's implicit <c>LatestSpec()</c>.</summary>
+        public LatestSpec()
         {
         }
     }
@@ -59,7 +66,8 @@ public class OffsetSpec
     /// </summary>
     public sealed class MaxTimestampSpec : OffsetSpec
     {
-        internal MaxTimestampSpec()
+        /// <summary>Creates the spec, Java's implicit <c>MaxTimestampSpec()</c>.</summary>
+        public MaxTimestampSpec()
         {
         }
     }
@@ -70,7 +78,8 @@ public class OffsetSpec
     /// </summary>
     public sealed class EarliestLocalSpec : OffsetSpec
     {
-        internal EarliestLocalSpec()
+        /// <summary>Creates the spec, Java's implicit <c>EarliestLocalSpec()</c>.</summary>
+        public EarliestLocalSpec()
         {
         }
     }
@@ -81,7 +90,8 @@ public class OffsetSpec
     /// </summary>
     public sealed class LatestTieredSpec : OffsetSpec
     {
-        internal LatestTieredSpec()
+        /// <summary>Creates the spec, Java's implicit <c>LatestTieredSpec()</c>.</summary>
+        public LatestTieredSpec()
         {
         }
     }
@@ -92,7 +102,8 @@ public class OffsetSpec
     /// </summary>
     public sealed class EarliestPendingUploadSpec : OffsetSpec
     {
-        internal EarliestPendingUploadSpec()
+        /// <summary>Creates the spec, Java's implicit <c>EarliestPendingUploadSpec()</c>.</summary>
+        public EarliestPendingUploadSpec()
         {
         }
     }

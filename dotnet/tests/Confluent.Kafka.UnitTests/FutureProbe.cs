@@ -22,7 +22,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Observes one sync or async future without an unbounded wait: whether it is done, whether it is still pending, and
-/// its outcome.
+/// its outcome. A failed <c>Get</c> throws an <see cref="ExecutionException"/>; its outcome is the failure that
+/// exception carries, checked by <see cref="FutureAssert.Unwrapped"/>.
 /// </summary>
 internal abstract class FutureProbe
 {
@@ -31,26 +32,29 @@ internal abstract class FutureProbe
     internal abstract bool IsDone { get; }
 
     internal static FutureProbe Of(KafkaFuture future) =>
-        new SyncProbe(() => future.IsDone, () =>
+        new SyncProbe(() => future.IsDone(), () =>
         {
             future.Get();
             return BlockingCall.Returned;
         });
 
-    internal static FutureProbe Of<T>(KafkaFuture<T> future) => new SyncProbe(() => future.IsDone, () => future.Get());
+    internal static FutureProbe Of<T>(KafkaFuture<T> future) => new SyncProbe(() => future.IsDone(), () => future.Get());
 
-    internal static FutureProbe Of(AsyncKafkaFuture future) => new AsyncProbe(future.Get(), static async task =>
+    internal static FutureProbe Of(AsyncKafkaFuture future) => new AsyncProbe(() => future.IsDone(), future.Get(), static async task =>
     {
         await task.ConfigureAwait(false);
         return BlockingCall.Returned;
     });
 
-    internal static FutureProbe Of<T>(AsyncKafkaFuture<T> future) => new AsyncProbe(future.Get(), static async task =>
+    internal static FutureProbe Of<T>(AsyncKafkaFuture<T> future) => new AsyncProbe(() => future.IsDone(), future.Get(), static async task =>
         await ((Task<T>)task).ConfigureAwait(false));
 
     internal abstract void AssertPending();
 
     internal abstract Task<object?> Outcome();
+
+    private static object? Failure(object? outcome) =>
+        outcome is ExecutionException ? FutureAssert.Unwrapped(outcome) : outcome;
 
     /// <summary>Probes a sync future, running its <c>Get()</c> as a <see cref="BlockingCall"/>.</summary>
     private sealed class SyncProbe : FutureProbe
@@ -77,25 +81,30 @@ internal abstract class FutureProbe
         {
             BlockingCall call = _started ?? BlockingCall.StartGet(_get);
             _started = null;
-            return Task.FromResult(call.Join());
+            return Task.FromResult(Failure(call.Join()));
         }
     }
 
-    /// <summary>Probes an async future, awaiting its task under <see cref="TestTimeout"/>.</summary>
+    /// <summary>
+    /// Probes an async future, awaiting its <c>Get</c> task under <see cref="TestTimeout"/>. Whether it is done is the
+    /// future's own answer: the <c>Get</c> task completes after the future, its continuations running asynchronously.
+    /// </summary>
     private sealed class AsyncProbe : FutureProbe
     {
+        private readonly Func<bool> _isDone;
         private readonly Task _task;
         private readonly Func<Task, Task<object?>> _await;
 
-        internal AsyncProbe(Task task, Func<Task, Task<object?>> await)
+        internal AsyncProbe(Func<bool> isDone, Task task, Func<Task, Task<object?>> await)
         {
+            _isDone = isDone;
             _task = task;
             _await = await;
         }
 
-        internal override bool IsDone => _task.IsCompleted;
+        internal override bool IsDone => _isDone();
 
-        internal override void AssertPending() => Assert.False(_task.IsCompleted, "the future had already completed");
+        internal override void AssertPending() => Assert.False(_isDone(), "the future had already completed");
 
         internal override async Task<object?> Outcome()
         {
@@ -103,9 +112,9 @@ internal abstract class FutureProbe
             {
                 return await TestTimeout.Run(() => _await(_task), s_deadline).ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is not TimeoutException)
+            catch (Exception exception) when (exception is not System.TimeoutException)
             {
-                return exception;
+                return Failure(exception);
             }
         }
     }

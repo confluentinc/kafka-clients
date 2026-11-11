@@ -85,7 +85,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Assert.True(seen.Elapsed < s_quickly, $"Dispose took {seen.Elapsed.TotalMilliseconds} ms");
         Assert.Equal(0, seen.PendingCallsAtReturn);
         Assert.True(seen.PendingCompleted, "the pending send did not complete");
-        Assert.IsType<ObjectDisposedException>(seen.AfterClose);
+        Assert.IsType<IllegalStateException>(seen.AfterClose);
         await Task.Delay(Settle);
         Assert.Equal(1, seen.FlushingCalls);
         Assert.Equal(1, seen.PendingCalls());
@@ -96,7 +96,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     {
         Observation seen = new Observation();
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         string topic = Topic("mock-flush-in-callback");
         Recording pending = new Recording(seen);
@@ -124,7 +124,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Assert.True(producer.CompleteNext());
         Assert.True(flushing.WaitEnded(Deadline), "the flushing callback did not end");
         _ = pendingFuture.Get(Deadline);
-        seen.PendingCompleted = pendingFuture.IsDone;
+        seen.PendingCompleted = pendingFuture.IsDone();
         return seen;
     }
 
@@ -133,7 +133,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Observation seen = new Observation();
         TaskCompletionSource<bool> gate = NewGate();
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         try
         {
@@ -199,7 +199,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
 
             await TestTimeout.Run(() => flushingEnded, disposes ? s_quickly : Deadline);
             _ = await Within(pendingFuture.Get());
-            seen.PendingCompleted = pendingFuture.IsDone;
+            seen.PendingCompleted = pendingFuture.IsDone();
             if (disposes)
             {
                 seen.AfterClose = FailureOf(() => _ = producer.Flush());
@@ -308,7 +308,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>A sync delivery callback that flushes its own producer.</summary>
-    private sealed class Flushing : IDeliveryCallback
+    private sealed class Flushing : ICallback
     {
         private readonly Observation _seen;
         private readonly Action _observe;
@@ -338,7 +338,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>An async delivery callback that flushes its own producer, before its first <c>await</c> or after one.</summary>
-    private sealed class AsyncFlushing : IAsyncDeliveryCallback
+    private sealed class AsyncFlushing : IAsyncCallback
     {
         private readonly Observation _seen;
         private readonly Action _observe;
@@ -380,7 +380,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>An async delivery callback whose task runs until its gate opens.</summary>
-    private sealed class Blocker : IAsyncDeliveryCallback
+    private sealed class Blocker : IAsyncCallback
     {
         private readonly Task _gate;
         private readonly TaskCompletionSource<bool> _started = NewGate();
@@ -397,7 +397,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     }
 
     /// <summary>The pending send's delivery callback: it counts its calls and logs that it ran.</summary>
-    private sealed class Recording : IDeliveryCallback
+    private sealed class Recording : ICallback
     {
         private readonly Observation _seen;
         private int _calls;

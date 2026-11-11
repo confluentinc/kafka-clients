@@ -1,0 +1,12 @@
+# Renamed .NET types and the Java type each translates: one `<.NET type> <Java type>` per line.
+# A pair no type needs is CKRDA0014: delete it.
+
+# Java's ConfigResource.Type: a bare `Type` would clash with System.Type (M15/P3 D16).
+Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type
+
+# Java's AlterConfigOp.OpType, until it is renamed OpType (rule 1).
+Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType
+
+# Java's ConsumerRebalanceListener, until the two bases go: Java's onPartitionsLost default is then an extension
+# method and IConsumerRebalanceListenerWithPartitionsLost replaces it (dotnet/CLAUDE.md §3 rule 10).
+Confluent.Kafka.Consumer.ConsumerRebalanceListenerBase org.apache.kafka.clients.consumer.ConsumerRebalanceListener

@@ -27,34 +27,33 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="AuthorizedOperations"/> is <see langword="null"/> when the operations are not
+/// <see cref="AuthorizedOperations()"/> is <see langword="null"/> when the operations are not
 /// known (the broker was not asked, or did not answer), and empty when the broker answered that
 /// none is authorized, as Java's accessor.
-/// </para>
-/// <para>
-/// Value equality is not implemented, although Java's class overrides <c>equals</c> and
-/// <c>hashCode</c>: a recorded deviation, as on <see cref="TopicPartitionInfo"/>.
 /// </para>
 /// </remarks>
 public sealed class TopicDescription
 {
     private readonly List<TopicPartitionInfo> _partitions;
     private readonly List<AclOperation>? _authorizedOperations;
+    private readonly string _name;
+    private readonly bool _isInternal;
+    private readonly Uuid _topicId;
 
     /// <summary>
     /// Creates a description with an empty authorized-operations set and
     /// <see cref="Uuid.ZERO_UUID"/> as the topic id — Java's three-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="partitions"/> is null.
     /// </exception>
-    public TopicDescription(string name, bool isInternal, IEnumerable<TopicPartitionInfo> partitions)
-        : this(name, isInternal, partitions, Array.Empty<AclOperation>())
+    public TopicDescription(string name, bool @internal, IEnumerable<TopicPartitionInfo> partitions)
+        : this(name, @internal, partitions, Array.Empty<AclOperation>())
     {
     }
 
@@ -63,7 +62,7 @@ public sealed class TopicDescription
     /// four-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
@@ -75,16 +74,16 @@ public sealed class TopicDescription
     /// </exception>
     public TopicDescription(
         string name,
-        bool isInternal,
+        bool @internal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations)
-        : this(name, isInternal, partitions, authorizedOperations, Uuid.ZERO_UUID)
+        : this(name, @internal, partitions, authorizedOperations, Uuid.ZERO_UUID)
     {
     }
 
     /// <summary>Creates a description — Java's five-argument constructor.</summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
@@ -97,7 +96,7 @@ public sealed class TopicDescription
     /// </exception>
     public TopicDescription(
         string name,
-        bool isInternal,
+        bool @internal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations,
         Uuid topicId)
@@ -107,43 +106,82 @@ public sealed class TopicDescription
             throw new ArgumentNullException(nameof(partitions));
         }
 
-        Name = name ?? throw new ArgumentNullException(nameof(name));
-        IsInternal = isInternal;
+        _name = name ?? throw new ArgumentNullException(nameof(name));
+        _isInternal = @internal;
         _partitions = new List<TopicPartitionInfo>(partitions);
 
         _authorizedOperations =
             authorizedOperations is null ? null : new List<AclOperation>(authorizedOperations);
-        TopicId = topicId;
+        _topicId = topicId;
     }
 
     /// <summary>The topic name — Java's <c>name()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The topic name.</returns>
+    public string Name() => _name;
 
     /// <summary>
     /// Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>) —
     /// Java's <c>isInternal()</c>.
     /// </summary>
-    public bool IsInternal { get; }
+    /// <returns>Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>).</returns>
+    public bool IsInternal() => _isInternal;
 
     /// <summary>The topic id — Java's <c>topicId()</c>.</summary>
-    public Uuid TopicId { get; }
+    /// <returns>The topic id.</returns>
+    public Uuid TopicId() => _topicId;
 
     /// <summary>
     /// One entry per partition, where the index is the partition id — Java's
     /// <c>partitions()</c>.
     /// </summary>
-    public IReadOnlyList<TopicPartitionInfo> Partitions => _partitions;
+    /// <returns>One entry per partition, where the index is the partition id.</returns>
+    public IReadOnlyList<TopicPartitionInfo> Partitions() => _partitions;
 
     /// <summary>
     /// The operations the caller is authorized to perform on this topic, or
     /// <see langword="null"/> when they are not known — Java's <c>authorizedOperations()</c>.
     /// An empty collection means they were reported and none is authorized.
     /// </summary>
+    /// <returns>The operations the caller is authorized to perform on this topic, or <see langword="null"/> when
+    /// they are not known.</returns>
     /// <remarks>
     /// A collection, where Java returns a <c>Set</c>: <c>IReadOnlySet&lt;T&gt;</c> post-dates
     /// netstandard2.0.
     /// </remarks>
-    public IReadOnlyCollection<AclOperation>? AuthorizedOperations => _authorizedOperations;
+    public IReadOnlyCollection<AclOperation>? AuthorizedOperations() => _authorizedOperations;
+
+    /// <summary>
+    /// Value equality over the name, the internal flag, the partitions and the authorized operations (as a set),
+    /// Java's <c>equals</c>; the topic id is not compared, as in Java.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two describe the same topic.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is TopicDescription other
+            && _isInternal == other._isInternal
+            && string.Equals(_name, other._name, StringComparison.Ordinal)
+            && _partitions.SequenceEqual(other._partitions)
+            && OperationsMatch(_authorizedOperations, other._authorizedOperations));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_name);
+            hash = (hash * 31) + _isInternal.GetHashCode();
+            foreach (TopicPartitionInfo partition in _partitions)
+            {
+                hash = (hash * 31) + (partition?.GetHashCode() ?? 0);
+            }
+
+            hash = (hash * 31) + OperationsHash(_authorizedOperations);
+            return hash;
+        }
+    }
 
     /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
@@ -151,8 +189,29 @@ public sealed class TopicDescription
         string.Format(
             CultureInfo.InvariantCulture,
             "(name={0}, internal={1}, partitions={2}, authorizedOperations={3})",
-            Name,
-            IsInternal ? "true" : "false",
+            Name(),
+            IsInternal() ? "true" : "false",
             string.Join(",", _partitions.Select(static partition => partition.ToString())),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]");
+
+    private static bool OperationsMatch(List<AclOperation>? left, List<AclOperation>? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : new HashSet<AclOperation>(left).SetEquals(right);
+
+    private static int OperationsHash(List<AclOperation>? operations)
+    {
+        if (operations is null)
+        {
+            return 0;
+        }
+
+        int hash = 0;
+        foreach (AclOperation operation in new HashSet<AclOperation>(operations))
+        {
+            hash = unchecked(hash + ((int)operation).GetHashCode());
+        }
+
+        return hash;
+    }
 }

@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -27,8 +28,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// A filter that failed fails its own future. A matched ACL that could not be deleted is reported
-/// as a value, in <see cref="FilterResult.Exception"/>, inside a <see cref="FilterResults"/> whose
-/// future completed, so <c>Values[filter]</c> can succeed while <see cref="All"/> fails.
+/// as a value, in <see cref="FilterResult.Exception()"/>, inside a <see cref="FilterResults"/> whose
+/// future completed, so <c>Values()[filter]</c> can succeed while <see cref="All"/> fails.
 /// </remarks>
 /// <seealso cref="AsyncDeleteAclsResult"/>
 public sealed class DeleteAclsResult
@@ -52,14 +53,15 @@ public sealed class DeleteAclsResult
     /// <summary>
     /// One future per requested filter, keyed by the filter — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<AclBindingFilter, KafkaFuture<FilterResults>> Values => _values;
+    /// <returns>One future per requested filter, keyed by the filter.</returns>
+    public IReadOnlyDictionary<AclBindingFilter, KafkaFuture<FilterResults>> Values() => _values;
 
     /// <summary>
     /// Every ACL deleted across every filter — Java's <c>all()</c>.
     /// </summary>
     /// <returns>
     /// A future yielding the deleted bindings. It fails if any <em>filter</em> failed (with the first failure to
-    /// complete), or with the first <see cref="FilterResult.Exception"/> encountered in filter order. Filters that
+    /// complete), or with the first <see cref="FilterResult.Exception()"/> encountered in filter order. Filters that
     /// matched nothing are not an error — the result is then a successful empty collection.
     /// </returns>
     public KafkaFuture<IReadOnlyCollection<AclBinding>> All() =>
@@ -89,14 +91,14 @@ public sealed class DeleteAclsResult
         List<AclBinding> bindings = new List<AclBinding>();
         foreach (AclBindingFilter filter in filters)
         {
-            foreach (FilterResult result in resolved[filter].Values)
+            foreach (FilterResult result in resolved[filter].Values())
             {
-                if (result.Exception is not null)
+                if (result.Exception() is { } exception)
                 {
-                    throw result.Exception;
+                    throw exception;
                 }
 
-                bindings.Add(result.Binding!);
+                bindings.Add(result.Binding()!);
             }
         }
 
@@ -109,29 +111,35 @@ public sealed class DeleteAclsResult
     /// </summary>
     /// <remarks>
     /// A matched ACL whose delete failed carries both its binding and its error, as Java's client
-    /// builds it, so <see cref="Exception"/>, not a null <see cref="Binding"/>, says the delete failed.
+    /// builds it, so <see cref="Exception()"/>, not a null <see cref="Binding()"/>, says the delete failed.
     /// </remarks>
     public sealed class FilterResult
     {
-        internal FilterResult(AclBinding? binding, KafkaException? exception)
+        private readonly AclBinding? _binding;
+        private readonly ApiException? _exception;
+
+        internal FilterResult(AclBinding? binding, ApiException? exception)
         {
-            Binding = binding;
-            Exception = exception;
+            _binding = binding;
+            _exception = exception;
         }
 
         /// <summary>
-        /// The ACL the filter matched — deleted when <see cref="Exception"/> is
+        /// The ACL the filter matched — deleted when <see cref="Exception()"/> is
         /// <see langword="null"/>, and still reported when deleting it failed — Java's
         /// <c>binding()</c>. <see langword="null"/> only when the matched ACL could
         /// not be decoded.
         /// </summary>
-        public AclBinding? Binding { get; }
+        /// <returns>The ACL the filter matched — deleted when <see cref="Exception()"/> is <see langword="null"/>,
+        /// and still reported when deleting it failed.</returns>
+        public AclBinding? Binding() => _binding;
 
         /// <summary>
         /// Why deleting this ACL failed, or <see langword="null"/> if it was deleted —
         /// Java's <c>exception()</c>.
         /// </summary>
-        public KafkaException? Exception { get; }
+        /// <returns>Why deleting this ACL failed, or <see langword="null"/> if it was deleted.</returns>
+        public ApiException? Exception() => _exception;
     }
 
     /// <summary>
@@ -139,12 +147,15 @@ public sealed class DeleteAclsResult
     /// </summary>
     public sealed class FilterResults
     {
-        internal FilterResults(IReadOnlyList<FilterResult> values) => Values = values;
+        private readonly IReadOnlyList<FilterResult> _values;
+
+        internal FilterResults(IReadOnlyList<FilterResult> values) => _values = values;
 
         /// <summary>
         /// One entry per matched ACL — Java's <c>values()</c>. Empty when the
         /// filter matched nothing, which is not an error.
         /// </summary>
-        public IReadOnlyList<FilterResult> Values { get; }
+        /// <returns>One entry per matched ACL.</returns>
+        public IReadOnlyList<FilterResult> Values() => _values;
     }
 }

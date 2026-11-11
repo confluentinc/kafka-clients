@@ -50,7 +50,8 @@ public sealed class AlterPartitionReassignmentsResult
     /// <summary>
     /// One future per requested partition, keyed by partition — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartition, KafkaFuture> Values => _values;
+    /// <returns>One future per requested partition, keyed by partition.</returns>
+    public IReadOnlyDictionary<TopicPartition, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every reassignment was initiated, and fails with the first failure to

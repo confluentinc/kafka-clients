@@ -16,13 +16,17 @@ process's **CPU and RSS** at a regular interval.
    throughput. Consumer-first ordering is guaranteed because the producer is a
    child process spawned only after assignment.
 4. Polls in a tight loop, recording each record's latency into a fixed-bucket
-   **streaming histogram** (1 ms buckets, 0–60 s; O(1) memory, **no per-record
-   allocation**). Key/value bytes are never copied — the deserializer returns
-   the byte *length*.
+   **streaming histogram** (1 ms buckets, 0–600 s; allocated once, zeroed, so
+   only the buckets written are ever resident; **no per-record allocation**).
+   Key/value bytes are never copied — the deserializer returns the byte
+   *length*.
 5. Every `--interval` seconds: samples CPU% + RSS, prints a line, and appends a
-   JSONL metric record; resets the per-interval histogram.
-6. After `--duration` seconds of measurement, stops the producer, closes the
-   consumer, and writes a final summary.
+   JSONL metric record; resets the per-interval histogram in place, clearing
+   only the buckets it wrote.
+6. After `--duration` seconds of measurement, stops the producer, writes the
+   final summary and results, and only then closes the consumer: a close
+   error is printed as a warning and changes neither the results nor the exit
+   status.
 
 Warmup messages are consumed but excluded from measurement (connection ramp,
 cache warm-up).
@@ -86,16 +90,26 @@ python3 tools/deploy_and_run_perf/deploy_and_run_perf.py user@host \
 | `-d, --duration` | `60` | measurement window (s), after warmup |
 | `--message-size` | `1024` | producer record size (bytes) |
 | `--partitions` | `8` | partitions when creating the topic |
-| `-w, --warmup-messages` | `5000` | records skipped before measuring |
+| `-w, --warmup-messages` | `5000` | records skipped before measuring (`0` for none) |
 | `--interval` | `5` | metric reporting interval (s) |
 | `--poll-timeout-ms` | `500` | `poll()` timeout |
 | `--join-timeout` | `120` | max wait (s) for partition assignment |
 | `--offset-reset` | `latest` | `latest` (live) or `earliest` (drains backlog) |
 | `--kafka-bin` | `~/dev/opensource/kafka/bin` | Kafka CLI scripts dir |
 | `--results-dir` | `consumer-perf/results` | output directory |
+| `--results-file` | (none) | also write the summary there in the `cargo xtask perf-cloud` `results.json` format, when records were measured |
 | `--no-produce` | (off) | don't launch a producer |
 | `--no-create-topic` | (off) | don't create/verify the topic |
+| `--peak` | (off) | run the producer unbounded (`--throughput -1`); saturates the consumer, so latency becomes backlog age |
+| `--retention-ms` | `3600000` | topic `retention.ms` at create time (bounds disk under `--peak`) |
+| `--num-records` | throughput × (duration + 30) + warmup | producer `--num-records` |
+| `--fetch-min-bytes` | (client default, 1) | consumer `fetch.min.bytes` |
+| `--fetch-max-wait-ms` | (client default, 500) | consumer `fetch.max.wait.ms` |
+| `--max-partition-fetch-bytes` | (client default, 1 MiB) | consumer `max.partition.fetch.bytes` |
+| `--fetch-max-bytes` | (client default, 50 MiB) | consumer `fetch.max.bytes` |
+| `--max-poll-records` | (client default, 500) | consumer `max.poll.records` |
 | `--compression-type` | (producer default) | producer `compression.type`: `none` / `gzip` / `snappy` / `lz4` / `zstd` |
+| `--client-config` | (none) | Kafka client properties file (e.g. SASL_SSL credentials): merged into the consumer config, and given to the producer (`--producer.config`) and `kafka-topics.sh` (`--command-config`) |
 | `-v, --verbose` | (off) | log every poll (record counts / heartbeats) |
 
 `--selftest-cpu` runs a standalone CPU/RSS sampler check (burns CPU, prints
@@ -128,14 +142,17 @@ Interval line:
  "lat_p999_ms":31,"lat_max_ms":210,"cpu_pct":31.5,"rss_mb":42.1}
 ```
 
-Summary line (carries `"client":"rust"` so a future Java / librdkafka arm can
-emit the same schema and be compared by a single plotting script):
+Summary line (`"client":"rust"`; the librdkafka and Java arms in `compare/`
+print a summary line in the same shape with their own `client`, see below):
 
 ```json
 {"type":"summary","client":"rust","messages":3000000,"duration_s":60.0,
  "throughput_msg_s":50000.0,"throughput_mib_s":48.8,"lat_min_ms":2,
- "lat_avg_ms":6.5,"lat_p50_ms":6,"lat_p90_ms":8,"lat_p95_ms":9,"lat_p99_ms":12,
- "lat_p999_ms":32,"lat_max_ms":252}
+ "lat_avg_ms":6.5,"lat_stddev_ms":2.1,"lat_p50_ms":6,"lat_p90_ms":8,
+ "lat_p95_ms":9,"lat_p99_ms":12,"lat_p999_ms":32,"lat_max_ms":252,
+ "cpu_avg_pct":31.5,"cpu_min_pct":28.0,"cpu_max_pct":35.2,"rss_avg_mb":42.1,
+ "rss_min_mb":40.3,"rss_max_mb":43.0,"rpp_n":120000,"rpp_min":1,
+ "rpp_mean":25.00,"rpp_p50":24,"rpp_p99":61,"rpp_max":500}
 ```
 
 ## Debugging the client (logging)
@@ -185,12 +202,18 @@ Key targets for the slow/stuck-join investigation:
   default), not `LogAppendTime`.
 - **CPU%** is reported as percent of a single core (may exceed 100% under
   multi-core load), matching the Java MXBean-style measurement.
-- **Fetch tuning**: this benchmark uses the client defaults (`fetch.min.bytes=1`,
-  `max.poll.records=500`), which favor low latency — appropriate for an e2e
-  latency test. Tuning these for throughput would require public config builders
-  on `ConsumerConfig` (not yet exposed).
+- **Fetch tuning**: by default this benchmark uses the client defaults
+  (`fetch.min.bytes=1`, `max.poll.records=500`), which favor low latency —
+  appropriate for an e2e latency test. The fetch flags (`--fetch-min-bytes`,
+  `--fetch-max-wait-ms`, `--max-partition-fetch-bytes`, `--fetch-max-bytes`,
+  `--max-poll-records`) override them, e.g. to tune for throughput.
 - **Pick a rate below saturation**: at rates the consumer cannot keep up with,
   latency grows without bound (queue buildup) — that is a real signal, but make
   sure you are measuring steady state, not catch-up.
-- **librdkafka / Java arms**: deferred. The JSONL schema is shared so they can
-  be added later and compared head-to-head.
+- **librdkafka / Java arms**: `compare/librdkafka_e2e.c` (the native
+  librdkafka C consumer) and `compare/JavaE2E.java` (the Java kafka-clients
+  consumer) use the same methodology, print a summary line in the same shape
+  (`client` `librdkafka-c` / `java`) and, with `--results-file`, write the
+  same `results.json`. `deploy_and_run_perf.py` (`--test librdkafka-consumer` /
+  `java-consumer`) and `cargo xtask perf-cloud` build and run them next to this
+  harness.

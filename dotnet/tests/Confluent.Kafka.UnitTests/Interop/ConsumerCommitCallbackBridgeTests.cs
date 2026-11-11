@@ -20,12 +20,15 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
+
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -62,7 +65,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.Null(reported);
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(callback.Calls);
         Assert.Null(offsets);
-        TimeoutException timeout = Assert.IsType<TimeoutException>(exception);
+        FutureTimeoutException timeout = Assert.IsType<FutureTimeoutException>(exception);
         Assert.Equal("commit timed out", timeout.Message);
         Assert.True(registration.IsReleased);
     }
@@ -81,8 +84,8 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.NotNull(offsets);
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(offsets!);
         Assert.Equal(s_tp0, entry.Key);
-        Assert.Equal(42, entry.Value.Offset);
-        Assert.Equal("meta", entry.Value.Metadata);
+        Assert.Equal(42, entry.Value.Offset());
+        Assert.Equal("meta", entry.Value.Metadata());
         Assert.True(registration.IsReleased);
     }
 
@@ -177,8 +180,8 @@ public sealed class ConsumerCommitCallbackBridgeTests
         AssertReleasedAfterTheReport(registration);
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(delivered!);
         Assert.Equal(s_tp0, entry.Key);
-        Assert.Equal(9, entry.Value.Offset);
-        Assert.Equal("async", entry.Value.Metadata);
+        Assert.Equal(9, entry.Value.Offset());
+        Assert.Equal("async", entry.Value.Metadata());
     }
 
     [Fact]
@@ -250,7 +253,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.Null(reported);
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(calls);
         Assert.Null(offsets);
-        Assert.Equal("async commit timed out", Assert.IsType<TimeoutException>(exception).Message);
+        Assert.Equal("async commit timed out", Assert.IsType<FutureTimeoutException>(exception).Message);
         Assert.True(registration.IsReleased);
     }
 
@@ -342,7 +345,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
 
             CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
             Assert.True(registration.IsReleased);
-            Assert.Equal(5, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset);
+            Assert.Equal(5, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset());
         }
         finally
         {
@@ -355,11 +358,11 @@ public sealed class ConsumerCommitCallbackBridgeTests
     {
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1", ["group.protocol"] = "consumer" },
-            Serdes.ByteArray,
-            Serdes.ByteArray);
+            Serdes.ByteArray(),
+            Serdes.ByteArray());
         RecordingCallback callback = new RecordingCallback();
 
-        KafkaException refused = Assert.Throws<KafkaException>(() => consumer.CommitAsync(Offsets(1), callback));
+        InvalidGroupIdException refused = Assert.Throws<InvalidGroupIdException>(() => consumer.CommitAsync(Offsets(1), callback));
 
         Assert.Equal(InvalidGroupIdCode, refused.Code);
         Assert.Equal(NoGroupId, refused.Message);
@@ -400,7 +403,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         }
 
         await TestTimeout.Run(() => rebalance, s_deadline);
-        InvalidOperationException concurrent = await Assert.ThrowsAsync<InvalidOperationException>(
+        ConcurrentModificationException concurrent = await Assert.ThrowsAsync<ConcurrentModificationException>(
             () => TestTimeout.Run(() => refusedCommit, s_deadline));
         Assert.Equal(ConcurrentMessage, concurrent.Message);
         CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
@@ -464,7 +467,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
             Assert.Equal(200, callback.Calls.Count);
             for (int i = 0; i < 200; i++)
             {
-                Assert.Equal(i, callback.Calls[i].Offsets![s_tp0].Offset);
+                Assert.Equal(i, callback.Calls[i].Offsets![s_tp0].Offset());
             }
         }
         finally
@@ -481,7 +484,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         try
         {
             using NativeCallArguments arguments = new NativeCallArguments();
-            IntPtr map = arguments.OffsetMap(NativeConsumer.SnapshotCommitOffsets(offsets));
+            IntPtr map = arguments.OffsetMap(OffsetsSnapshot.Of(offsets));
             IntPtr handle = registration.NewHandle();
             IntPtr outErr = IntPtr.Zero;
             try
@@ -544,7 +547,9 @@ public sealed class ConsumerCommitCallbackBridgeTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference ReportAFailureLate(ConsumerCallbackReporter reporter, ManualResetEventSlim reported)
     {
+#pragma warning disable CKRDA0001 // Stands in for the user's callback Task; completing it inline is what the GC check needs.
         TaskCompletionSource<bool> outcome = new TaskCompletionSource<bool>();
+#pragma warning restore CKRDA0001
         reporter.Exit(reporter.Enter(asyncCallback: true));
         reporter.ReportWhenEnded(1, outcome.Task, null, reported.Set);
         InvalidCastException failure = new InvalidCastException("reported after destroy");
@@ -559,10 +564,10 @@ public sealed class ConsumerCommitCallbackBridgeTests
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(offset, metadata) };
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static CommitCallbackRegistration? Registration(object consumer) =>
         ((NativeConsumer)consumer.GetType()

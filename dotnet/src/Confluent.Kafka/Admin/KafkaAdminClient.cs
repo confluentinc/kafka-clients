@@ -64,9 +64,9 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null) =>
         DeleteTopicsResult.OfClient(_native.DeleteTopics(
-            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
+            topics ?? throw new ArgumentNullException(nameof(topics)),
             options));
 
     /// <inheritdoc/>
@@ -223,7 +223,7 @@ public sealed class KafkaAdminClient : IAdmin
     public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         RemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

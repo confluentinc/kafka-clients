@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
@@ -212,11 +213,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListConsumerGroupOffsetsOptions.TimeoutMs):
-                NativeMethods.ListConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(ListConsumerGroupOffsetsOptions.RequireStable):
                 NativeMethods.ListConsumerGroupOffsetsOptionsSetRequireStable(
-                    native, options.RequireStable ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.RequireStable() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListConsumerGroupOffsetsOptions has no C setter for " + setter + ".");
@@ -253,19 +254,19 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentException($"The spec for group id '{entry.Key}' must not be null.", nameof(groupSpecs));
             }
 
-            IReadOnlyCollection<TopicPartition>? selected = entry.Value.TopicPartitions;
+            IReadOnlyCollection<TopicPartition>? selected = entry.Value.TopicPartitions();
             if (selected is not null)
             {
                 foreach (TopicPartition partition in selected)
                 {
-                    if (partition.Topic is null)
+                    if (partition.Topic() is null)
                     {
                         throw new ArgumentException(
                             $"The spec for group id '{entry.Key}' must not select a topic partition with a null topic.",
                             nameof(groupSpecs));
                     }
 
-                    AdminStrings.Validate(partition.Topic, nameof(groupSpecs));
+                    AdminStrings.Validate(partition.Topic(), nameof(groupSpecs));
                 }
             }
 
@@ -280,7 +281,7 @@ internal sealed partial class NativeAdminClient
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.ListConsumerGroupOffsetsSpecNew(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        IReadOnlyCollection<TopicPartition>? selected = spec.TopicPartitions;
+        IReadOnlyCollection<TopicPartition>? selected = spec.TopicPartitions();
         if (selected is null)
         {
             return native;
@@ -384,7 +385,7 @@ internal sealed partial class NativeAdminClient
                 new List<KeyValuePair<TopicPartition, OffsetAndMetadata>>(offsets.Count);
             foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The offsets map must not contain a topic partition with a null topic.", nameof(offsets));
@@ -395,8 +396,8 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentException("Offset value must not be null.", nameof(offsets));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(offsets));
-                AdminStrings.Validate(entry.Value.Metadata, nameof(offsets));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(offsets));
+                AdminStrings.Validate(entry.Value.Metadata(), nameof(offsets));
                 entries.Add(entry);
             }
 
@@ -447,6 +448,17 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> AlterConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
+        if (partition.Topic() is null)
+        {
+            // No request partition has a null topic, so Java's future fails as for one not attempted. A recorded
+            // deviation: Java fails it only once the call has answered, with the call's own error if it failed.
+            KafkaFutureImpl<object?> notAttempted = new KafkaFutureImpl<object?>();
+            notAttempted.CompleteWithError(new IllegalArgumentException(
+                "Alter offset for partition \"null-" + partition.Partition().ToString(CultureInfo.InvariantCulture) +
+                "\" was not attempted"));
+            return notAttempted;
+        }
+
         IntPtr native = NewResultTopicPartition(partition);
         try
         {
@@ -482,7 +494,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AlterConsumerGroupOffsetsOptions.TimeoutMs):
-                NativeMethods.AlterConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AlterConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterConsumerGroupOffsetsOptions has no C setter for " + setter + ".");
@@ -493,10 +505,10 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String metadata = Utf8Marshal.Pin(value.Metadata ?? string.Empty))
+        using (Utf8Marshal.PinnedUtf8String metadata = Utf8Marshal.Pin(value.Metadata() ?? string.Empty))
         {
             native = NativeMethods.OffsetAndMetadataWithLeaderEpochMetadata(
-                value.Offset, value.LeaderEpoch ?? -1, metadata.Pointer, ref outErr);
+                value.Offset(), value.LeaderEpoch() ?? -1, metadata.Pointer, ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -518,12 +530,12 @@ internal sealed partial class NativeAdminClient
     // A null topic cannot cross the C ABI, so a result lookup rejects it at the call.
     private static IntPtr NewResultTopicPartition(TopicPartition partition)
     {
-        if (partition.Topic is null)
+        if (partition.Topic() is null)
         {
             throw new ArgumentException("The partition must not have a null topic.", nameof(partition));
         }
 
-        AdminStrings.Validate(partition.Topic, nameof(partition));
+        AdminStrings.Validate(partition.Topic(), nameof(partition));
         return NewNativeTopicPartition(partition);
     }
 
@@ -548,14 +560,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (TopicPartition partition in partitions)
             {
-                if (partition.Topic is null)
+                if (partition.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The partitions collection must not contain a topic partition with a null topic.",
                         nameof(partitions));
                 }
 
-                AdminStrings.Validate(partition.Topic, nameof(partitions));
+                AdminStrings.Validate(partition.Topic(), nameof(partitions));
                 if (seen.Add(partition))
                 {
                     requested.Add(partition);
@@ -599,6 +611,14 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> DeleteConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
+        if (partition.Topic() is null)
+        {
+            // No request partition has a null topic: Java's membership check throws at the call.
+            throw new IllegalArgumentException(
+                "Partition null-" + partition.Partition().ToString(CultureInfo.InvariantCulture) +
+                " was not included in the original request");
+        }
+
         IntPtr native = NewResultTopicPartition(partition);
         try
         {
@@ -634,7 +654,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteConsumerGroupOffsetsOptions.TimeoutMs):
-                NativeMethods.DeleteConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteConsumerGroupOffsetsOptions has no C setter for " + setter + ".");
@@ -691,7 +711,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteConsumerGroupsOptions.TimeoutMs):
-                NativeMethods.DeleteConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteConsumerGroupsOptions has no C setter for " + setter + ".");
@@ -715,10 +735,10 @@ internal sealed partial class NativeAdminClient
             }
 
             AdminStrings.Validate(groupId, nameof(groupId));
-            AdminStrings.Validate(options.Reason, nameof(options));
-            foreach (MemberToRemove member in options.Members)
+            AdminStrings.Validate(options.Reason(), nameof(options));
+            foreach (MemberToRemove member in options.Members())
             {
-                AdminStrings.Validate(member.GroupInstanceId, nameof(options));
+                AdminStrings.Validate(member.GroupInstanceId(), nameof(options));
             }
 
             using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(groupId);
@@ -736,10 +756,26 @@ internal sealed partial class NativeAdminClient
         }
     }
 
+    /// <summary>
+    /// Java's <c>memberResult</c> checks for a null member: the <c>removeAll</c> mode first, then the membership a null
+    /// member never has. The core makes both checks for any other member.
+    /// </summary>
+    internal static void RequireRequestedMember(MemberToRemove? member, bool removeAll)
+    {
+        if (member is not null)
+        {
+            return;
+        }
+
+        throw new IllegalArgumentException(removeAll
+            ? "The method: memberResult is not applicable in 'removeAll' mode"
+            : "Member null was not included in the original request");
+    }
+
     internal static KafkaFutureImpl<object?> RemoveMembersFromConsumerGroupMemberResult(
         SafeAdminResultHandle result, MemberToRemove member)
     {
-        AdminStrings.Validate(member.GroupInstanceId, nameof(member));
+        AdminStrings.Validate(member.GroupInstanceId(), nameof(member));
         IntPtr native = NewNativeMemberToRemove(member);
         try
         {
@@ -772,16 +808,16 @@ internal sealed partial class NativeAdminClient
     // The no-argument constructor is Java's "remove every member"; otherwise the members cross at creation.
     private static IntPtr NewRemoveMembersOptionsWithMembers(RemoveMembersFromConsumerGroupOptions options, ref IntPtr outErr)
     {
-        if (options.RemoveAll)
+        if (options.RemoveAll())
         {
             return NativeMethods.RemoveMembersFromConsumerGroupOptionsNew(ref outErr);
         }
 
-        List<IntPtr> members = new List<IntPtr>(options.Members.Count);
+        List<IntPtr> members = new List<IntPtr>(options.Members().Count);
         IntPtr list = IntPtr.Zero;
         try
         {
-            foreach (MemberToRemove member in options.Members)
+            foreach (MemberToRemove member in options.Members())
             {
                 members.Add(NewNativeMemberToRemove(member));
             }
@@ -805,19 +841,19 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(RemoveMembersFromConsumerGroupOptions.Reason):
-                if (options.Reason is null)
+                if (options.Reason() is not { } reasonText)
                 {
                     NativeMethods.RemoveMembersFromConsumerGroupOptionsSetReason(native, IntPtr.Zero, ref outErr);
                 }
                 else
                 {
-                    using Utf8Marshal.PinnedUtf8String reason = Utf8Marshal.Pin(options.Reason);
+                    using Utf8Marshal.PinnedUtf8String reason = Utf8Marshal.Pin(reasonText);
                     NativeMethods.RemoveMembersFromConsumerGroupOptionsSetReason(native, reason.Pointer, ref outErr);
                 }
 
                 break;
             case nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs):
-                NativeMethods.RemoveMembersFromConsumerGroupOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.RemoveMembersFromConsumerGroupOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("RemoveMembersFromConsumerGroupOptions has no C setter for " + setter + ".");
@@ -828,7 +864,7 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String groupInstanceId = Utf8Marshal.Pin(member.GroupInstanceId))
+        using (Utf8Marshal.PinnedUtf8String groupInstanceId = Utf8Marshal.Pin(member.GroupInstanceId()))
         {
             native = NativeMethods.MemberToRemoveNew(groupInstanceId.Pointer, ref outErr);
         }

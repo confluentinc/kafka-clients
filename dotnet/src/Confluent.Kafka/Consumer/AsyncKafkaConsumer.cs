@@ -52,27 +52,47 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// </param>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="configs"/>, <paramref name="keyDeserializer"/>, or
-    /// <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null: Java then reads the
+    /// <c>key.deserializer</c> / <c>value.deserializer</c> config, which .NET config cannot set.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
     /// <c>null</c>, or the client refuses a value.
     /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// <c>group.protocol</c> is <c>classic</c>, which this client does not support; <c>classic</c> is
     /// also the default when the key is unset.
     /// </exception>
+    /// <remarks>
+    /// Each deserializer that is <see cref="IDisposable"/> is disposed once, key then value, when the consumer is
+    /// closed or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to
+    /// construct kafka consumer", but not for a configuration the core refuses with another error, nor when this
+    /// constructor throws
+    /// <see cref="ArgumentNullException"/> or refuses a deserializer, a value's type or a <c>null</c> with
+    /// <see cref="ConfigException"/>, nor by a close refused with <see cref="ConcurrentModificationException"/>, which
+    /// leaves the consumer open. So a deserializer shared with another client, or used after the close, sees it
+    /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
+    /// A deserializer that is only <see cref="IAsyncDisposable"/> is not disposed. When a <c>Poll</c> is still
+    /// deserializing, <c>Close</c> or <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers
+    /// after it ends.
+    /// </remarks>
     public AsyncKafkaConsumer(
         IReadOnlyDictionary<string, object?> configs,
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
-        _native = NativeConsumer.Create(configs);
+        // Java copies the config map first, so a null one fails before a missing deserializer.
+        if (configs is null)
+        {
+            throw new ArgumentNullException(nameof(configs));
+        }
+
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
+        _native = NativeConsumer.Create(configs, serdes: new SerdeDisposal(keyDeserializer, valueDeserializer));
     }
 
     /// <inheritdoc/>
@@ -86,16 +106,34 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IConsumerRebalanceListener listener,
+        IConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default) =>
-        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+        _native.SubscribeWithCallback(topics, callback, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
-        IAsyncConsumerRebalanceListener listener,
+        IAsyncConsumerRebalanceListener callback,
         CancellationToken cancellationToken = default) =>
-        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+        _native.SubscribeWithCallback(topics, callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(pattern, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Subscribe(
+        SubscriptionPattern pattern,
+        IConsumerRebalanceListener callback,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(pattern, callback, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Subscribe(
+        SubscriptionPattern pattern,
+        IAsyncConsumerRebalanceListener callback,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(pattern, callback, cancellationToken);
 
     /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
@@ -113,8 +151,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.SeekWithCallback(partition, offsetAndMetadata, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default) =>
-        _native.CurrentLagWithCallback(partition, cancellationToken);
+    public Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default) =>
+        _native.CurrentLagWithCallback(topicPartition, cancellationToken);
 
     /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>

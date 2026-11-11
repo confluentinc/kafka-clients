@@ -90,6 +90,8 @@ public sealed class PublicConsumerCallbackRoutingTests
 
     private static readonly string[] s_topics = { Topic };
 
+    private static readonly SubscriptionPattern s_pattern = new SubscriptionPattern(Topic + ".*");
+
     public static IEnumerable<object[]> Vehicles() => new[]
     {
         new object[] { "KafkaConsumer, a commit callback" },
@@ -135,7 +137,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             return new[] { started.Join(s_deadline) ? outcome! : "never ended" };
         });
 
-        Assert.Equal(new[] { "throws InvalidOperationException: " + Concurrent }, outcomes);
+        Assert.Equal(new[] { "throws ConcurrentModificationException: " + Concurrent }, outcomes);
     }
 
     [Theory]
@@ -171,7 +173,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.Equal("ok", outcome);
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => consumer.Committed(s_partitions), s_deadline);
-            Assert.Equal(8, committed[s_tp0]!.Offset);
+            Assert.Equal(8, committed[s_tp0]!.Offset());
         }
         finally
         {
@@ -212,9 +214,9 @@ public sealed class PublicConsumerCallbackRoutingTests
         await TestTimeout.Run(() => rebalance, s_deadline);
         await TestTimeout.Run(() => disposing, s_deadline);
         Assert.Equal(
-            new[] { "ok", "ok [" + Topic + "-0]", "throws InvalidOperationException: " + Concurrent },
+            new[] { "ok", "ok [" + Topic + "-0]", "throws ConcurrentModificationException: " + Concurrent },
             outcomes);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -252,9 +254,9 @@ public sealed class PublicConsumerCallbackRoutingTests
         await TestTimeout.Run(() => disposing, s_deadline);
         _ = await Record.ExceptionAsync(() => TestTimeout.Run(() => rebalance, s_deadline));
         Assert.Equal(
-            new[] { "ok", "ok [" + Topic + "-0]", "throws InvalidOperationException: " + Concurrent },
+            new[] { "ok", "ok [" + Topic + "-0]", "throws ConcurrentModificationException: " + Concurrent },
             outcomes);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -352,7 +354,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.True(elapsed.Elapsed < s_wellInsideThePoll, "Dispose took " + elapsed.Elapsed);
             Assert.Equal(Enumerable.Repeat("throws KafkaException -18: ", routedCalls), outcomes);
             Assert.Equal("throws KafkaException -18: ", polled);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -408,7 +410,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.True(elapsed.Elapsed < s_wellInsideThePoll, "DisposeAsync took " + elapsed.Elapsed);
             Assert.Equal(Enumerable.Repeat("faults KafkaException -18: ", routedCalls), outcomes);
             Assert.Equal("KafkaException -18: ", polled is null ? "ok" : Describe(polled));
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -502,7 +504,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.Equal("ok", outcome);
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => consumer.Committed(s_partitions), s_deadline);
-            Assert.Equal(4, committed[s_tp0]!.Offset);
+            Assert.Equal(4, committed[s_tp0]!.Offset());
         }
         finally
         {
@@ -569,10 +571,10 @@ public sealed class PublicConsumerCallbackRoutingTests
         IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => ProbeTimed(consumer));
 
         Assert.True(elapsed.Elapsed < s_wait, "the timed calls took " + elapsed.Elapsed);
-        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
+        string unsupported = fails + "UnsupportedOperationException: " + MockHandleUnsupported;
         string timedOut = fails + TimedOut;
-        string timerNegative = "throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1000";
-        string coreNegative = "throws ArgumentOutOfRangeException(timeout): Timeout must not be negative";
+        string timerNegative = "throws IllegalArgumentException: Invalid negative timeout -1000";
+        string coreNegative = "throws IllegalArgumentException: Timeout must not be negative";
         AssertOutcomes(
             new[]
             {
@@ -602,7 +604,7 @@ public sealed class PublicConsumerCallbackRoutingTests
 
         IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => ProbeMetadata(consumer));
 
-        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
+        string unsupported = fails + "UnsupportedOperationException: " + MockHandleUnsupported;
         string timedOut = fails + TimedOut;
         AssertOutcomes(
             new[]
@@ -633,7 +635,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     {
         foreach (string vehicle in new[] { "KafkaConsumer, a commit callback", "AsyncKafkaConsumer, a commit callback" })
         {
-            foreach (string call in new[] { "assign", "subscribe", "subscription", "unsubscribe", "poll", "close" })
+            foreach (string call in new[] { "assign", "subscribe", "subscribe_pattern", "subscription", "unsubscribe", "poll", "close" })
             {
                 yield return new object[] { vehicle, call };
             }
@@ -646,7 +648,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     {
         IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => new[] { Refusable(consumer, call) });
 
-        string refused = "InvalidOperationException: " + Concurrent;
+        string refused = "ConcurrentModificationException: " + Concurrent;
         Assert.Single(outcomes);
         Assert.EndsWith(refused, outcomes[0], StringComparison.Ordinal);
         Assert.True(
@@ -718,6 +720,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             {
                 "assign" => Call(() => sync.Assign(s_partitions)),
                 "subscribe" => Call(() => sync.Subscribe(s_topics)),
+                "subscribe_pattern" => Call(() => sync.Subscribe(s_pattern)),
                 "subscription" => Call(() => Format(sync.Subscription())),
                 "unsubscribe" => Call(sync.Unsubscribe),
                 "poll" => Call(() => sync.Poll(TimeSpan.Zero)),
@@ -730,6 +733,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         {
             "assign" => CallAsync(() => async.Assign(s_partitions)),
             "subscribe" => CallAsync(() => async.Subscribe(s_topics)),
+            "subscribe_pattern" => CallAsync(() => async.Subscribe(s_pattern)),
             "subscription" => Call(() => Format(async.Subscription())),
             "unsubscribe" => CallAsync(() => async.Unsubscribe()),
             "poll" => CallAsync(() => async.Poll(TimeSpan.Zero)),
@@ -814,8 +818,8 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static List<string> Expected(bool mock, bool async)
     {
         string fails = async ? "faults " : "throws ";
-        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
-        string refused = "throws InvalidOperationException: " + Concurrent;
+        string unsupported = fails + "UnsupportedOperationException: " + MockHandleUnsupported;
+        string refused = "throws ConcurrentModificationException: " + Concurrent;
         List<string> expected = new List<string>
         {
             "Commit(): ok",
@@ -838,13 +842,15 @@ public sealed class PublicConsumerCallbackRoutingTests
             "SeekToBeginning: " + (mock ? unsupported : "ok"),
             "SeekToEnd: " + (mock ? unsupported : "ok"),
             "Poll: " + refused,
-            "Poll(negative): throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1",
+            "Poll(negative): throws IllegalArgumentException: Invalid negative timeout -1",
             "Subscribe: " + refused,
             "Subscribe(listener): " + refused,
+            "Subscribe(pattern): " + refused,
+            "Subscribe(pattern, listener): " + refused,
             "Unsubscribe: " + refused,
             "Assign: " + refused,
             "Commit(timeout): ok",
-            "Commit(negative timeout): throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1",
+            "Commit(negative timeout): throws IllegalArgumentException: Invalid negative timeout -1",
             "Commit(offsets, timeout): ok",
             "Committed(timeout): " + (mock ? unsupported : fails + TimedOut + ShortCommittedTimeout),
             "BeginningOffsets(timeout): " + (mock ? unsupported : fails + TimedOut + ShortOffsetsTimeout),
@@ -923,6 +929,8 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Poll(negative)", Call(() => consumer.Poll(s_negative)));
         Add("Subscribe", Call(() => consumer.Subscribe(s_topics)));
         Add("Subscribe(listener)", Call(() => consumer.Subscribe(s_topics, new SyncListener(() => { }))));
+        Add("Subscribe(pattern)", Call(() => consumer.Subscribe(s_pattern)));
+        Add("Subscribe(pattern, listener)", Call(() => consumer.Subscribe(s_pattern, new SyncListener(() => { }))));
         Add("Unsubscribe", Call(consumer.Unsubscribe));
         Add("Assign", Call(() => consumer.Assign(s_partitions)));
         Add("Commit(timeout)", Call(() => consumer.Commit(s_second)));
@@ -937,7 +945,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("ListTopics", Call(() => consumer.ListTopics()));
         Add("ListTopics(timeout)", Call(() => consumer.ListTopics(s_short)));
         Add("Subscription", Call(() => Format(consumer.Subscription())));
-        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId));
+        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId()));
         Add("EnforceRebalance", Call(() => consumer.EnforceRebalance()));
         Add("Metrics", Call(() => consumer.Metrics() is null ? "null" : "a map"));
         return outcomes;
@@ -971,6 +979,8 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Poll(negative)", CallAsync(() => consumer.Poll(s_negative)));
         Add("Subscribe", CallAsync(() => consumer.Subscribe(s_topics)));
         Add("Subscribe(listener)", CallAsync(() => consumer.Subscribe(s_topics, new SyncListener(() => { }))));
+        Add("Subscribe(pattern)", CallAsync(() => consumer.Subscribe(s_pattern)));
+        Add("Subscribe(pattern, listener)", CallAsync(() => consumer.Subscribe(s_pattern, new SyncListener(() => { }))));
         Add("Unsubscribe", CallAsync(() => consumer.Unsubscribe()));
         Add("Assign", CallAsync(() => consumer.Assign(s_partitions)));
         Add("Commit(timeout)", CallAsync(() => consumer.Commit(s_second)));
@@ -985,7 +995,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("ListTopics", CallAsync(() => consumer.ListTopics()));
         Add("ListTopics(timeout)", CallAsync(() => consumer.ListTopics(s_short)));
         Add("Subscription", Call(() => Format(consumer.Subscription())));
-        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId));
+        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId()));
         Add("EnforceRebalance", Call(() => consumer.EnforceRebalance()));
         Add("Metrics", Call(() => consumer.Metrics() is null ? "null" : "a map"));
         return outcomes;
@@ -1284,7 +1294,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     }
 
     private static string Format(IReadOnlyCollection<TopicPartition> partitions) =>
-        "[" + string.Join(",", partitions.Select(p => p.Topic + "-" + p.Partition.ToString(CultureInfo.InvariantCulture))) + "]";
+        "[" + string.Join(",", partitions.Select(p => p.Topic() + "-" + p.Partition().ToString(CultureInfo.InvariantCulture))) + "]";
 
     private static string Format(IReadOnlyCollection<string> topics) => "[" + string.Join(",", topics) + "]";
 
@@ -1293,11 +1303,11 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static string Format(long value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static string Format(ConsumerGroupMetadata metadata) =>
-        metadata.GroupId + "/" + metadata.GenerationId.ToString(CultureInfo.InvariantCulture) + "/" + metadata.MemberId
-        + "/" + (metadata.GroupInstanceId ?? "null");
+        metadata.GroupId() + "/" + metadata.GenerationId().ToString(CultureInfo.InvariantCulture) + "/" + metadata.MemberId()
+        + "/" + (metadata.GroupInstanceId() ?? "null");
 
     private static string Format<TValue>(IReadOnlyDictionary<TopicPartition, TValue> values) =>
-        "{" + string.Join(",", values.Select(entry => entry.Key.Topic + "-" + entry.Key.Partition.ToString(CultureInfo.InvariantCulture)
+        "{" + string.Join(",", values.Select(entry => entry.Key.Topic() + "-" + entry.Key.Partition().ToString(CultureInfo.InvariantCulture)
             + "=" + (entry.Value?.ToString() ?? "null"))) + "}";
 
     private static Func<(bool BeforeTheRelease, bool AfterTheRelease)?> WatchTheRoutingHandle(object consumer)
@@ -1327,17 +1337,17 @@ public sealed class PublicConsumerCallbackRoutingTests
             {
                 consumer.Assignment();
             }
-            catch (ObjectDisposedException)
+            catch (IllegalStateException)
             {
                 return;
             }
-            catch (InvalidOperationException)
+            catch (ConcurrentModificationException)
             {
             }
 
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the consumer never began to close");
+                throw new System.TimeoutException("the consumer never began to close");
             }
 
             Thread.Yield();
@@ -1374,10 +1384,10 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static Dictionary<TopicPartition, long> Timestamps() => new Dictionary<TopicPartition, long> { [s_tp0] = 0 };
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
@@ -1389,10 +1399,10 @@ public sealed class PublicConsumerCallbackRoutingTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
     private sealed class SyncListener : ConsumerRebalanceListenerBase

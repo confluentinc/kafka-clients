@@ -61,7 +61,7 @@ public sealed class AdminP5SubmitArgumentTests
     [InlineData(-5, 0)]
     public void ListGroupsOptions_Timeout_IsSentAsTheCoreReadsIt(int? timeoutMs, int expected)
     {
-        ListGroupsOptions options = new ListGroupsOptions { TimeoutMs = timeoutMs };
+        ListGroupsOptions options = new ListGroupsOptions().TimeoutMs(timeoutMs);
 
         Assert.Equal(new[] { nameof(ListGroupsOptions.TimeoutMs) }, options.Setters.InOrder);
         Assert.Equal(expected, ReadBack(options).TimeoutMs);
@@ -70,25 +70,23 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void ListGroupsOptions_EachSetterRunTwice_SendsItsLastValue()
     {
-        ListGroupsOptions options = new ListGroupsOptions
-        {
-            TimeoutMs = 5,
-            GroupStates = new[] { GroupState.STABLE },
-            ProtocolTypes = new[] { "consumer" },
-            Types = new[] { GroupType.SHARE },
-        };
-        options.TimeoutMs = 7;
-        options.GroupStates = new[] { GroupState.DEAD, GroupState.EMPTY };
-        options.ProtocolTypes = Array.Empty<string>();
-        options.Types = null!;
+        ListGroupsOptions options = new ListGroupsOptions()
+            .TimeoutMs(5)
+            .InGroupStates(new[] { GroupState.STABLE })
+            .WithProtocolTypes(new[] { "consumer" })
+            .WithTypes(new[] { GroupType.SHARE });
+        options.TimeoutMs(7);
+        options.InGroupStates(new[] { GroupState.DEAD, GroupState.EMPTY });
+        options.WithProtocolTypes(Array.Empty<string>());
+        options.WithTypes(null);
 
         Assert.Equal(
             new[]
             {
                 nameof(ListGroupsOptions.TimeoutMs),
-                nameof(ListGroupsOptions.GroupStates),
-                nameof(ListGroupsOptions.ProtocolTypes),
-                nameof(ListGroupsOptions.Types),
+                nameof(ListGroupsOptions.InGroupStates),
+                nameof(ListGroupsOptions.WithProtocolTypes),
+                nameof(ListGroupsOptions.WithTypes),
             },
             options.Setters.InOrder);
 
@@ -102,22 +100,20 @@ public sealed class AdminP5SubmitArgumentTests
     [Theory]
     [MemberData(nameof(GroupStates))]
     public void ListGroupsOptions_EveryGroupState_CrossesAsItself(GroupState state) =>
-        Assert.Equal(new[] { state }, ReadBack(new ListGroupsOptions { GroupStates = new[] { state } }).GroupStates);
+        Assert.Equal(new[] { state }, ReadBack(new ListGroupsOptions().InGroupStates(new[] { state })).GroupStates);
 
     [Theory]
     [MemberData(nameof(GroupTypes))]
     public void ListGroupsOptions_EveryGroupType_CrossesAsItself(GroupType type) =>
-        Assert.Equal(new[] { type }, ReadBack(new ListGroupsOptions { Types = new[] { type } }).Types);
+        Assert.Equal(new[] { type }, ReadBack(new ListGroupsOptions().WithTypes(new[] { type })).Types);
 
     [Fact]
     public void ListGroupsOptions_TheThreeFilters_EachCrossWithItsOwnValues()
     {
-        ListGroupsReadBack sent = ReadBack(new ListGroupsOptions
-        {
-            GroupStates = new[] { GroupState.STABLE, GroupState.EMPTY, GroupState.STABLE, GroupState.RECONCILING },
-            ProtocolTypes = new[] { "", "consumer", "prötocol-日本" },
-            Types = new[] { GroupType.CONSUMER },
-        });
+        ListGroupsReadBack sent = ReadBack(new ListGroupsOptions()
+            .InGroupStates(new[] { GroupState.STABLE, GroupState.EMPTY, GroupState.STABLE, GroupState.RECONCILING })
+            .WithProtocolTypes(new[] { "", "consumer", "prötocol-日本" })
+            .WithTypes(new[] { GroupType.CONSUMER }));
 
         Assert.Equal(
             new[] { GroupState.STABLE, GroupState.EMPTY, GroupState.RECONCILING },
@@ -133,7 +129,7 @@ public sealed class AdminP5SubmitArgumentTests
     {
         ListGroupsOptions consumer = ListGroupsOptions.ForConsumerGroups();
         Assert.Equal(
-            new[] { nameof(ListGroupsOptions.Types), nameof(ListGroupsOptions.ProtocolTypes) },
+            new[] { nameof(ListGroupsOptions.WithTypes), nameof(ListGroupsOptions.WithProtocolTypes) },
             consumer.Setters.InOrder);
         ListGroupsReadBack forConsumer = ReadBack(consumer);
         Assert.Equal(new[] { GroupType.CONSUMER, GroupType.CLASSIC }, forConsumer.Types.OrderBy(type => type));
@@ -159,8 +155,8 @@ public sealed class AdminP5SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ListGroupsOptions options = onTheStateAxis
-            ? new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }
-            : new ListGroupsOptions { Types = new[] { (GroupType)99 } };
+            ? new ListGroupsOptions().InGroupStates(new[] { (GroupState)(-1) })
+            : new ListGroupsOptions().WithTypes(new[] { (GroupType)99 });
 
         ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(() => admin.ListGroups(options));
 
@@ -180,7 +176,7 @@ public sealed class AdminP5SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => admin.ListGroups(new ListGroupsOptions { ProtocolTypes = new[] { "con\0sumer" } }));
+            () => admin.ListGroups(new ListGroupsOptions().WithProtocolTypes(new[] { "con\0sumer" })));
 
         Assert.Equal("options", failure.ParamName);
         Assert.StartsWith(AdminStrings.InvalidStringMessage, failure.Message, StringComparison.Ordinal);
@@ -190,9 +186,9 @@ public sealed class AdminP5SubmitArgumentTests
     public void ListGroupsOptions_ANullProtocolType_IsRejectedBySetter()
     {
         ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => new ListGroupsOptions { ProtocolTypes = new[] { "consumer", null! } });
+            () => new ListGroupsOptions().WithProtocolTypes(new[] { "consumer", null! }));
 
-        Assert.Equal("value", failure.ParamName);
+        Assert.Equal("protocolTypes", failure.ParamName);
         Assert.StartsWith("A protocol type must not be null", failure.Message, StringComparison.Ordinal);
     }
 
@@ -234,8 +230,8 @@ public sealed class AdminP5SubmitArgumentTests
     [InlineData(-5, 0)]
     public void DescribeGroupsOptions_Timeout_IsSentAsTheCoreReadsIt(int? timeoutMs, int expected)
     {
-        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions { TimeoutMs = timeoutMs };
-        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions { TimeoutMs = timeoutMs };
+        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions().TimeoutMs(timeoutMs);
+        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions().TimeoutMs(timeoutMs);
 
         Assert.Equal(new[] { nameof(DescribeConsumerGroupsOptions.TimeoutMs) }, consumer.Setters.InOrder);
         Assert.Equal(new[] { nameof(DescribeClassicGroupsOptions.TimeoutMs) }, classic.Setters.InOrder);
@@ -248,8 +244,8 @@ public sealed class AdminP5SubmitArgumentTests
     [InlineData(false)]
     public void DescribeGroupsOptions_IncludeAuthorizedOperations_CrossesInBothStates(bool include)
     {
-        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions { IncludeAuthorizedOperations = include };
-        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include };
+        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions().IncludeAuthorizedOperations(include);
+        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions().IncludeAuthorizedOperations(include);
 
         Assert.Equal(
             new[] { nameof(DescribeConsumerGroupsOptions.IncludeAuthorizedOperations) }, consumer.Setters.InOrder);
@@ -260,20 +256,16 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void DescribeGroupsOptions_EachSetterRunTwice_SendsItsLastValue()
     {
-        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions
-        {
-            IncludeAuthorizedOperations = true,
-            TimeoutMs = 5,
-        };
-        consumer.IncludeAuthorizedOperations = false;
-        consumer.TimeoutMs = 7;
-        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions
-        {
-            TimeoutMs = 5,
-            IncludeAuthorizedOperations = false,
-        };
-        classic.TimeoutMs = 9;
-        classic.IncludeAuthorizedOperations = true;
+        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions()
+            .IncludeAuthorizedOperations(true)
+            .TimeoutMs(5);
+        consumer.IncludeAuthorizedOperations(false);
+        consumer.TimeoutMs(7);
+        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions()
+            .TimeoutMs(5)
+            .IncludeAuthorizedOperations(false);
+        classic.TimeoutMs(9);
+        classic.IncludeAuthorizedOperations(true);
 
         Assert.Equal(
             new[]
@@ -316,7 +308,7 @@ public sealed class AdminP5SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         var described = admin.DescribeConsumerGroups(
-            new[] { "group", "GROUP", "group", "grüppe" }, new DescribeConsumerGroupsOptions { TimeoutMs = 100 });
+            new[] { "group", "GROUP", "group", "grüppe" }, new DescribeConsumerGroupsOptions().TimeoutMs(100));
 
         Assert.Equal(
             new[] { "GROUP", "group", "grüppe" },
@@ -336,7 +328,7 @@ public sealed class AdminP5SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         var described = admin.DescribeClassicGroups(
-            new[] { "group", "GROUP", "group" }, new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = true });
+            new[] { "group", "GROUP", "group" }, new DescribeClassicGroupsOptions().IncludeAuthorizedOperations(true));
 
         Assert.Equal(
             new[] { "GROUP", "group" }, described.DescribedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
@@ -377,7 +369,7 @@ public sealed class AdminP5SubmitArgumentTests
 
     private static void AssertNotImplemented(Exception? outcome)
     {
-        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
+        UnsupportedOperationException failure = Assert.IsType<UnsupportedOperationException>(outcome);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
@@ -607,11 +599,11 @@ public sealed class AdminP5SubmitArgumentTests
     [InlineData(-5, 0)]
     public void GroupOffsetsOptions_Timeout_IsSentAsTheCoreReadsIt(int? timeoutMs, int expected)
     {
-        ListConsumerGroupOffsetsOptions list = new ListConsumerGroupOffsetsOptions { TimeoutMs = timeoutMs };
-        AlterConsumerGroupOffsetsOptions alter = new AlterConsumerGroupOffsetsOptions { TimeoutMs = timeoutMs };
-        DeleteConsumerGroupOffsetsOptions deleteOffsets = new DeleteConsumerGroupOffsetsOptions { TimeoutMs = timeoutMs };
-        DeleteConsumerGroupsOptions deleteGroups = new DeleteConsumerGroupsOptions { TimeoutMs = timeoutMs };
-        RemoveMembersFromConsumerGroupOptions remove = new RemoveMembersFromConsumerGroupOptions { TimeoutMs = timeoutMs };
+        ListConsumerGroupOffsetsOptions list = new ListConsumerGroupOffsetsOptions().TimeoutMs(timeoutMs);
+        AlterConsumerGroupOffsetsOptions alter = new AlterConsumerGroupOffsetsOptions().TimeoutMs(timeoutMs);
+        DeleteConsumerGroupOffsetsOptions deleteOffsets = new DeleteConsumerGroupOffsetsOptions().TimeoutMs(timeoutMs);
+        DeleteConsumerGroupsOptions deleteGroups = new DeleteConsumerGroupsOptions().TimeoutMs(timeoutMs);
+        RemoveMembersFromConsumerGroupOptions remove = new RemoveMembersFromConsumerGroupOptions().TimeoutMs(timeoutMs);
 
         Assert.Equal(new[] { nameof(ListConsumerGroupOffsetsOptions.TimeoutMs) }, list.Setters.InOrder);
         Assert.Equal(new[] { nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs) }, remove.Setters.InOrder);
@@ -627,7 +619,7 @@ public sealed class AdminP5SubmitArgumentTests
     [InlineData(false)]
     public void ListConsumerGroupOffsetsOptions_RequireStable_CrossesInBothStates(bool requireStable)
     {
-        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { RequireStable = requireStable };
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions().RequireStable(requireStable);
 
         Assert.Equal(new[] { nameof(ListConsumerGroupOffsetsOptions.RequireStable) }, options.Setters.InOrder);
         Assert.Equal((-1, requireStable), ReadBack(options));
@@ -636,29 +628,31 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void GroupOffsetsOptions_EachSetterRunTwice_SendsItsLastValue()
     {
-        ListConsumerGroupOffsetsOptions list = new ListConsumerGroupOffsetsOptions { TimeoutMs = 5, RequireStable = true };
-        list.TimeoutMs = 7;
-        list.RequireStable = false;
+        ListConsumerGroupOffsetsOptions list = new ListConsumerGroupOffsetsOptions().TimeoutMs(5).RequireStable(true);
+        list.TimeoutMs(7);
+        list.RequireStable(false);
         Assert.Equal(
             new[] { nameof(ListConsumerGroupOffsetsOptions.TimeoutMs), nameof(ListConsumerGroupOffsetsOptions.RequireStable) },
             list.Setters.InOrder);
         Assert.Equal((7, false), ReadBack(list));
 
-        AlterConsumerGroupOffsetsOptions alter = new AlterConsumerGroupOffsetsOptions { TimeoutMs = 5 };
-        alter.TimeoutMs = null;
+        AlterConsumerGroupOffsetsOptions alter = new AlterConsumerGroupOffsetsOptions().TimeoutMs(5);
+        alter.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(alter));
 
-        DeleteConsumerGroupOffsetsOptions deleteOffsets = new DeleteConsumerGroupOffsetsOptions { TimeoutMs = 5 };
-        deleteOffsets.TimeoutMs = 8;
+        DeleteConsumerGroupOffsetsOptions deleteOffsets = new DeleteConsumerGroupOffsetsOptions().TimeoutMs(5);
+        deleteOffsets.TimeoutMs(8);
         Assert.Equal(8, ReadBack(deleteOffsets));
 
-        DeleteConsumerGroupsOptions deleteGroups = new DeleteConsumerGroupsOptions { TimeoutMs = 5 };
-        deleteGroups.TimeoutMs = 9;
+        DeleteConsumerGroupsOptions deleteGroups = new DeleteConsumerGroupsOptions().TimeoutMs(5);
+        deleteGroups.TimeoutMs(9);
         Assert.Equal(9, ReadBack(deleteGroups));
 
-        RemoveMembersFromConsumerGroupOptions remove = new RemoveMembersFromConsumerGroupOptions { Reason = "first", TimeoutMs = 5 };
-        remove.Reason = null;
-        remove.TimeoutMs = 6;
+        RemoveMembersFromConsumerGroupOptions remove = new RemoveMembersFromConsumerGroupOptions();
+        remove.Reason("first");
+        remove.TimeoutMs(5);
+        remove.Reason(null);
+        remove.TimeoutMs(6);
         Assert.Equal(
             new[] { nameof(RemoveMembersFromConsumerGroupOptions.Reason), nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs) },
             remove.Setters.InOrder);
@@ -684,10 +678,8 @@ public sealed class AdminP5SubmitArgumentTests
     public void RemoveMembersOptions_TheMembers_CrossAtCreation_ARepeatCollapsed()
     {
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions(
-            new[] { new MemberToRemove("instance-1"), new MemberToRemove("instance-é"), new MemberToRemove("instance-1") })
-        {
-            Reason = "rebalance",
-        };
+            new[] { new MemberToRemove("instance-1"), new MemberToRemove("instance-é"), new MemberToRemove("instance-1") });
+        options.Reason("rebalance");
 
         RemoveMembersReadBack sent = ReadBack(options);
         Assert.False(sent.RemoveAll);
@@ -700,7 +692,7 @@ public sealed class AdminP5SubmitArgumentTests
     public void ListConsumerGroupOffsetsSpec_AllPartitionsAndAnEmptySelection_CrossDifferently()
     {
         Assert.Null(ReadBack(new ListConsumerGroupOffsetsSpec()));
-        Assert.Empty(ReadBack(new ListConsumerGroupOffsetsSpec { TopicPartitions = Array.Empty<TopicPartition>() })!);
+        Assert.Empty(ReadBack(new ListConsumerGroupOffsetsSpec().TopicPartitions(Array.Empty<TopicPartition>()))!);
 
         TopicPartition[] selected =
         {
@@ -708,7 +700,7 @@ public sealed class AdminP5SubmitArgumentTests
             new TopicPartition("beta-é", 11),
             new TopicPartition("alpha", 2),
         };
-        Assert.Equal(selected, ReadBack(new ListConsumerGroupOffsetsSpec { TopicPartitions = selected }));
+        Assert.Equal(selected, ReadBack(new ListConsumerGroupOffsetsSpec().TopicPartitions(selected)));
     }
 
     [Fact]
@@ -743,7 +735,7 @@ public sealed class AdminP5SubmitArgumentTests
             admin,
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
-                ["g1"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { default(TopicPartition) } },
+                ["g1"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { default(TopicPartition) }),
             },
             "The spec for group id 'g1' must not select a topic partition with a null topic.");
     }

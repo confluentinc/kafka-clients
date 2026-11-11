@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -25,8 +26,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The typed send on both producer mocks: a typed round-trip, the serializer invoked on a null key or value as
-/// Java's is, a nullable value type's tombstone, and a serializer throw wrapped in a synchronous
-/// <see cref="SerializationException"/> with nothing sent. The mock exposes only a history count, so the
+/// Java's is, a nullable value type's tombstone, and a serializer throw leaving <c>Send</c> synchronously as it is,
+/// with nothing sent. The mock exposes only a history count, so the
 /// serialized bytes are not read back.
 /// </summary>
 public sealed class PublicProducerTypedSendTests
@@ -39,7 +40,7 @@ public sealed class PublicProducerTypedSendTests
     public void Sync_TypedRoundTrip_StringLong_Succeeds()
     {
         MockProducer<string, long> producer =
-            new MockProducer<string, long>(Serdes.String, Serdes.Int64);
+            new MockProducer<string, long>(Serdes.String(), Serdes.Long());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
@@ -47,9 +48,9 @@ public sealed class PublicProducerTypedSendTests
             () => metadata = producer.Send(new ProducerRecord<string, long>(Topic, 42L, "k", partition: 3)).Get(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(3, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(3, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
         Assert.Equal(1, producer.HistoryCount());
     }
 
@@ -57,7 +58,7 @@ public sealed class PublicProducerTypedSendTests
     public async Task Async_TypedRoundTrip_StringLong_Succeeds()
     {
         AsyncMockProducer<string, long> producer =
-            new AsyncMockProducer<string, long>(Serdes.String, Serdes.Int64);
+            new AsyncMockProducer<string, long>(Serdes.String(), Serdes.Long());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         RecordMetadata metadata = null!;
@@ -65,18 +66,18 @@ public sealed class PublicProducerTypedSendTests
             async () => metadata = await producer.Send(new ProducerRecord<string, long>(Topic, 42L, "k", partition: 3)).Delivery(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(3, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(3, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
         Assert.Equal(1, producer.HistoryCount());
     }
 
     [Fact]
     public void Sync_TypedRoundTrip_ByteArray_Succeeds()
     {
-        // <byte[], byte[]> with Serdes.ByteArray is the bytes surface.
+        // <byte[], byte[]> with Serdes.ByteArray() is the bytes surface.
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
@@ -85,15 +86,15 @@ public sealed class PublicProducerTypedSendTests
                 Topic, Encoding.UTF8.GetBytes("v"), Encoding.UTF8.GetBytes("k"), partition: 1)).Get(),
             s_deadline);
 
-        Assert.Equal(1, metadata.Partition);
+        Assert.Equal(1, metadata.Partition());
         Assert.Equal(1, producer.HistoryCount());
     }
 
     [Fact]
     public void Sync_NullKeyAndValue_InvokesSerializer_ThenSends()
     {
-        RecordingSerializer<string> keySer = new RecordingSerializer<string>(Serdes.String);
-        RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String);
+        RecordingSerializer<string> keySer = new RecordingSerializer<string>(Serdes.String());
+        RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String());
         MockProducer<string, string> producer =
             new MockProducer<string, string>(keySer, valueSer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
@@ -114,9 +115,9 @@ public sealed class PublicProducerTypedSendTests
     [Fact]
     public async Task Async_NullValue_InvokesSerializer_ThenSends()
     {
-        RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String);
+        RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String());
         AsyncMockProducer<string, string> producer =
-            new AsyncMockProducer<string, string>(Serdes.String, valueSer);
+            new AsyncMockProducer<string, string>(Serdes.String(), valueSer);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         await TestTimeout.Run(
@@ -131,9 +132,9 @@ public sealed class PublicProducerTypedSendTests
     [Fact]
     public void Sync_EmptyValue_InvokesSerializer_ThenSends()
     {
-        RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String);
+        RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String());
         MockProducer<string, string> producer =
-            new MockProducer<string, string>(Serdes.String, valueSer);
+            new MockProducer<string, string>(Serdes.String(), valueSer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // An empty string serializes to a present, empty byte[], distinct from absent.
@@ -151,7 +152,7 @@ public sealed class PublicProducerTypedSendTests
     {
         NullableInt64Serializer valueSer = new NullableInt64Serializer();
         MockProducer<string, long?> producer =
-            new MockProducer<string, long?>(Serdes.String, valueSer);
+            new MockProducer<string, long?>(Serdes.String(), valueSer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // A null long? is a tombstone and a present 0L a value; the serializer is invoked for both.
@@ -167,38 +168,34 @@ public sealed class PublicProducerTypedSendTests
     }
 
     [Fact]
-    public void Sync_ValueSerializerThrows_ThrowsSerializationExceptionSynchronously()
+    public void Sync_ValueSerializerThrows_RethrowsItSynchronously()
     {
         ThrowingSerializer<string> valueSer = new ThrowingSerializer<string>();
         MockProducer<string, string> producer =
-            new MockProducer<string, string>(Serdes.String, valueSer);
+            new MockProducer<string, string>(Serdes.String(), valueSer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        SerializationException ex = Assert.Throws<SerializationException>(
+        ThrowingSerializer<string>.BoomException ex = Assert.Throws<ThrowingSerializer<string>.BoomException>(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")));
 
-        // The wrap carries the topic and "value", with the original throw as the inner exception.
-        Assert.Contains(Topic, ex.Message, StringComparison.Ordinal);
-        Assert.Contains("value", ex.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<string>.BoomException>(ex.InnerException);
+        Assert.Same(valueSer.LastThrown, ex);
 
         // The throw is before the native send, so nothing was sent.
         Assert.Equal(0, producer.HistoryCount());
     }
 
     [Fact]
-    public void Sync_KeySerializerThrows_MessageMentionsKey()
+    public void Sync_KeySerializerThrows_RethrowsItSynchronously()
     {
         ThrowingSerializer<string> keySer = new ThrowingSerializer<string>();
         MockProducer<string, string> producer =
-            new MockProducer<string, string>(keySer, Serdes.String);
+            new MockProducer<string, string>(keySer, Serdes.String());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        SerializationException ex = Assert.Throws<SerializationException>(
+        ThrowingSerializer<string>.BoomException ex = Assert.Throws<ThrowingSerializer<string>.BoomException>(
             () => producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")));
 
-        Assert.Contains("key", ex.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<string>.BoomException>(ex.InnerException);
+        Assert.Same(keySer.LastThrown, ex);
         Assert.Equal(0, producer.HistoryCount());
     }
 
@@ -207,18 +204,17 @@ public sealed class PublicProducerTypedSendTests
     {
         ThrowingSerializer<string> valueSer = new ThrowingSerializer<string>();
         AsyncMockProducer<string, string> producer =
-            new AsyncMockProducer<string, string>(Serdes.String, valueSer);
+            new AsyncMockProducer<string, string>(Serdes.String(), valueSer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        // The async Send serializes before it returns, so the wrap leaves the call (Assert.Throws, not ThrowsAsync);
-        // the statement lambda binds Action, not the obsolete Func<Task>.
-        SerializationException ex = Assert.Throws<SerializationException>(() =>
+        // The async Send serializes before it returns, so the throw leaves the call (Assert.Throws, not
+        // ThrowsAsync); the statement lambda binds Action, not the obsolete Func<Task>.
+        ThrowingSerializer<string>.BoomException ex = Assert.Throws<ThrowingSerializer<string>.BoomException>(() =>
         {
             _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));
         });
 
-        Assert.Contains(Topic, ex.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<string>.BoomException>(ex.InnerException);
+        Assert.Same(valueSer.LastThrown, ex);
 
         // Nothing was sent.
         Assert.Equal(0, producer.HistoryCount());
@@ -228,19 +224,24 @@ public sealed class PublicProducerTypedSendTests
     public void BuiltInSerdes_NullInput_MapToTombstone()
     {
         // The tombstone path relies on the reference-type built-in serdes returning null for null, as Java's do, and
-        // on Serdes.Null always returning null; a value type cannot be null.
-        Assert.Null(Serdes.String.Serialize(Topic, null!));
-        Assert.Null(Serdes.ByteArray.Serialize(Topic, null!));
-        Assert.Null(Serdes.Null.Serialize(Topic, null));
-        Assert.Null(Serdes.Null.Serialize(Topic, new object()));
-        Assert.NotNull(Serdes.Int64.Serialize(Topic, 0L));
+        // on Serdes.Void() always returning null; a value type cannot be null.
+        Assert.Null(Serdes.String().Serialize(Topic, null!));
+        Assert.Null(Serdes.ByteArray().Serialize(Topic, null!));
+        Assert.Null(Serdes.Void().Serialize(Topic, null));
+        Assert.Null(Serdes.Void().Serialize(Topic, new object()));
+        Assert.NotNull(Serdes.Long().Serialize(Topic, 0L));
     }
 
     [Fact]
     public void ByteArraySerde_IsZeroCopyIdentity()
     {
-        // Serdes.ByteArray returns the caller's array, so the bytes send path adds no value-sized copy.
+        // Serdes.ByteArray() returns the caller's array, so the bytes send path adds no value-sized copy.
         byte[] value = Encoding.UTF8.GetBytes("value");
-        Assert.Same(value, Serdes.ByteArray.Serialize(Topic, value));
+        ReadOnlyMemory<byte>? serialized = Serdes.ByteArray().Serialize(Topic, value);
+        Assert.True(serialized.HasValue);
+        Assert.True(MemoryMarshal.TryGetArray(serialized.Value, out ArraySegment<byte> segment));
+        Assert.Same(value, segment.Array);
+        Assert.Equal(0, segment.Offset);
+        Assert.Equal(value.Length, segment.Count);
     }
 }

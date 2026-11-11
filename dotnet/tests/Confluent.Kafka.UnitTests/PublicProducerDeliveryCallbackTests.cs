@@ -30,7 +30,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The delivery callback, <see cref="IDeliveryCallback"/> and <c>Send(record, callback)</c>, on both producer mocks;
+/// The delivery callback, <see cref="ICallback"/> and <c>Send(record, callback)</c>, on both producer mocks;
 /// every behavioural test runs against the sync and the async flavor.
 /// </summary>
 public sealed class PublicProducerDeliveryCallbackTests
@@ -67,9 +67,9 @@ public sealed class PublicProducerDeliveryCallbackTests
             Assert.Single(await SettledCompletions(callback, expected: 1));
 
         Assert.Null(completion.Exception);
-        Assert.Equal(Topic, completion.Metadata.Topic);
-        Assert.Equal(2, completion.Metadata.Partition);
-        Assert.Equal(0L, completion.Metadata.Offset);
+        Assert.Equal(Topic, completion.Metadata.Topic());
+        Assert.Equal(2, completion.Metadata.Partition());
+        Assert.Equal(0L, completion.Metadata.Offset());
 
         // The callback and the caller get the same instance: one completion drives both.
         Assert.Same(returned, completion.Metadata);
@@ -92,7 +92,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
-        Assert.Equal(NonAscii, completion.Metadata.Topic);
+        Assert.Equal(NonAscii, completion.Metadata.Topic());
     }
 
     [Theory]
@@ -152,7 +152,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         // Java completes the future after the callbacks run. The probe is the send task's state seen from inside the
         // callback; comparing continuation order would race RunContinuationsAsynchronously.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TaskStateProbeCallback probe = new TaskStateProbeCallback();
@@ -174,7 +174,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // The sync probe: the callback has run, on the completion thread, by the time the blocking Get returns.
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -205,7 +205,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // On failure too, the callback runs, on the completion thread, before Get throws.
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -220,14 +220,14 @@ public sealed class PublicProducerDeliveryCallbackTests
                 producer.Send(
                     new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
             }
-            catch (KafkaException)
+            catch (Confluent.Kafka.ExecutionException)
             {
                 invokedAtThrow = callback.Completions.Count == 1;
                 threadsAtThrow = callback.Threads;
             }
         });
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "ordering-throw", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("ordering-throw")));
         await TestTimeout.Run(() => sendTask, s_deadline);
 
         Assert.True(invokedAtThrow, "the delivery callback had not run when the blocking Get threw");
@@ -249,25 +249,25 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 3), callback);
 
         // Code 2 = CorruptMessage, which the core classifies retriable / non-fatal.
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "boom-delivery", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("boom-delivery")));
 
-        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => WithTimeout(sendTask));
+        CorruptRecordException thrown = await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
 
         // Java's callback never sees null metadata: the -1 placeholder keeps the topic and the record's partition.
         Assert.NotNull(completion.Metadata);
-        Assert.Equal(Topic, completion.Metadata.Topic);
-        Assert.Equal(3, completion.Metadata.Partition);
-        Assert.Equal(-1L, completion.Metadata.Offset);
-        Assert.Equal(-1L, completion.Metadata.Timestamp);
+        Assert.Equal(Topic, completion.Metadata.Topic());
+        Assert.Equal(3, completion.Metadata.Partition());
+        Assert.Equal(-1L, completion.Metadata.Offset());
+        Assert.Equal(-1L, completion.Metadata.Timestamp());
 
         // The callback gets the send's own exception: the same code, message and flags.
-        KafkaException delivered = Assert.IsType<KafkaException>(completion.Exception);
+        CorruptRecordException delivered = Assert.IsType<CorruptRecordException>(completion.Exception);
         Assert.Equal(2, delivered.Code);
         Assert.Contains("boom-delivery", delivered.Message, StringComparison.Ordinal);
-        Assert.True(delivered.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(delivered);
         Assert.Equal(thrown.Code, delivered.Code);
         Assert.Equal(thrown.Message, delivered.Message);
     }
@@ -286,13 +286,13 @@ public sealed class PublicProducerDeliveryCallbackTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v")), callback);
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "no-partition", isRetriable: true)));
-        await Assert.ThrowsAsync<KafkaException>(() => WithTimeout(sendTask));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("no-partition")));
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
-        Assert.Equal(Topic, completion.Metadata.Topic);
-        Assert.Equal(0, completion.Metadata.Partition);
+        Assert.Equal(Topic, completion.Metadata.Topic());
+        Assert.Equal(0, completion.Metadata.Partition());
     }
 
     [Theory]
@@ -306,7 +306,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         Exception injected = kind == KafkaError
-            ? new KafkaException(2, "the injected instance", isRetriable: true)
+            ? new Common.Errors.CorruptRecordException("the injected instance")
             : new InjectedException("the injected instance");
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -314,11 +314,31 @@ public sealed class PublicProducerDeliveryCallbackTests
         DriveUntilResolved(() => producer.ErrorNext(injected));
 
         Exception failure = await Assert.ThrowsAnyAsync<Exception>(() => WithTimeout(sendTask));
-        Assert.Same(injected, failure);
+        Assert.Same(injected, FutureAssert.Unwrapped(failure));
         (RecordMetadata metadata, Exception? delivered) = Assert.Single(await SettledCompletions(callback, expected: 1));
         Assert.Same(injected, delivered);
-        Assert.Equal(1, metadata.Partition);
-        Assert.Equal(-1L, metadata.Offset);
+        Assert.Equal(1, metadata.Partition());
+        Assert.Equal(-1L, metadata.Offset());
+    }
+
+    [Theory]
+    [InlineData(Sync)]
+    [InlineData(Async)]
+    public async Task ErrorNext_Null_CompletesTheNextSendSuccessfully_AsJavasErrorNext(string flavor)
+    {
+        Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+
+        Task<RecordMetadata> sendTask = producer.Send(
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 1), callback);
+        DriveUntilResolved(() => producer.ErrorNext(null));
+
+        RecordMetadata metadata = await WithTimeout(sendTask);
+        Assert.Equal(1, metadata.Partition());
+        (RecordMetadata delivered, Exception? exception) = Assert.Single(await SettledCompletions(callback, expected: 1));
+        Assert.Null(exception);
+        Assert.Equal(metadata.Offset(), delivered.Offset());
     }
 
     [Theory]
@@ -332,7 +352,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
-        Assert.Throws<ObjectDisposedException>(() => producer.SendInline(
+        Assert.Throws<IllegalStateException>(() => producer.SendInline(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
 
         Assert.Empty(callback.Completions);
@@ -343,18 +363,17 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public void NoCallback_OnSynchronousThrow_SerializerThrows(string flavor)
     {
-        // Java's doSend rethrows a SerializationException without running the callback.
+        // Java's doSend rethrows a serializer's throw that is not an ApiException without running the callback.
         ThrowingSerializer<byte[]> throwing = new ThrowingSerializer<byte[]>();
         Flavor producer = Flavor.Create(flavor, valueSerializer: throwing);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
-        SerializationException error = Assert.Throws<SerializationException>(() => producer.SendInline(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
+        ThrowingSerializer<byte[]>.BoomException error = Assert.Throws<ThrowingSerializer<byte[]>.BoomException>(
+            () => producer.SendInline(
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
 
-        Assert.Contains("value", error.Message, StringComparison.Ordinal);
-        Assert.Contains(Topic, error.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<byte[]>.BoomException>(error.InnerException);
+        Assert.Same(throwing.LastThrown, error);
         Assert.Equal(1, throwing.InvocationCount);
         Assert.Empty(callback.Completions);
     }
@@ -390,14 +409,14 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("first"), partition: 0), throwing));
 
         Assert.True(throwing.WasInvoked);
-        Assert.Equal(Topic, first.Topic);
-        Assert.Equal(0L, first.Offset);
+        Assert.Equal(Topic, first.Topic());
+        Assert.Equal(0L, first.Offset());
 
         RecordingDeliveryCallback recording = new RecordingDeliveryCallback();
         RecordMetadata second = await WithTimeout(producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("second"), partition: 0), recording));
 
-        Assert.Equal(1L, second.Offset);
+        Assert.Equal(1L, second.Offset());
         Assert.Single(await SettledCompletions(recording, expected: 1));
     }
 
@@ -423,7 +442,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         await TestTimeout.Run(async () => results = await Task.WhenAll(sends), s_deadline);
 
         Assert.Equal(RecordCount, results.Length);
-        Assert.All(results, metadata => Assert.Equal(Topic, metadata.Topic));
+        Assert.All(results, metadata => Assert.Equal(Topic, metadata.Topic()));
         Assert.Equal(RecordCount, throwing.InvocationCount);
     }
 
@@ -452,7 +471,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         string line = await SettledTraceLine(listener, marker);
 
         // The trace names the delivery callback, not the trampoline or the offset-commit callback.
-        Assert.Contains("IDeliveryCallback", line, StringComparison.Ordinal);
+        Assert.Contains("ICallback", line, StringComparison.Ordinal);
         Assert.DoesNotContain("IOffsetCommitCallback", line, StringComparison.Ordinal);
     }
 
@@ -473,7 +492,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("first"), partition: 0),
             reentrant));
 
-        Assert.Equal(0, first.Partition);
+        Assert.Equal(0, first.Partition());
 
         Task<RecordMetadata>? retry = null;
         Stopwatch elapsed = Stopwatch.StartNew();
@@ -485,7 +504,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         Assert.NotNull(retry);
         RecordMetadata second = await WithTimeout(retry!);
-        Assert.Equal(1, second.Partition);
+        Assert.Equal(1, second.Partition());
     }
 
     [Fact]
@@ -493,7 +512,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // A token that ends the caller's Get wait leaves the record and its callback alone.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -510,14 +529,14 @@ public sealed class PublicProducerDeliveryCallbackTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => WithTimeout(wait));
         Assert.Equal(cts.Token, canceled.CancellationToken);
         Assert.Empty(callback.Completions);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
 
         Assert.True(producer.CompleteNext());
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
         Assert.Null(completion.Exception);
-        Assert.Equal(Topic, completion.Metadata.Topic);
+        Assert.Equal(Topic, completion.Metadata.Topic());
         Assert.Same(completion.Metadata, await WithTimeout(future.Get()));
     }
 
@@ -572,7 +591,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // The real clients need a broker, so this pins the shape on every class; the mocks cover the behaviour.
         MethodInfo? method = FindSend(
-            surface, typeof(ProducerRecord<byte[], byte[]>), typeof(IDeliveryCallback));
+            surface, typeof(ProducerRecord<byte[], byte[]>), typeof(ICallback));
 
         Assert.NotNull(method);
 
@@ -602,7 +621,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         MethodInfo? method = FindSend(
             surface,
             typeof(ProducerRecord<byte[], byte[]>),
-            typeof(IDeliveryCallback),
+            typeof(ICallback),
             typeof(CancellationToken));
 
         Assert.NotNull(method);
@@ -638,10 +657,10 @@ public sealed class PublicProducerDeliveryCallbackTests
         // The callback stays a sync void, as Java's, and its overload is kept beside the future.
         Assert.Equal(
             typeof(void),
-            typeof(IDeliveryCallback).GetMethod(nameof(IDeliveryCallback.OnCompletion))!.ReturnType);
+            typeof(ICallback).GetMethod(nameof(ICallback.OnCompletion))!.ReturnType);
 
         ParameterInfo[] parameters =
-            typeof(IDeliveryCallback).GetMethod(nameof(IDeliveryCallback.OnCompletion))!.GetParameters();
+            typeof(ICallback).GetMethod(nameof(ICallback.OnCompletion))!.GetParameters();
         Assert.Equal(typeof(RecordMetadata), parameters[0].ParameterType);
         Assert.Equal(typeof(Exception), parameters[1].ParameterType);
     }
@@ -687,7 +706,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             await Task.Delay(2).ConfigureAwait(false);
         }
 
-        throw new TimeoutException("the swallowed delivery-callback failure was never traced");
+        throw new System.TimeoutException("the swallowed delivery-callback failure was never traced");
     }
 
     // The sync flavor sends on a worker, so an early CompleteNext or ErrorNext can find nothing pending.
@@ -698,7 +717,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "No pending send registered to drive within the deadline — treated as a hang.");
             }
 
@@ -711,7 +730,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         Task winner = await Task.WhenAny(task, Task.Delay(s_deadline)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw new TimeoutException("Send did not complete within the deadline — treated as a hang.");
+            throw new System.TimeoutException("Send did not complete within the deadline — treated as a hang.");
         }
 
         return await task.ConfigureAwait(false);
@@ -727,7 +746,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>Records each completion and the thread it ran on.</summary>
-    private sealed class RecordingDeliveryCallback : IDeliveryCallback
+    private sealed class RecordingDeliveryCallback : ICallback
     {
         private readonly List<(RecordMetadata Metadata, Exception? Exception)> _completions =
             new List<(RecordMetadata, Exception?)>();
@@ -770,7 +789,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>A callback that throws.</summary>
-    private sealed class ThrowingDeliveryCallback : IDeliveryCallback
+    private sealed class ThrowingDeliveryCallback : ICallback
     {
         private readonly string _message;
 
@@ -793,7 +812,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>Sends again from inside the callback and captures any throw.</summary>
-    private sealed class ReentrantDeliveryCallback : IDeliveryCallback
+    private sealed class ReentrantDeliveryCallback : ICallback
     {
         private readonly Func<Task<RecordMetadata>> _send;
 
@@ -809,7 +828,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     }
 
     /// <summary>Records the send task's state as seen from inside the callback.</summary>
-    private sealed class TaskStateProbeCallback : IDeliveryCallback
+    private sealed class TaskStateProbeCallback : ICallback
     {
         internal Task<RecordMetadata>? Task { get; set; }
 
@@ -873,21 +892,21 @@ public sealed class PublicProducerDeliveryCallbackTests
             bool autoComplete = true,
             ISerializer<byte[]>? valueSerializer = null)
         {
-            ISerializer<byte[]> value = valueSerializer ?? Serdes.ByteArray;
+            ISerializer<byte[]> value = valueSerializer ?? Serdes.ByteArray();
             return flavor == Sync
                 ? new SyncFlavor(autoComplete, value)
                 : new AsyncFlavor(autoComplete, value);
         }
 
         internal abstract Task<RecordMetadata> Send(
-            ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback);
+            ProducerRecord<byte[], byte[]> record, ICallback callback);
 
         internal abstract void SendInline(
-            ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback);
+            ProducerRecord<byte[], byte[]> record, ICallback? callback);
 
         internal abstract bool CompleteNext();
 
-        internal abstract bool ErrorNext(Exception exception);
+        internal abstract bool ErrorNext(Exception? exception);
 
         public abstract void Dispose();
 
@@ -899,21 +918,21 @@ public sealed class PublicProducerDeliveryCallbackTests
             internal SyncFlavor(bool autoComplete, ISerializer<byte[]> valueSerializer)
             {
                 _producer = new MockProducer<byte[], byte[]>(
-                    Serdes.ByteArray, valueSerializer, autoComplete);
+                    Serdes.ByteArray(), valueSerializer, autoComplete);
             }
 
             internal override Task<RecordMetadata> Send(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback callback) =>
                 Task.Run(() => _producer.Send(record, callback).Get());
 
             // The future is discarded: every caller asserts a synchronous throw out of Send itself.
             internal override void SendInline(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback? callback) =>
                 _ = _producer.Send(record, callback!);
 
             internal override bool CompleteNext() => _producer.CompleteNext();
 
-            internal override bool ErrorNext(Exception exception) =>
+            internal override bool ErrorNext(Exception? exception) =>
                 _producer.ErrorNext(exception);
 
             public override void Dispose() => _producer.Dispose();
@@ -927,20 +946,20 @@ public sealed class PublicProducerDeliveryCallbackTests
             internal AsyncFlavor(bool autoComplete, ISerializer<byte[]> valueSerializer)
             {
                 _producer = new AsyncMockProducer<byte[], byte[]>(
-                    Serdes.ByteArray, valueSerializer, autoComplete);
+                    Serdes.ByteArray(), valueSerializer, autoComplete);
             }
 
             internal override Task<RecordMetadata> Send(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback callback) =>
                 _producer.Send(record, callback).Delivery();
 
             internal override void SendInline(
-                ProducerRecord<byte[], byte[]> record, IDeliveryCallback? callback) =>
+                ProducerRecord<byte[], byte[]> record, ICallback? callback) =>
                 _ = _producer.Send(record, callback!);
 
             internal override bool CompleteNext() => _producer.CompleteNext();
 
-            internal override bool ErrorNext(Exception exception) =>
+            internal override bool ErrorNext(Exception? exception) =>
                 _producer.ErrorNext(exception);
 
             public override void Dispose() => _producer.Dispose();

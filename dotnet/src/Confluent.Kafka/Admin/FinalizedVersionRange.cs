@@ -15,6 +15,7 @@
 using System;
 using System.Globalization;
 
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -27,10 +28,13 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class FinalizedVersionRange
 {
+    private readonly short _minVersionLevel;
+    private readonly short _maxVersionLevel;
+
     /// <summary>Creates a finalized range — Java's constructor.</summary>
     /// <param name="minVersionLevel">The minimum finalized version level.</param>
     /// <param name="maxVersionLevel">The maximum finalized version level.</param>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// Either level is negative, or the maximum is below the minimum. The bound is
     /// <c>&gt;= 0</c>, as Java's code enforces, although its javadoc says <c>&gt;= 1</c>.
     /// </exception>
@@ -38,7 +42,7 @@ public sealed class FinalizedVersionRange
     {
         if (minVersionLevel < 0 || maxVersionLevel < 0 || maxVersionLevel < minVersionLevel)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Expected minVersionLevel >= 0, maxVersionLevel >= 0 and"
@@ -48,23 +52,25 @@ public sealed class FinalizedVersionRange
                     maxVersionLevel));
         }
 
-        MinVersionLevel = minVersionLevel;
-        MaxVersionLevel = maxVersionLevel;
+        _minVersionLevel = minVersionLevel;
+        _maxVersionLevel = maxVersionLevel;
     }
 
     /// <summary>The minimum level — Java's <c>minVersionLevel()</c>.</summary>
-    public short MinVersionLevel { get; }
+    /// <returns>The minimum level.</returns>
+    public short MinVersionLevel() => _minVersionLevel;
 
     /// <summary>The maximum level — Java's <c>maxVersionLevel()</c>.</summary>
-    public short MaxVersionLevel { get; }
+    /// <returns>The maximum level.</returns>
+    public short MaxVersionLevel() => _maxVersionLevel;
 
     /// <summary>Value equality over both levels — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same range.</returns>
     public override bool Equals(object? obj) =>
         obj is FinalizedVersionRange other
-        && MinVersionLevel == other.MinVersionLevel
-        && MaxVersionLevel == other.MaxVersionLevel;
+        && MinVersionLevel() == other.MinVersionLevel()
+        && MaxVersionLevel() == other.MaxVersionLevel();
 
     /// <summary>The hash of both levels — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -72,7 +78,7 @@ public sealed class FinalizedVersionRange
     {
         unchecked
         {
-            return (((int)MinVersionLevel * 31) + 1) * 31 + MaxVersionLevel;
+            return (((int)MinVersionLevel() * 31) + 1) * 31 + MaxVersionLevel();
         }
     }
 
@@ -82,6 +88,6 @@ public sealed class FinalizedVersionRange
         string.Format(
             CultureInfo.InvariantCulture,
             "FinalizedVersionRange[min_version_level:{0}, max_version_level:{1}]",
-            MinVersionLevel,
-            MaxVersionLevel);
+            MinVersionLevel(),
+            MaxVersionLevel());
 }

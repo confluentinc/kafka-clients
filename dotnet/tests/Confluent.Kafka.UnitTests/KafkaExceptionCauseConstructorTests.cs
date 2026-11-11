@@ -30,6 +30,9 @@ public sealed class KafkaExceptionCauseConstructorTests
     private static KafkaException Create(string type, Exception? cause) =>
         type == nameof(SerializationException) ? new SerializationException(cause) : new KafkaException(cause);
 
+    // A bare KafkaException has the id -1; SerializationException has its own, -15.
+    private static int ExpectedCode(string type) => type == nameof(SerializationException) ? -15 : -1;
+
     private static Exception Thrown(Exception exception)
     {
         try
@@ -54,8 +57,8 @@ public sealed class KafkaExceptionCauseConstructorTests
         Assert.Equal(type, exception.GetType().Name);
         Assert.Equal("System.InvalidOperationException: the cause: café", exception.Message);
         Assert.Same(cause, exception.InnerException);
-        Assert.Equal(0, exception.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.Equal(ExpectedCode(type), exception.Code);
+        Assert.False(exception is Common.Errors.RetriableException);
     }
 
     [Theory]
@@ -70,28 +73,71 @@ public sealed class KafkaExceptionCauseConstructorTests
         Assert.Equal(type, exception.GetType().Name);
         Assert.Equal("System.Exception: ", exception.Message);
         Assert.Same(cause, exception.InnerException);
-        Assert.Equal(0, exception.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.Equal(ExpectedCode(type), exception.Code);
+        Assert.False(exception is Common.Errors.RetriableException);
     }
 
     [Theory]
     [InlineData(nameof(KafkaException))]
     [InlineData(nameof(SerializationException))]
-    public void NullCause_MessageIsTheDefaultMessage(string type)
+    public void CauseWithANullJavaMessage_MessageIsTheCauseTypeFullName(string type)
+    {
+        Exception cause = Thrown(new KafkaException((string?)null));
+
+        KafkaException exception = Create(type, cause);
+
+        Assert.Equal(type, exception.GetType().Name);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", exception.Message);
+        Assert.Same(cause, exception.InnerException);
+        Assert.Equal(ExpectedCode(type), exception.Code);
+        Assert.False(exception is Common.Errors.RetriableException);
+    }
+
+    [Theory]
+    [InlineData(nameof(KafkaException))]
+    [InlineData(nameof(SerializationException))]
+    public void CauseWithAJavaToStringOverride_MessageIsTheOverride(string type)
+    {
+        Exception cause = Thrown(new OverridingException("its own text"));
+
+        KafkaException exception = Create(type, cause);
+
+        Assert.Equal("OverridingException{its own text}", exception.Message);
+        Assert.Same(cause, exception.InnerException);
+    }
+
+    [Theory]
+    [InlineData(nameof(KafkaException))]
+    [InlineData(nameof(SerializationException))]
+    public void NullCause_MessageIsEmpty(string type)
     {
         KafkaException exception = Create(type, null);
         KafkaException parameterless = type == nameof(SerializationException)
             ? new SerializationException()
             : new KafkaException();
-        string expected = type == nameof(SerializationException)
-            ? "Exception of type 'Confluent.Kafka.Common.Errors.SerializationException' was thrown."
-            : "Exception of type 'Confluent.Kafka.Common.KafkaException' was thrown.";
 
         Assert.Equal(type, exception.GetType().Name);
-        Assert.Equal(expected, exception.Message);
-        Assert.Equal(parameterless.Message, exception.Message);
+        Assert.Equal(string.Empty, exception.Message);
+        Assert.Equal(string.Empty, parameterless.Message);
         Assert.Null(exception.InnerException);
-        Assert.Equal(0, exception.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.Equal(ExpectedCode(type), exception.Code);
+        Assert.Equal(ExpectedCode(type), parameterless.Code);
+        Assert.False(exception is Common.Errors.RetriableException);
+    }
+
+    /// <summary>
+    /// A <see cref="KafkaException"/> that overrides Java's <c>toString()</c>, as Java's
+    /// <c>QuotaViolationException</c> does.
+    /// </summary>
+    private sealed class OverridingException : KafkaException
+    {
+        private readonly string _text;
+
+        internal OverridingException(string text)
+        {
+            _text = text;
+        }
+
+        internal override string TypeAndMessage() => "OverridingException{" + _text + "}";
     }
 }

@@ -58,16 +58,16 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         Assert.Equal(
             typeof(IReadOnlyDictionary<Uuid, KafkaFuture>),
-            typeof(DeleteTopicsResult).GetProperty(nameof(DeleteTopicsResult.TopicIdValues))!.PropertyType);
+            Getters.Get(typeof(DeleteTopicsResult), nameof(DeleteTopicsResult.TopicIdValues)).ReturnType);
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, KafkaFuture>),
-            typeof(DeleteTopicsResult).GetProperty(nameof(DeleteTopicsResult.TopicNameValues))!.PropertyType);
+            Getters.Get(typeof(DeleteTopicsResult), nameof(DeleteTopicsResult.TopicNameValues)).ReturnType);
         Assert.Equal(
             typeof(IReadOnlyDictionary<Uuid, KafkaFuture<TopicDescription>>),
-            typeof(DescribeTopicsResult).GetProperty(nameof(DescribeTopicsResult.TopicIdValues))!.PropertyType);
+            Getters.Get(typeof(DescribeTopicsResult), nameof(DescribeTopicsResult.TopicIdValues)).ReturnType);
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, KafkaFuture<TopicDescription>>),
-            typeof(DescribeTopicsResult).GetProperty(nameof(DescribeTopicsResult.TopicNameValues))!.PropertyType);
+            Getters.Get(typeof(DescribeTopicsResult), nameof(DescribeTopicsResult.TopicNameValues)).ReturnType);
     }
 
     [Fact]
@@ -95,7 +95,7 @@ public sealed class PublicAdminTopicResultConstructionTests
             (() => _ = new DescribeTopicsResult(null, null), BothNull),
         })
         {
-            ArgumentException failure = Assert.Throws<ArgumentException>(construct);
+            IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(construct);
             Assert.Null(failure.ParamName);
             Assert.Equal(message, failure.Message);
         }
@@ -130,8 +130,8 @@ public sealed class PublicAdminTopicResultConstructionTests
         Assert.Equal(2, replicationFactor);
         Assert.Equal(topicId, reportedId);
 
-        Assert.Same(created.GetAsync(), Assert.Single(result.Values).Value.Get());
-        await TestTimeout.Run(() => result.Values["t"].Get(), s_deadline);
+        Assert.Same(created.GetWrappedAsync(), Assert.Single(result.Values()).Value.Get());
+        await TestTimeout.Run(() => result.Values()["t"].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException fault = new KafkaException("fabricated failure");
@@ -144,11 +144,11 @@ public sealed class PublicAdminTopicResultConstructionTests
                 ["bad"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(failed),
             });
 
-        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => mixed.Values["bad"].Get(), s_deadline)));
-        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+        Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => mixed.Values()["bad"].Get(), s_deadline)));
+        Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => mixed.All().Get(), s_deadline)));
-        await TestTimeout.Run(() => mixed.Values["ok"].Get(), s_deadline);
+        await TestTimeout.Run(() => mixed.Values()["ok"].Get(), s_deadline);
     }
 
     [Fact]
@@ -156,14 +156,14 @@ public sealed class PublicAdminTopicResultConstructionTests
     {
         Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> map = new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>();
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
 
         KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> pending = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
         map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(pending);
 
-        KeyValuePair<string, AsyncKafkaFuture> added = Assert.Single(result.Values);
+        KeyValuePair<string, AsyncKafkaFuture> added = Assert.Single(result.Values());
         Assert.Equal("t", added.Key);
-        Assert.Same(pending.GetAsync(), added.Value.Get());
+        Assert.Same(pending.GetWrappedAsync(), added.Value.Get());
         Task all = result.All().Get();
         Task<int> partitions = result.NumPartitions("t").Get();
         Assert.False(all.IsCompleted);
@@ -176,7 +176,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> replacement = KafkaFutureImpl.CompletedFuture(Metadata(5));
         map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(replacement);
 
-        Assert.Same(replacement.GetAsync(), Assert.Single(result.Values).Value.Get());
+        Assert.Same(replacement.GetWrappedAsync(), Assert.Single(result.Values()).Value.Get());
         Assert.Equal(5, await TestTimeout.Run(() => result.NumPartitions("t").Get(), s_deadline));
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
@@ -184,12 +184,12 @@ public sealed class PublicAdminTopicResultConstructionTests
         KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.Failed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
         map["late"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(failed);
 
-        Assert.Equal(new[] { "late", "t" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
-        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values["late"].Get(), s_deadline)));
-        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+        Assert.Equal(new[] { "late", "t" }, result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
+        Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.Values()["late"].Get(), s_deadline)));
+        Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline)));
-        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+        Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.NumPartitions("late").Get(), s_deadline)));
     }
 
@@ -202,20 +202,20 @@ public sealed class PublicAdminTopicResultConstructionTests
             new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> { ["a"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(a) };
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
 
-        IReadOnlyDictionary<string, AsyncKafkaFuture> first = result.Values;
+        IReadOnlyDictionary<string, AsyncKafkaFuture> first = result.Values();
         map["b"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(b);
-        IReadOnlyDictionary<string, AsyncKafkaFuture> second = result.Values;
+        IReadOnlyDictionary<string, AsyncKafkaFuture> second = result.Values();
         map.Remove("a");
-        IReadOnlyDictionary<string, AsyncKafkaFuture> third = result.Values;
+        IReadOnlyDictionary<string, AsyncKafkaFuture> third = result.Values();
 
-        Assert.Same(a.GetAsync(), Assert.Single(first).Value.Get());
+        Assert.Same(a.GetWrappedAsync(), Assert.Single(first).Value.Get());
         Assert.False(first.ContainsKey("b"));
 
         Assert.Equal(2, second.Count);
-        Assert.Same(a.GetAsync(), second["a"].Get());
-        Assert.Same(b.GetAsync(), second["b"].Get());
+        Assert.Same(a.GetWrappedAsync(), second["a"].Get());
+        Assert.Same(b.GetWrappedAsync(), second["b"].Get());
 
-        Assert.Same(b.GetAsync(), Assert.Single(third).Value.Get());
+        Assert.Same(b.GetWrappedAsync(), Assert.Single(third).Value.Get());
         Assert.False(third.ContainsKey("a"));
     }
 
@@ -233,10 +233,10 @@ public sealed class PublicAdminTopicResultConstructionTests
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
 
         // Values: ordinal, like Java's HashMap — the stored spelling hits, the other misses.
-        KeyValuePair<string, AsyncKafkaFuture> entry = Assert.Single(result.Values);
+        KeyValuePair<string, AsyncKafkaFuture> entry = Assert.Single(result.Values());
         Assert.Equal("t", entry.Key);
-        Assert.Same(created.GetAsync(), entry.Value.Get());
-        Assert.False(result.Values.ContainsKey("T"));
+        Assert.Same(created.GetWrappedAsync(), entry.Value.Get());
+        Assert.False(result.Values().ContainsKey("T"));
 
         // The typed accessors: the caller's map, like Java's futures.get(topic).
         Assert.Equal(3, await TestTimeout.Run(() => result.NumPartitions("T").Get(), s_deadline));
@@ -257,14 +257,14 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         AsyncDeleteTopicsResult result = new AsyncDeleteTopicsResult(byId, null);
 
-        Assert.Same(byId, result.TopicIdValues);
-        Assert.Null(result.TopicNameValues);
-        Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
+        Assert.Same(byId, result.TopicIdValues());
+        Assert.Null(result.TopicNameValues());
+        Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline)));
 
         AsyncDeleteTopicsResult byName = new AsyncDeleteTopicsResult(
             null, new Dictionary<string, AsyncKafkaFuture> { ["t"] = new AsyncKafkaFuture(TestFutures.Done()) });
-        Assert.Null(byName.TopicIdValues);
+        Assert.Null(byName.TopicIdValues());
         await TestTimeout.Run(() => byName.All().Get(), s_deadline);
     }
 
@@ -282,8 +282,8 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         AsyncDescribeTopicsResult result = new AsyncDescribeTopicsResult(null, byName);
 
-        Assert.Same(byName, result.TopicNameValues);
-        Assert.Null(result.TopicIdValues);
+        Assert.Same(byName, result.TopicNameValues());
+        Assert.Null(result.TopicIdValues());
         Assert.Null(result.AllTopicIds());
 
         IReadOnlyDictionary<string, TopicDescription> all = default!;
@@ -337,14 +337,11 @@ public sealed class PublicAdminTopicResultConstructionTests
     }
 
     [Fact]
-    public void TopicMetadataAndConfig_FromAnError_EveryAccessorKeepsTheStoredIdentity()
+    public void TopicMetadataAndConfig_FromAnError_EveryAccessorThrowsTheStoredException()
     {
-        const int Code = 7;
         const string Message = "Topic metadata unavailable: request timed out.";
-        KafkaException stored = new KafkaException(Code, Message, isRetriable: true);
+        Common.Errors.TimeoutException stored = new Common.Errors.TimeoutException(Message);
         CreateTopicsResult.TopicMetadataAndConfig metadata = new CreateTopicsResult.TopicMetadataAndConfig(stored);
-
-        Assert.False(metadata.HasMetadata);
 
         (string Name, Action Call)[] accessors =
         {
@@ -356,12 +353,9 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         foreach ((string name, Action call) in accessors)
         {
-            KafkaException thrown = Assert.Throws<KafkaException>(call);
-            Assert.True(Code == thrown.Code, name);
-            Assert.True(thrown.IsRetriable, name);
+            Common.Errors.TimeoutException thrown = Assert.Throws<Common.Errors.TimeoutException>(call);
+            Assert.True(ReferenceEquals(stored, thrown), name);
             Assert.Equal(Message, thrown.Message);
-            Assert.Same(stored, thrown.InnerException);
-            Assert.NotSame(stored, thrown);
         }
     }
 

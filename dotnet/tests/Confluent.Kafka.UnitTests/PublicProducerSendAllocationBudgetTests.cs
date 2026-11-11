@@ -47,9 +47,9 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // Each measurement is repeated and the lowest result taken.
     private const int MeasurementAttempts = 4;
 
-    // The absolute per-send budget, which the marginal budget cannot see: the measured 464 B (net8.0, net10.0; the
-    // delivery state, its KafkaFutureImpl, the delivery task, the record and the record's Headers) plus 16 B, less
-    // than one more object.
+    // The absolute per-send budget, which the marginal budget cannot see: the measured 472 B (net8.0, net10.0; the
+    // delivery state, its KafkaFutureImpl with the field that caches the Get() task, the delivery task, the record and
+    // the record's Headers) plus 8 B, less than one more object.
     private const long FastPathPerSendBudgetBytes = 480;
 
     // More attempts than the marginal test, as an absolute figure has no matched pair to cancel a one-off allocation.
@@ -62,7 +62,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Warm up so the measured runs are steady-state.
@@ -109,7 +109,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 3; i++)
@@ -133,6 +133,75 @@ public sealed class PublicProducerSendAllocationBudgetTests
             $"Fast-path Send per-send caller-thread allocation {perSend} B exceeded the budget " +
             $"{FastPathPerSendBudgetBytes} B ({bytes} B over {SendCount} sends) — the first stage must " +
             "stay a struct over the delivery task when a permit is free.");
+    }
+
+    [Fact]
+    public async Task Send_NativeMemoryValue_PerRecordAllocation_HasNoValueSizedCopy()
+    {
+        byte[] key = MakeBytes(16, 0xAB);
+        using NativeMemoryManager smallValue = new NativeMemoryManager(SmallValueSize);
+        using NativeMemoryManager largeValue = new NativeMemoryManager(LargeValueSize);
+
+        AsyncMockProducer<byte[], ReadOnlyMemory<byte>?> producer =
+            new AsyncMockProducer<byte[], ReadOnlyMemory<byte>?>(Serdes.ByteArray(), MemorySerializer.Instance);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        for (int i = 0; i < 3; i++)
+        {
+            _ = FireAndMeasureMemory(producer, smallValue.Memory, key, out Task<RecordMetadata>[] warmup);
+            await AwaitAll(warmup);
+        }
+
+        long smallBytes = 0;
+        long largeBytes = 0;
+        long perSendMarginal = long.MaxValue;
+        for (int attempt = 0; attempt < MeasurementAttempts; attempt++)
+        {
+            long small = FireAndMeasureMemory(producer, smallValue.Memory, key, out Task<RecordMetadata>[] smallSends);
+            await AwaitAll(smallSends);
+
+            long large = FireAndMeasureMemory(producer, largeValue.Memory, key, out Task<RecordMetadata>[] largeSends);
+            await AwaitAll(largeSends);
+
+            long marginal = (large - small) / SendCount;
+            if (marginal < perSendMarginal)
+            {
+                perSendMarginal = marginal;
+                smallBytes = small;
+                largeBytes = large;
+            }
+        }
+
+        Assert.True(
+            perSendMarginal <= PerSendBudgetBytes,
+            $"Per-send caller-thread allocation marginal {perSendMarginal} B exceeded the budget " +
+            $"{PerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} sends) — " +
+            "a native-memory value must be pinned in place, never copied onto the heap.");
+    }
+
+    private static long FireAndMeasureMemory(
+        AsyncMockProducer<byte[], ReadOnlyMemory<byte>?> producer,
+        ReadOnlyMemory<byte> value,
+        byte[] key,
+        out Task<RecordMetadata>[] sends)
+    {
+        Task<RecordMetadata>[] tasks = new Task<RecordMetadata>[SendCount];
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < SendCount; i++)
+        {
+            tasks[i] = producer.Send(
+                new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value, key, partition: 0)).Delivery();
+        }
+
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        sends = tasks;
+        return after - before;
     }
 
     private static long FireAndMeasure(AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, out Task<RecordMetadata>[] sends)

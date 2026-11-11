@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
@@ -28,13 +29,13 @@ public sealed class ListGroupsResult
 {
     private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _all;
     private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _valid;
-    private readonly KafkaFutureImpl<IReadOnlyCollection<KafkaException>> _errors;
+    private readonly KafkaFutureImpl<IReadOnlyCollection<Exception>> _errors;
     private readonly SafeAdminResultHandle _native;
 
     private ListGroupsResult(
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors,
+        KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
         SafeAdminResultHandle native)
     {
         _all = all;
@@ -48,7 +49,7 @@ public sealed class ListGroupsResult
     internal static ListGroupsResult OfClient(
         (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
             KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> Errors,
+            KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
             SafeAdminResultHandle Result) native) =>
         new ListGroupsResult(native.All, native.Valid, native.Errors, native.Result);
 
@@ -66,6 +67,6 @@ public sealed class ListGroupsResult
     /// <summary>
     /// The errors the brokers answered with.
     /// </summary>
-    public KafkaFuture<IReadOnlyCollection<KafkaException>> Errors() =>
-        new KafkaFuture<IReadOnlyCollection<KafkaException>>(_errors);
+    public KafkaFuture<IReadOnlyCollection<Exception>> Errors() =>
+        new KafkaFuture<IReadOnlyCollection<Exception>>(_errors);
 }

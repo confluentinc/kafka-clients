@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Common.Acl;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A null <see cref="Principal"/> or <see cref="Host"/> matches any; <c>""</c> filters on the
+/// A null <see cref="Principal()"/> or <see cref="Host()"/> matches any; <c>""</c> filters on the
 /// literal empty value.
 /// </para>
 /// <para>
@@ -34,14 +34,19 @@ namespace Confluent.Kafka.Common.Acl;
 /// behaviour and lives in the core.
 /// </para>
 /// <para>
-/// <see cref="Operation"/> and <see cref="PermissionType"/> only ever hold a defined member, as a
+/// <see cref="Operation()"/> and <see cref="PermissionType()"/> only ever hold a defined member, as a
 /// Java filter does.
 /// </para>
 /// </remarks>
 public sealed class AccessControlEntryFilter
 {
+    private readonly string? _principal;
+    private readonly string? _host;
+    private readonly AclOperation _operation;
+    private readonly AclPermissionType _permissionType;
+
     /// <summary>A filter matching every access control entry — Java's <c>ANY</c>.</summary>
-    public static AccessControlEntryFilter ANY { get; } =
+    public static readonly AccessControlEntryFilter ANY =
         new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
 
     /// <summary>
@@ -70,30 +75,114 @@ public sealed class AccessControlEntryFilter
         AclOperation operation,
         AclPermissionType permissionType)
     {
-        Principal = principal;
-        Host = host;
+        _principal = principal;
+        _host = host;
 
-        Operation = AclEnumCodes.DefinedOrUnknown(operation);
-        PermissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
+        _operation = AclEnumCodes.DefinedOrUnknown(operation);
+        _permissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
     }
 
     /// <summary>The principal, or <c>null</c> to match any — Java's <c>principal()</c>.</summary>
-    public string? Principal { get; }
+    /// <returns>The principal, or <c>null</c> to match any.</returns>
+    public string? Principal() => _principal;
 
     /// <summary>The host, or <c>null</c> to match any — Java's <c>host()</c>.</summary>
-    public string? Host { get; }
+    /// <returns>The host, or <c>null</c> to match any.</returns>
+    public string? Host() => _host;
 
     /// <summary>The operation — Java's <c>operation()</c>.</summary>
-    public AclOperation Operation { get; }
+    /// <returns>The operation.</returns>
+    public AclOperation Operation() => _operation;
 
     /// <summary>The permission type — Java's <c>permissionType()</c>.</summary>
-    public AclPermissionType PermissionType { get; }
+    /// <returns>The permission type.</returns>
+    public AclPermissionType PermissionType() => _permissionType;
 
     /// <summary>
     /// Whether the operation or permission type is <c>UNKNOWN</c> — Java's <c>isUnknown()</c>.
     /// </summary>
-    public bool IsUnknown =>
-        Operation == AclOperation.UNKNOWN || PermissionType == AclPermissionType.UNKNOWN;
+    /// <returns>Whether the operation or permission type is <c>UNKNOWN</c>.</returns>
+    public bool IsUnknown() =>
+        Operation() == AclOperation.UNKNOWN || PermissionType() == AclPermissionType.UNKNOWN;
+
+    /// <summary>
+    /// Whether this filter matches <paramref name="other"/> — Java's <c>matches(AccessControlEntry)</c>: each
+    /// component is <see langword="null"/> or <c>ANY</c>, or equal to the entry's.
+    /// </summary>
+    /// <param name="other">The access control entry to test.</param>
+    /// <returns>Whether the filter matches the entry.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="other"/> is null and the filter reads it. A filter whose principal and host are null and whose
+    /// operation and permission type are <c>ANY</c>, such as <see cref="ANY"/>, never reads it and matches a null
+    /// entry, as Java's does.
+    /// </exception>
+    public bool Matches(AccessControlEntry other)
+    {
+        // The entry is read only where Java's matches reads it, so ANY.Matches(null) is true.
+        if (_principal is not null && !string.Equals(_principal, Given(other).Principal(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (_host is not null && !string.Equals(_host, Given(other).Host(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (_operation != AclOperation.ANY && _operation != Given(other).Operation())
+        {
+            return false;
+        }
+
+        return _permissionType == AclPermissionType.ANY || _permissionType == Given(other).PermissionType();
+    }
+
+    /// <summary>
+    /// Whether this filter matches at most one entry — Java's <c>matchesAtMostOne()</c>: it has no
+    /// <see cref="FindIndefiniteField"/>.
+    /// </summary>
+    /// <returns>Whether every component is definite.</returns>
+    public bool MatchesAtMostOne() => FindIndefiniteField() is null;
+
+    /// <summary>
+    /// A description of the first component that keeps this filter from matching just one entry, or
+    /// <see langword="null"/> when there is none — Java's <c>findIndefiniteField()</c>.
+    /// </summary>
+    /// <returns>Java's text for the indefinite component, or <see langword="null"/>.</returns>
+    public string? FindIndefiniteField()
+    {
+        if (_principal is null)
+        {
+            return "Principal is NULL";
+        }
+
+        if (_host is null)
+        {
+            return "Host is NULL";
+        }
+
+        if (_operation == AclOperation.ANY)
+        {
+            return "Operation is ANY";
+        }
+
+        if (_operation == AclOperation.UNKNOWN)
+        {
+            return "Operation is UNKNOWN";
+        }
+
+        if (_permissionType == AclPermissionType.ANY)
+        {
+            return "Permission type is ANY";
+        }
+
+        if (_permissionType == AclPermissionType.UNKNOWN)
+        {
+            return "Permission type is UNKNOWN";
+        }
+
+        return null;
+    }
 
     /// <summary>Value equality over all four components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
@@ -102,10 +191,10 @@ public sealed class AccessControlEntryFilter
     /// </returns>
     public override bool Equals(object? obj) =>
         obj is AccessControlEntryFilter other
-        && string.Equals(Principal, other.Principal, StringComparison.Ordinal)
-        && string.Equals(Host, other.Host, StringComparison.Ordinal)
-        && Operation == other.Operation
-        && PermissionType == other.PermissionType;
+        && string.Equals(Principal(), other.Principal(), StringComparison.Ordinal)
+        && string.Equals(Host(), other.Host(), StringComparison.Ordinal)
+        && Operation() == other.Operation()
+        && PermissionType() == other.PermissionType();
 
     /// <summary>The hash of all four components — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -114,10 +203,10 @@ public sealed class AccessControlEntryFilter
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + (Principal is null ? 0 : StringComparer.Ordinal.GetHashCode(Principal));
-            hash = (hash * 31) + (Host is null ? 0 : StringComparer.Ordinal.GetHashCode(Host));
-            hash = (hash * 31) + ((int)Operation).GetHashCode();
-            hash = (hash * 31) + ((int)PermissionType).GetHashCode();
+            hash = (hash * 31) + (_principal is null ? 0 : StringComparer.Ordinal.GetHashCode(_principal));
+            hash = (hash * 31) + (_host is null ? 0 : StringComparer.Ordinal.GetHashCode(_host));
+            hash = (hash * 31) + ((int)_operation).GetHashCode();
+            hash = (hash * 31) + ((int)_permissionType).GetHashCode();
             return hash;
         }
     }
@@ -131,8 +220,11 @@ public sealed class AccessControlEntryFilter
         string.Format(
             CultureInfo.InvariantCulture,
             "(principal={0}, host={1}, operation={2}, permissionType={3})",
-            Principal ?? "<any>",
-            Host ?? "<any>",
-            Operation,
-            PermissionType);
+            Principal() ?? "<any>",
+            Host() ?? "<any>",
+            Operation(),
+            PermissionType());
+
+    private static AccessControlEntry Given(AccessControlEntry? other) =>
+        other ?? throw new ArgumentNullException(nameof(other));
 }

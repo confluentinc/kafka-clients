@@ -166,15 +166,15 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(CreatePartitionsOptions.TimeoutMs):
-                NativeMethods.CreatePartitionsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.CreatePartitionsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(CreatePartitionsOptions.ValidateOnly):
                 NativeMethods.CreatePartitionsOptionsSetValidateOnly(
-                    native, options.ValidateOnly ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(CreatePartitionsOptions.RetryOnQuotaViolation):
                 NativeMethods.CreatePartitionsOptionsSetRetryOnQuotaViolation(
-                    native, options.RetryOnQuotaViolation ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ShouldRetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("CreatePartitionsOptions has no C setter for " + setter + ".");
@@ -197,14 +197,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, RecordsToDelete> entry in recordsToDelete)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The records-to-delete map must not contain a topic partition with a null topic.",
                         nameof(recordsToDelete));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(recordsToDelete));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(recordsToDelete));
                 if (entry.Value is null)
                 {
                     throw new ArgumentException(
@@ -278,7 +278,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteRecordsOptions.TimeoutMs):
-                NativeMethods.DeleteRecordsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteRecordsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteRecordsOptions has no C setter for " + setter + ".");
@@ -307,12 +307,12 @@ internal sealed partial class NativeAdminClient
             }
 
             if (options is not null
-                && options.IsolationLevel != IsolationLevel.READ_UNCOMMITTED
-                && options.IsolationLevel != IsolationLevel.READ_COMMITTED)
+                && options.IsolationLevel() != IsolationLevel.READ_UNCOMMITTED
+                && options.IsolationLevel() != IsolationLevel.READ_COMMITTED)
             {
                 throw new ArgumentOutOfRangeException(
                     "options",
-                    options.IsolationLevel,
+                    options.IsolationLevel(),
                     "ListOffsetsOptions.IsolationLevel must be IsolationLevel.READ_UNCOMMITTED or "
                     + "IsolationLevel.READ_COMMITTED.");
             }
@@ -322,15 +322,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, OffsetSpec> entry in topicPartitionOffsets)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The offsets map must not contain a topic partition with a null topic.",
                         nameof(topicPartitionOffsets));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(topicPartitionOffsets));
-                CheckOffsetSpec(entry.Value, nameof(topicPartitionOffsets));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(topicPartitionOffsets));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);
@@ -380,7 +379,7 @@ internal sealed partial class NativeAdminClient
         AdminOptionsMarshal.New create = options is not null
             && options.Setters.InOrder.Contains(nameof(ListOffsetsOptions.IsolationLevel))
                 ? (ref IntPtr outErr) =>
-                    NativeMethods.ListOffsetsOptionsWithIsolationLevel(NativeIsolationLevel(options.IsolationLevel), ref outErr)
+                    NativeMethods.ListOffsetsOptionsWithIsolationLevel(NativeIsolationLevel(options.IsolationLevel()), ref outErr)
                 : s_newListOffsetsOptions;
         return AdminOptionsMarshal.Build(
             create, options, options?.Setters, s_setListOffsetsOption, s_destroyListOffsetsOptions);
@@ -394,7 +393,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListOffsetsOptions.TimeoutMs):
-                NativeMethods.ListOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(ListOffsetsOptions.IsolationLevel):
                 break;
@@ -411,24 +410,6 @@ internal sealed partial class NativeAdminClient
             : NativeMethods.IsolationLevelReadUncommitted(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return level;
-    }
-
-    private static void CheckOffsetSpec(OffsetSpec? spec, string parameterName)
-    {
-        switch (spec)
-        {
-            case null:
-            case OffsetSpec.LatestSpec:
-            case OffsetSpec.EarliestSpec:
-            case OffsetSpec.MaxTimestampSpec:
-            case OffsetSpec.EarliestLocalSpec:
-            case OffsetSpec.LatestTieredSpec:
-            case OffsetSpec.EarliestPendingUploadSpec:
-            case OffsetSpec.TimestampSpec:
-                return;
-            default:
-                throw new ArgumentException($"Unsupported offset spec '{spec.GetType().Name}'.", parameterName);
-        }
     }
 
     internal static IntPtr NativeOffsetSpec(OffsetSpec? spec, out IntPtr owned)
@@ -501,9 +482,9 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic))
+        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic()))
         {
-            native = NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition, ref outErr);
+            native = NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition(), ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);

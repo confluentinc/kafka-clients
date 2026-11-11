@@ -65,7 +65,7 @@ internal static class ChaosEvents
         return value;
     }
 
-    // Serdes.ByteArray keeps absent and empty apart: null is an absent key or value, an empty array
+    // Serdes.ByteArray() keeps absent and empty apart: null is an absent key or value, an empty array
     // a present empty one.
     internal static bool TryCheckRecord(byte[]? key, byte[]? value, uint msgSize, out ulong index, out string? detail)
     {
@@ -145,7 +145,7 @@ internal static class ChaosEvents
 
         return new Proto.WorkloadEvent
         {
-            Delivered = new Proto.Delivered { Index = index, Partition = metadata.Partition, Offset = metadata.Offset },
+            Delivered = new Proto.Delivered { Index = index, Partition = metadata.Partition(), Offset = metadata.Offset() },
         };
     }
 
@@ -163,16 +163,16 @@ internal static class ChaosEvents
 
     internal static Proto.WorkloadEvent ConsumedOrCorrupted(ConsumerRecord<byte[], byte[]> record, uint msgSize)
     {
-        if (TryCheckRecord(record.Key, record.Value, msgSize, out ulong index, out string? detail))
+        if (TryCheckRecord(record.Key(), record.Value(), msgSize, out ulong index, out string? detail))
         {
             return new Proto.WorkloadEvent
             {
                 Consumed = new Proto.Consumed
                 {
                     Index = index,
-                    Topic = record.Topic,
-                    Partition = record.Partition,
-                    Offset = record.Offset,
+                    Topic = record.Topic(),
+                    Partition = record.Partition(),
+                    Offset = record.Offset(),
                 },
             };
         }
@@ -181,9 +181,9 @@ internal static class ChaosEvents
         {
             Corrupted = new Proto.Corrupted
             {
-                Topic = record.Topic,
-                Partition = record.Partition,
-                Offset = record.Offset,
+                Topic = record.Topic(),
+                Partition = record.Partition(),
+                Offset = record.Offset(),
                 Detail = detail ?? string.Empty,
             },
         };
@@ -195,14 +195,14 @@ internal static class ChaosEvents
         List<TopicPartition> sorted = new List<TopicPartition>(partitions);
         sorted.Sort(static (a, b) =>
         {
-            int byTopic = string.CompareOrdinal(a.Topic, b.Topic);
-            return byTopic != 0 ? byTopic : a.Partition.CompareTo(b.Partition);
+            int byTopic = string.CompareOrdinal(a.Topic(), b.Topic());
+            return byTopic != 0 ? byTopic : a.Partition().CompareTo(b.Partition());
         });
 
         Proto.Rebalance rebalance = new Proto.Rebalance { Kind = kind, ObservedAtUnixNanos = observedAtUnixNanos };
         foreach (TopicPartition tp in sorted)
         {
-            rebalance.Partitions.Add(new Proto.TopicPartitionRef { Topic = tp.Topic, Partition = tp.Partition });
+            rebalance.Partitions.Add(new Proto.TopicPartitionRef { Topic = tp.Topic(), Partition = tp.Partition() });
         }
 
         return new Proto.WorkloadEvent { Rebalance = rebalance };
@@ -224,9 +224,9 @@ internal static class ChaosEvents
             {
                 Committed = new Proto.Committed
                 {
-                    Topic = entry.Key.Topic,
-                    Partition = entry.Key.Partition,
-                    Offset = entry.Value.Offset,
+                    Topic = entry.Key.Topic(),
+                    Partition = entry.Key.Partition(),
+                    Offset = entry.Value.Offset(),
                 },
             });
         }

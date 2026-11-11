@@ -22,7 +22,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Pins the teardown helpers of <see cref="TestTimeout"/>: a teardown that never ends fails with a
-/// <see cref="TimeoutException"/> naming the disposed type, also when it blocks before its first await, and a
+/// <see cref="System.TimeoutException"/> naming the disposed type, also when it blocks before its first await, and a
 /// teardown that ends is passed through unchanged.
 /// </summary>
 public sealed class TestTimeoutTeardownTests
@@ -41,7 +41,7 @@ public sealed class TestTimeoutTeardownTests
     {
         NeverEndingAsyncDisposable target = new NeverEndingAsyncDisposable();
 
-        TimeoutException hung = await Assert.ThrowsAsync<TimeoutException>(() => TestTimeout.DisposeAsync(target, s_short));
+        System.TimeoutException hung = await Assert.ThrowsAsync<System.TimeoutException>(() => TestTimeout.DisposeAsync(target, s_short));
 
         Assert.StartsWith(Hung("NeverEndingAsyncDisposable"), hung.Message, StringComparison.Ordinal);
         Assert.Equal(1, target.Calls);
@@ -57,7 +57,7 @@ public sealed class TestTimeoutTeardownTests
             await TestTimeout.RunOffThisThread(
                 async () =>
                 {
-                    TimeoutException hung = await Assert.ThrowsAsync<TimeoutException>(() => TestTimeout.DisposeAsync(target, s_short));
+                    System.TimeoutException hung = await Assert.ThrowsAsync<System.TimeoutException>(() => TestTimeout.DisposeAsync(target, s_short));
 
                     Assert.StartsWith(Hung("BlockingAsyncDisposable"), hung.Message, StringComparison.Ordinal);
                     Assert.NotEqual(Environment.CurrentManagedThreadId, target.ThreadId);
@@ -80,7 +80,7 @@ public sealed class TestTimeoutTeardownTests
             TestTimeout.Run(
                 () =>
                 {
-                    TimeoutException hung = Assert.Throws<TimeoutException>(() => TestTimeout.Dispose(target, s_short));
+                    System.TimeoutException hung = Assert.Throws<System.TimeoutException>(() => TestTimeout.Dispose(target, s_short));
 
                     Assert.StartsWith(Hung("BlockingDisposable"), hung.Message, StringComparison.Ordinal);
                     Assert.NotEqual(Environment.CurrentManagedThreadId, target.ThreadId);
@@ -103,7 +103,7 @@ public sealed class TestTimeoutTeardownTests
             TestTimeout.Run(
                 () =>
                 {
-                    TimeoutException hung = Assert.Throws<TimeoutException>(() => TestTimeout.Teardown(target, () => gate.Wait(), s_short));
+                    System.TimeoutException hung = Assert.Throws<System.TimeoutException>(() => TestTimeout.Teardown(target, () => gate.Wait(), s_short));
 
                     Assert.StartsWith(Hung("GenericTarget<Byte[], String>"), hung.Message, StringComparison.Ordinal);
                 },
@@ -120,8 +120,11 @@ public sealed class TestTimeoutTeardownTests
     {
         GenericTarget<int, long> target = new GenericTarget<int, long>();
 
-        TimeoutException hung = await Assert.ThrowsAsync<TimeoutException>(
-            () => TestTimeout.TeardownAsync(target, () => new TaskCompletionSource<bool>().Task, s_short));
+        System.TimeoutException hung = await Assert.ThrowsAsync<System.TimeoutException>(
+            () => TestTimeout.TeardownAsync(
+                target,
+                () => new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task,
+                s_short));
 
         Assert.StartsWith(Hung("GenericTarget<Int32, Int64>"), hung.Message, StringComparison.Ordinal);
     }
@@ -176,7 +179,7 @@ public sealed class TestTimeoutTeardownTests
         public ValueTask DisposeAsync()
         {
             Calls++;
-            return new ValueTask(new TaskCompletionSource<bool>().Task);
+            return new ValueTask(new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task);
         }
     }
 

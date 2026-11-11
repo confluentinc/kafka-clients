@@ -30,7 +30,7 @@ namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockConsumerOperations
 {
     private readonly MockConsumer<byte[], byte[]> _inner =
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
 
     private readonly ConsumerScript _script;
 
@@ -43,7 +43,7 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     {
         _script.ApplyPendingAsync(this).GetAwaiter().GetResult();
         ConsumerRecords<byte[], byte[]> records = _inner.Poll(timeout);
-        if (records.Count == 0)
+        if (records.Count() == 0)
         {
             // The mock returns at once when it has nothing, where a real consumer waits out the
             // timeout: waiting here keeps an idle loop from spinning, without changing what any
@@ -58,6 +58,11 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
 
     public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
         _inner.Subscribe(topics, listener);
+
+    public void Subscribe(SubscriptionPattern pattern) => _inner.Subscribe(pattern);
+
+    public void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener listener) =>
+        _inner.Subscribe(pattern, listener);
 
     public void Unsubscribe() => _inner.Unsubscribe();
 

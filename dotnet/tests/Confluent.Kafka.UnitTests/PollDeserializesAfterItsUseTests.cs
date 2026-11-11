@@ -78,9 +78,9 @@ public sealed class PollDeserializesAfterItsUseTests
         object? outcome = BlockingCall.RunGet(() => consumer.Poll(s_pollTimeout));
 
         ConsumerRecords<string?, string?> records = Assert.IsType<ConsumerRecords<string?, string?>>(outcome);
-        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset).Select(r => r.Value));
+        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset()).Select(r => r.Value()));
         Assert.Equal(2, values.Calls);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -106,9 +106,9 @@ public sealed class PollDeserializesAfterItsUseTests
         ConsumerRecords<string?, string?> records =
             await TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline);
 
-        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset).Select(r => r.Value));
+        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset()).Select(r => r.Value()));
         Assert.Equal(2, values.Calls);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(3L, e.Offset);
+        Assert.Equal(3L, e.Offset());
         Assert.Equal(3L, consumer.Position(s_tp0));
     }
 
@@ -143,7 +143,7 @@ public sealed class PollDeserializesAfterItsUseTests
             RecordDeserializationException e = await Assert.ThrowsAsync<RecordDeserializationException>(
                 () => TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline));
 
-            Assert.Equal(3L, e.Offset);
+            Assert.Equal(3L, e.Offset());
             Assert.Equal(3L, await TestTimeout.Run(() => consumer.Position(s_tp0), s_deadline));
         }
         finally
@@ -157,7 +157,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        MockConsumer<byte[], int> consumer = new MockConsumer<byte[], int>(Serdes.ByteArray, values);
+        MockConsumer<byte[], int> consumer = new MockConsumer<byte[], int>(Serdes.ByteArray(), values);
         values.Reassign = consumer.Assign;
         try
         {
@@ -180,7 +180,7 @@ public sealed class PollDeserializesAfterItsUseTests
             Assert.All(Kept(topic, values.Failed), kept => Assert.Equal(0L, consumer.Position(kept)));
             AddRecords(consumer.AddRecord, Kept(topic, values.Failed));
             AssertRedelivered(consumer.Poll(s_pollTimeout), topic, values.Failed);
-            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition));
+            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition()));
         }
         finally
         {
@@ -193,7 +193,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        MockConsumer<byte[], int> consumer = new MockConsumer<byte[], int>(Serdes.ByteArray, values);
+        MockConsumer<byte[], int> consumer = new MockConsumer<byte[], int>(Serdes.ByteArray(), values);
         values.Reassign = consumer.Assign;
         try
         {
@@ -211,7 +211,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
             window.AssertTheOtherCallWaited();
             Assert.Null(window.Failure);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -224,7 +224,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray, values);
+        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray(), values);
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         try
         {
@@ -252,7 +252,7 @@ public sealed class PollDeserializesAfterItsUseTests
             AddRecords(consumer.AddRecord, Kept(topic, values.Failed));
             AssertRedelivered(
                 await TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline), topic, values.Failed);
-            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition));
+            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition()));
         }
         finally
         {
@@ -265,7 +265,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray, values);
+        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray(), values);
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         try
         {
@@ -283,7 +283,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
             window.AssertTheOtherCallWaited();
             Assert.Null(window.Failure);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -296,7 +296,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray, values);
+        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray(), values);
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         using ManualResetEventSlim closing = new ManualResetEventSlim();
         using ManualResetEventSlim finish = new ManualResetEventSlim();
@@ -344,12 +344,12 @@ public sealed class PollDeserializesAfterItsUseTests
             Join(caller);
 
             Assert.True(waited, "the other thread's call returned while the close waited for the seek-backs");
-            Assert.IsType<ObjectDisposedException>(refused);
+            Assert.IsType<IllegalStateException>(refused);
             await TestTimeout.Run(() => close!, s_deadline);
             RecordDeserializationException failed = await Assert.ThrowsAsync<RecordDeserializationException>(
                 () => TestTimeout.Run(() => poll!, s_deadline));
-            Assert.Equal(new TopicPartition(topic, values.Failed), failed.TopicPartition);
-            Assert.Equal(0L, failed.Offset);
+            Assert.Equal(new TopicPartition(topic, values.Failed), failed.TopicPartition());
+            Assert.Equal(0L, failed.Offset());
         }
         finally
         {
@@ -383,8 +383,8 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         foreach (TopicPartition partition in partitions)
         {
-            addRecord(partition.Topic, partition.Partition, 0, null, new[] { (byte)partition.Partition });
-            addRecord(partition.Topic, partition.Partition, 1, null, new[] { (byte)partition.Partition });
+            addRecord(partition.Topic(), partition.Partition(), 0, null, new[] { (byte)partition.Partition() });
+            addRecord(partition.Topic(), partition.Partition(), 1, null, new[] { (byte)partition.Partition() });
         }
     }
 
@@ -394,11 +394,11 @@ public sealed class PollDeserializesAfterItsUseTests
     private static void AssertRedelivered(ConsumerRecords<byte[], int> records, string topic, int failed)
     {
         IEnumerable<(int Partition, long Offset, int Value)> expected = Kept(topic, failed)
-            .SelectMany(tp => new[] { (tp.Partition, 0L, tp.Partition), (tp.Partition, 1L, tp.Partition) });
+            .SelectMany(tp => new[] { (tp.Partition(), 0L, tp.Partition()), (tp.Partition(), 1L, tp.Partition()) });
         Assert.Equal(
             expected,
-            records.Select(r => (r.Partition, r.Offset, r.Value)).OrderBy(r => r.Partition).ThenBy(r => r.Offset));
-        Assert.All(records, r => Assert.Equal(topic, r.Topic));
+            records.Select(r => (Partition: r.Partition(), Offset: r.Offset(), Value: r.Value())).OrderBy(r => r.Partition).ThenBy(r => r.Offset));
+        Assert.All(records, r => Assert.Equal(topic, r.Topic()));
     }
 
     private static SeekBackWindow RunTheSeekBackWindow(
@@ -414,7 +414,7 @@ public sealed class PollDeserializesAfterItsUseTests
             Thread poller = StartThread(() => polled = Record.Exception(poll));
             if (!trace.WaitEntered())
             {
-                throw new TimeoutException("the seek-backs never traced the unassigned partition");
+                throw new System.TimeoutException("the seek-backs never traced the unassigned partition");
             }
 
             TopicPartition probe = new TopicPartition(topic, values.Failed == 0 ? 1 : 0);
@@ -456,7 +456,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         if (!thread.Join(s_deadline))
         {
-            throw new TimeoutException("a thread of the seek-back window never ended");
+            throw new System.TimeoutException("a thread of the seek-back window never ended");
         }
     }
 
@@ -467,7 +467,7 @@ public sealed class PollDeserializesAfterItsUseTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();
@@ -511,8 +511,8 @@ public sealed class PollDeserializesAfterItsUseTests
         {
             Assert.True(_waited, "the other thread's call returned while the seek-backs ran");
             RecordDeserializationException failed = Assert.IsType<RecordDeserializationException>(_polled);
-            Assert.Equal(new TopicPartition(_topic, _failed), failed.TopicPartition);
-            Assert.Equal(0L, failed.Offset);
+            Assert.Equal(new TopicPartition(_topic, _failed), failed.TopicPartition());
+            Assert.Equal(0L, failed.Offset());
             string line = Assert.Single(_lines);
             Assert.Contains($"Could not seek {_topic}-{_failed} back to offset 0", line, StringComparison.Ordinal);
         }

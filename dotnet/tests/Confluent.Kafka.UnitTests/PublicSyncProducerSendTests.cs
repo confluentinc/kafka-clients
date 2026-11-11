@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -39,7 +40,7 @@ public sealed class PublicSyncProducerSendTests
     [Fact]
     public void Send_OnAutoCompleteMock_ReturnsMetadata()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
@@ -48,9 +49,9 @@ public sealed class PublicSyncProducerSendTests
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2)).Get(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(2, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(2, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
         // RecordMetadata.ToString mirrors Java's "topic-partition@offset".
         Assert.Equal("sync-send-topic-2@0", metadata.ToString());
     }
@@ -58,7 +59,7 @@ public sealed class PublicSyncProducerSendTests
     [Fact]
     public void Send_SequentialToSamePartition_OffsetsIncrement()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 5; i++)
@@ -70,15 +71,15 @@ public sealed class PublicSyncProducerSendTests
                     new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{captured}"), partition: 0)).Get(),
                 s_deadline);
 
-            Assert.Equal(0, metadata.Partition);
-            Assert.Equal((long)captured, metadata.Offset);
+            Assert.Equal(0, metadata.Partition());
+            Assert.Equal((long)captured, metadata.Offset());
         }
     }
 
     [Fact]
     public async Task Send_ManualComplete_UnblocksAndReturnsMetadata()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Get blocks on a worker thread until CompleteNext resolves it from this thread.
@@ -90,24 +91,24 @@ public sealed class PublicSyncProducerSendTests
         RecordMetadata metadata = null!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
     }
 
     [Fact]
     public async Task Send_ManualError_FaultsWithKafkaException()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "sync-mock-error", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
         // Get throws the injected KafkaException, code and message included.
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
         Assert.Equal(2, failure.Code);
         Assert.Contains("sync-mock-error", failure.Message, StringComparison.Ordinal);
@@ -118,7 +119,7 @@ public sealed class PublicSyncProducerSendTests
     {
         // A non-ASCII topic guards the hand-written UTF-8 marshalling both ways.
         const string topic = "sync-主题-ünîcödé";
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = null!;
@@ -127,13 +128,13 @@ public sealed class PublicSyncProducerSendTests
                 new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
 
-        Assert.Equal(topic, metadata.Topic);
+        Assert.Equal(topic, metadata.Topic());
     }
 
     [Fact]
     public void Send_NullRecord_ThrowsArgumentNull()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
@@ -146,7 +147,7 @@ public sealed class PublicSyncProducerSendTests
     {
         // The null check precedes the closed check, so a closed producer with a null record throws
         // ArgumentNullException.
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.Send(null!));
@@ -154,23 +155,23 @@ public sealed class PublicSyncProducerSendTests
     }
 
     [Fact]
-    public void Send_AfterDispose_ThrowsObjectDisposed()
+    public void Send_AfterDispose_ThrowsIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
     }
 
     [Fact]
-    public void Send_AfterClose_ThrowsObjectDisposed()
+    public void Send_AfterClose_ThrowsIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Teardown(producer, () => producer.Close());
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
 
         TestTimeout.Dispose(producer);
@@ -185,7 +186,7 @@ public sealed class PublicSyncProducerSendTests
         {
             if (sw.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "No pending send registered to drive within the deadline — treated as a hang.");
             }
 

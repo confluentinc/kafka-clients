@@ -61,7 +61,8 @@ public sealed class DescribeConsumerGroupsResult
     /// <summary>
     /// The future of each group's description, keyed by group id.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> DescribedGroups => _futures;
+    /// <returns>The future of each group's description, keyed by group id.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> DescribedGroups() => _futures;
 
     /// <summary>
     /// A future that yields every group's description once all of them succeeded; it fails with the
@@ -82,7 +83,7 @@ public sealed class DescribeConsumerGroupsResult
             Dictionary<string, ConsumerGroupDescription> descriptions = new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;

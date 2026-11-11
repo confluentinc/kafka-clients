@@ -56,7 +56,7 @@ public sealed class AdminP2bResultMarshalTests
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        Assert.Equal(lowWatermark, copied.LowWatermark);
+        Assert.Equal(lowWatermark, copied.LowWatermark());
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed class AdminP2bResultMarshalTests
         Assert.Equal(3, deleted.LowWatermarks.Values.Distinct().Count());
         foreach (TopicPartition key in new[] { a0, a1, b0 })
         {
-            NotSupportedException failure = Assert.Throws<NotSupportedException>(() => deleted.LowWatermarks[key].Get(s_deadline));
+            UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => deleted.LowWatermarks[key].Get(s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
     }

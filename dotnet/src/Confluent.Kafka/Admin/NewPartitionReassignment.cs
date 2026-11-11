@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -49,18 +50,19 @@ public sealed class NewPartitionReassignment
     /// The broker ids the partition's replicas are to move to, preferred leader first.
     /// Must not be empty. The list is copied.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="targetReplicas"/> is null.</exception>
-    /// <exception cref="ArgumentException"><paramref name="targetReplicas"/> is empty.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="targetReplicas"/> is null or empty, with Java's message.
+    /// </exception>
     public NewPartitionReassignment(IReadOnlyList<int> targetReplicas)
     {
         if (targetReplicas is null)
         {
-            throw new ArgumentNullException(nameof(targetReplicas), NoReplicasMessage);
+            throw new IllegalArgumentException(NoReplicasMessage);
         }
 
         if (targetReplicas.Count == 0)
         {
-            throw new ArgumentException(NoReplicasMessage, nameof(targetReplicas));
+            throw new IllegalArgumentException(NoReplicasMessage);
         }
 
         _targetReplicas = new List<int>(targetReplicas).AsReadOnly();
@@ -70,5 +72,6 @@ public sealed class NewPartitionReassignment
     /// The broker ids the partition's replicas are to move to — Java's
     /// <c>targetReplicas()</c>. Never empty, and read-only, as Java's <c>List.copyOf</c> result.
     /// </summary>
-    public IReadOnlyList<int> TargetReplicas => _targetReplicas;
+    /// <returns>The broker ids the partition's replicas are to move to.</returns>
+    public IReadOnlyList<int> TargetReplicas() => _targetReplicas;
 }

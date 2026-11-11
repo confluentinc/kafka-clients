@@ -69,7 +69,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -83,7 +83,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
         Assert.Same(result.Entities().Get(), result.Entities().Get());
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
     }
 
@@ -108,7 +108,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
             ClientQuotaFilter.ContainsOnly(new[] { component }));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -127,7 +127,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DescribeClientQuotas(
-                ClientQuotaFilter.All(), new DescribeClientQuotasOptions { TimeoutMs = -1 })));
+                ClientQuotaFilter.All(), new DescribeClientQuotasOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -136,7 +136,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DescribeClientQuotas(ClientQuotaFilter.All()));
     }
 
@@ -159,5 +159,5 @@ public sealed class PublicAdminDescribeClientQuotasTests
 
     [Fact]
     public void Options_DefaultToJavasDefaults() =>
-        Assert.Null(new DescribeClientQuotasOptions().TimeoutMs);
+        Assert.Null(new DescribeClientQuotasOptions().TimeoutMs());
 }

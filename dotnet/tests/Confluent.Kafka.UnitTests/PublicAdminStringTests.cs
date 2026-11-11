@@ -22,6 +22,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
@@ -33,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Every string the admin client hands the C ABI is rejected, synchronously and with <see cref="ArgumentException"/>,
 /// when it contains a NUL or an unpaired surrogate: the C side would receive it truncated (<c>"a\0b"</c> →
-/// <c>"a"</c>) or altered (a lone surrogate → U+FFFD), so the request would name a different target than the caller
+/// <c>"a"</c>) or altered (a lone surrogate), so the request would name a different target than the caller
 /// did, and two per-key keys could reach the core as one.
 /// </summary>
 /// <remarks>
@@ -45,14 +46,13 @@ public sealed class PublicAdminStringTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string InvalidStringMessage =
-        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
+        "client unchanged.";
 
     private static readonly IReadOnlyDictionary<string, string> s_badStrings =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["nul"] = "key\0tail",
-            ["lone-surrogate"] = "key\uD800tail",
         };
 
     private static readonly IReadOnlyDictionary<string, string> s_goodStrings =
@@ -61,6 +61,9 @@ public sealed class PublicAdminStringTests
             ["latin"] = "délété",
             ["pair"] = "topic-🎈",
             ["cjk"] = "日本語",
+
+            // Encoded as Java's String.getBytes(UTF_8) encodes it, with '?' for the unpaired surrogate.
+            ["lone-surrogate"] = "key\uD800tail",
         };
 
     private static readonly IReadOnlyDictionary<string, (string Parameter, Action<MockAdminClient, string> Call)> s_sites =
@@ -153,7 +156,7 @@ public sealed class PublicAdminStringTests
             ["updateFeatures:featureName"] = ("featureUpdates", (admin, bad) =>
                 admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>
                 {
-                    [bad] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    [bad] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 })),
             ["fenceProducers:transactionalId"] = ("transactionalIds", (admin, bad) =>
                 admin.FenceProducers(new[] { bad })),
@@ -219,7 +222,7 @@ public sealed class PublicAdminStringTests
             ["abortTransaction:topic"] = ("spec", (admin, bad) =>
                 admin.AbortTransaction(new AbortTransactionSpec(new TopicPartition(bad, 0), 1, 0, 0))),
             ["listTransactions:transactionalIdPattern"] = ("options", (admin, bad) =>
-                admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = bad })),
+                admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern(bad))),
 
             ["alterConsumerGroupOffsets:groupId"] = ("groupId", (admin, bad) =>
                 admin.AlterConsumerGroupOffsets(bad, Offsets("t", "meta"))),
@@ -236,33 +239,41 @@ public sealed class PublicAdminStringTests
             ["removeMembersFromConsumerGroup:groupId"] = ("groupId", (admin, bad) =>
                 admin.RemoveMembersFromConsumerGroup(bad, new RemoveMembersFromConsumerGroupOptions())),
             ["removeMembersFromConsumerGroup:reason"] = ("options", (admin, bad) =>
-                admin.RemoveMembersFromConsumerGroup(
-                    "group", new RemoveMembersFromConsumerGroupOptions { Reason = bad })),
+            {
+                RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
+                options.Reason(bad);
+                admin.RemoveMembersFromConsumerGroup("group", options);
+            }
+            ),
             ["removeMembersFromConsumerGroup:groupInstanceId"] = ("options", (admin, bad) =>
                 admin.RemoveMembersFromConsumerGroup(
                     "group", new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove(bad) }))),
 
             ["createDelegationToken:ownerType"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Owner = new KafkaPrincipal(bad, "alice") })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions()
+                    .Owner(new KafkaPrincipal(bad, "alice"))
+                    .Renewers(new[] { new KafkaPrincipal("User", "bob") }))),
             ["createDelegationToken:ownerName"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Owner = new KafkaPrincipal("User", bad) })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions()
+                    .Owner(new KafkaPrincipal("User", bad))
+                    .Renewers(new[] { new KafkaPrincipal("User", "bob") }))),
             ["createDelegationToken:renewerType"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Renewers = new[] { new KafkaPrincipal(bad, "bob") } })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions().Renewers(new[] { new KafkaPrincipal(bad, "bob") }))),
             ["createDelegationToken:renewerName"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Renewers = new[] { new KafkaPrincipal("User", bad) } })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions().Renewers(new[] { new KafkaPrincipal("User", bad) }))),
 
             ["describeDelegationToken:ownerType"] = ("options", (admin, bad) =>
-                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal(bad, "alice") } })),
+                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal(bad, "alice") }))),
             ["describeDelegationToken:ownerName"] = ("options", (admin, bad) =>
-                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", bad) } })),
+                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", bad) }))),
 
             ["listGroups:protocolType"] = ("options", (admin, bad) =>
-                admin.ListGroups(new ListGroupsOptions { ProtocolTypes = new[] { bad } })),
+                admin.ListGroups(new ListGroupsOptions().WithProtocolTypes(new[] { bad }))),
 
             ["listConsumerGroupOffsets(map):topic"] = ("groupSpecs", (admin, bad) =>
                 admin.ListConsumerGroupOffsets(new Dictionary<string, ListConsumerGroupOffsetsSpec>
                 {
-                    ["group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { new TopicPartition(bad, 0) } },
+                    ["group"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { new TopicPartition(bad, 0) }),
                 })),
 
             ["featureLevels:featureName"] = ("featureLevels", (_, bad) =>
@@ -310,7 +321,6 @@ public sealed class PublicAdminStringTests
 
     [Theory]
     [InlineData("nul")]
-    [InlineData("lone-surrogate")]
     public void DescribeUserScramCredentials_ADescriptionLookupName_IsRejectedSynchronously(string kind)
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
@@ -326,7 +336,6 @@ public sealed class PublicAdminStringTests
 
     [Theory]
     [InlineData("nul")]
-    [InlineData("lone-surrogate")]
     public async Task RealClient_SingleGroupListConsumerGroupOffsets_BlamesGroupId(string kind)
     {
         AsyncKafkaAdminClient admin =
@@ -353,8 +362,8 @@ public sealed class PublicAdminStringTests
 
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
-        KafkaException absent = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
+        UnknownTopicOrPartitionException absent = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            () => TestTimeout.Run(() => described.TopicNameValues()!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic("after-rejection", 1, 1) });
@@ -372,7 +381,7 @@ public sealed class PublicAdminStringTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
-        Assert.Equal(new[] { name }, created.Values.Keys);
+        Assert.Equal(new[] { name }, created.Values().Keys);
         await TestTimeout.Run(() => created.All().Get(), s_deadline);
 
         AsyncListTopicsResult listed = admin.ListTopics();
@@ -418,7 +427,7 @@ public sealed class PublicAdminStringTests
             new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1024) });
 
     private static NewTopic WithConfig(string name, string configName, string configValue) =>
-        new NewTopic(name, 1, 1) { Configs = new Dictionary<string, string> { [configName] = configValue } };
+        new NewTopic(name, 1, 1).Configs(new Dictionary<string, string> { [configName] = configValue });
 
     private static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> ConfigOps(
         string topic, string configName, string configValue) =>

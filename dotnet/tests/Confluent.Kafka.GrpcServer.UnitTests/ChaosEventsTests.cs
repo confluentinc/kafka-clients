@@ -214,7 +214,7 @@ public sealed class ChaosEventsTests
     [Fact]
     public void Rebalance_FromTheListener_IsObservedBetweenBeforeAndAfter()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         List<Proto.WorkloadEvent> events = new List<Proto.WorkloadEvent>();
         ChaosRebalanceListener listener = new ChaosRebalanceListener(events.Add, consumer, checkCommits: false);
 
@@ -266,12 +266,21 @@ public sealed class ChaosEventsTests
     }
 
     [Fact]
-    public void Failed_OfANonKafkaException_IsTheTranslatedLocalIllegalState()
+    public void Failed_OfAnIllegalStateException_IsItsId()
+    {
+        Proto.WorkloadEvent failed = ChaosEvents.Failed(new IllegalStateException("boom"));
+
+        Assert.Equal(-4, failed.Failed.Error.Code);
+        Assert.Equal("boom", failed.Failed.Error.Message);
+    }
+
+    [Fact]
+    public void Failed_OfAnExceptionWithoutAnId_IsTheServerFallback()
     {
         Proto.WorkloadEvent failed = ChaosEvents.Failed(new InvalidOperationException("boom"));
 
         Assert.Equal(-4, failed.Failed.Error.Code);
-        Assert.Equal("boom", failed.Failed.Error.Message);
+        Assert.Equal("dotnet server: InvalidOperationException: boom", failed.Failed.Error.Message);
     }
 
     internal static long UnixNanos() => (DateTime.UtcNow - DateTime.UnixEpoch).Ticks * 100;

@@ -45,7 +45,7 @@ public sealed class AdminP7SubmitArgumentTests
     public void Upsertion_CarriesTheUserTheCredentialInfoAndThePasswordVerbatim(ScramMechanism mechanism) =>
         ReadUpsertion(
             new UserScramCredentialUpsertion(
-                "ålice", new ScramCredentialInfo(mechanism, 8192), new byte[] { 0x61, 0x00, 0x62 }, salt: null),
+                "ålice", new ScramCredentialInfo(mechanism, 8192), new byte[] { 0x61, 0x00, 0x62 }),
             native =>
             {
                 Assert.Equal("ålice", Utf8Marshal.PtrToString(ReadPointer(native, Native.UpsertionUser)));
@@ -56,8 +56,12 @@ public sealed class AdminP7SubmitArgumentTests
             });
 
     [Fact]
-    public void Upsertion_ANullSalt_IsGeneratedByTheCore() =>
-        ReadUpsertion(Upsert("u", salt: null), native => Assert.NotEmpty(ReadBytes(native, Native.UpsertionSalt)));
+    public void Upsertion_AGeneratedSalt_ComesFromTheCore_AndIsForwardedVerbatim()
+    {
+        UserScramCredentialUpsertion upsertion = Upsert("u");
+        Assert.NotEmpty(upsertion.Salt());
+        ReadUpsertion(upsertion, native => Assert.Equal(upsertion.Salt(), ReadBytes(native, Native.UpsertionSalt)));
+    }
 
     [Fact]
     public void Upsertion_AnEmptySalt_IsKeptEmpty() =>
@@ -114,8 +118,8 @@ public sealed class AdminP7SubmitArgumentTests
                 new UserScramCredentialDeletion("other", ScramMechanism.SCRAM_SHA_256),
             });
 
-        Assert.Equal(new[] { "dup", "other" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
-        foreach (KafkaFuture future in result.Values.Values)
+        Assert.Equal(new[] { "dup", "other" }, result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
+        foreach (KafkaFuture future in result.Values().Values)
         {
             AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
         }
@@ -195,20 +199,20 @@ public sealed class AdminP7SubmitArgumentTests
     [InlineData(-5, 0)]
     public void ScramOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal(expected, DescribeTimeoutMs(new DescribeUserScramCredentialsOptions { TimeoutMs = timeoutMs }));
-        Assert.Equal(expected, AlterTimeoutMs(new AlterUserScramCredentialsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, DescribeTimeoutMs(new DescribeUserScramCredentialsOptions().TimeoutMs(timeoutMs)));
+        Assert.Equal(expected, AlterTimeoutMs(new AlterUserScramCredentialsOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void ScramOptions_ASetterRunTwice_SendsItsLastValue()
     {
-        DescribeUserScramCredentialsOptions describe = new DescribeUserScramCredentialsOptions { TimeoutMs = 10 };
-        describe.TimeoutMs = 20;
+        DescribeUserScramCredentialsOptions describe = new DescribeUserScramCredentialsOptions().TimeoutMs(10);
+        describe.TimeoutMs(20);
         Assert.Equal(20, DescribeTimeoutMs(describe));
         Assert.Equal(new[] { nameof(DescribeUserScramCredentialsOptions.TimeoutMs) }, describe.Setters.InOrder);
 
-        AlterUserScramCredentialsOptions alter = new AlterUserScramCredentialsOptions { TimeoutMs = 10 };
-        alter.TimeoutMs = null;
+        AlterUserScramCredentialsOptions alter = new AlterUserScramCredentialsOptions().TimeoutMs(10);
+        alter.TimeoutMs(null);
         Assert.Equal(-1, AlterTimeoutMs(alter));
         Assert.Equal(new[] { nameof(AlterUserScramCredentialsOptions.TimeoutMs) }, alter.Setters.InOrder);
     }
@@ -258,34 +262,32 @@ public sealed class AdminP7SubmitArgumentTests
         Assert.Equal(
             expected,
             ReadCreate(
-                new CreateDelegationTokenOptions { TimeoutMs = timeoutMs },
+                new CreateDelegationTokenOptions().TimeoutMs(timeoutMs),
                 native => ReadInt32(native, Native.CreateDelegationTokenOptionsTimeoutMs)));
         Assert.Equal(
             expected,
             ReadRenew(
-                new RenewDelegationTokenOptions { TimeoutMs = timeoutMs },
+                new RenewDelegationTokenOptions().TimeoutMs(timeoutMs),
                 native => ReadInt32(native, Native.RenewDelegationTokenOptionsTimeoutMs)));
         Assert.Equal(
             expected,
             ReadExpire(
-                new ExpireDelegationTokenOptions { TimeoutMs = timeoutMs },
+                new ExpireDelegationTokenOptions().TimeoutMs(timeoutMs),
                 native => ReadInt32(native, Native.ExpireDelegationTokenOptionsTimeoutMs)));
         Assert.Equal(
             expected,
             ReadDescribe(
-                new DescribeDelegationTokenOptions { TimeoutMs = timeoutMs },
+                new DescribeDelegationTokenOptions().TimeoutMs(timeoutMs),
                 native => ReadInt32(native, Native.DescribeDelegationTokenOptionsTimeoutMs)));
     }
 
     [Fact]
     public void CreateOptions_EachSetter_ReachesTheCOptions()
     {
-        CreateDelegationTokenOptions options = new CreateDelegationTokenOptions
-        {
-            Renewers = new[] { new KafkaPrincipal("User", "first"), new KafkaPrincipal("Group", "second") },
-            Owner = new KafkaPrincipal("User", "owner"),
-            MaxLifetimeMs = 86_400_000L,
-        };
+        CreateDelegationTokenOptions options = new CreateDelegationTokenOptions()
+            .Renewers(new[] { new KafkaPrincipal("User", "first"), new KafkaPrincipal("Group", "second") })
+            .Owner(new KafkaPrincipal("User", "owner"))
+            .MaxLifetimeMs(86_400_000L);
 
         Assert.Equal(
             new[] { new KafkaPrincipal("User", "first"), new KafkaPrincipal("Group", "second") },
@@ -299,8 +301,8 @@ public sealed class AdminP7SubmitArgumentTests
     [Fact]
     public void CreateOptions_ANullOwner_LeavesTheOwnerUnset()
     {
-        CreateDelegationTokenOptions options = new CreateDelegationTokenOptions { Owner = new KafkaPrincipal("User", "owner") };
-        options.Owner = null;
+        CreateDelegationTokenOptions options = new CreateDelegationTokenOptions().Owner(new KafkaPrincipal("User", "owner"));
+        options.Owner(null);
 
         Assert.Equal(IntPtr.Zero, ReadCreate(options, native => ReadPointer(native, Native.CreateDelegationTokenOptionsOwner)));
         Assert.Equal(new[] { nameof(CreateDelegationTokenOptions.Owner) }, options.Setters.InOrder);
@@ -312,39 +314,35 @@ public sealed class AdminP7SubmitArgumentTests
         Assert.Equal(
             3_600_000L,
             ReadRenew(
-                new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L },
+                new RenewDelegationTokenOptions().RenewTimePeriodMs(3_600_000L),
                 native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
         Assert.Equal(
             5_000L,
             ReadExpire(
-                new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 5_000L },
+                new ExpireDelegationTokenOptions().ExpiryTimePeriodMs(5_000L),
                 native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
     }
 
     [Fact]
     public void DescribeOptions_Owners_NullAndEmptyStayApart_AndKeepRequestOrder()
     {
-        Assert.Null(DescribeOwners(new DescribeDelegationTokenOptions { Owners = null }));
+        Assert.Null(DescribeOwners(new DescribeDelegationTokenOptions().Owners(null)));
         Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<KafkaPrincipal>>(
-            DescribeOwners(new DescribeDelegationTokenOptions { Owners = Array.Empty<KafkaPrincipal>() })));
+            DescribeOwners(new DescribeDelegationTokenOptions().Owners(Array.Empty<KafkaPrincipal>()))));
         Assert.Equal(
             new[] { new KafkaPrincipal("User", "alice"), new KafkaPrincipal("Group", "ops") },
-            DescribeOwners(new DescribeDelegationTokenOptions
-            {
-                Owners = new[] { new KafkaPrincipal("User", "alice"), new KafkaPrincipal("Group", "ops") },
-            }));
+            DescribeOwners(new DescribeDelegationTokenOptions()
+                .Owners(new[] { new KafkaPrincipal("User", "alice"), new KafkaPrincipal("Group", "ops") })));
     }
 
     [Fact]
     public void TokenOptions_ASetterRunTwice_SendsItsLastValue()
     {
-        CreateDelegationTokenOptions create = new CreateDelegationTokenOptions
-        {
-            Renewers = new[] { new KafkaPrincipal("User", "first") },
-            Owner = new KafkaPrincipal("User", "first-owner"),
-        };
-        create.Renewers = new[] { new KafkaPrincipal("User", "second") };
-        create.Owner = new KafkaPrincipal("User", "second-owner");
+        CreateDelegationTokenOptions create = new CreateDelegationTokenOptions()
+            .Renewers(new[] { new KafkaPrincipal("User", "first") })
+            .Owner(new KafkaPrincipal("User", "first-owner"));
+        create.Renewers(new[] { new KafkaPrincipal("User", "second") });
+        create.Owner(new KafkaPrincipal("User", "second-owner"));
         Assert.Equal(
             new[] { new KafkaPrincipal("User", "second") },
             ReadCreate(create, native => Principals(ReadPointer(native, Native.CreateDelegationTokenOptionsRenewers))));
@@ -355,19 +353,17 @@ public sealed class AdminP7SubmitArgumentTests
             new[] { nameof(CreateDelegationTokenOptions.Renewers), nameof(CreateDelegationTokenOptions.Owner) },
             create.Setters.InOrder);
 
-        RenewDelegationTokenOptions renew = new RenewDelegationTokenOptions { RenewTimePeriodMs = 10 };
-        renew.RenewTimePeriodMs = 20;
+        RenewDelegationTokenOptions renew = new RenewDelegationTokenOptions().RenewTimePeriodMs(10);
+        renew.RenewTimePeriodMs(20);
         Assert.Equal(20L, ReadRenew(renew, native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
 
-        ExpireDelegationTokenOptions expire = new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 10 };
-        expire.ExpiryTimePeriodMs = 20;
+        ExpireDelegationTokenOptions expire = new ExpireDelegationTokenOptions().ExpiryTimePeriodMs(10);
+        expire.ExpiryTimePeriodMs(20);
         Assert.Equal(20L, ReadExpire(expire, native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
 
-        DescribeDelegationTokenOptions describe = new DescribeDelegationTokenOptions
-        {
-            Owners = new[] { new KafkaPrincipal("User", "alice") },
-        };
-        describe.Owners = null;
+        DescribeDelegationTokenOptions describe = new DescribeDelegationTokenOptions()
+            .Owners(new[] { new KafkaPrincipal("User", "alice") });
+        describe.Owners(null);
         Assert.Null(DescribeOwners(describe));
         Assert.Equal(new[] { nameof(DescribeDelegationTokenOptions.Owners) }, describe.Setters.InOrder);
     }
@@ -418,12 +414,12 @@ public sealed class AdminP7SubmitArgumentTests
         Assert.Equal(
             expected,
             ReadDescribeFeatures(
-                new DescribeFeaturesOptions { TimeoutMs = timeoutMs },
+                new DescribeFeaturesOptions().TimeoutMs(timeoutMs),
                 native => ReadInt32(native, Native.DescribeFeaturesOptionsTimeoutMs)));
         Assert.Equal(
             expected,
             ReadUpdateFeatures(
-                new UpdateFeaturesOptions { TimeoutMs = timeoutMs },
+                new UpdateFeaturesOptions().TimeoutMs(timeoutMs),
                 native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
     }
 
@@ -431,22 +427,25 @@ public sealed class AdminP7SubmitArgumentTests
     public void NodeId_UnsetAndZero_StayApart_AndASetIdIsForwardedVerbatim()
     {
         Assert.Equal(-1, NodeIdOf(new DescribeFeaturesOptions()));
-        Assert.Equal(0, NodeIdOf(new DescribeFeaturesOptions { NodeId = 0 }));
-        Assert.Equal(7, NodeIdOf(new DescribeFeaturesOptions { NodeId = 7 }));
+        Assert.Equal(0, NodeIdOf(new DescribeFeaturesOptions().NodeId(0)));
+        Assert.Equal(7, NodeIdOf(new DescribeFeaturesOptions().NodeId(7)));
     }
 
     [Fact]
-    public void NodeId_Null_ThrowsAndLeavesTheFieldAsItWas()
+    public void NodeId_TakesJavasInt_AndAnUnsetIdIsNull()
     {
+        Assert.Equal(
+            typeof(int),
+            Assert.Single(typeof(DescribeFeaturesOptions).GetMethod(
+                nameof(DescribeFeaturesOptions.NodeId), new[] { typeof(int) })!.GetParameters()).ParameterType);
+
         DescribeFeaturesOptions options = new DescribeFeaturesOptions();
-        Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => options.NodeId = null).ParamName);
-        Assert.Null(options.NodeId);
+        Assert.Null(options.NodeId());
         Assert.Empty(options.Setters.InOrder);
         Assert.Equal(-1, NodeIdOf(options));
 
-        options.NodeId = 3;
-        Assert.Throws<ArgumentNullException>(() => options.NodeId = null);
-        Assert.Equal(3, options.NodeId);
+        options.NodeId(3);
+        Assert.Equal(3, options.NodeId());
         Assert.Equal(new[] { nameof(DescribeFeaturesOptions.NodeId) }, options.Setters.InOrder);
         Assert.Equal(3, NodeIdOf(options));
     }
@@ -455,21 +454,21 @@ public sealed class AdminP7SubmitArgumentTests
     [InlineData(false, 0)]
     [InlineData(true, 1)]
     public void UpdateFeaturesOptions_ValidateOnly_ReachesTheCOptions(bool validateOnly, int expected) =>
-        Assert.Equal(expected, ValidateOnlyOf(new UpdateFeaturesOptions { ValidateOnly = validateOnly }));
+        Assert.Equal(expected, ValidateOnlyOf(new UpdateFeaturesOptions().ValidateOnly(validateOnly)));
 
     [Fact]
     public void FeatureOptions_ASetterRunTwice_SendsItsLastValue()
     {
-        DescribeFeaturesOptions describe = new DescribeFeaturesOptions { NodeId = 1, TimeoutMs = 10 };
-        describe.NodeId = 2;
+        DescribeFeaturesOptions describe = new DescribeFeaturesOptions().NodeId(1).TimeoutMs(10);
+        describe.NodeId(2);
         Assert.Equal(2, NodeIdOf(describe));
         Assert.Equal(
             new[] { nameof(DescribeFeaturesOptions.TimeoutMs), nameof(DescribeFeaturesOptions.NodeId) },
             describe.Setters.InOrder);
 
-        UpdateFeaturesOptions update = new UpdateFeaturesOptions { ValidateOnly = true, TimeoutMs = 10 };
-        update.ValidateOnly = false;
-        update.TimeoutMs = null;
+        UpdateFeaturesOptions update = new UpdateFeaturesOptions().ValidateOnly(true).TimeoutMs(10);
+        update.ValidateOnly(false);
+        update.TimeoutMs(null);
         Assert.Equal(0, ValidateOnlyOf(update));
         Assert.Equal(-1, ReadUpdateFeatures(update, native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
         Assert.Equal(
@@ -478,13 +477,13 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     [Theory]
-    [InlineData((short)3, FeatureUpdate.UpgradeType.UPGRADE, 1)]
-    [InlineData((short)2, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE, 2)]
-    [InlineData((short)0, FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE, 3)]
-    [InlineData(short.MaxValue, FeatureUpdate.UpgradeType.UPGRADE, 1)]
-    [InlineData((short)1, FeatureUpdate.UpgradeType.UNKNOWN, 0)]
+    [InlineData((short)3, UpgradeType.UPGRADE, 1)]
+    [InlineData((short)2, UpgradeType.SAFE_DOWNGRADE, 2)]
+    [InlineData((short)0, UpgradeType.UNSAFE_DOWNGRADE, 3)]
+    [InlineData(short.MaxValue, UpgradeType.UPGRADE, 1)]
+    [InlineData((short)1, UpgradeType.UNKNOWN, 0)]
     public void FeatureUpdate_CrossesItsLevelAndItsUpgradeTypeCode(
-        short maxVersionLevel, FeatureUpdate.UpgradeType upgradeType, int expectedCode) =>
+        short maxVersionLevel, UpgradeType upgradeType, int expectedCode) =>
         Assert.Equal(
             (maxVersionLevel, (sbyte)expectedCode),
             ReadFeatureUpdate(new FeatureUpdate(maxVersionLevel, upgradeType)));
@@ -493,7 +492,7 @@ public sealed class AdminP7SubmitArgumentTests
     public void FeatureUpdate_AnUndefinedUpgradeType_CrossesAsUnknown() =>
         Assert.Equal(
             ((short)1, (sbyte)0),
-            ReadFeatureUpdate(new FeatureUpdate(1, (FeatureUpdate.UpgradeType)9)));
+            ReadFeatureUpdate(new FeatureUpdate(1, (UpgradeType)9)));
 
     [Fact]
     public void UnregisterControllerOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
@@ -511,26 +510,26 @@ public sealed class AdminP7SubmitArgumentTests
     [InlineData(int.MinValue, 0)]
     public void UnregisterControllerOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(
         int? timeoutMs, int expected) =>
-        Assert.Equal(expected, UnregisterControllerTimeoutOf(new UnregisterControllerOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, UnregisterControllerTimeoutOf(new UnregisterControllerOptions().TimeoutMs(timeoutMs)));
 
     [Fact]
     public void UnregisterControllerOptions_ASetterRunTwice_SendsItsLastValue()
     {
-        UnregisterControllerOptions options = new UnregisterControllerOptions { TimeoutMs = 10 };
-        options.TimeoutMs = 20;
+        UnregisterControllerOptions options = new UnregisterControllerOptions().TimeoutMs(10);
+        options.TimeoutMs(20);
         Assert.Equal(20, UnregisterControllerTimeoutOf(options));
 
-        options.TimeoutMs = null;
+        options.TimeoutMs(null);
         Assert.Equal(-1, UnregisterControllerTimeoutOf(options));
         Assert.Equal(new[] { nameof(UnregisterControllerOptions.TimeoutMs) }, options.Setters.InOrder);
     }
 
     private static UserScramCredentialUpsertion Upsert(string user, byte[]? password = null, byte[]? salt = null) =>
-        new UserScramCredentialUpsertion(
-            user,
-            new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
-            password ?? new byte[] { 1, 2, 3 },
-            salt);
+        salt is null
+            ? new UserScramCredentialUpsertion(
+                user, new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), password ?? new byte[] { 1, 2, 3 })
+            : new UserScramCredentialUpsertion(
+                user, new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), password ?? new byte[] { 1, 2, 3 }, salt);
 
     private static void ReadUpsertion(UserScramCredentialUpsertion upsertion, Action<IntPtr> read)
     {
@@ -561,7 +560,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static void AssertNotImplemented(Exception? outcome)
     {
-        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
+        UnsupportedOperationException failure = FutureAssert.Cause<UnsupportedOperationException>(
+            Assert.IsAssignableFrom<Exception>(outcome));
         Assert.Equal("Not implemented yet", failure.Message);
     }
 

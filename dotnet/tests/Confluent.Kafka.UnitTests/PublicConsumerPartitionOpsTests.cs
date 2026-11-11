@@ -43,7 +43,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Assign_EmptyCollection_ClearsTheAssignment()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, 0) }), s_deadline);
         Assert.Single(consumer.Assignment());
@@ -56,7 +56,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Pause_ThenPaused_ReturnsThePausedSet()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
@@ -70,7 +70,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Resume_AfterPause_ClearsThePausedSet()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
@@ -85,7 +85,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task SeekToBeginning_ResolvesBrokerFree_NoOffsetSetup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
@@ -96,7 +96,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task SeekToEnd_ResolvesBrokerFree_NoOffsetSetup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
@@ -107,7 +107,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task SeekToBeginning_ObservableViaPoll_ResetsToBeginningOffset()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
@@ -122,14 +122,14 @@ public sealed class PublicConsumerPartitionOpsTests
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
-        long[] offsets = records.Select(r => r.Offset).OrderBy(o => o).ToArray();
+        long[] offsets = records.Select(r => r.Offset()).OrderBy(o => o).ToArray();
         Assert.Equal(new long[] { 5, 6, 7, 8, 9 }, offsets);
     }
 
     [Fact]
     public async Task SeekToEnd_ObservableViaPoll_ResetsToEndOffset()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
@@ -144,14 +144,14 @@ public sealed class PublicConsumerPartitionOpsTests
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
-        long[] offsets = records.Select(r => r.Offset).OrderBy(o => o).ToArray();
+        long[] offsets = records.Select(r => r.Offset()).OrderBy(o => o).ToArray();
         Assert.Equal(new long[] { 8, 9 }, offsets);
     }
 
     [Fact]
     public async Task Pause_EmptyCollection_IsNoOpSuccess()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.Pause(Array.Empty<TopicPartition>()), s_deadline);
         Assert.Empty(consumer.Paused());
@@ -160,7 +160,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Resume_EmptyCollection_IsNoOpSuccess()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.Resume(Array.Empty<TopicPartition>()), s_deadline);
     }
@@ -168,7 +168,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task SeekToBeginning_EmptyCollection_IsNoOpSuccess()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.SeekToBeginning(Array.Empty<TopicPartition>()), s_deadline);
     }
@@ -176,20 +176,20 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task SeekToEnd_EmptyCollection_IsNoOpSuccess()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.SeekToEnd(Array.Empty<TopicPartition>()), s_deadline);
     }
 
     [Fact]
-    public async Task Pause_UnassignedPartition_FaultsWithInvalidOperationExceptionMessage()
+    public async Task Pause_UnassignedPartition_FaultsWithIllegalStateMessage()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, 0) }), s_deadline);
 
         TopicPartition unassigned = new TopicPartition(Topic, 99);
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
             () => TestTimeout.Run(() => consumer.Pause(new[] { unassigned }), s_deadline));
 
         Assert.Contains("No current assignment for partition", ex.Message, StringComparison.Ordinal);
@@ -199,12 +199,12 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Pause_UnassignedPartition_FaultsThenConsumerReusable()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition assigned = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { assigned }), s_deadline);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => TestTimeout.Run(() => consumer.Pause(new[] { new TopicPartition(Topic, 99) }), s_deadline));
 
         await TestTimeout.Run(() => consumer.Pause(new[] { assigned }), s_deadline);
@@ -214,7 +214,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Ops_NullCollection_ThrowArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Assign(null!));
@@ -227,36 +227,52 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Ops_ElementWithNullTopic_ThrowArgumentException()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         TopicPartition[] withNullTopic = { default };
 
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.Assign(withNullTopic));
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Pause(withNullTopic));
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Resume(withNullTopic));
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToBeginning(withNullTopic));
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToEnd(withNullTopic));
     }
 
+    // Java's SubscriptionState.assignedState throws for a partition that is not assigned, which a null topic never is.
+    // The binding throws at the call, before a Task is returned.
     [Fact]
-    public async Task Ops_AfterDispose_ThrowObjectDisposed()
+    public void PauseAndResume_ElementWithNullTopic_ThrowIllegalStateAtTheCall()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+
+        TopicPartition[] withNullTopic = { default };
+
+        Assert.Equal(
+            "No current assignment for partition null-0",
+            Assert.Throws<IllegalStateException>(() => { _ = consumer.Pause(withNullTopic); }).Message);
+        Assert.Equal(
+            "No current assignment for partition null-0",
+            Assert.Throws<IllegalStateException>(() => { _ = consumer.Resume(withNullTopic); }).Message);
+    }
+
+    [Fact]
+    public async Task Ops_AfterDispose_ThrowIllegalState()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TopicPartition[] tps = { new TopicPartition(Topic, 0) };
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Assign(tps));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Pause(tps));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Resume(tps));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SeekToBeginning(tps));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.SeekToEnd(tps));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Assign(tps));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Pause(tps));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Resume(tps));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.SeekToBeginning(tps));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.SeekToEnd(tps));
     }
 
     [Fact]
     public async Task Ops_PreCanceledToken_ThrowOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition[] tps = { new TopicPartition(Topic, 0) };
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -272,7 +288,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Ops_AfterWakeup_ConsumerStillUsable()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);

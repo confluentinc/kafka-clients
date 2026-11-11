@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Generate the Python exception hierarchy for the `confluent_kafka` binding.
+//! Generate the exception hierarchies of the Python `confluent_kafka` binding
+//! and of the .NET binding.
 //!
 //! Reads the Java exception sources (Apache Kafka 4.4.0, under `kafka/`) and
 //! emits one Python class per Java exception class the FFI enum
@@ -24,7 +25,9 @@
 //! constructors are evaluated statically through their `this(...)` /
 //! `super(...)` chains, which gives each overload's message, cause and fields,
 //! the Java-given defaults a shorter overload passes to a longer one, and the
-//! `java_forms` overload table.
+//! `java_forms` overload table. The same class graph also gives the .NET
+//! binding one C# class per Java exception class, its id registry and its
+//! layout-test rows (see `csharp`).
 //!
 //! The build fails when a Kafka class has no FFI id, an FFI id has no class, the
 //! `extends` chain differs, or a Java construct outside the small slice the
@@ -44,6 +47,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::java_parse::{self, CallKind, Ctor, Expr, Factory, GetterBody, JavaClass, Param, Visibility};
+
+mod csharp;
 
 /// Root of the Java source tree (Apache Kafka 4.4.0), relative to the repo root.
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
@@ -631,7 +636,7 @@ const KAFKA_EXCEPTION_FQN: &str = "org.apache.kafka.common.KafkaException";
 /// models none) and the constructors as `(type, name)` lists. The JDK source is
 /// not in the tree; the constructors are Java 11's, the release Kafka's clients
 /// compile for (`kafka/build.gradle`: `minClientJavaVersion = 11`).
-type JdkCtor = &'static [(&'static str, &'static str)];
+pub(crate) type JdkCtor = &'static [(&'static str, &'static str)];
 const JDK_FOUR: &[JdkCtor] = &[
     &[],
     &[("String", "s")],
@@ -706,6 +711,22 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
     // and the core's `LOCAL_NULL_POINTER` id is one of the `RUST_ONLY_IDS`, which the
     // binding maps to that `TypeError`.
 ];
+
+/// The Kafka exception classes the generator makes a class for, those of [`BRIDGE`]
+/// and [`ABSTRACT_CLASSES`], whether or not Kafka marks them public: the bindings
+/// have a class for each, so `cargo xtask java-api` lists them.
+pub(crate) fn generated_kafka_classes() -> impl Iterator<Item = &'static str> {
+    BRIDGE
+        .iter()
+        .map(|(_, fqn)| *fqn)
+        .chain(ABSTRACT_CLASSES.iter().copied())
+        .filter(|fqn| fqn.starts_with("org.apache.kafka."))
+}
+
+/// The Java built-in exceptions of [`JDK_BUILTINS`]: FQN, parent FQN and constructors.
+pub(crate) fn jdk_exceptions() -> impl Iterator<Item = (&'static str, &'static str, &'static [JdkCtor])> {
+    JDK_BUILTINS.iter().map(|(fqn, parent, _, ctors)| (*fqn, *parent, *ctors))
+}
 
 /// JDK classes at the top of every chain: `Throwable`'s constructors decide the
 /// message and the cause.
@@ -836,6 +857,7 @@ fn jdk_class(fqn: &str, parent: &str, ctors: &[JdkCtor]) -> JavaClass {
         parent_simple: parent.rsplit('.').next().unwrap().to_string(),
         imports: BTreeMap::new(),
         javadoc: String::new(),
+        javadoc_list: Vec::new(),
         ctors: ctors
             .iter()
             .map(|params| Ctor {
@@ -3462,10 +3484,19 @@ pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, Strin
         messages.join("\n")
     );
     outputs.push((repo_root.join(PY_ROOT).join("confluent_kafka/_error_registry.py"), registry));
+
+    // The .NET binding's classes, registry and layout rows.
+    let cs = csharp::outputs(repo_root, &g)?;
+    let outside = csharp::outside_projects(repo_root, &cs);
+    if !outside.is_empty() {
+        anyhow::bail!("error hierarchy (C#): outputs outside the .NET projects: {outside:?}");
+    }
+    outputs.extend(cs);
     Ok(outputs)
 }
 
-/// Regenerate the Python exception hierarchy files.
+/// Regenerate the generated error-hierarchy files, the Python modules and stubs and the C#
+/// classes, and remove the orphaned outputs of either.
 pub fn generate(repo_root: &Path) -> anyhow::Result<()> {
     let outputs = generated_outputs(repo_root)?;
     for (path, content) in &outputs {
@@ -3475,7 +3506,8 @@ pub fn generate(repo_root: &Path) -> anyhow::Result<()> {
         fs::write(path, content)?;
     }
     // A class Java renamed or dropped leaves its old output behind: remove it.
-    let orphans = orphaned_outputs(repo_root, &outputs)?;
+    let mut orphans = orphaned_outputs(repo_root, &outputs)?;
+    orphans.extend(csharp::orphans(repo_root, &outputs)?);
     for path in &orphans {
         fs::remove_file(path)?;
     }
@@ -3566,6 +3598,7 @@ pub fn check_up_to_date(repo_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     }
     // Output left behind for a renamed or dropped Java class is stale too.
     stale.extend(orphaned_outputs(repo_root, &outputs)?);
+    stale.extend(csharp::orphans(repo_root, &outputs)?);
     // So is a generated package the wheel would leave out.
     stale.extend(
         unlisted_packages(repo_root, &outputs)?
@@ -4076,6 +4109,49 @@ mod tests {
         )
         .unwrap();
         assert!(unlisted_packages(&root, &outputs).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn csharp_orphans_and_outside_outputs_are_found() {
+        let root = std::env::temp_dir().join(format!("xtask-cs-orphans-{}", std::process::id()));
+        let src = root.join(csharp::CS_SRC);
+        let tests = root.join(csharp::CS_TESTS);
+        let marked = format!("// <auto-generated>\n// {GENERATED_MARKER}.\n// </auto-generated>\n");
+        let write = |path: &PathBuf, text: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        let kept = src.join("Common/Errors/KeptException.cs");
+        let gone = src.join("Common/Errors/GoneException.cs");
+        let gone_test = tests.join("GoneRows.cs");
+        write(&kept, &marked);
+        write(&gone, &marked);
+        write(&gone_test, &marked);
+        write(&src.join("Common/HandWritten.cs"), "// Hand-written.\n");
+        write(&src.join("Common/Errors/Notes.txt"), &marked);
+        write(
+            &src.join("Common/LateMarker.cs"),
+            &format!("{}// {GENERATED_MARKER}.\n", "//\n".repeat(25)),
+        );
+        write(&src.join("obj/Debug/GoneException.cs"), &marked);
+        write(&src.join("bin/Debug/GoneException.cs"), &marked);
+        let outputs = vec![(kept.clone(), String::new())];
+        let mut expected = vec![gone, gone_test];
+        expected.sort();
+        assert_eq!(csharp::orphans(&root, &outputs).unwrap(), expected);
+
+        let outside_cs = root.join("dotnet/src/Other/Stray.cs");
+        let outputs = vec![
+            (kept, String::new()),
+            (tests.join("Rows.cs"), String::new()),
+            (outside_cs.clone(), String::new()),
+            (root.join("python/confluent_kafka/stray.py"), String::new()),
+        ];
+        assert_eq!(
+            csharp::outside_projects(&root, &outputs),
+            vec![outside_cs.display().to_string()]
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

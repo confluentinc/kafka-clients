@@ -63,7 +63,7 @@ internal sealed class MockAdminClientBuilderCore
         Node[] snapshot = SnapshotNodes(brokers, nameof(brokers));
         if (controller is null)
         {
-            throw new ArgumentException("The controller node must be in the list of brokers", nameof(controller));
+            throw new IllegalArgumentException("The controller node must be in the list of brokers");
         }
 
         ValidateNode(controller, nameof(controller));
@@ -276,8 +276,8 @@ internal sealed class MockAdminClientBuilderCore
             throw new ArgumentNullException(parameterName);
         }
 
-        AdminStrings.Validate(node.Host, parameterName);
-        AdminStrings.Validate(node.Rack, parameterName);
+        AdminStrings.Validate(node.Host(), parameterName);
+        AdminStrings.Validate(node.Rack(), parameterName);
     }
 
     private static void ValidateKey(string key, string parameterName)

@@ -35,49 +35,54 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class AlterConfigOp
 {
+    private readonly ConfigEntry _configEntry;
+    private readonly AlterConfigOpType _opType;
+
     /// <summary>
     /// Initializes an operation — Java's
     /// <c>AlterConfigOp(ConfigEntry configEntry, OpType operationType)</c>.
     /// </summary>
     /// <param name="configEntry">The configuration entry the operation applies to.</param>
-    /// <param name="opType">What to do with it.</param>
+    /// <param name="operationType">What to do with it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="configEntry"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="opType"/> is not a defined <see cref="AlterConfigOpType"/> member.
+    /// <paramref name="operationType"/> is not a defined <see cref="AlterConfigOpType"/> member.
     /// </exception>
     /// <remarks>
     /// The null check is stricter than Java, which stores the reference unchecked. An undefined
-    /// <paramref name="opType"/> is refused, because Java's closed <c>OpType</c> enum cannot hold one
+    /// <paramref name="operationType"/> is refused, because Java's closed <c>OpType</c> enum cannot hold one
     /// and has no <c>UNKNOWN</c> member to map it to, while a C# enum accepts any integral value by
     /// cast.
     /// </remarks>
-    public AlterConfigOp(ConfigEntry configEntry, AlterConfigOpType opType)
+    public AlterConfigOp(ConfigEntry configEntry, AlterConfigOpType operationType)
     {
-        ConfigEntry = configEntry ?? throw new ArgumentNullException(nameof(configEntry));
-        if (!Enum.IsDefined(typeof(AlterConfigOpType), opType))
+        _configEntry = configEntry ?? throw new ArgumentNullException(nameof(configEntry));
+        if (!Enum.IsDefined(typeof(AlterConfigOpType), operationType))
         {
             throw new ArgumentOutOfRangeException(
-                nameof(opType), opType, "opType must be a defined AlterConfigOpType member.");
+                nameof(operationType), operationType, "operationType must be a defined AlterConfigOpType member.");
         }
 
-        OpType = opType;
+        _opType = operationType;
     }
 
     /// <summary>The entry this operation applies to — Java's <c>configEntry()</c>.</summary>
-    public ConfigEntry ConfigEntry { get; }
+    /// <returns>The entry this operation applies to.</returns>
+    public ConfigEntry ConfigEntry() => _configEntry;
 
     /// <summary>What the operation does — Java's <c>opType()</c>.</summary>
-    public AlterConfigOpType OpType { get; }
+    /// <returns>What the operation does.</returns>
+    public AlterConfigOpType OpType() => _opType;
 
     /// <summary>
     /// Value equality over the entry and the operation type — Java's <c>equals</c>, which compares
-    /// the entry with <c>Objects.equals</c> and so relies on <see cref="ConfigEntry"/>'s own value
+    /// the entry with <c>Objects.equals</c> and so relies on <see cref="ConfigEntry()"/>'s own value
     /// equality.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two operations are the same.</returns>
     public override bool Equals(object? obj) =>
-        obj is AlterConfigOp other && OpType == other.OpType && ConfigEntry.Equals(other.ConfigEntry);
+        obj is AlterConfigOp other && OpType() == other.OpType() && ConfigEntry().Equals(other.ConfigEntry());
 
     /// <summary>The hash of the two fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -85,7 +90,7 @@ public sealed class AlterConfigOp
     {
         unchecked
         {
-            return (OpType.GetHashCode() * 31) + ConfigEntry.GetHashCode();
+            return (OpType().GetHashCode() * 31) + ConfigEntry().GetHashCode();
         }
     }
 
@@ -97,9 +102,9 @@ public sealed class AlterConfigOp
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
-            CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", JavaName(OpType), ConfigEntry);
+            CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", ConstantName(OpType()), ConfigEntry());
 
-    private static string JavaName(AlterConfigOpType opType) => opType switch
+    private static string ConstantName(AlterConfigOpType opType) => opType switch
     {
         AlterConfigOpType.SET => "SET",
         AlterConfigOpType.DELETE => "DELETE",

@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
@@ -40,7 +41,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: behaviour.FailEach is null);
+        _inner = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: behaviour.FailEach is null);
     }
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<byte[], byte[]> record, CancellationToken cancellationToken = default)
@@ -51,11 +52,11 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<byte[], byte[]> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Send), cancellationToken);
-        ulong index = ProducerProbe.IndexOf(record.Key);
+        ulong index = ProducerProbe.IndexOf(record.Key());
         _sends++;
 
         // Both scenario steps wait for the mock with a bounded spin: the disposal for the earlier
@@ -76,7 +77,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
             ValueTask<AsyncKafkaFuture<RecordMetadata>> admission =
                 _inner.Send(record, new CountingCallback(callback, index, _probe), cancellationToken);
             if (_behaviour.FailEach is (int code, string message)
-                && !SpinWait.SpinUntil(() => _inner.ErrorNext(new KafkaException(code, message, isRetriable: false)), s_mockTimeout))
+                && !SpinWait.SpinUntil(() => _inner.ErrorNext(TestValues.OfClass(code, message)), s_mockTimeout))
             {
                 throw new InvalidOperationException($"record {index} never reached the mock to be failed");
             }
@@ -94,7 +95,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<byte[], byte[]> record,
-        IAsyncDeliveryCallback callback,
+        IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Send), cancellationToken);
@@ -114,6 +115,39 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     }
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
+
+    public Task InitTransactions(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(InitTransactions), cancellationToken);
+        return _inner.InitTransactions(cancellationToken);
+    }
+
+    public Task BeginTransaction(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(BeginTransaction), cancellationToken);
+        return _inner.BeginTransaction(cancellationToken);
+    }
+
+    public Task SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(SendOffsetsToTransaction), cancellationToken);
+        return _inner.SendOffsetsToTransaction(offsets, groupMetadata, cancellationToken);
+    }
+
+    public Task CommitTransaction(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(CommitTransaction), cancellationToken);
+        return _inner.CommitTransaction(cancellationToken);
+    }
+
+    public Task AbortTransaction(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(AbortTransaction), cancellationToken);
+        return _inner.AbortTransaction(cancellationToken);
+    }
 
     public async Task Close(CancellationToken cancellationToken = default)
     {
@@ -164,13 +198,13 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     }
 
     /// <summary>Counts each delivery-callback invocation, then forwards it unchanged.</summary>
-    private sealed class CountingCallback : IDeliveryCallback
+    private sealed class CountingCallback : ICallback
     {
-        private readonly IDeliveryCallback _target;
+        private readonly ICallback _target;
         private readonly ulong _index;
         private readonly ProducerProbe _probe;
 
-        internal CountingCallback(IDeliveryCallback target, ulong index, ProducerProbe probe)
+        internal CountingCallback(ICallback target, ulong index, ProducerProbe probe)
         {
             _target = target;
             _index = index;

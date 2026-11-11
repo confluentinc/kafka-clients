@@ -21,6 +21,7 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -45,21 +46,19 @@ public sealed class PublicAdminConfigsTests
             () => admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
-                {
-                    Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-                },
+                    .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" }),
             }).All().Get(),
             s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { resource });
 
-        Config config = await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
+        Config config = await TestTimeout.Run(() => result.Values()[resource].Get(), s_deadline);
         ConfigEntry entry = Assert.IsType<ConfigEntry>(config.Get("cleanup.policy"));
-        Assert.Equal("compact", entry.Value);
+        Assert.Equal("compact", entry.Value());
 
         IReadOnlyDictionary<ConfigResource, Config> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
-        Assert.Equal("compact", all[resource].Get("cleanup.policy")!.Value);
+        Assert.Equal("compact", all[resource].Get("cleanup.policy")!.Value());
     }
 
     [Fact]
@@ -84,8 +83,8 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
-        Assert.Equal("1000", config.Get("retention.ms")!.Value);
+        Config config = await TestTimeout.Run(() => described.Values()[resource].Get(), s_deadline);
+        Assert.Equal("1000", config.Get("retention.ms")!.Value());
     }
 
     [Fact]
@@ -98,9 +97,7 @@ public sealed class PublicAdminConfigsTests
             () => admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
-                {
-                    Configs = new Dictionary<string, string> { ["retention.ms"] = "1000" },
-                },
+                    .Configs(new Dictionary<string, string> { ["retention.ms"] = "1000" }),
             }).All().Get(),
             s_deadline);
 
@@ -118,7 +115,7 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
+        Config config = await TestTimeout.Run(() => described.Values()[resource].Get(), s_deadline);
         Assert.Null(config.Get("retention.ms"));
     }
 
@@ -140,10 +137,10 @@ public sealed class PublicAdminConfigsTests
                 [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.SET) },
             });
 
-        await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[present].Get(), s_deadline);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
+        UnknownTopicOrPartitionException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values()[missing].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-absent", failure.Message);
     }
 
@@ -175,8 +172,8 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal(subscription, Assert.Single(filtered));
 
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { subscription }).Values[subscription].Get(), s_deadline);
-        Assert.Equal("60000", config.Get("interval.ms")!.Value);
+            () => admin.DescribeConfigs(new[] { subscription }).Values()[subscription].Get(), s_deadline);
+        Assert.Equal("60000", config.Get("interval.ms")!.Value());
     }
 
     [Fact]
@@ -200,17 +197,17 @@ public sealed class PublicAdminConfigsTests
                 [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
 
-        await TestTimeout.Run(() => result.Values[noOps].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[noOps].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         // The sibling's operation was applied, so the success above is not a blanket one.
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { sibling }).Values[sibling].Get(), s_deadline);
-        Assert.Equal("v", config.Get("k")!.Value);
+            () => admin.DescribeConfigs(new[] { sibling }).Values()[sibling].Get(), s_deadline);
+        Assert.Equal("v", config.Get("k")!.Value());
 
         Config untouched = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { noOps }).Values[noOps].Get(), s_deadline);
-        Assert.Empty(untouched.Entries);
+            () => admin.DescribeConfigs(new[] { noOps }).Values()[noOps].Get(), s_deadline);
+        Assert.Empty(untouched.Entries());
     }
 
     [Fact]
@@ -229,7 +226,7 @@ public sealed class PublicAdminConfigsTests
                 [resource] = Array.Empty<AlterConfigOp>(),
             });
 
-        await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[resource].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -247,8 +244,8 @@ public sealed class PublicAdminConfigsTests
             {
                 [absent] = Array.Empty<AlterConfigOp>(),
             });
-        KafkaException zeroOpsFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => zeroOps.Values[absent].Get()), s_deadline);
+        UnknownTopicOrPartitionException zeroOpsFailure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => zeroOps.Values()[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
         // The same absent resource with one operation is sent, so the core rejects it.
@@ -257,8 +254,8 @@ public sealed class PublicAdminConfigsTests
             {
                 [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => withOps.Values[absent].Get()), s_deadline);
+        UnknownTopicOrPartitionException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values()[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
     }
 
@@ -271,12 +268,12 @@ public sealed class PublicAdminConfigsTests
         ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
 
-        ConfigResource key = Assert.Single(result.Values.Keys);
-        Assert.Equal(ConfigResourceType.UNKNOWN, key.Type);
-        Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
+        ConfigResource key = Assert.Single(result.Values().Keys);
+        Assert.Equal(ConfigResourceType.UNKNOWN, key.Type());
+        Assert.True(result.Values().ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.Values[undefined].Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Values()[undefined].Get()), s_deadline);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
@@ -288,11 +285,11 @@ public sealed class PublicAdminConfigsTests
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         Assert.Null(Record.Exception(
-            () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions { TimeoutMs = -1 })));
+            () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(),
-                new AlterConfigsOptions { TimeoutMs = -2 })));
+                new AlterConfigsOptions().TimeoutMs(-2))));
     }
 
     [Fact]
@@ -327,14 +324,14 @@ public sealed class PublicAdminConfigsTests
     }
 
     [Fact]
-    public void AfterDispose_BothRpcsThrowObjectDisposed()
+    public void AfterDispose_BothRpcsThrowIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeConfigs(new[] { resource }));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.DescribeConfigs(new[] { resource }));
+        Assert.Throws<IllegalStateException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>()));
     }
@@ -359,8 +356,8 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { resource }).Values[resource].Get(), s_deadline);
-        Assert.Equal("v", config.Get("k")!.Value);
+            () => admin.DescribeConfigs(new[] { resource }).Values()[resource].Get(), s_deadline);
+        Assert.Equal("v", config.Get("k")!.Value());
     }
 
     [Fact]
@@ -383,6 +380,6 @@ public sealed class PublicAdminConfigsTests
 
         IReadOnlyDictionary<ConfigResource, Config> all =
             await TestTimeout.Run(() => admin.DescribeConfigs(new[] { resource }).All().Get(), s_deadline);
-        Assert.Equal("y", all[resource].Get("x")!.Value);
+        Assert.Equal("y", all[resource].Get("x")!.Value());
     }
 }

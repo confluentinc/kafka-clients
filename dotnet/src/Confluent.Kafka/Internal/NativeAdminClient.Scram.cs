@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Internal;
@@ -121,8 +122,14 @@ internal sealed partial class NativeAdminClient
         StartResultFuture(result, s_describeUserScramCredentialsUsers, s_copyOutScramUsers);
 
     internal static KafkaFutureImpl<UserScramCredentialsDescription> DescribeUserScramCredentialsDescription(
-        SafeAdminResultHandle result, string userName)
+        SafeAdminResultHandle result, string? userName)
     {
+        if (userName is null)
+        {
+            // The users future fails only when the call does, as Java's dataFuture.
+            return NoSuchNullUser(DescribeUserScramCredentialsUsers(result));
+        }
+
         using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(userName);
         IntPtr pointer = user.Pointer;
         return StartResultFuture(
@@ -130,6 +137,18 @@ internal sealed partial class NativeAdminClient
             (IntPtr native, ref IntPtr outErr) =>
                 s_describeUserScramCredentialsDescription(native, pointer, ref outErr),
             s_copyOutScramDescription);
+    }
+
+    /// <summary>
+    /// Java's <c>description(null)</c>: it waits for the response, as for any user, and fails with the call's error or,
+    /// as no user in the response is null, with <c>"No such user: null"</c>.
+    /// </summary>
+    internal static KafkaFutureImpl<UserScramCredentialsDescription> NoSuchNullUser(KafkaFutureImpl response)
+    {
+        KafkaFutureImpl<UserScramCredentialsDescription> missing = new KafkaFutureImpl<UserScramCredentialsDescription>();
+        response.AddListener(done =>
+            missing.CompleteWithError(done.Failure ?? new ResourceNotFoundException("No such user: null")));
+        return missing;
     }
 
     internal static IntPtr NewDescribeUserScramCredentialsOptions(DescribeUserScramCredentialsOptions? options) =>
@@ -150,7 +169,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeUserScramCredentialsOptions.TimeoutMs):
                 NativeMethods.DescribeUserScramCredentialsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException(
@@ -231,7 +250,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(AlterUserScramCredentialsOptions.TimeoutMs):
                 NativeMethods.AlterUserScramCredentialsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException(
@@ -275,7 +294,7 @@ internal sealed partial class NativeAdminClient
                     "The SCRAM credential alterations must not contain a null element.", nameof(alterations));
             }
 
-            AdminStrings.Validate(alteration.User, nameof(alterations));
+            AdminStrings.Validate(alteration.User(), nameof(alterations));
             requested.Add(alteration);
         }
 

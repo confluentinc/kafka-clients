@@ -23,6 +23,8 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -53,9 +55,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             result.PartitionsToOffsetAndMetadata().Get(),
             result.PartitionsToOffsetAndMetadata("p5-lcgo-one").Get());
 
-        ArgumentException unknown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException unknown = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.PartitionsToOffsetAndMetadata("p5-lcgo-absent"); });
-        Assert.Equal("groupId", unknown.ParamName);
+        Assert.Equal("Offsets for consumer group 'p5-lcgo-absent' were not requested.", unknown.Message);
     }
 
     [Fact]
@@ -81,14 +83,14 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 
         foreach (Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future in futures)
         {
-            NotSupportedException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => future), s_deadline);
+            UnsupportedOperationException failure = await TestTimeout.Run(
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => future), s_deadline);
 
             Assert.Equal(NotImplemented, failure.Message);
         }
 
         // The no-argument accessor needs exactly one group, as Java's guard does.
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = result.PartitionsToOffsetAndMetadata(); });
     }
 
@@ -105,8 +107,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                 ["p5-lcgo-all-b"] = new ListConsumerGroupOffsetsSpec(),
             });
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -125,7 +127,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 
         Assert.Empty(all);
 
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = result.PartitionsToOffsetAndMetadata(); });
     }
 
@@ -135,7 +137,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
-        Assert.Null(new ListConsumerGroupOffsetsSpec().TopicPartitions);
+        Assert.Null(new ListConsumerGroupOffsetsSpec().TopicPartitions());
 
         foreach (IReadOnlyCollection<TopicPartition>? selection in
             new IReadOnlyCollection<TopicPartition>?[] { null, Array.Empty<TopicPartition>() })
@@ -143,10 +145,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
-                    ["p5-lcgo-sel"] = new ListConsumerGroupOffsetsSpec
-                    {
-                        TopicPartitions = selection,
-                    },
+                    ["p5-lcgo-sel"] = new ListConsumerGroupOffsetsSpec()
+                        .TopicPartitions(selection),
                 });
 
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
@@ -158,14 +158,12 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncListConsumerGroupOffsetsResult selected = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
-                ["p5-lcgo-sel-2"] = new ListConsumerGroupOffsetsSpec
-                {
-                    TopicPartitions = new[]
+                ["p5-lcgo-sel-2"] = new ListConsumerGroupOffsetsSpec()
+                    .TopicPartitions(new[]
                     {
                         new TopicPartition("p5-lcgo-topic", 0),
                         new TopicPartition("p5-lcgo-topic", 1),
-                    },
-                },
+                    }),
             });
 
         Assert.Empty(
@@ -232,10 +230,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                 admin.ListConsumerGroupOffsets(
                     new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                     {
-                        ["p5-lcgo-bad-tp"] = new ListConsumerGroupOffsetsSpec
-                        {
-                            TopicPartitions = new[] { default(TopicPartition) },
-                        },
+                        ["p5-lcgo-bad-tp"] = new ListConsumerGroupOffsetsSpec()
+                            .TopicPartitions(new[] { default(TopicPartition) }),
                     });
             });
         Assert.Equal("groupSpecs", nullTopic.ParamName);
@@ -256,7 +252,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             {
                 admin.ListConsumerGroupOffsets(
                     "p5-lcgo-timeout",
-                    new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 });
+                    new ListConsumerGroupOffsetsOptions().TimeoutMs(-1));
             }));
         Assert.Null(Record.Exception(
             () =>
@@ -266,7 +262,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     {
                         ["p5-lcgo-timeout-2"] = new ListConsumerGroupOffsetsSpec(),
                     },
-                    new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 });
+                    new ListConsumerGroupOffsetsOptions().TimeoutMs(-1));
             }));
     }
 
@@ -276,10 +272,10 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
-        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions().TimeoutMs(-1);
 
-        KafkaException batched = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException batched = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => real.ListConsumerGroupOffsets(
                     new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                     {
@@ -287,8 +283,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     },
                     options).All().Get()),
             s_deadline);
-        KafkaException single = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException single = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => real.ListConsumerGroupOffsets("p5-lcgo-forward", options).All().Get()),
             s_deadline);
 
@@ -303,10 +299,10 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { admin.ListConsumerGroupOffsets("p5-lcgo-disposed"); });
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () =>
             {
                 admin.ListConsumerGroupOffsets(

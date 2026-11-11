@@ -24,7 +24,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Teardown of the sync consumers: Close and Dispose return, are idempotent under double and mixed calls, and every
-/// operation throws <see cref="ObjectDisposedException"/> after them.
+/// operation throws <see cref="IllegalStateException"/> after them.
 /// </summary>
 public sealed class PublicSyncConsumerTeardownTests
 {
@@ -37,21 +37,21 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Dispose_ReturnsWithoutHang()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
 
     [Fact]
     public void Close_ReturnsWithoutHang()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
     public void DoubleDispose_IsSafe()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
         TestTimeout.Dispose(consumer);
     }
@@ -59,7 +59,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Close_ThenDispose_IsIdempotent()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Teardown(consumer, () => consumer.Close());
         TestTimeout.Dispose(consumer);
     }
@@ -67,7 +67,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Dispose_ThenClose_IsIdempotent()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
         TestTimeout.Teardown(consumer, () => consumer.Close());
     }
@@ -75,42 +75,42 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Close_OnMock_DoesNotHang_AfterSubscribe()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Subscribe(ProofTopic());
 
         TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
-    public void UseAfterDispose_ThrowsObjectDisposed()
+    public void UseAfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Unsubscribe());
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assign(new[] { new TopicPartition("t", 0) }));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Pause(new[] { new TopicPartition("t", 0) }));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Resume(new[] { new TopicPartition("t", 0) }));
-        Assert.Throws<ObjectDisposedException>(() => consumer.SeekToBeginning(new[] { new TopicPartition("t", 0) }));
-        Assert.Throws<ObjectDisposedException>(() => consumer.SeekToEnd(new[] { new TopicPartition("t", 0) }));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Position(new TopicPartition("t", 0)));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Commit());
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => consumer.Poll(s_pollTimeout));
+        Assert.Throws<IllegalStateException>(() => consumer.Subscribe(ProofTopic()));
+        Assert.Throws<IllegalStateException>(() => consumer.Unsubscribe());
+        Assert.Throws<IllegalStateException>(() => consumer.Assign(new[] { new TopicPartition("t", 0) }));
+        Assert.Throws<IllegalStateException>(() => consumer.Pause(new[] { new TopicPartition("t", 0) }));
+        Assert.Throws<IllegalStateException>(() => consumer.Resume(new[] { new TopicPartition("t", 0) }));
+        Assert.Throws<IllegalStateException>(() => consumer.SeekToBeginning(new[] { new TopicPartition("t", 0) }));
+        Assert.Throws<IllegalStateException>(() => consumer.SeekToEnd(new[] { new TopicPartition("t", 0) }));
+        Assert.Throws<IllegalStateException>(() => consumer.Position(new TopicPartition("t", 0)));
+        Assert.Throws<IllegalStateException>(() => consumer.Commit());
+        Assert.Throws<IllegalStateException>(
             () => consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>()));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        Assert.Throws<IllegalStateException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
     }
 
     [Fact]
-    public void UseAfterClose_ThrowsObjectDisposed()
+    public void UseAfterClose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Teardown(consumer, () => consumer.Close());
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
-        Assert.Throws<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
+        Assert.Throws<IllegalStateException>(() => consumer.Subscribe(ProofTopic()));
+        Assert.Throws<IllegalStateException>(() => consumer.Poll(s_pollTimeout));
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public sealed class PublicSyncConsumerTeardownTests
             {
                 for (int i = 0; i < 100; i++)
                 {
-                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
                     consumer.Subscribe(ProofTopic());
                     consumer.Dispose();
                 }
@@ -137,7 +137,7 @@ public sealed class PublicSyncConsumerTeardownTests
             {
                 for (int i = 0; i < 100; i++)
                 {
-                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
                     consumer.Subscribe(ProofTopic());
                     consumer.Close();
                 }

@@ -88,7 +88,7 @@ internal sealed class ConsumerScript
                     case StepKind.Rebalance:
                         foreach (TopicPartition partition in step.Partitions!)
                         {
-                            mock.UpdateBeginningOffset(partition.Topic, partition.Partition, 0);
+                            mock.UpdateBeginningOffset(partition.Topic(), partition.Partition(), 0);
                         }
 
                         await mock.Rebalance(step.Partitions!).ConfigureAwait(false);

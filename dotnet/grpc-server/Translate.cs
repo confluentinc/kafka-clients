@@ -59,8 +59,8 @@ internal static class Translate
     internal static Proto.CallbackLogPartition CallbackLogPartitionToProto(TopicPartition partition) =>
         new Proto.CallbackLogPartition
         {
-            Topic = partition.Topic,
-            Partition = partition.Partition,
+            Topic = partition.Topic(),
+            Partition = partition.Partition(),
         };
 
     internal static Dictionary<TopicPartition, OffsetAndMetadata> ProtoOffsetsToDictionary(
@@ -76,7 +76,23 @@ internal static class Translate
         return result;
     }
 
-    internal const string PatternSubscribeUnsupported = "pattern subscribe is not supported by the .NET binding yet";
+    /// <summary>
+    /// A transaction's offsets: an absent metadata is the empty string and an absent leader epoch none,
+    /// as Python's <c>_proto_offset_entries_to_dict</c> reads them.
+    /// </summary>
+    internal static Dictionary<TopicPartition, OffsetAndMetadata> OffsetEntriesToDictionary(
+        IEnumerable<Proto.OffsetEntry> offsets)
+    {
+        Dictionary<TopicPartition, OffsetAndMetadata> result = new Dictionary<TopicPartition, OffsetAndMetadata>();
+        foreach (Proto.OffsetEntry entry in offsets)
+        {
+            int? leaderEpoch = entry.HasLeaderEpoch ? entry.LeaderEpoch : (int?)null;
+            string metadata = entry.HasMetadata ? entry.Metadata : string.Empty;
+            result[new TopicPartition(entry.Topic, entry.Partition)] = new OffsetAndMetadata(entry.Offset, metadata, leaderEpoch);
+        }
+
+        return result;
+    }
 
     internal static TimeSpan? ConsumerTimeout(bool hasTimeoutMs, long timeoutMs) =>
         hasTimeoutMs ? TimeSpan.FromMilliseconds(timeoutMs) : null;
@@ -85,14 +101,14 @@ internal static class Translate
     {
         Proto.ConsumerGroupMetadata proto = new Proto.ConsumerGroupMetadata
         {
-            GroupId = groupMetadata.GroupId,
-            GenerationId = groupMetadata.GenerationId,
-            MemberId = groupMetadata.MemberId,
+            GroupId = groupMetadata.GroupId(),
+            GenerationId = groupMetadata.GenerationId(),
+            MemberId = groupMetadata.MemberId(),
         };
 
-        if (groupMetadata.GroupInstanceId is not null)
+        if (groupMetadata.GroupInstanceId() is not null)
         {
-            proto.GroupInstanceId = groupMetadata.GroupInstanceId;
+            proto.GroupInstanceId = groupMetadata.GroupInstanceId();
         }
 
         return proto;
@@ -112,28 +128,38 @@ internal static class Translate
     internal static Proto.CurrentLagResponse CurrentLagResponse(long? lag) =>
         lag.HasValue ? new Proto.CurrentLagResponse { Lag = lag.Value } : new Proto.CurrentLagResponse();
 
-    private const int LocalIllegalStateCode = -4;
-
     private const int LocalIllegalArgumentCode = -3;
 
-    private const int LocalTimeoutCode = -5;
-
-    private const int LocalUnsupportedOperationCode = -31;
+    private const int LocalIllegalStateCode = -4;
 
     private const int RequestTimedOutCode = 7;
 
-    // By type, as Python's _kafka_error_to_proto: ArgumentNullException is Python's TypeError,
-    // which has no FFI id, so it takes the server-made -4 fallback rather than -3.
-    internal static Proto.KafkaError ToProto(Exception error) => error switch
+    // As Python's _kafka_error_to_proto sends each class's _ffi_id: a class with an id (a KafkaException,
+    // a Java-named class, CorrelationIdMismatchException) sends it; a .NET-only ArgumentException
+    // precondition -3. Any other exception has no id, Python's TypeError (ArgumentNullException) and the
+    // Java-named classes without one included, and takes the server-made -4 fallback. A future's Get
+    // throws Java's ExecutionException around the failure; the failure is what is sent, as Python's
+    // _unwrapped sends an ExecutionError's cause.
+    internal static Proto.KafkaError ToProto(Exception error)
     {
-        KafkaException ke => Coded(ke.Code, ke),
-        ArgumentNullException => ServerMade(error),
-        ArgumentException => Coded(LocalIllegalArgumentCode, error),
-        InvalidOperationException => Coded(LocalIllegalStateCode, error),
-        System.TimeoutException => Coded(LocalTimeoutCode, error),
-        NotSupportedException => Coded(LocalUnsupportedOperationCode, error),
-        _ => ServerMade(error),
-    };
+        Exception sent = Unwrapped(error);
+        return KafkaException.FfiIdOf(sent) switch
+        {
+            int code => Coded(code, sent),
+            null => sent switch
+            {
+                ArgumentNullException => ServerMade(sent),
+                IndexOutOfBoundsException => ServerMade(sent),
+                ArgumentException => Coded(LocalIllegalArgumentCode, sent),
+                _ => ServerMade(sent),
+            },
+        };
+    }
+
+    // The error behind a future's Get failure: Java's ExecutionException wraps the cause the future
+    // failed with. Any other error is itself.
+    internal static Exception Unwrapped(Exception error) =>
+        error is ExecutionException { InnerException: { } cause } ? cause : error;
 
     private static GroupMembershipOperation GroupMembershipOperationFromName(string name) => name switch
     {
@@ -158,7 +184,6 @@ internal static class Translate
         {
             ArgumentOutOfRangeException e => new ArgumentOutOfRangeException(e.ParamName, e.ActualValue, string.Empty).Message,
             ArgumentException e => new ArgumentException(string.Empty, e.ParamName).Message,
-            ObjectDisposedException e => new ObjectDisposedException(e.ObjectName, string.Empty).Message,
             _ => string.Empty,
         };
 
@@ -185,6 +210,12 @@ internal static class Translate
         Message = $"unknown producer_id {producerId}",
     };
 
+    internal static Proto.KafkaError UnknownGroupMetadata(ulong groupMetadataId) => new Proto.KafkaError
+    {
+        Code = LocalIllegalStateCode,
+        Message = $"unknown group_metadata_id {groupMetadataId}",
+    };
+
     internal static Proto.KafkaError SendTimedOut() => new Proto.KafkaError
     {
         Code = RequestTimedOutCode,
@@ -202,18 +233,18 @@ internal static class Translate
 
     internal static Proto.TopicPartition TpToProto(TopicPartition partition) => new Proto.TopicPartition
     {
-        Topic = partition.Topic,
-        Partition = partition.Partition,
+        Topic = partition.Topic(),
+        Partition = partition.Partition(),
     };
 
     internal static Proto.OffsetAndMetadata OamToProto(OffsetAndMetadata oam)
     {
         Proto.OffsetAndMetadata proto = new Proto.OffsetAndMetadata
         {
-            Offset = oam.Offset,
-            Metadata = oam.Metadata ?? string.Empty,
+            Offset = oam.Offset(),
+            Metadata = oam.Metadata() ?? string.Empty,
         };
-        if (oam.LeaderEpoch is int leaderEpoch)
+        if (oam.LeaderEpoch() is int leaderEpoch)
         {
             proto.LeaderEpoch = leaderEpoch;
         }
@@ -225,10 +256,10 @@ internal static class Translate
     {
         Proto.OffsetAndTimestamp proto = new Proto.OffsetAndTimestamp
         {
-            Offset = oat.Offset,
-            Timestamp = oat.Timestamp,
+            Offset = oat.Offset(),
+            Timestamp = oat.Timestamp(),
         };
-        if (oat.LeaderEpoch is int leaderEpoch)
+        if (oat.LeaderEpoch() is int leaderEpoch)
         {
             proto.LeaderEpoch = leaderEpoch;
         }
@@ -240,14 +271,14 @@ internal static class Translate
     {
         Proto.Node proto = new Proto.Node
         {
-            Id = node.Id,
-            Host = node.Host,
-            Port = node.Port,
-            IsFenced = node.IsFenced,
+            Id = node.Id(),
+            Host = node.Host(),
+            Port = node.Port(),
+            IsFenced = node.IsFenced(),
         };
-        if (node.Rack is not null)
+        if (node.Rack() is not null)
         {
-            proto.Rack = node.Rack;
+            proto.Rack = node.Rack();
         }
 
         return proto;
@@ -257,25 +288,25 @@ internal static class Translate
     {
         Proto.PartitionInfo proto = new Proto.PartitionInfo
         {
-            Topic = info.Topic,
-            Partition = info.Partition,
+            Topic = info.Topic(),
+            Partition = info.Partition(),
         };
-        if (info.Leader is not null)
+        if (info.Leader() is { } leader)
         {
-            proto.Leader = NodeToProto(info.Leader);
+            proto.Leader = NodeToProto(leader);
         }
 
-        foreach (Node node in info.Replicas)
+        foreach (Node node in info.Replicas())
         {
             proto.Replicas.Add(NodeToProto(node));
         }
 
-        foreach (Node node in info.InSyncReplicas)
+        foreach (Node node in info.InSyncReplicas())
         {
             proto.InSyncReplicas.Add(NodeToProto(node));
         }
 
-        foreach (Node node in info.OfflineReplicas)
+        foreach (Node node in info.OfflineReplicas())
         {
             proto.OfflineReplicas.Add(NodeToProto(node));
         }
@@ -287,34 +318,34 @@ internal static class Translate
     {
         Proto.ConsumerRecord proto = new Proto.ConsumerRecord
         {
-            Topic = record.Topic,
-            Partition = record.Partition,
-            Offset = record.Offset,
-            Timestamp = record.Timestamp,
-            TimestampType = (int)record.TimestampType,
+            Topic = record.Topic(),
+            Partition = record.Partition(),
+            Offset = record.Offset(),
+            Timestamp = record.Timestamp(),
+            TimestampType = (int)record.TimestampType(),
         };
 
-        if (record.Key is not null)
+        if (record.Key() is not null)
         {
-            proto.Key = ByteString.CopyFrom(record.Key);
+            proto.Key = ByteString.CopyFrom(record.Key());
         }
 
-        if (record.Value is not null)
+        if (record.Value() is not null)
         {
-            proto.Value = ByteString.CopyFrom(record.Value);
+            proto.Value = ByteString.CopyFrom(record.Value());
         }
 
-        if (record.LeaderEpoch is int le)
+        if (record.LeaderEpoch() is int le)
         {
             proto.LeaderEpoch = le;
         }
 
-        foreach (Header header in record.Headers)
+        foreach (Header header in record.Headers())
         {
             proto.Headers.Add(new Proto.Header
             {
-                Key = header.Key,
-                Value = ByteString.CopyFrom(header.Value ?? Array.Empty<byte>()),
+                Key = header.Key(),
+                Value = ByteString.CopyFrom(header.Value() ?? Array.Empty<byte>()),
             });
         }
 
@@ -346,29 +377,29 @@ internal static class Translate
 
     internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata
     {
-        Offset = metadata.Offset,
-        Timestamp = metadata.Timestamp,
-        SerializedKeySize = metadata.SerializedKeySize,
-        SerializedValueSize = metadata.SerializedValueSize,
-        Topic = metadata.Topic,
-        Partition = metadata.Partition,
+        Offset = metadata.Offset(),
+        Timestamp = metadata.Timestamp(),
+        SerializedKeySize = metadata.SerializedKeySize(),
+        SerializedValueSize = metadata.SerializedValueSize(),
+        Topic = metadata.Topic(),
+        Partition = metadata.Partition(),
     };
 
     internal static Proto.Metric MetricToProto(MetricName name, IMetric metric)
     {
         Proto.Metric proto = new Proto.Metric
         {
-            Name = name.Name,
-            Group = name.Group,
-            Description = name.Description,
+            Name = name.Name(),
+            Group = name.Group(),
+            Description = name.Description(),
         };
 
-        foreach (KeyValuePair<string, string> tag in name.Tags)
+        foreach (KeyValuePair<string, string> tag in name.Tags())
         {
             proto.Tags.Add(tag.Key, tag.Value);
         }
 
-        switch (metric.Value)
+        switch (metric.MetricValue())
         {
             case double doubleValue:
                 proto.DoubleValue = doubleValue;
@@ -384,7 +415,7 @@ internal static class Translate
                 break;
             default:
                 throw new InvalidOperationException(
-                    $"unexpected metric value type '{metric.Value?.GetType().FullName ?? "null"}' for metric '{name.Name}'");
+                    $"unexpected metric value type '{metric.MetricValue()?.GetType().FullName ?? "null"}' for metric '{name.Name()}'");
         }
 
         return proto;

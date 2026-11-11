@@ -116,7 +116,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
                 case "Close":
                     KafkaException wrapped = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => call, s_deadline));
                     AssertCloseWrapped(raised, wrapped);
-                    Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+                    Assert.Throws<IllegalStateException>(() => consumer.Assignment());
                     break;
                 default:
                     Assert.Same(raised, await Assert.ThrowsAsync<CallbackException>(() => TestTimeout.Run(() => call, s_deadline)));
@@ -316,7 +316,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
                     KafkaException closed = await Assert.ThrowsAsync<KafkaException>(
                         () => TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(5))), s_deadline));
                     AssertCloseWrapped(nesting.Raised, closed);
-                    Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+                    Assert.Throws<IllegalStateException>(() => consumer.Assignment());
                     return;
             }
 
@@ -442,7 +442,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
         Assert.Equal(typeof(CallbackException).FullName + ": bad", wrapped.Message);
         Assert.Same(raised, wrapped.InnerException);
         Assert.Equal(UnknownServerErrorCode, wrapped.Code);
-        Assert.False(wrapped.IsRetriable);
+        Assert.False(wrapped is Common.Errors.RetriableException);
     }
 
     private static void AssertCloseWrapped(CallbackException raised, KafkaException wrapped)
@@ -451,7 +451,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
         Assert.Equal("Failed to close kafka consumer", wrapped.Message);
         Assert.Same(raised, wrapped.InnerException);
         Assert.Equal(UnknownServerErrorCode, wrapped.Code);
-        Assert.False(wrapped.IsRetriable);
+        Assert.False(wrapped is Common.Errors.RetriableException);
     }
 
     private static Task Deliver(IAsyncConsumer<byte[], byte[]> consumer, string call) =>
@@ -517,7 +517,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }
@@ -525,7 +525,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> NewAsyncMockConsumer()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         consumer.UpdateBeginningOffset(Topic, 0, 0);
         return consumer;

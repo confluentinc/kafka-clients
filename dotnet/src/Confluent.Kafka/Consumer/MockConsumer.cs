@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
@@ -56,16 +57,17 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
     /// (<c>"latest"</c>).
     /// </param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
         _native = NativeConsumer.CreateMock(autoOffsetReset, withPump: false);
     }
 
@@ -77,8 +79,15 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
 
     /// <inheritdoc/>
-    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
-        _native.Subscribe(topics, listener);
+    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback) =>
+        _native.Subscribe(topics, callback);
+
+    /// <inheritdoc/>
+    public void Subscribe(SubscriptionPattern pattern) => _native.Subscribe(pattern);
+
+    /// <inheritdoc/>
+    public void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener callback) =>
+        _native.Subscribe(pattern, callback);
 
     /// <inheritdoc/>
     public void Unsubscribe() => _native.Unsubscribe();
@@ -174,15 +183,15 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) =>
-        _native.Seek(partition.Topic, partition.Partition, offset);
+        _native.Seek(partition.Topic(), partition.Partition(), offset);
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
-        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+        _native.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata);
 
     /// <inheritdoc/>
-    public long? CurrentLag(TopicPartition partition) =>
-        _native.CurrentLag(partition.Topic, partition.Partition);
+    public long? CurrentLag(TopicPartition topicPartition) =>
+        _native.CurrentLag(topicPartition.Topic(), topicPartition.Partition());
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();
@@ -229,7 +238,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="offset">The beginning offset to reset to.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateBeginningOffset(string topic, int partition, long offset) =>
         _native.UpdateBeginningOffset(topic, partition, offset);
 
@@ -242,7 +251,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="offset">The end offset to reset to.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateEndOffset(string topic, int partition, long offset) =>
         _native.UpdateEndOffset(topic, partition, offset);
 
@@ -259,7 +268,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="leaderPort">The leader port for every partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
         _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
@@ -273,8 +282,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="value">The value bytes, or <see langword="null"/> for a tombstone.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">The partition is not assigned.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _native.AddRecord(topic, partition, offset, key, value);
 
@@ -283,11 +291,51 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>MockConsumer.setPollException</c>); <see langword="null"/> clears a pending one.
     /// </summary>
     /// <param name="exception">The exception for the next poll, or <see langword="null"/> to clear a pending one.</param>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void SetPollException(KafkaException? exception) => _native.SetPollException(exception);
 
     /// <summary>
-    /// Simulates a rebalance to the new full assignment <paramref name="partitions"/> (Java
+    /// Makes the offset queries throw <paramref name="exception"/>, the same instance (Java
+    /// <c>MockConsumer.setOffsetsException</c>); <see langword="null"/> clears a pending one.
+    /// </summary>
+    /// <param name="exception">The exception for the offset queries, or <see langword="null"/> to clear a pending one.</param>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void SetOffsetsException(KafkaException? exception) => _native.SetOffsetsException(exception);
+
+    /// <summary>
+    /// Sets the offsets the <c>by_duration</c> reset strategy resets to (Java
+    /// <c>MockConsumer.updateDurationOffsets(Map)</c>).
+    /// </summary>
+    /// <param name="newOffsets">The offset of each partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A partition in <paramref name="newOffsets"/> has a null topic.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateDurationOffsets(newOffsets);
+
+    /// <summary>Schedules a poll task that does nothing (Java <c>MockConsumer.scheduleNopPollTask()</c>).</summary>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void ScheduleNopPollTask() => _native.ScheduleNopPollTask();
+
+    /// <summary>
+    /// Sets the most records one poll returns (Java <c>MockConsumer.setMaxPollRecords(long)</c>).
+    /// </summary>
+    /// <param name="maxPollRecords">The most records one poll returns, at least <c>1</c>.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="maxPollRecords"/> is less than <c>1</c>.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void SetMaxPollRecords(long maxPollRecords) => _native.SetMaxPollRecords(maxPollRecords);
+
+    /// <summary>The timeout of the last poll (Java <c>MockConsumer.lastPollTimeout()</c>).</summary>
+    /// <returns>The last poll's timeout, or <see langword="null"/> before the first poll.</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public TimeSpan? LastPollTimeout() => _native.LastPollTimeout();
+
+    /// <summary>Whether the consumer has been closed (Java <c>MockConsumer.closed()</c>).</summary>
+    /// <returns><see langword="true"/> once the consumer is closed or disposed.</returns>
+    public bool Closed() => _native.MockClosed();
+
+    /// <summary>
+    /// Simulates a rebalance to the new full assignment <paramref name="newAssignment"/> (Java
     /// <c>MockConsumer.rebalance(Collection)</c>).
     /// </summary>
     /// <remarks>
@@ -296,17 +344,16 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// returns after they have returned; an exception from either is thrown here as the same instance. Buffered
     /// records are cleared, as in Java.
     /// </remarks>
-    /// <param name="partitions">The new full assignment.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <param name="newAssignment">The new full assignment.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or the consumer is manually assigned (Java's <c>IllegalArgumentException</c>).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment) => _native.Rebalance(newAssignment);
 
     /// <summary>
-    /// Simulates losing <paramref name="partitions"/> without a clean revocation (Java
+    /// Simulates losing <paramref name="partitionsLost"/> without a clean revocation (Java
     /// <c>MockConsumer.losePartitions(Collection)</c>).
     /// </summary>
     /// <remarks>
@@ -314,15 +361,13 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>OnPartitionsLost</c> fires with them on the calling thread; then they leave the <see cref="Assignment"/>.
     /// An exception from the listener is thrown here as the same instance, and the assignment is left unchanged.
     /// </remarks>
-    /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">
-    /// A partition is not currently assigned (Java's <c>IllegalStateException</c>).
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or a partition is not currently assigned.
     /// </exception>
-    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitions) => _native.LosePartitions(partitions);
+    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost) => _native.LosePartitions(partitionsLost);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

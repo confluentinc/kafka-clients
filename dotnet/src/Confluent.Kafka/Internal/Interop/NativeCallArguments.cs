@@ -35,6 +35,7 @@ internal sealed class NativeCallArguments : IDisposable
         Node,
         PartitionInfo,
         TopicPartitionInfo,
+        SubscriptionPattern,
     }
 
     internal IntPtr Utf8(string value)
@@ -51,6 +52,13 @@ internal sealed class NativeCallArguments : IDisposable
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.TopicPartitionNew(Utf8(topic), partition, ref outErr);
         return Track(handle, Kind.TopicPartition, ref outErr);
+    }
+
+    internal IntPtr SubscriptionPattern(string pattern)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr handle = NativeMethods.SubscriptionPatternNew(Utf8(pattern), ref outErr);
+        return Track(handle, Kind.SubscriptionPattern, ref outErr);
     }
 
     internal IntPtr TopicPartitionList(IReadOnlyList<(string Topic, int Partition)> partitions)
@@ -82,7 +90,7 @@ internal sealed class NativeCallArguments : IDisposable
         return Track(handle, Kind.OffsetAndMetadata, ref outErr);
     }
 
-    internal IntPtr OffsetMap(NativeConsumer.CommitOffsetsSnapshot snapshot)
+    internal IntPtr OffsetMap(OffsetsSnapshot snapshot)
     {
         IntPtr map = Map();
         for (int i = 0; i < snapshot.Count; i++)
@@ -121,7 +129,7 @@ internal sealed class NativeCallArguments : IDisposable
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.NodeWithRackIsFenced(
-            node.Id, Utf8(node.Host), node.Port, NullableUtf8(node.Rack), node.IsFenced ? (sbyte)1 : (sbyte)0, ref outErr);
+            node.Id(), Utf8(node.Host()), node.Port(), NullableUtf8(node.Rack()), node.IsFenced() ? (sbyte)1 : (sbyte)0, ref outErr);
         return Track(handle, Kind.Node, ref outErr);
     }
 
@@ -182,22 +190,22 @@ internal sealed class NativeCallArguments : IDisposable
 
     internal IntPtr TopicPartitionInfo(Confluent.Kafka.Common.TopicPartitionInfo info)
     {
-        IntPtr leader = info.Leader is null ? IntPtr.Zero : Node(info.Leader);
-        IntPtr replicas = NodeList(info.Replicas);
-        IntPtr isr = NodeList(info.InSyncReplicas);
+        IntPtr leader = info.Leader() is { } infoLeader ? Node(infoLeader) : IntPtr.Zero;
+        IntPtr replicas = NodeList(info.Replicas());
+        IntPtr isr = NodeList(info.Isr());
         IntPtr outErr = IntPtr.Zero;
         // Java's four-argument TopicPartitionInfo constructor leaves both lists null, and
         // the .NET class has both lists or neither; null lists are that constructor.
-        IntPtr handle = info.Elr is { } elr && info.LastKnownElr is { } lastKnownElr
+        IntPtr handle = info.Elr() is { } elr && info.LastKnownElr() is { } lastKnownElr
             ? NativeMethods.TopicPartitionInfoWithElrLastKnownElr(
-                info.Partition,
+                info.Partition(),
                 leader,
                 replicas,
                 isr,
                 NodeList(elr),
                 NodeList(lastKnownElr),
                 ref outErr)
-            : NativeMethods.TopicPartitionInfoNew(info.Partition, leader, replicas, isr, ref outErr);
+            : NativeMethods.TopicPartitionInfoNew(info.Partition(), leader, replicas, isr, ref outErr);
         return Track(handle, Kind.TopicPartitionInfo, ref outErr);
     }
 
@@ -280,6 +288,9 @@ internal sealed class NativeCallArguments : IDisposable
                 break;
             case Kind.TopicPartitionInfo:
                 NativeMethods.TopicPartitionInfoDestroy(entry.Handle, ref outErr);
+                break;
+            case Kind.SubscriptionPattern:
+                NativeMethods.SubscriptionPatternDestroy(entry.Handle, ref outErr);
                 break;
         }
 

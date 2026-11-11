@@ -20,10 +20,13 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -41,6 +44,8 @@ public sealed class AdminLogDirsMarshalTests
 
     private const int UnknownServerErrorCode = -1;
 
+    private const int KafkaTimeoutErrorCode = 7;
+
     [Fact]
     public void CopyOutDescription_ReadsEveryField_AndSurvivesTheDestroy()
     {
@@ -51,19 +56,19 @@ public sealed class AdminLogDirsMarshalTests
             usableBytes: 0L,
             isCordoned: true);
 
-        Assert.Null(copied.Error);
-        Assert.Equal(1_099_511_627_776L, copied.TotalBytes);
-        Assert.Equal(0L, copied.UsableBytes);
-        Assert.True(copied.IsCordoned);
-        Assert.Equal(2, copied.ReplicaInfos.Count);
-        ReplicaInfo first = Assert.Contains(new TopicPartition(Topic, 0), copied.ReplicaInfos);
-        Assert.Equal(100L, first.Size);
-        Assert.Equal(3L, first.OffsetLag);
-        Assert.False(first.IsFuture);
-        ReplicaInfo second = Assert.Contains(new TopicPartition(Topic, 1), copied.ReplicaInfos);
-        Assert.Equal(7L, second.Size);
-        Assert.Equal(0L, second.OffsetLag);
-        Assert.True(second.IsFuture);
+        Assert.Null(copied.Error());
+        Assert.Equal(1_099_511_627_776L, copied.TotalBytes());
+        Assert.Equal(0L, copied.UsableBytes());
+        Assert.True(copied.IsCordoned());
+        Assert.Equal(2, copied.ReplicaInfos().Count);
+        ReplicaInfo first = Assert.Contains(new TopicPartition(Topic, 0), copied.ReplicaInfos());
+        Assert.Equal(100L, first.Size());
+        Assert.Equal(3L, first.OffsetLag());
+        Assert.False(first.IsFuture());
+        ReplicaInfo second = Assert.Contains(new TopicPartition(Topic, 1), copied.ReplicaInfos());
+        Assert.Equal(7L, second.Size());
+        Assert.Equal(0L, second.OffsetLag());
+        Assert.True(second.IsFuture());
     }
 
     [Theory]
@@ -76,20 +81,20 @@ public sealed class AdminLogDirsMarshalTests
         LogDirDescription copied = CopyOutBuilt(
             IntPtr.Zero, Array.Empty<(TopicPartition, long, long, bool)>(), nativeBytes, nativeBytes, isCordoned: false);
 
-        Assert.Equal(expected, copied.TotalBytes);
-        Assert.Equal(expected, copied.UsableBytes);
-        Assert.False(copied.IsCordoned);
-        Assert.Empty(copied.ReplicaInfos);
+        Assert.Equal(expected, copied.TotalBytes());
+        Assert.Equal(expected, copied.UsableBytes());
+        Assert.False(copied.IsCordoned());
+        Assert.Empty(copied.ReplicaInfos());
     }
 
     [Fact]
-    public void CopyOutDescription_ADirectoryKafkaError_IsAFieldOfTheDescription()
+    public void CopyOutDescription_ADirectoryApiError_IsAFieldOfTheDescription()
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr error;
         using (Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("The log directory is offline."))
         {
-            error = Native.ErrorKafkaMessage(message.Pointer, ref outErr);
+            error = Native.ErrorTimeout(message.Pointer, ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -97,10 +102,28 @@ public sealed class AdminLogDirsMarshalTests
         LogDirDescription copied = CopyOutBuilt(
             error, Array.Empty<(TopicPartition, long, long, bool)>(), -1L, -1L, isCordoned: false);
 
-        KafkaException directoryError = Assert.IsType<KafkaException>(copied.Error);
-        Assert.Equal(UnknownServerErrorCode, directoryError.Code);
+        KafkaTimeoutException directoryError = Assert.IsType<KafkaTimeoutException>(copied.Error());
+        Assert.Equal(KafkaTimeoutErrorCode, directoryError.Code);
         Assert.Equal("The log directory is offline.", directoryError.Message);
         Assert.Contains("The log directory is offline.", copied.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CopyOutDescription_ADirectoryKafkaErrorThatIsNotAnApiError_IsThrown()
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr error;
+        using (Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("not an API error"))
+        {
+            error = Native.ErrorKafkaMessage(message.Pointer, ref outErr);
+        }
+
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+
+        KafkaException thrown = Assert.Throws<KafkaException>(
+            () => CopyOutBuilt(error, Array.Empty<(TopicPartition, long, long, bool)>(), -1L, -1L, isCordoned: false));
+        Assert.Equal(UnknownServerErrorCode, thrown.Code);
+        Assert.Equal("not an API error", thrown.Message);
     }
 
     [Fact]
@@ -115,7 +138,7 @@ public sealed class AdminLogDirsMarshalTests
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(
+        IllegalStateException thrown = Assert.Throws<IllegalStateException>(
             () => CopyOutBuilt(error, Array.Empty<(TopicPartition, long, long, bool)>(), -1L, -1L, isCordoned: false));
         Assert.Equal("not a Kafka error", thrown.Message);
     }
@@ -132,16 +155,16 @@ public sealed class AdminLogDirsMarshalTests
         described.Result.Dispose();
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
-        Assert.Null(description.Error);
-        Assert.Null(description.TotalBytes);
-        Assert.Null(description.UsableBytes);
-        Assert.Equal(2, description.ReplicaInfos.Count);
+        Assert.Null(description.Error());
+        Assert.Null(description.TotalBytes());
+        Assert.Null(description.UsableBytes());
+        Assert.Equal(2, description.ReplicaInfos().Count);
         foreach (int partition in new[] { 0, 1 })
         {
-            ReplicaInfo replica = Assert.Contains(new TopicPartition(Topic, partition), description.ReplicaInfos);
-            Assert.Equal(0, replica.Size);
-            Assert.Equal(0, replica.OffsetLag);
-            Assert.False(replica.IsFuture);
+            ReplicaInfo replica = Assert.Contains(new TopicPartition(Topic, partition), description.ReplicaInfos());
+            Assert.Equal(0, replica.Size());
+            Assert.Equal(0, replica.OffsetLag());
+            Assert.False(replica.IsFuture());
         }
     }
 
@@ -164,11 +187,7 @@ public sealed class AdminLogDirsMarshalTests
     }
 
     [Fact]
-    public void CopyOutReplicaLogDirInfo_ANullValue_Throws()
-    {
-        KafkaException thrown = Assert.Throws<KafkaException>(() => LogDirMarshal.CopyOutReplicaLogDirInfo(IntPtr.Zero));
-        Assert.Equal("The describeReplicaLogDirs future delivered no log-directory information.", thrown.Message);
-    }
+    public void CopyOutReplicaLogDirInfo_ANullValue_IsNull() => Assert.Null(LogDirMarshal.CopyOutReplicaLogDirInfo(IntPtr.Zero));
 
     [Fact]
     public async Task AlterReplicaLogDirs_OnTheMock_FailsTheReplicasFutureWithTheMocksMessage()
@@ -181,7 +200,7 @@ public sealed class AdminLogDirsMarshalTests
         var altered = admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string> { [replica] = "/not-a-configured-dir" }, null);
 
-        KafkaException failure = Assert.Throws<KafkaException>(() => altered.Values[replica].Get(s_deadline));
+        KafkaStorageException failure = Assert.Throws<KafkaStorageException>(() => altered.Values[replica].Get(s_deadline));
         Assert.Equal("Log directory /not-a-configured-dir is offline", failure.Message);
         altered.Result.Dispose();
     }
@@ -247,9 +266,9 @@ public sealed class AdminLogDirsMarshalTests
         {
             foreach ((TopicPartition partition, long size, long offsetLag, bool isFuture) in replicas)
             {
-                using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic))
+                using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic()))
                 {
-                    keys.Add(NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition, ref outErr));
+                    keys.Add(NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition(), ref outErr));
                 }
 
                 KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -302,5 +321,8 @@ public sealed class AdminLogDirsMarshalTests
 
         [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_message_err", CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr ErrorKafkaMessage(IntPtr message, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_Error_timeout_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ErrorTimeout(IntPtr message, ref IntPtr outErr);
     }
 }

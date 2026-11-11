@@ -41,7 +41,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_ReturnsSetOffsets()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(Topic, 0, 5);
         consumer.UpdateBeginningOffset(Topic, 1, 7);
@@ -59,7 +59,7 @@ public sealed class PublicConsumerOffsetQueryTests
     public async Task BeginningOffsets_NonAsciiTopic_RoundTripsThroughKeyMarshalling()
     {
         const string nonAscii = "topic-grüße-Ω-🎉";
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(nonAscii, 3, 99);
 
@@ -70,12 +70,12 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     [Fact]
-    public async Task BeginningOffsets_UnsetPartition_FaultsWithInvalidOperationExceptionMessage()
+    public async Task BeginningOffsets_UnsetPartition_FaultsWithIllegalStateMessage()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
             () => BeginningOffsetsOf(consumer, new[] { new TopicPartition(Topic, 0) }));
 
         Assert.Equal(
@@ -86,7 +86,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_ReturnsSetOffsets()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset(Topic, 0, 100);
         consumer.UpdateEndOffset(Topic, 2, 250);
@@ -101,12 +101,12 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     [Fact]
-    public async Task EndOffsets_UnsetPartition_FaultsWithInvalidOperationExceptionMessage()
+    public async Task EndOffsets_UnsetPartition_FaultsWithIllegalStateMessage()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
             () => EndOffsetsOf(consumer, new[] { new TopicPartition(Topic, 4) }));
 
         Assert.Equal(
@@ -117,11 +117,11 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_AfterFault_ConsumerReusable()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset(Topic, 0, 11);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => EndOffsetsOf(consumer, new[] { new TopicPartition(Topic, 9) }));
 
         IReadOnlyDictionary<TopicPartition, long> result = await EndOffsetsOf(
@@ -132,7 +132,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_EmptyCollection_ReturnsEmptyMap()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = await CommittedOf(
@@ -144,7 +144,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_UncommittedPartition_ReturnsEmptyMap()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = await CommittedOf(
@@ -154,16 +154,16 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     [Fact]
-    public async Task OffsetsForTimes_OnMock_FaultsWithNotSupportedException()
+    public async Task OffsetsForTimes_OnMock_FaultsWithUnsupportedOperationException()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition(Topic, 0)] = 1_000L,
         };
 
-        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException ex = await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => OffsetsForTimesOf(consumer, search));
 
         Assert.Equal("Not implemented yet.", ex.Message);
@@ -173,14 +173,14 @@ public sealed class PublicConsumerOffsetQueryTests
     public async Task OffsetsForTimes_NegativeTimestamp_Accepted_ThenFaultsOnMock()
     {
         // A negative timestamp is a valid sentinel (earliest or latest), so it reaches the mock.
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition(Topic, 0)] = -2L, // LATEST sentinel
         };
 
-        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException ex = await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => OffsetsForTimesOf(consumer, search));
 
         Assert.Equal("Not implemented yet.", ex.Message);
@@ -189,17 +189,17 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_EmptyMap_StillFaultsOnMock()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => OffsetsForTimesOf(consumer, new Dictionary<TopicPartition, long>()));
     }
 
     [Fact]
     public async Task BeginningOffsets_EmptyCollection_ReturnsEmptyMap()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
@@ -211,7 +211,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_EmptyCollection_ReturnsEmptyMap()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<TopicPartition, long> result = await EndOffsetsOf(
@@ -223,7 +223,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_NullCollection_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Committed(null!));
@@ -232,7 +232,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_NullCollection_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.BeginningOffsets(null!));
@@ -241,7 +241,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_NullCollection_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.EndOffsets(null!));
@@ -250,7 +250,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_NullMap_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.OffsetsForTimes(null!));
@@ -259,7 +259,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_NullElementTopic_ThrowsArgument()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentException>(
@@ -269,7 +269,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_NullKeyTopic_ThrowsArgument()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
@@ -280,42 +280,42 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     [Fact]
-    public async Task Committed_AfterDispose_ThrowsObjectDisposed()
+    public async Task Committed_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.Committed(new[] { new TopicPartition(Topic, 0) }));
     }
 
     [Fact]
-    public async Task BeginningOffsets_AfterDispose_ThrowsObjectDisposed()
+    public async Task BeginningOffsets_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.BeginningOffsets(new[] { new TopicPartition(Topic, 0) }));
     }
 
     [Fact]
-    public async Task EndOffsets_AfterDispose_ThrowsObjectDisposed()
+    public async Task EndOffsets_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.EndOffsets(new[] { new TopicPartition(Topic, 0) }));
     }
 
     [Fact]
-    public async Task OffsetsForTimes_AfterDispose_ThrowsObjectDisposed()
+    public async Task OffsetsForTimes_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long>
             {
                 [new TopicPartition(Topic, 0)] = 1L,
@@ -325,7 +325,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(Topic, 0, 1);
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -338,7 +338,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -350,7 +350,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_AfterWakeup_StillUsable()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset(Topic, 0, 5);
 

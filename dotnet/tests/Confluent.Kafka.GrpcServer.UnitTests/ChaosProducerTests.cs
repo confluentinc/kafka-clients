@@ -140,11 +140,10 @@ public sealed class ChaosProducerTests
         foreach (Proto.WorkloadEvent failure in failures)
         {
             Exception thrown = harness.Producer.SendThrew[failure.SendFailed.Index];
-            ObjectDisposedException disposed = Assert.IsType<ObjectDisposedException>(thrown);
-            string withoutObjectName = new ObjectDisposedException((string?)null).Message;
-            Assert.StartsWith(withoutObjectName, disposed.Message, StringComparison.Ordinal);
+            IllegalStateException closed = Assert.IsType<IllegalStateException>(thrown);
+            Assert.Equal("MockProducer is already closed.", closed.Message);
             Assert.Equal(-4, failure.SendFailed.Error.Code);
-            Assert.Equal(withoutObjectName, failure.SendFailed.Error.Message);
+            Assert.Equal("MockProducer is already closed.", failure.SendFailed.Error.Message);
         }
 
         // The healthy records' callbacks fired once each; a throwing Send's never did.
@@ -302,9 +301,9 @@ public sealed class ChaosProducerTests
         // The flavour's own real client, built the way its servicer builds it.
         ConfigException expected = flavour == ChaosFlavour.Async
             ? Assert.Throws<ConfigException>(
-                () => new AsyncKafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray, Serdes.ByteArray))
+                () => new AsyncKafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray(), Serdes.ByteArray()))
             : Assert.Throws<ConfigException>(
-                () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray, Serdes.ByteArray));
+                () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray(), Serdes.ByteArray()));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);
         Proto.RunProducerRequest request = ChaosHarness.ProducerRequest("p-real");
         request.Config.Clear();

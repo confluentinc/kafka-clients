@@ -22,7 +22,9 @@ using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.Soak.Tests;
 
@@ -69,15 +71,16 @@ public sealed class TopicSetupTests
     private static string[] Lines(StringWriter output) =>
         output.ToString().Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
 
-    private static IEnumerable<(string Name, int? Partitions, short? ReplicationFactor)> Created(object? newTopics) =>
-        Assert.IsAssignableFrom<IEnumerable<NewTopic>>(newTopics)
-            .Select(topic => (topic.Name, topic.NumPartitions, topic.ReplicationFactor));
+    // Compared with NewTopic.Equals, which, as Java's equals, tells an unset count (null) from -1;
+    // the getters read -1 for both, as Java's do.
+    private static IEnumerable<NewTopic> Created(object? newTopics) =>
+        Assert.IsAssignableFrom<IEnumerable<NewTopic>>(newTopics);
 
     private static async Task<int> PartitionCount(IAsyncAdmin admin, string topic)
     {
         IReadOnlyDictionary<string, TopicDescription> described =
             await admin.DescribeTopics(new[] { topic }).AllTopicNames()!.Value.Get();
-        return described[topic].Partitions.Count;
+        return described[topic].Partitions().Count;
     }
 
     [Fact]
@@ -88,7 +91,7 @@ public sealed class TopicSetupTests
         await CreateTopic(recorder, Options(3, 1, recreate: false));
 
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
-        Assert.Equal(new[] { ("t", (int?)3, (short?)1) }, Created(recorder.Arguments[0][0]));
+        Assert.Equal(new[] { new NewTopic("t", (int?)3, (short?)1) }, Created(recorder.Arguments[0][0]));
     }
 
     [Theory]
@@ -106,7 +109,7 @@ public sealed class TopicSetupTests
         await CreateTopic(recorder, Options(partitions, 1, recreate: false));
 
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
-        Assert.Equal(new[] { ("t", sentPartitions, (short?)1) }, Created(recorder.Arguments[0][0]));
+        Assert.Equal(new[] { new NewTopic("t", sentPartitions, (short?)1) }, Created(recorder.Arguments[0][0]));
         Assert.Equal(createdPartitions, await PartitionCount(mock, "t"));
     }
 
@@ -125,10 +128,10 @@ public sealed class TopicSetupTests
         await CreateTopic(recorder, Options(1, replicationFactor, recreate: false));
 
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
-        Assert.Equal(new[] { ("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
+        Assert.Equal(new[] { new NewTopic("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
         IReadOnlyDictionary<string, TopicDescription> described =
             await mock.DescribeTopics(new[] { "t" }).AllTopicNames()!.Value.Get();
-        Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions).Replicas.Count);
+        Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions()).Replicas().Count);
     }
 
     [Fact]
@@ -147,7 +150,7 @@ public sealed class TopicSetupTests
     public async Task CreateTopicAuthFailureIsFatal()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException authentication = SoakTestSupport.KafkaError(58, "bad creds");
+        KafkaException authentication = new SaslAuthenticationException("bad creds");
         recorder.CreateTopicsError = authentication;
 
         SoakFatalStartupException ex = await Assert.ThrowsAsync<SoakFatalStartupException>(
@@ -171,7 +174,7 @@ public sealed class TopicSetupTests
         SoakTransientStartupException ex = await Assert.ThrowsAsync<SoakTransientStartupException>(
             () => CreateTopic(recorder, Options(3, 1, recreate: false)));
 
-        KafkaException timeout = Assert.IsType<KafkaException>(ex.InnerException);
+        KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(ex.InnerException);
         Assert.Equal(7, timeout.Code);
         Assert.Equal("The mock timed out the request.", timeout.Message);
         Assert.Equal(
@@ -202,8 +205,8 @@ public sealed class TopicSetupTests
         TopicCollection.TopicNameCollection deleted =
             Assert.IsType<TopicCollection.TopicNameCollection>(recorder.Arguments[0][0]);
         Assert.Equal(new[] { "t" }, deleted.TopicNames());
-        Assert.Equal(30000, Assert.IsType<DeleteTopicsOptions>(recorder.Arguments[0][1]).TimeoutMs);
-        Assert.Equal(new[] { ("t", sentPartitions, (short?)null) }, Created(recorder.Arguments[1][0]));
+        Assert.Equal(30000, Assert.IsType<DeleteTopicsOptions>(recorder.Arguments[0][1]).TimeoutMs());
+        Assert.Equal(new[] { new NewTopic("t", sentPartitions, (short?)null) }, Created(recorder.Arguments[1][0]));
         Assert.Equal(createdPartitions, await PartitionCount(mock, "t"));
         Assert.Equal(new[] { TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10) }, delays);
         Assert.Equal(
@@ -249,7 +252,7 @@ public sealed class TopicSetupTests
         var mock = AsyncMockAdminClient.Create().Build();
         await mock.CreateTopics(new[] { new NewTopic("t", 3, 1) }).All().Get();
         RecordingAdmin recorder = RecordingAdmin.Over(mock);
-        recorder.DeleteTopicsError = SoakTestSupport.KafkaError(3, "gone");
+        recorder.DeleteTopicsError = new UnknownTopicOrPartitionException("gone");
         using var output = new StringWriter();
 
         await CreateTopic(recorder, Options(4, 1, recreate: true), output: output);
@@ -272,7 +275,7 @@ public sealed class TopicSetupTests
     public async Task RecreateTopicAuthFailureOnDeleteIsFatal()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException authentication = SoakTestSupport.KafkaError(58, "bad creds");
+        KafkaException authentication = new SaslAuthenticationException("bad creds");
         recorder.DeleteTopicsError = authentication;
 
         SoakFatalStartupException ex = await Assert.ThrowsAsync<SoakFatalStartupException>(
@@ -290,7 +293,7 @@ public sealed class TopicSetupTests
     public async Task RecreateTopicAuthFailureOnCreateIsFatal()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException authorization = SoakTestSupport.KafkaError(29, "denied");
+        KafkaException authorization = new TopicAuthorizationException("denied");
         recorder.CreateTopicsError = authorization;
 
         SoakFatalStartupException ex = await Assert.ThrowsAsync<SoakFatalStartupException>(
@@ -314,7 +317,7 @@ public sealed class TopicSetupTests
         SoakTransientStartupException ex = await Assert.ThrowsAsync<SoakTransientStartupException>(
             () => CreateTopic(recorder, Options(4, 1, recreate: true)));
 
-        KafkaException timeout = Assert.IsType<KafkaException>(ex.InnerException);
+        KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(ex.InnerException);
         Assert.Equal(7, timeout.Code);
         Assert.Equal(
             "could not delete topic 't': The mock timed out the request.. "
@@ -327,7 +330,7 @@ public sealed class TopicSetupTests
     public async Task RecreateTopicOtherFailureOnCreateIsTransient()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException timeout = SoakTestSupport.KafkaError(7, "slow");
+        KafkaException timeout = new KafkaTimeoutException("slow");
         recorder.CreateTopicsError = timeout;
 
         SoakTransientStartupException ex = await Assert.ThrowsAsync<SoakTransientStartupException>(

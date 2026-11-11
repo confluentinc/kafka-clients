@@ -68,7 +68,7 @@ public sealed class PublicAdminDescribeAclsTests
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -82,7 +82,7 @@ public sealed class PublicAdminDescribeAclsTests
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
         Assert.Same(result.Values().Get(), result.Values().Get());
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
     }
 
@@ -97,7 +97,7 @@ public sealed class PublicAdminDescribeAclsTests
                 new ResourcePatternFilter(ResourceType.ANY, null, PatternType.ANY),
                 new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY)));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -115,7 +115,7 @@ public sealed class PublicAdminDescribeAclsTests
         // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DescribeAcls(
-                Filter("t"), new DescribeAclsOptions { TimeoutMs = -1 })));
+                Filter("t"), new DescribeAclsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -124,11 +124,11 @@ public sealed class PublicAdminDescribeAclsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeAcls(Filter("gone")));
+        Assert.Throws<IllegalStateException>(() => admin.DescribeAcls(Filter("gone")));
     }
 
     [Fact]
-    public void Options_DefaultToJavasDefaults() => Assert.Null(new DescribeAclsOptions().TimeoutMs);
+    public void Options_DefaultToJavasDefaults() => Assert.Null(new DescribeAclsOptions().TimeoutMs());
 
     private static AclBindingFilter Filter(string name) =>
         new AclBindingFilter(

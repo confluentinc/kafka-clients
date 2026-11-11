@@ -66,7 +66,7 @@ public sealed class PublicProducerSendWithCallbackTests
                 {
                     KafkaFuture<RecordMetadata> future = default;
                     TestTimeout.Run(() => future = producer.Send(Record(topic), callback), s_deadline);
-                    failures[topic] = Capture(() => future.Get());
+                    failures[topic] = FutureAssert.Unwrapped(Capture(() => future.Get()));
                 }
             }
             finally
@@ -84,8 +84,8 @@ public sealed class PublicProducerSendWithCallbackTests
                 for (int i = 0; i < topics.Length; i++)
                 {
                     AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stages[i].AsTask(), s_deadline);
-                    failures[topics[i]] = await Assert.ThrowsAnyAsync<Exception>(
-                        () => TestTimeout.Run(() => future.Get(), s_deadline));
+                    failures[topics[i]] = FutureAssert.Unwrapped(await Assert.ThrowsAnyAsync<Exception>(
+                        () => TestTimeout.Run(() => future.Get(), s_deadline)));
                 }
             }
             finally
@@ -95,13 +95,13 @@ public sealed class PublicProducerSendWithCallbackTests
         }
 
         List<(RecordMetadata Metadata, Exception? Exception)> calls = callback.Calls();
-        Assert.Equal(topics.OrderBy(t => t, StringComparer.Ordinal), calls.Select(c => c.Metadata.Topic).OrderBy(t => t, StringComparer.Ordinal));
+        Assert.Equal(topics.OrderBy(t => t, StringComparer.Ordinal), calls.Select(c => c.Metadata.Topic()).OrderBy(t => t, StringComparer.Ordinal));
         foreach ((RecordMetadata metadata, Exception? exception) in calls)
         {
             KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(exception);
-            Assert.Same(failures[metadata.Topic], timeout);
+            Assert.Same(failures[metadata.Topic()], timeout);
             Assert.Equal(7, timeout.Code);
-            Assert.Equal($"Topic {metadata.Topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
+            Assert.Equal($"Topic {metadata.Topic()} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
         }
     }
 
@@ -117,7 +117,7 @@ public sealed class PublicProducerSendWithCallbackTests
             PublicProducerFirstStageTests.CloseTheCore(producer);
 
             (callback, Exception? refused) = SendRefused(producer);
-            InvalidOperationException closed = Assert.IsType<InvalidOperationException>(refused);
+            IllegalStateException closed = Assert.IsType<IllegalStateException>(refused);
             Assert.Equal("Cannot perform operation after producer has been closed", closed.Message);
 
             AssertAlive(callback, "the state of a refused send was released before the destroy");
@@ -222,14 +222,14 @@ public sealed class PublicProducerSendWithCallbackTests
             }
         }
 
-        KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(outcome);
+        KafkaException timeout = FutureAssert.CauseAny<KafkaException>(outcome);
         Assert.Equal(7, timeout.Code);
         Assert.Equal($"Topic {topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
         Assert.Equal(1, throwing.Count);
 
         (RecordMetadata otherMetadata, Exception? otherDelivered) = Assert.Single(next.Calls());
-        Assert.Equal(other, otherMetadata.Topic);
-        Assert.Same(otherOutcome, otherDelivered);
+        Assert.Equal(other, otherMetadata.Topic());
+        Assert.Same(FutureAssert.Unwrapped(otherOutcome), otherDelivered);
 
         Assert.Single(trace.LinesContaining(marker));
     }
@@ -275,17 +275,17 @@ public sealed class PublicProducerSendWithCallbackTests
             }
         }
 
-        KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(failure);
+        KafkaException timeout = FutureAssert.CauseAny<KafkaException>(failure);
         Assert.Equal(7, timeout.Code);
-        Assert.True(timeout.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(timeout);
         Assert.Equal($"Topic {topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
 
         await Task.Delay(s_settle);
         (RecordMetadata metadata, Exception? delivered) = Assert.Single(callback.Calls());
         Assert.Same(timeout, delivered);
-        Assert.Equal(topic, metadata.Topic);
-        Assert.Equal(-1, metadata.Partition);
-        Assert.Equal(-1L, metadata.Offset);
+        Assert.Equal(topic, metadata.Topic());
+        Assert.Equal(-1, metadata.Partition());
+        Assert.Equal(-1L, metadata.Offset());
     }
 
     [Theory]
@@ -313,7 +313,7 @@ public sealed class PublicProducerSendWithCallbackTests
             int index = 1;
             foreach (Exception outcome in new[] { firstOutcome, secondOutcome, thirdOutcome })
             {
-                KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(outcome);
+                KafkaException timeout = FutureAssert.CauseAny<KafkaException>(outcome);
                 Assert.Equal(7, timeout.Code);
                 Assert.Equal($"Topic {prefix}{index} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
                 index++;
@@ -322,8 +322,8 @@ public sealed class PublicProducerSendWithCallbackTests
             Assert.Equal(NativeProducer.CompletionThreadName, outer.ThreadName);
             Assert.Equal(NativeProducer.CompletionThreadName, middle.ThreadName);
             (RecordMetadata metadata, Exception? delivered) = Assert.Single(last.Calls());
-            Assert.Equal(prefix + "3", metadata.Topic);
-            Assert.Same(thirdOutcome, delivered);
+            Assert.Equal(prefix + "3", metadata.Topic());
+            Assert.Same(FutureAssert.Unwrapped(thirdOutcome), delivered);
         }
         finally
         {
@@ -346,10 +346,10 @@ public sealed class PublicProducerSendWithCallbackTests
         };
 
     private static KafkaProducer<byte[], byte[]> SyncUnreachable(int maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncKafkaProducer<byte[], byte[]> AsyncUnreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Exception Capture(Action action)
     {
@@ -411,7 +411,7 @@ public sealed class PublicProducerSendWithCallbackTests
     }
 
     /// <summary>Waits for the test to publish the record's future, then reads it from inside the callback.</summary>
-    private sealed class OrderProbe : IDeliveryCallback
+    private sealed class OrderProbe : ICallback
     {
         private readonly ManualResetEventSlim _published = new ManualResetEventSlim();
         private KafkaFuture<RecordMetadata> _future;
@@ -438,13 +438,13 @@ public sealed class PublicProducerSendWithCallbackTests
                 return;
             }
 
-            DoneInsideTheCallback = _future.IsDone;
+            DoneInsideTheCallback = _future.IsDone();
             GetReturnedInsideTheCallback = Volatile.Read(ref GetReturned);
         }
     }
 
     /// <summary>Throws from <see cref="OnCompletion"/>, with its marker in the message.</summary>
-    private sealed class ThrowingCallback : IDeliveryCallback
+    private sealed class ThrowingCallback : ICallback
     {
         private readonly string _marker;
         private int _count;
@@ -464,15 +464,15 @@ public sealed class PublicProducerSendWithCallbackTests
     }
 
     /// <summary>Sends one more record, through the sync <c>Send</c>, from inside its own delivery callback.</summary>
-    private sealed class NestedSendCallback : IDeliveryCallback
+    private sealed class NestedSendCallback : ICallback
     {
         private readonly KafkaProducer<byte[], byte[]> _producer;
         private readonly ProducerRecord<byte[], byte[]> _record;
-        private readonly IDeliveryCallback _callback;
+        private readonly ICallback _callback;
         private readonly TaskCompletionSource<KafkaFuture<RecordMetadata>> _nested =
             new TaskCompletionSource<KafkaFuture<RecordMetadata>>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        internal NestedSendCallback(KafkaProducer<byte[], byte[]> producer, ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback)
+        internal NestedSendCallback(KafkaProducer<byte[], byte[]> producer, ProducerRecord<byte[], byte[]> record, ICallback callback)
         {
             _producer = producer;
             _record = record;

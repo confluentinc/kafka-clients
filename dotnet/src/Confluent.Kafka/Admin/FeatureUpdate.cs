@@ -23,27 +23,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class FeatureUpdate
 {
-    /// <summary>
-    /// What kind of change the update performs — Java's nested <c>FeatureUpdate.UpgradeType</c>.
-    /// </summary>
-    public enum UpgradeType : byte
-    {
-        /// <summary>Unrecognized — Java's <c>UNKNOWN</c>.</summary>
-        UNKNOWN = 0,
-
-        /// <summary>Raise the feature level — Java's <c>UPGRADE</c>.</summary>
-        UPGRADE = 1,
-
-        /// <summary>
-        /// Lower the level, but only where no metadata is lost — Java's <c>SAFE_DOWNGRADE</c>.
-        /// </summary>
-        SAFE_DOWNGRADE = 2,
-
-        /// <summary>
-        /// Lower the level, allowing metadata loss — Java's <c>UNSAFE_DOWNGRADE</c>.
-        /// </summary>
-        UNSAFE_DOWNGRADE = 3,
-    }
+    private readonly short _maxVersionLevel;
+    private readonly UpgradeType _upgradeType;
 
     /// <summary>Creates an update — Java's constructor.</summary>
     /// <param name="maxVersionLevel">
@@ -51,15 +32,15 @@ public sealed class FeatureUpdate
     /// accompanied by a downgrade type.
     /// </param>
     /// <param name="upgradeType">The kind of change.</param>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="maxVersionLevel"/> is <c>0</c> with
-    /// <see cref="UpgradeType.UPGRADE"/>, or is negative.
+    /// <see cref="Admin.UpgradeType.UPGRADE"/>, or is negative.
     /// </exception>
     public FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)
     {
-        if (maxVersionLevel == 0 && upgradeType == UpgradeType.UPGRADE)
+        if (maxVersionLevel == 0 && upgradeType == Admin.UpgradeType.UPGRADE)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE"
@@ -69,29 +50,28 @@ public sealed class FeatureUpdate
 
         if (maxVersionLevel < 0)
         {
-            throw new ArgumentException("Cannot specify a negative version level.");
+            throw new IllegalArgumentException("Cannot specify a negative version level.");
         }
 
-        MaxVersionLevel = maxVersionLevel;
-        Type = upgradeType;
+        _maxVersionLevel = maxVersionLevel;
+        _upgradeType = upgradeType;
     }
 
     /// <summary>
     /// The new maximum version level — Java's <c>maxVersionLevel()</c>.
     /// </summary>
-    public short MaxVersionLevel { get; }
+    /// <returns>The new maximum version level.</returns>
+    public short MaxVersionLevel() => _maxVersionLevel;
 
-    /// <summary>
-    /// The kind of change — Java's <c>upgradeType()</c>. It is named <see cref="Type"/>, a
-    /// recorded deviation: C# forbids a member named like the nested <see cref="UpgradeType"/>.
-    /// </summary>
-    public UpgradeType Type { get; }
+    /// <summary>The kind of change — Java's <c>upgradeType()</c>.</summary>
+    /// <returns>The kind of change.</returns>
+    public UpgradeType UpgradeType() => _upgradeType;
 
     /// <summary>Value equality over both fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same update.</returns>
     public override bool Equals(object? obj) =>
-        obj is FeatureUpdate other && MaxVersionLevel == other.MaxVersionLevel && Type == other.Type;
+        obj is FeatureUpdate other && MaxVersionLevel() == other.MaxVersionLevel() && UpgradeType() == other.UpgradeType();
 
     /// <summary>The hash of both fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -99,14 +79,14 @@ public sealed class FeatureUpdate
     {
         unchecked
         {
-            return (((int)MaxVersionLevel * 31) + 1) * 31 + (int)Type;
+            return (((int)MaxVersionLevel() * 31) + 1) * 31 + (int)UpgradeType();
         }
     }
 
     /// <summary>
     /// A diagnostic rendering matching Java's <c>toString()</c>, the upgrade type printed as Java's
     /// constant name: <c>FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}</c>. An
-    /// undefined <see cref="UpgradeType"/>, which the constructor stores as given, renders as its
+    /// undefined <see cref="Admin.UpgradeType"/>, which the constructor stores as given, renders as its
     /// number.
     /// </summary>
     /// <returns>The rendering.</returns>
@@ -114,17 +94,44 @@ public sealed class FeatureUpdate
         string.Format(
             CultureInfo.InvariantCulture,
             "FeatureUpdate{{maxVersionLevel:{0}, upgradeType:{1}}}",
-            MaxVersionLevel,
-            JavaName(Type));
+            MaxVersionLevel(),
+            ConstantName(UpgradeType()));
 
-    private static string JavaName(UpgradeType upgradeType) => upgradeType switch
+    private static string ConstantName(UpgradeType upgradeType) => upgradeType switch
     {
-        UpgradeType.UNKNOWN => "UNKNOWN",
-        UpgradeType.UPGRADE => "UPGRADE",
-        UpgradeType.SAFE_DOWNGRADE => "SAFE_DOWNGRADE",
-        UpgradeType.UNSAFE_DOWNGRADE => "UNSAFE_DOWNGRADE",
+        Admin.UpgradeType.UNKNOWN => "UNKNOWN",
+        Admin.UpgradeType.UPGRADE => "UPGRADE",
+        Admin.UpgradeType.SAFE_DOWNGRADE => "SAFE_DOWNGRADE",
+        Admin.UpgradeType.UNSAFE_DOWNGRADE => "UNSAFE_DOWNGRADE",
         _ => ((int)upgradeType).ToString(CultureInfo.InvariantCulture),
     };
+}
+
+/// <summary>
+/// What kind of change a <see cref="FeatureUpdate"/> performs — Java's nested
+/// <c>org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType</c>.
+/// </summary>
+/// <remarks>
+/// It is not nested, a recorded deviation: <see cref="FeatureUpdate.UpgradeType()"/> is a method, and a
+/// nested type of the same name would not compile (<c>CS0102</c>).
+/// </remarks>
+public enum UpgradeType : byte
+{
+    /// <summary>Unrecognized — Java's <c>UNKNOWN</c>.</summary>
+    UNKNOWN = 0,
+
+    /// <summary>Raise the feature level — Java's <c>UPGRADE</c>.</summary>
+    UPGRADE = 1,
+
+    /// <summary>
+    /// Lower the level, but only where no metadata is lost — Java's <c>SAFE_DOWNGRADE</c>.
+    /// </summary>
+    SAFE_DOWNGRADE = 2,
+
+    /// <summary>
+    /// Lower the level, allowing metadata loss — Java's <c>UNSAFE_DOWNGRADE</c>.
+    /// </summary>
+    UNSAFE_DOWNGRADE = 3,
 }
 
 /// <summary>
@@ -135,16 +142,16 @@ public static class UpgradeTypes
 {
     /// <summary>
     /// The upgrade type for a code — Java's <c>UpgradeType.fromCode(int)</c>. An unknown code
-    /// gives <see cref="FeatureUpdate.UpgradeType.UNKNOWN"/>; it never throws.
+    /// gives <see cref="UpgradeType.UNKNOWN"/>; it never throws.
     /// </summary>
     /// <param name="code">The code.</param>
     /// <returns>The upgrade type.</returns>
-    public static FeatureUpdate.UpgradeType FromCode(int code) =>
+    public static UpgradeType FromCode(int code) =>
         code switch
         {
-            1 => FeatureUpdate.UpgradeType.UPGRADE,
-            2 => FeatureUpdate.UpgradeType.SAFE_DOWNGRADE,
-            3 => FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE,
-            _ => FeatureUpdate.UpgradeType.UNKNOWN,
+            1 => UpgradeType.UPGRADE,
+            2 => UpgradeType.SAFE_DOWNGRADE,
+            3 => UpgradeType.UNSAFE_DOWNGRADE,
+            _ => UpgradeType.UNKNOWN,
         };
 }

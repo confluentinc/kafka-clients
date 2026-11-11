@@ -68,7 +68,7 @@ public sealed class PublicConsumerCallbackScopeTests
             Assert.True(started!.Join(s_deadline), "the started thread never ended");
             Assert.Null(closing);
             Assert.True(closed, "the started thread never closed the consumer");
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -100,7 +100,7 @@ public sealed class PublicConsumerCallbackScopeTests
 
             Task closing = await TestTimeout.Run(() => started!, s_deadline);
             await TestTimeout.Run(() => closing, s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -142,7 +142,7 @@ public sealed class PublicConsumerCallbackScopeTests
             Assert.True(started!.Join(s_deadline), "the started thread never ended");
             Assert.Null(closing);
             Assert.True(closed, "the started thread never closed the consumer");
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -185,7 +185,7 @@ public sealed class PublicConsumerCallbackScopeTests
 
             Assert.True(started!.Join(s_deadline), "the started thread never ended");
             await TestTimeout.Run(() => closing!, s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -207,7 +207,7 @@ public sealed class PublicConsumerCallbackScopeTests
             TestTimeout.Run(() => outer.Rebalance(new[] { s_partition }), s_deadline);
 
             await TestTimeout.Run(() => closing!, s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => other.Assignment());
+            Assert.Throws<IllegalStateException>(() => other.Assignment());
             Assert.Equal(new[] { s_partition }, outer.Assignment());
         }
         finally
@@ -240,7 +240,7 @@ public sealed class PublicConsumerCallbackScopeTests
 
             Assert.True(ran, "the listener never ran");
             Assert.Null(closing);
-            Assert.Throws<ObjectDisposedException>(() => other.Assignment());
+            Assert.Throws<IllegalStateException>(() => other.Assignment());
             Assert.Equal(new[] { s_partition }, outer.Assignment());
         }
         finally
@@ -265,7 +265,7 @@ public sealed class PublicConsumerCallbackScopeTests
             await TestTimeout.Run(() => outer.Rebalance(new[] { s_partition }), s_deadline);
 
             await TestTimeout.Run(() => closing!, s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => other.Assignment());
+            Assert.Throws<IllegalStateException>(() => other.Assignment());
             Assert.Equal(new[] { s_partition }, outer.Assignment());
         }
         finally
@@ -294,10 +294,10 @@ public sealed class PublicConsumerCallbackScopeTests
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
@@ -308,10 +308,10 @@ public sealed class PublicConsumerCallbackScopeTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
     private sealed class SyncListener : IConsumerRebalanceListener

@@ -35,7 +35,7 @@ public sealed class PublicAdminP8Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.AbortTransaction(
                 new AbortTransactionSpec(new TopicPartition("txn-topic", 3), 91_234L, 7, 42)).All().Get());
 
@@ -72,7 +72,7 @@ public sealed class PublicAdminP8Tests
         Assert.Null(Record.Exception(
             () => admin.AbortTransaction(
                 new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1),
-                new AbortTransactionOptions { TimeoutMs = -1 })));
+                new AbortTransactionOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -81,7 +81,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.AbortTransaction(
                 new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1)));
     }
@@ -92,7 +92,7 @@ public sealed class PublicAdminP8Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.ForceTerminateTransaction("txn-a").Result().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -118,7 +118,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Null(Record.Exception(
             () => admin.ForceTerminateTransaction(
-                "txn-a", new TerminateTransactionOptions { TimeoutMs = -1 })));
+                "txn-a", new TerminateTransactionOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ForceTerminateTransaction("txn-a"));
+        Assert.Throws<IllegalStateException>(() => admin.ForceTerminateTransaction("txn-a"));
     }
 
     [Fact]
@@ -138,22 +138,22 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-y", "txn-x" });
 
-        Assert.Equal(2, result.FencedProducers.Count);
-        foreach (AsyncKafkaFuture fenced in result.FencedProducers.Values)
+        Assert.Equal(2, result.FencedProducers().Count);
+        foreach (AsyncKafkaFuture fenced in result.FencedProducers().Values)
         {
-            NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => fenced.Get());
+            UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fenced.Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get())).Message);
+            (await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get())).Message);
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<NotSupportedException>(() => result.ProducerId("txn-x").Get())).Message);
+            (await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.ProducerId("txn-x").Get())).Message);
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<NotSupportedException>(() => result.EpochId("txn-y").Get())).Message);
+            (await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.EpochId("txn-y").Get())).Message);
     }
 
     [Fact]
@@ -164,7 +164,7 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(Array.Empty<string>());
 
-        Assert.Empty(result.FencedProducers);
+        Assert.Empty(result.FencedProducers());
         await result.All().Get();
     }
 
@@ -176,8 +176,8 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
 
-        Assert.Equal(new[] { "txn-a" }, result.FencedProducers.Keys);
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        Assert.Equal(new[] { "txn-a" }, result.FencedProducers().Keys);
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -189,26 +189,23 @@ public sealed class PublicAdminP8Tests
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a" });
 
         // A statement lambda, so xUnit binds the Action overload, not the Task-returning one.
-        ArgumentException producerId = Assert.Throws<ArgumentException>(
+        IllegalArgumentException producerId = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.ProducerId("txn-missing"); });
-        ArgumentException epochId = Assert.Throws<ArgumentException>(
+        IllegalArgumentException epochId = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.EpochId("txn-missing"); });
 
-        Assert.StartsWith(
-            "TransactionalId `txn-missing` was not included in the request",
-            producerId.Message,
-            StringComparison.Ordinal);
-        Assert.StartsWith(
-            "TransactionalId `txn-missing` was not included in the request",
-            epochId.Message,
-            StringComparison.Ordinal);
-        Assert.Equal("transactionalId", producerId.ParamName);
+        Assert.Equal("TransactionalId `txn-missing` was not included in the request", producerId.Message);
+        Assert.Equal("TransactionalId `txn-missing` was not included in the request", epochId.Message);
 
-        Assert.Throws<ArgumentNullException>(() => { _ = result.ProducerId(null!); });
-        Assert.Throws<ArgumentNullException>(() => { _ = result.EpochId(null!); });
+        Assert.Equal(
+            "TransactionalId `null` was not included in the request",
+            Assert.Throws<IllegalArgumentException>(() => { _ = result.ProducerId(null!); }).Message);
+        Assert.Equal(
+            "TransactionalId `null` was not included in the request",
+            Assert.Throws<IllegalArgumentException>(() => { _ = result.EpochId(null!); }).Message);
 
         // Observe the requested id's own fault, so nothing goes unobserved.
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -232,7 +229,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Null(Record.Exception(
             () => admin.FenceProducers(
-                new[] { "txn-a" }, new FenceProducersOptions { TimeoutMs = -1 })));
+                new[] { "txn-a" }, new FenceProducersOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -241,7 +238,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.FenceProducers(new[] { "txn-a" }));
+        Assert.Throws<IllegalStateException>(() => admin.FenceProducers(new[] { "txn-a" }));
     }
 
     [Fact]
@@ -254,14 +251,14 @@ public sealed class PublicAdminP8Tests
 
         foreach (string id in new[] { "txn-a", "txn-b" })
         {
-            NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => result.Description(id).Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get())).Message);
+            (await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get())).Message);
     }
 
     [Fact]
@@ -282,19 +279,16 @@ public sealed class PublicAdminP8Tests
         AsyncDescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-a" });
 
         // A statement lambda, so xUnit binds the Action overload, not the Task-returning one.
-        ArgumentException missing = Assert.Throws<ArgumentException>(
+        IllegalArgumentException missing = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.Description("txn-missing"); });
 
-        Assert.StartsWith(
-            "TransactionalId `txn-missing` was not included in the request",
-            missing.Message,
-            StringComparison.Ordinal);
-        Assert.Equal("transactionalId", missing.ParamName);
+        Assert.Equal("TransactionalId `txn-missing` was not included in the request", missing.Message);
 
-        Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
+        IllegalArgumentException nullId = Assert.Throws<IllegalArgumentException>(() => { _ = result.Description(null!); });
+        Assert.Equal("TransactionalId `null` was not included in the request", nullId.Message);
 
         // Observe the requested id's own fault, so nothing goes unobserved.
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -318,7 +312,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Null(Record.Exception(
             () => admin.DescribeTransactions(
-                new[] { "txn-a" }, new DescribeTransactionsOptions { TimeoutMs = -1 })));
+                new[] { "txn-a" }, new DescribeTransactionsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -327,7 +321,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DescribeTransactions(new[] { "txn-a" }));
     }
 
@@ -347,14 +341,14 @@ public sealed class PublicAdminP8Tests
 
         foreach (TopicPartition partition in requested)
         {
-            NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => result.PartitionResult(partition).Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get())).Message);
+            (await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get())).Message);
     }
 
     [Fact]
@@ -375,11 +369,11 @@ public sealed class PublicAdminP8Tests
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0), new TopicPartition("alpha", 0) });
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => result.PartitionResult(new TopicPartition("alpha", 0)).Get()));
-        Assert.Throws<ArgumentException>(
+        Assert.Throws<IllegalArgumentException>(
             () => { _ = result.PartitionResult(new TopicPartition("alpha", 1)); });
     }
 
@@ -392,20 +386,12 @@ public sealed class PublicAdminP8Tests
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) });
 
-        ArgumentException missing = Assert.Throws<ArgumentException>(
+        IllegalArgumentException missing = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.PartitionResult(new TopicPartition("beta", 0)); });
 
-        Assert.StartsWith(
-            "Topic partition ",
-            missing.Message,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "was not included in the request",
-            missing.Message,
-            StringComparison.Ordinal);
-        Assert.Equal("partition", missing.ParamName);
+        Assert.Equal("Topic partition beta-0 was not included in the request", missing.Message);
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -430,7 +416,7 @@ public sealed class PublicAdminP8Tests
         Assert.Null(Record.Exception(
             () => admin.DescribeProducers(
                 new[] { new TopicPartition("alpha", 0) },
-                new DescribeProducersOptions { TimeoutMs = -1 })));
+                new DescribeProducersOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -441,9 +427,9 @@ public sealed class PublicAdminP8Tests
 
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) },
-            new DescribeProducersOptions { BrokerId = -1 });
+            new DescribeProducersOptions().BrokerId(-1));
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -452,7 +438,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DescribeProducers(new[] { new TopicPartition("alpha", 0) }));
     }
 
@@ -464,9 +450,9 @@ public sealed class PublicAdminP8Tests
 
         AsyncListTransactionsResult result = admin.ListTransactions();
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.ByBrokerId().Get()));
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.AllByBrokerId().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.ByBrokerId().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.AllByBrokerId().Get()));
     }
 
     [Fact]
@@ -476,15 +462,13 @@ public sealed class PublicAdminP8Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result = admin.ListTransactions(
-            new ListTransactionsOptions
-            {
-                FilteredStates = new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT },
-                FilteredProducerIds = new[] { 11L, 22L, 33L },
-                FilteredDuration = 60_000L,
-                FilteredTransactionalIdPattern = "txn-.*",
-            });
+            new ListTransactionsOptions()
+                .FilterStates(new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT })
+                .FilterProducerIds(new[] { 11L, 22L, 33L })
+                .FilterOnDuration(60_000L)
+                .FilterOnTransactionalIdPattern("txn-.*"));
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -494,7 +478,7 @@ public sealed class PublicAdminP8Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
-            () => admin.ListTransactions(new ListTransactionsOptions { TimeoutMs = -1 })));
+            () => admin.ListTransactions(new ListTransactionsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -504,9 +488,9 @@ public sealed class PublicAdminP8Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result =
-            admin.ListTransactions(new ListTransactionsOptions { FilteredDuration = -5L });
+            admin.ListTransactions(new ListTransactionsOptions().FilterOnDuration(-5L));
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -515,7 +499,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTransactions());
+        Assert.Throws<IllegalStateException>(() => admin.ListTransactions());
     }
 
     [Fact]
@@ -528,11 +512,11 @@ public sealed class PublicAdminP8Tests
             new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1)).All().Get();
         Task terminate = admin.ForceTerminateTransaction("txn-a").Result().Get();
 
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => abort));
-        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => terminate));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => abort));
+        AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => terminate));
     }
 
-    private static void AssertNotImplemented(NotSupportedException exception)
+    private static void AssertNotImplemented(UnsupportedOperationException exception)
     {
         Assert.Equal("Not implemented yet", exception.Message);
     }

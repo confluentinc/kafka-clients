@@ -24,30 +24,37 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class TopicListing
 {
+    private readonly string _name;
+    private readonly Uuid _topicId;
+    private readonly bool _isInternal;
+
     /// <summary>Initializes a listing — Java's constructor.</summary>
     /// <param name="name">The topic name.</param>
     /// <param name="topicId">The topic id.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
-    public TopicListing(string name, Uuid topicId, bool isInternal)
+    public TopicListing(string name, Uuid topicId, bool @internal)
     {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
-        TopicId = topicId;
-        IsInternal = isInternal;
+        _name = name ?? throw new ArgumentNullException(nameof(name));
+        _topicId = topicId;
+        _isInternal = @internal;
     }
 
     /// <summary>The topic name — Java's <c>name()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The topic name.</returns>
+    public string Name() => _name;
 
     /// <summary>The topic id — Java's <c>topicId()</c>.</summary>
-    public Uuid TopicId { get; }
+    /// <returns>The topic id.</returns>
+    public Uuid TopicId() => _topicId;
 
     /// <summary>
     /// Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>) —
     /// Java's <c>isInternal()</c>. Internal topics are listed only when
-    /// <see cref="ListTopicsOptions.ListInternal"/> is set.
+    /// <see cref="ListTopicsOptions.ShouldListInternal()"/> is set.
     /// </summary>
-    public bool IsInternal { get; }
+    /// <returns>Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>).</returns>
+    public bool IsInternal() => _isInternal;
 
     /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
@@ -55,7 +62,7 @@ public sealed class TopicListing
         string.Format(
             CultureInfo.InvariantCulture,
             "(name={0}, topicId={1}, internal={2})",
-            Name,
-            TopicId,
-            IsInternal ? "true" : "false");
+            Name(),
+            TopicId(),
+            IsInternal() ? "true" : "false");
 }

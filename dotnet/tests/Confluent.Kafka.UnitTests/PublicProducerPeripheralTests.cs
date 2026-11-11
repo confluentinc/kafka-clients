@@ -38,7 +38,7 @@ public sealed class PublicProducerPeripheralTests
     [Fact]
     public async Task Flush_OnMock_Succeeds()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -48,7 +48,7 @@ public sealed class PublicProducerPeripheralTests
     public async Task Flush_CalledRepeatedly_Succeeds()
     {
         // Repeated flushes free their per-call state once each.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 5; i++)
@@ -60,7 +60,7 @@ public sealed class PublicProducerPeripheralTests
     [Fact]
     public async Task Close_OnMock_Succeeds()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         await TestTimeout.Run(() => producer.Close(), s_deadline);
     }
@@ -68,32 +68,32 @@ public sealed class PublicProducerPeripheralTests
     [Fact]
     public async Task Close_CalledTwice_IsIdempotent()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         // The first Close closes and destroys; the second is a no-op.
         await TestTimeout.Run(() => producer.Close(), s_deadline);
         await TestTimeout.Run(() => producer.Close(), s_deadline);
 
-        AsyncMockProducer<byte[], byte[]> timed = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> timed = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(() => timed.Close(TimeSpan.Zero), s_deadline);
         await TestTimeout.Run(() => timed.Close(TimeSpan.Zero), s_deadline);
     }
 
     [Fact]
-    public async Task Close_ThenFlush_ThrowsObjectDisposed()
+    public async Task Close_ThenFlush_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(() => producer.Close(), s_deadline);
 
-        // After Close a call throws ObjectDisposedException, before any native call.
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
+        // After Close a call throws IllegalStateException, before any native call.
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.Flush());
     }
 
     [Fact]
     public async Task Close_PreCanceledToken_ThrowsOperationCanceled()
     {
         // An already-cancelled token throws before the close begins.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -107,7 +107,7 @@ public sealed class PublicProducerPeripheralTests
     public async Task PartitionsFor_OnMock_ReturnsEmptyList()
     {
         // The mock's cluster is empty, so PartitionsFor succeeds with an empty list; a populated list needs a broker.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(producer, Topic);
@@ -120,7 +120,7 @@ public sealed class PublicProducerPeripheralTests
     public async Task PartitionsFor_EmptyTopic_ForwardedNotRejected_ReturnsEmptyList()
     {
         // An empty topic reaches the core, as in Java and Python; only null is rejected.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(producer, string.Empty);
@@ -133,7 +133,7 @@ public sealed class PublicProducerPeripheralTests
     {
         // Only null is rejected, before any native call; ArgumentNullException sets no custom message, so ParamName
         // is the asserted contract.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(
@@ -146,7 +146,7 @@ public sealed class PublicProducerPeripheralTests
     {
         // The null check precedes the closed check, so a closed producer with a null topic throws
         // ArgumentNullException.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(producer);
 
         ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(
@@ -155,19 +155,19 @@ public sealed class PublicProducerPeripheralTests
     }
 
     [Fact]
-    public async Task PartitionsFor_AfterDispose_ThrowsObjectDisposed()
+    public async Task PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(producer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.PartitionsFor(Topic));
     }
 
     [Fact]
     public async Task PartitionsFor_PreCanceledToken_ThrowsOperationCanceled()
     {
         // An already-cancelled token throws before any native call.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -179,7 +179,7 @@ public sealed class PublicProducerPeripheralTests
     public async Task PartitionsFor_CalledRepeatedly_Succeeds()
     {
         // Repeated queries free their per-call state and list root once each.
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 5; i++)
@@ -190,12 +190,12 @@ public sealed class PublicProducerPeripheralTests
     }
 
     [Fact]
-    public async Task Flush_AfterDispose_ThrowsObjectDisposed()
+    public async Task Flush_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(producer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.Flush());
     }
 
     private static async Task<IReadOnlyList<PartitionInfo>> PartitionsForOf(IAsyncProducer<byte[], byte[]> producer, string topic)

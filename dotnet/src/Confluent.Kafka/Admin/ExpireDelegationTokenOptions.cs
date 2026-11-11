@@ -25,15 +25,15 @@ public sealed class ExpireDelegationTokenOptions
     private int? _timeoutMs;
     private long _expiryTimePeriodMs = -1L;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public ExpireDelegationTokenOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -41,14 +41,20 @@ public sealed class ExpireDelegationTokenOptions
     /// <c>expiryTimePeriodMs()</c>. Defaults to <c>-1</c>, as Java's does; a negative value
     /// expires it immediately.
     /// </summary>
-    public long ExpiryTimePeriodMs
+    /// <returns>How long until the token expires, in milliseconds — Java's <c>expiryTimePeriodMs()</c>. Defaults to
+    /// <c>-1</c>, as Java's does; a negative value expires it immediately.</returns>
+    public long ExpiryTimePeriodMs() => _expiryTimePeriodMs;
+
+    /// <summary>Sets the time period until the token expires.</summary>
+    /// <param name="expiryTimePeriodMs">The time period until we should expire this token. At or above 0, the
+    /// token's expiration timestamp becomes min(now + <paramref name="expiryTimePeriodMs"/>, maxTimestamp); below 0,
+    /// the token is expired immediately.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public ExpireDelegationTokenOptions ExpiryTimePeriodMs(long expiryTimePeriodMs)
     {
-        get => _expiryTimePeriodMs;
-        set
-        {
-            _expiryTimePeriodMs = value;
-            Setters.Ran(nameof(ExpiryTimePeriodMs));
-        }
+        _expiryTimePeriodMs = expiryTimePeriodMs;
+        Setters.Ran(nameof(ExpiryTimePeriodMs));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

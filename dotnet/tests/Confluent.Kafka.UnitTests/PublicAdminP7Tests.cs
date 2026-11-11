@@ -17,12 +17,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-
 using Confluent.Kafka.Admin;
-
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
+using Confluent.Kafka.Internal;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -52,21 +52,19 @@ public sealed class PublicAdminP7Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await admin.CreateDelegationToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[] { new KafkaPrincipal("User", "alice") },
-                MaxLifetimeMs = 86_400_000L,
-            }).DelegationToken().Get();
+            new CreateDelegationTokenOptions()
+                .Renewers(new[] { new KafkaPrincipal("User", "alice") })
+                .MaxLifetimeMs(86_400_000L)).DelegationToken().Get();
 
-        Assert.NotEmpty(token.Hmac);
-        Assert.NotEmpty(token.TokenInfo.TokenId);
-        Assert.Equal(new[] { "User:alice" }, token.TokenInfo.RenewersAsString);
-        Assert.Equal("User:alice", token.TokenInfo.OwnerAsString);
-        Assert.True(token.TokenInfo.IssueTimestamp > 0);
-        Assert.Equal(86_400_000L, token.TokenInfo.MaxTimestamp);
+        Assert.NotEmpty(token.Hmac());
+        Assert.NotEmpty(token.TokenInfo().TokenId());
+        Assert.Equal(new[] { "User:alice" }, token.TokenInfo().RenewersAsString());
+        Assert.Equal("User:alice", token.TokenInfo().OwnerAsString());
+        Assert.True(token.TokenInfo().IssueTimestamp() > 0);
+        Assert.Equal(86_400_000L, token.TokenInfo().MaxTimestamp());
 
         // The mock mints with the ABI's `-1` expiry sentinel; renew is what sets one.
-        Assert.Equal(-1L, token.TokenInfo.ExpiryTimestamp);
+        Assert.Equal(-1L, token.TokenInfo().ExpiryTimestamp());
     }
 
     [Fact]
@@ -82,8 +80,8 @@ public sealed class PublicAdminP7Tests
             await admin.DescribeDelegationToken().DelegationTokens().Get();
 
         Assert.Equal(
-            new[] { first.TokenInfo.TokenId, second.TokenInfo.TokenId }.OrderBy(id => id, StringComparer.Ordinal),
-            described.Select(token => token.TokenInfo.TokenId).OrderBy(id => id, StringComparer.Ordinal));
+            new[] { first.TokenInfo().TokenId(), second.TokenInfo().TokenId() }.OrderBy(id => id, StringComparer.Ordinal),
+            described.Select(token => token.TokenInfo().TokenId()).OrderBy(id => id, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -95,11 +93,11 @@ public sealed class PublicAdminP7Tests
         DelegationToken token = await Create(admin, "alice");
 
         long renewed = await admin.RenewDelegationToken(
-            token.Hmac, new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L }).ExpiryTimestamp().Get();
+            token.Hmac(), new RenewDelegationTokenOptions().RenewTimePeriodMs(3_600_000L)).ExpiryTimestamp().Get();
         Assert.Equal(3_600_000L, renewed);
 
         long expired = await admin.ExpireDelegationToken(
-            token.Hmac, new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L }).ExpiryTimestamp().Get();
+            token.Hmac(), new ExpireDelegationTokenOptions().ExpiryTimePeriodMs(0L)).ExpiryTimestamp().Get();
         Assert.Equal(0L, expired);
 
         Assert.Empty(await admin.DescribeDelegationToken().DelegationTokens().Get());
@@ -111,7 +109,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(
             () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
     }
 
@@ -123,12 +121,12 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
-        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(FutureAssert.Throws<DelegationTokenNotFoundException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(FutureAssert.Throws<DelegationTokenNotFoundException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<KafkaException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+            await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<KafkaException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+            await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
     }
 
     [Fact]
@@ -163,18 +161,19 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
+        FeatureMetadata? metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
 
-        Assert.NotNull(metadata.FinalizedFeatures);
-        Assert.NotNull(metadata.SupportedFeatures);
-        Assert.NotNull(metadata.FinalizedFeaturesEpoch);
+        Assert.NotNull(metadata);
+        Assert.NotNull(metadata.FinalizedFeatures());
+        Assert.NotNull(metadata.SupportedFeatures());
+        Assert.NotNull(metadata.FinalizedFeaturesEpoch());
     }
 
     [Fact]
     public async Task DescribeFeatures_AcceptsANodeId() =>
         Assert.NotNull(
             await AsyncMockAdminClient.Create().Build()
-                .DescribeFeatures(new DescribeFeaturesOptions { NodeId = 0 })
+                .DescribeFeatures(new DescribeFeaturesOptions().NodeId(0))
                 .FeatureMetadata().Get());
 
     [Fact]
@@ -186,18 +185,18 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["metadata.version"] = new FeatureUpdate(9, FeatureUpdate.UpgradeType.UPGRADE),
-                ["group.version"] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.UPGRADE),
+                ["metadata.version"] = new FeatureUpdate(9, UpgradeType.UPGRADE),
+                ["group.version"] = new FeatureUpdate(2, UpgradeType.UPGRADE),
             });
 
         Assert.Equal(
             new[] { "group.version", "metadata.version" },
-            result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
-        foreach (AsyncKafkaFuture value in result.Values.Values)
+        await FutureAssert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
+        foreach (AsyncKafkaFuture value in result.Values().Values)
         {
-            await Assert.ThrowsAsync<KafkaException>(() => value.Get());
+            await FutureAssert.ThrowsAsync<InvalidRequestException>(() => value.Get());
         }
     }
 
@@ -210,7 +209,7 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result =
             admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal));
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -221,7 +220,7 @@ public sealed class PublicAdminP7Tests
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)));
 
         Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
@@ -233,14 +232,13 @@ public sealed class PublicAdminP7Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(
                 new FeatureUpdateEntries(
                     new KeyValuePair<string, FeatureUpdate>(
-                        null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE)))));
+                        null!, new FeatureUpdate(1, UpgradeType.UPGRADE)))));
 
-        Assert.Equal("featureUpdates", thrown.ParamName);
-        Assert.StartsWith("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
+        Assert.Equal("Provided feature can not be empty.", thrown.Message);
     }
 
     [Theory]
@@ -254,11 +252,11 @@ public sealed class PublicAdminP7Tests
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
                 {
-                    [feature] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    [feature] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 }));
 
         Assert.Contains("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
@@ -273,10 +271,10 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["a b"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                ["a b"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
-        Assert.Equal(new[] { "a b" }, result.Values.Keys);
+        Assert.Equal(new[] { "a b" }, result.Values().Keys);
     }
 
     [Theory]
@@ -292,10 +290,10 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                [feature] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                [feature] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
-        Assert.Equal(new[] { feature }, result.Values.Keys);
+        Assert.Equal(new[] { feature }, result.Values().Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -308,18 +306,18 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["metadata.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
-                ["group.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                ["metadata.version"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
+                ["group.version"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
         Assert.Equal(
             new[] { "group.version", "metadata.version" },
-            result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
 
         // A null per-key error is the success of a KafkaFuture<Void> result. Status, as IsCompletedSuccessfully post-dates
         // netstandard2.0.
         await result.All().Get();
-        foreach (AsyncKafkaFuture value in result.Values.Values)
+        foreach (AsyncKafkaFuture value in result.Values().Values)
         {
             Assert.Equal(TaskStatus.RanToCompletion, value.Get().Status);
         }
@@ -331,7 +329,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -346,7 +344,7 @@ public sealed class PublicAdminP7Tests
         AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
         Assert.Equal("Not implemented yet", error.Message);
     }
 
@@ -356,7 +354,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.AlterUserScramCredentials(
                 new[] { new UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256) }).All().Get());
 
@@ -371,22 +369,33 @@ public sealed class PublicAdminP7Tests
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.Users().Get());
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.Description("alice").Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Users().Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Description("alice").Get());
     }
 
     [Fact]
-    public void DescribeUserScramCredentials_NullUser_ThrowsSynchronously()
+    public async Task DescribeUserScramCredentials_NullUser_FailsTheFutureAsJava()
     {
-        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        AsyncMockAdminClient asyncAdmin = AsyncMockAdminClient.Create().Build();
+        using IDisposable asyncDisposal = TestTimeout.Disposal(asyncAdmin);
+        MockAdminClient syncAdmin = MockAdminClient.Create().Build();
+        using IDisposable syncDisposal = TestTimeout.Disposal(syncAdmin);
 
-        AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
+        // The mock's call fails, and a null user's future carries the call's error, as Java's dataFuture does.
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => asyncAdmin.DescribeUserScramCredentials().Description(null).Get());
+        FutureAssert.Throws<UnsupportedOperationException>(
+            () => syncAdmin.DescribeUserScramCredentials().Description(null).Get(TimeSpan.FromSeconds(30)));
 
-        ArgumentNullException nullUser =
-            Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
-        Assert.Equal("userName", nullUser.ParamName);
+        // Once the response arrives, no user in it is null.
+        KafkaFutureImpl<object?> response = new KafkaFutureImpl<object?>();
+        KafkaFutureImpl<UserScramCredentialsDescription> missing = NativeAdminClient.NoSuchNullUser(response);
+        Assert.False(missing.IsDone);
+        response.Complete(null);
+        ResourceNotFoundException noSuchUser =
+            await FutureAssert.ThrowsAsync<ResourceNotFoundException>(() => new AsyncKafkaFuture<UserScramCredentialsDescription>(missing).Get());
+        Assert.Equal("No such user: null", noSuchUser.Message);
     }
 
     [Fact]
@@ -398,9 +407,9 @@ public sealed class PublicAdminP7Tests
         DelegationToken token = await Create(admin, "alice");
         string text = token.ToString();
 
-        Assert.DoesNotContain(token.HmacAsBase64String, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(token.HmacAsBase64String(), text, StringComparison.Ordinal);
         Assert.DoesNotContain(
-            BitConverter.ToString(token.Hmac), text, StringComparison.OrdinalIgnoreCase);
+            BitConverter.ToString(token.Hmac()), text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("[*******]", text, StringComparison.Ordinal);
     }
 
@@ -431,8 +440,8 @@ public sealed class PublicAdminP7Tests
     [InlineData((short)5, (short)4)]
     public void FinalizedVersionRange_RejectsAnInvalidRange(short min, short max)
     {
-        ArgumentException thrown =
-            Assert.Throws<ArgumentException>(() => new FinalizedVersionRange(min, max));
+        IllegalArgumentException thrown =
+            Assert.Throws<IllegalArgumentException>(() => new FinalizedVersionRange(min, max));
 
         Assert.Contains(
             "Expected minVersionLevel >= 0, maxVersionLevel >= 0 and maxVersionLevel >= minVersionLevel, "
@@ -446,8 +455,8 @@ public sealed class PublicAdminP7Tests
     [InlineData((short)3, (short)2)]
     public void SupportedVersionRange_RejectsAnInvalidRange(short min, short max)
     {
-        ArgumentException thrown =
-            Assert.Throws<ArgumentException>(() => new SupportedVersionRange(min, max));
+        IllegalArgumentException thrown =
+            Assert.Throws<IllegalArgumentException>(() => new SupportedVersionRange(min, max));
 
         Assert.Contains(
             $"Expected 0 <= minVersion <= maxVersion but received minVersion:{min}, maxVersion:{max}.",
@@ -458,15 +467,15 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void EqualBounds_AreAccepted()
     {
-        Assert.Equal(0, new FinalizedVersionRange(0, 0).MaxVersionLevel);
-        Assert.Equal(0, new SupportedVersionRange(0, 0).MaxVersion);
+        Assert.Equal(0, new FinalizedVersionRange(0, 0).MaxVersionLevel());
+        Assert.Equal(0, new SupportedVersionRange(0, 0).MaxVersion());
     }
 
     [Fact]
     public void FeatureUpdate_RejectsADowngradeWithoutADowngradeType()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
-            () => new FeatureUpdate(0, FeatureUpdate.UpgradeType.UPGRADE));
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
+            () => new FeatureUpdate(0, UpgradeType.UPGRADE));
 
         Assert.Contains(
             "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the "
@@ -478,23 +487,23 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void FeatureUpdate_RejectsANegativeLevel()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
-            () => new FeatureUpdate(-1, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE));
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
+            () => new FeatureUpdate(-1, UpgradeType.SAFE_DOWNGRADE));
 
         Assert.Contains("Cannot specify a negative version level.", thrown.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public void FeatureUpdate_AcceptsADeletion() =>
-        Assert.Equal(0, new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE).MaxVersionLevel);
+        Assert.Equal(0, new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE).MaxVersionLevel());
 
     [Theory]
-    [InlineData(FeatureUpdate.UpgradeType.UNKNOWN, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
-    [InlineData(FeatureUpdate.UpgradeType.UPGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
-    [InlineData(FeatureUpdate.UpgradeType.SAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
-    [InlineData(FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
-    [InlineData((FeatureUpdate.UpgradeType)9, "FeatureUpdate{maxVersionLevel:1, upgradeType:9}")]
-    public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(FeatureUpdate.UpgradeType type, string expected) =>
+    [InlineData(UpgradeType.UNKNOWN, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
+    [InlineData(UpgradeType.UPGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
+    [InlineData(UpgradeType.SAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
+    [InlineData(UpgradeType.UNSAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
+    [InlineData((UpgradeType)9, "FeatureUpdate{maxVersionLevel:1, upgradeType:9}")]
+    public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(UpgradeType type, string expected) =>
         Assert.Equal(expected, new FeatureUpdate(1, type).ToString());
 
     [Fact]
@@ -524,6 +533,26 @@ public sealed class PublicAdminP7Tests
     }
 
     [Fact]
+    public void KafkaPrincipal_TokenAuthenticated_DefaultsToFalse_AndItsSetterLeavesEqualityAlone()
+    {
+        KafkaPrincipal principal = new KafkaPrincipal("User", "alice");
+        KafkaPrincipal unflagged = new KafkaPrincipal("User", "alice", false);
+        int hashBefore = principal.GetHashCode();
+
+        Assert.False(principal.TokenAuthenticated());
+
+        principal.TokenAuthenticated(true);
+
+        Assert.True(principal.TokenAuthenticated());
+        Assert.Equal(unflagged, principal);
+        Assert.Equal(hashBefore, principal.GetHashCode());
+        Assert.Equal(unflagged.GetHashCode(), principal.GetHashCode());
+        Assert.Equal(
+            typeof(void),
+            typeof(KafkaPrincipal).GetMethod(nameof(KafkaPrincipal.TokenAuthenticated), new[] { typeof(bool) })!.ReturnType);
+    }
+
+    [Fact]
     public void ScramMechanism_RoundTripsItsName()
     {
         Assert.Equal("SCRAM-SHA-256", ScramMechanism.SCRAM_SHA_256.MechanismName());
@@ -541,10 +570,8 @@ public sealed class PublicAdminP7Tests
 
     private static Task<DelegationToken> Create(AsyncMockAdminClient admin, string renewer) =>
         admin.CreateDelegationToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[] { new KafkaPrincipal("User", renewer) },
-            }).DelegationToken().Get();
+            new CreateDelegationTokenOptions()
+                .Renewers(new[] { new KafkaPrincipal("User", renewer) })).DelegationToken().Get();
 
     /// <summary>
     /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary cannot, a null key, so the

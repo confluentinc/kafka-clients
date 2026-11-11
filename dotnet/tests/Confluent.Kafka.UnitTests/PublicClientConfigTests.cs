@@ -19,6 +19,7 @@ using System.Linq;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -84,9 +85,11 @@ public sealed class PublicClientConfigTests
         AsyncKafkaAdminClientClient,
     };
 
+    // Java's tests take security.protocol and metadata.recovery.strategy from CommonClientConfigs, which is not
+    // translated, so those keys stay literals.
     [Theory]
     [InlineData(
-        "ProducerConfigTest.testInvalidCompressionType", "compression.type", "abc",
+        "ProducerConfigTest.testInvalidCompressionType", ProducerConfig.COMPRESSION_TYPE_CONFIG, "abc",
         "String must be one of: none, gzip, snappy, lz4, zstd")]
     [InlineData(
         "ProducerConfigTest.testInvalidSecurityProtocol", "security.protocol", "abc",
@@ -95,7 +98,8 @@ public sealed class PublicClientConfigTests
         "ProducerConfigTest.testInvalidMetadataRecoveryStrategy", "metadata.recovery.strategy", "abc",
         "String must be one of (case insensitive): REBOOTSTRAP, NONE")]
     [InlineData(
-        "ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy", "buffer.memory.allocation.strategy", "abc",
+        "ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy",
+        ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG, "abc",
         "String must be one of (case insensitive): FULL, INCREMENTAL")]
     [InlineData(
         "ConsumerConfigTest.testInvalidSecurityProtocol", "security.protocol", "abc",
@@ -104,10 +108,10 @@ public sealed class PublicClientConfigTests
         "ConsumerConfigTest.testInvalidMetadataRecoveryStrategy", "metadata.recovery.strategy", "abc",
         "String must be one of (case insensitive): REBOOTSTRAP, NONE")]
     [InlineData(
-        "ConsumerConfigTest.testInvalidGroupInstanceId", "group.instance.id", "",
+        "ConsumerConfigTest.testInvalidGroupInstanceId", ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "",
         "String must be non-empty")]
     [InlineData(
-        "ConsumerConfigTest.testProtocolConfigValidation(invalid)", "group.protocol", "invalid",
+        "ConsumerConfigTest.testProtocolConfigValidation(invalid)", ConsumerConfig.GROUP_PROTOCOL_CONFIG, "invalid",
         "String must be one of (case insensitive): CONSUMER, CLASSIC")]
     [InlineData(
         "AdminClientConfigTest.testInvalidMetadataRecoveryStrategy", "metadata.recovery.strategy", "abc",
@@ -122,20 +126,28 @@ public sealed class PublicClientConfigTests
     [Fact]
     public void ProducerConfigTest_testValidBufferMemoryAllocationStrategy()
     {
-        Constructs(KafkaProducerClient, Configs(KafkaProducerClient, ("buffer.memory.allocation.strategy", "incremental")));
+        Constructs(
+            KafkaProducerClient,
+            Configs(
+                KafkaProducerClient,
+                (ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+                    ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)));
     }
 
     [Theory]
-    [InlineData("heartbeat.interval.ms", 1000)]
-    [InlineData("session.timeout.ms", 30000)]
-    [InlineData("partition.assignment.strategy", "RoundRobinAssignor")]
+    [InlineData(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 1000)]
+    [InlineData(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 30000)]
+    [InlineData(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, "RoundRobinAssignor")]
     public void ConsumerConfigTest_testUnsupportedConfigsWithConsumerGroupProtocol(string key, object value)
     {
         Dictionary<string, object?> configs = Configs(
-            KafkaConsumerClient, ("group.protocol", "CONSUMER"), (key, value));
+            KafkaConsumerClient,
+            (ConsumerConfig.GROUP_PROTOCOL_CONFIG, GroupProtocol.CONSUMER.ToString()),
+            (key, value));
 
         Assert.Equal(
-            key + " cannot be set when group.protocol=CONSUMER",
+            key + " cannot be set when " + ConsumerConfig.GROUP_PROTOCOL_CONFIG + "=" +
+            GroupProtocol.CONSUMER.ToString(),
             Refusal(KafkaConsumerClient, configs).Message);
     }
 
@@ -143,14 +155,14 @@ public sealed class PublicClientConfigTests
     public void ProducerConfigTest_testUpperboundCheckOfEnableIdempotence()
     {
         Dictionary<string, object?> configs = Configs(
-            KafkaProducerClient, ("max.in.flight.requests.per.connection", 6));
+            KafkaProducerClient, (ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 6));
 
         Assert.Equal(
-            "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. " +
-            "Current value is 6.",
+            "To use the idempotent producer, " + ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION +
+            " must be set to at most 5. Current value is 6.",
             Refusal(KafkaProducerClient, configs).Message);
 
-        configs["max.in.flight.requests.per.connection"] = 5;
+        configs[ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION] = 5;
         Constructs(KafkaProducerClient, configs);
     }
 
@@ -159,21 +171,22 @@ public sealed class PublicClientConfigTests
     {
         Dictionary<string, object?> configs = Configs(
             KafkaProducerClient,
-            ("enable.idempotence", true),
-            ("transactional.id", "test-txn-id"),
-            ("transaction.two.phase.commit.enable", true),
-            ("transaction.timeout.ms", 60000));
+            (ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true),
+            (ProducerConfig.TRANSACTIONAL_ID_CONFIG, "test-txn-id"),
+            (ProducerConfig.TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG, true),
+            (ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, 60000));
 
         Assert.Equal(
-            "Cannot set transaction.timeout.ms when transaction.two.phase.commit.enable is set to true. " +
+            "Cannot set " + ProducerConfig.TRANSACTION_TIMEOUT_CONFIG + " when " +
+            ProducerConfig.TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG + " is set to true. " +
             "Transactions will not expire with two-phase commit enabled.",
             Refusal(KafkaProducerClient, configs).Message);
 
-        configs.Remove("transaction.timeout.ms");
+        configs.Remove(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG);
         Constructs(KafkaProducerClient, configs);
 
-        configs["transaction.timeout.ms"] = 60000;
-        configs["transaction.two.phase.commit.enable"] = false;
+        configs[ProducerConfig.TRANSACTION_TIMEOUT_CONFIG] = 60000;
+        configs[ProducerConfig.TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG] = false;
         Constructs(KafkaProducerClient, configs);
     }
 
@@ -436,11 +449,10 @@ public sealed class PublicClientConfigTests
         var consumer = (IConsumerCommon)Create(client, Configs(client, ("group.id", null)));
         try
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => consumer.GroupMetadata());
+            InvalidGroupIdException failure = Assert.Throws<InvalidGroupIdException>(() => consumer.GroupMetadata());
 
             Assert.Equal(InvalidGroupIdCode, failure.Code);
             Assert.Equal(GroupIdNotDefinedMessage, failure.Message);
-            Assert.False(failure.IsRetriable);
         }
         finally
         {
@@ -470,7 +482,6 @@ public sealed class PublicClientConfigTests
         ConfigException error = Assert.IsType<ConfigException>(caught);
         Assert.Equal(Invalid(key, "abc", "Not a number of type " + type), error.Message);
         Assert.Equal(ConfigErrorCode, error.Code);
-        Assert.False(error.IsRetriable);
     }
 
     [Theory]
@@ -523,10 +534,10 @@ public sealed class PublicClientConfigTests
 
     private static IDisposable Create(string client, IReadOnlyDictionary<string, object?> configs) => client switch
     {
-        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray),
-        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray),
-        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray),
-        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray),
+        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
+        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
+        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
+        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
         KafkaAdminClientClient => new KafkaAdminClient(configs),
         AsyncKafkaAdminClientClient => new AsyncKafkaAdminClient(configs),
         _ => throw new ArgumentOutOfRangeException(nameof(client), client, null),
@@ -539,7 +550,6 @@ public sealed class PublicClientConfigTests
     {
         ConfigException failure = Assert.Throws<ConfigException>(() => Constructs(client, configs));
         Assert.Equal(ConfigErrorCode, failure.Code);
-        Assert.False(failure.IsRetriable);
         Assert.Null(failure.InnerException);
         return failure;
     }

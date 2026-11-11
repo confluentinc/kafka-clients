@@ -36,25 +36,25 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void Flush_OnMock_Succeeds()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TestTimeout.Run(() => producer.Flush(), s_deadline);
     }
 
     [Fact]
-    public void Flush_AfterDispose_ThrowsObjectDisposed()
+    public void Flush_AfterDispose_ThrowsIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Flush());
+        Assert.Throws<IllegalStateException>(() => producer.Flush());
     }
 
     [Fact]
     public void PartitionsFor_OnMock_ReturnsEmptyList()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         IReadOnlyList<PartitionInfo> partitions = null!;
@@ -67,7 +67,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_EmptyTopic_ForwardedNotRejected_ReturnsEmptyList()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // An empty topic reaches the core, as in Java and Python; only null is rejected.
@@ -81,7 +81,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // ArgumentNullException sets no custom message, so ParamName is the asserted contract.
@@ -94,7 +94,7 @@ public sealed class PublicSyncProducerPeripheralTests
     {
         // The null check precedes the closed check, so a closed producer with a null topic throws
         // ArgumentNullException.
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.PartitionsFor(null!));
@@ -102,18 +102,18 @@ public sealed class PublicSyncProducerPeripheralTests
     }
 
     [Fact]
-    public void PartitionsFor_AfterDispose_ThrowsObjectDisposed()
+    public void PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
+        Assert.Throws<IllegalStateException>(() => producer.PartitionsFor(Topic));
     }
 
     [Fact]
     public void PartitionsFor_CalledRepeatedly_Succeeds()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Repeated calls free their owned list root once each and return a fresh empty list.

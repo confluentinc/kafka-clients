@@ -34,8 +34,11 @@ namespace Confluent.Kafka.Common.Acl;
 /// </remarks>
 public sealed class AclBindingFilter
 {
+    private readonly ResourcePatternFilter _patternFilter;
+    private readonly AccessControlEntryFilter _entryFilter;
+
     /// <summary>A filter matching every ACL binding — Java's <c>ANY</c>.</summary>
-    public static AclBindingFilter ANY { get; } =
+    public static readonly AclBindingFilter ANY =
         new AclBindingFilter(ResourcePatternFilter.ANY, AccessControlEntryFilter.ANY);
 
     /// <summary>Creates a binding filter — Java's constructor.</summary>
@@ -46,28 +49,60 @@ public sealed class AclBindingFilter
     /// </exception>
     public AclBindingFilter(ResourcePatternFilter patternFilter, AccessControlEntryFilter entryFilter)
     {
-        PatternFilter = patternFilter ?? throw new ArgumentNullException(nameof(patternFilter));
-        EntryFilter = entryFilter ?? throw new ArgumentNullException(nameof(entryFilter));
+        _patternFilter = patternFilter ?? throw new ArgumentNullException(nameof(patternFilter));
+        _entryFilter = entryFilter ?? throw new ArgumentNullException(nameof(entryFilter));
     }
 
     /// <summary>The resource pattern filter — Java's <c>patternFilter()</c>.</summary>
-    public ResourcePatternFilter PatternFilter { get; }
+    /// <returns>The resource pattern filter.</returns>
+    public ResourcePatternFilter PatternFilter() => _patternFilter;
 
     /// <summary>The access control entry filter — Java's <c>entryFilter()</c>.</summary>
-    public AccessControlEntryFilter EntryFilter { get; }
+    /// <returns>The access control entry filter.</returns>
+    public AccessControlEntryFilter EntryFilter() => _entryFilter;
 
     /// <summary>
     /// Whether either half has an <c>UNKNOWN</c> component — Java's <c>isUnknown()</c>.
     /// </summary>
-    public bool IsUnknown => PatternFilter.IsUnknown || EntryFilter.IsUnknown;
+    /// <returns>Whether either half has an <c>UNKNOWN</c> component.</returns>
+    public bool IsUnknown() => PatternFilter().IsUnknown() || EntryFilter().IsUnknown();
+
+    /// <summary>
+    /// Whether this filter matches at most one binding — Java's <c>matchesAtMostOne()</c>: both halves do.
+    /// </summary>
+    /// <returns>Whether both halves match at most one.</returns>
+    public bool MatchesAtMostOne() => _patternFilter.MatchesAtMostOne() && _entryFilter.MatchesAtMostOne();
+
+    /// <summary>
+    /// A description of the first component that keeps this filter from matching just one binding, the pattern
+    /// half first, or <see langword="null"/> when there is none — Java's <c>findIndefiniteField()</c>.
+    /// </summary>
+    /// <returns>Java's text for the indefinite component, or <see langword="null"/>.</returns>
+    public string? FindIndefiniteField() => _patternFilter.FindIndefiniteField() ?? _entryFilter.FindIndefiniteField();
+
+    /// <summary>
+    /// Whether this filter matches <paramref name="binding"/> — Java's <c>matches(AclBinding)</c>: both halves match.
+    /// </summary>
+    /// <param name="binding">The binding to test.</param>
+    /// <returns>Whether both halves match.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="binding"/> is null.</exception>
+    public bool Matches(AclBinding binding)
+    {
+        if (binding is null)
+        {
+            throw new ArgumentNullException(nameof(binding));
+        }
+
+        return _patternFilter.Matches(binding.Pattern()) && _entryFilter.Matches(binding.Entry());
+    }
 
     /// <summary>Value equality over both halves — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two are the same filter.</returns>
     public override bool Equals(object? obj) =>
         obj is AclBindingFilter other
-        && PatternFilter.Equals(other.PatternFilter)
-        && EntryFilter.Equals(other.EntryFilter);
+        && PatternFilter().Equals(other.PatternFilter())
+        && EntryFilter().Equals(other.EntryFilter());
 
     /// <summary>The hash of both halves — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -76,8 +111,8 @@ public sealed class AclBindingFilter
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + PatternFilter.GetHashCode();
-            hash = (hash * 31) + EntryFilter.GetHashCode();
+            hash = (hash * 31) + PatternFilter().GetHashCode();
+            hash = (hash * 31) + EntryFilter().GetHashCode();
             return hash;
         }
     }
@@ -90,6 +125,6 @@ public sealed class AclBindingFilter
         string.Format(
             CultureInfo.InvariantCulture,
             "(patternFilter={0}, entryFilter={1})",
-            PatternFilter,
-            EntryFilter);
+            PatternFilter(),
+            EntryFilter());
 }

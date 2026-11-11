@@ -15,7 +15,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
@@ -27,12 +26,14 @@ public sealed class ConsumerBenchmarkResult
 {
     public const int SetupNotReadyExitCode = 2;
 
-    internal ConsumerBenchmarkResult(bool assignmentFailed, bool setupNotReady, long messagesMeasured, long p99)
+    internal ConsumerBenchmarkResult(
+        bool assignmentFailed, bool setupNotReady, long messagesMeasured, long p99, bool resultsWriteFailed = false)
     {
         AssignmentFailed = assignmentFailed;
         SetupNotReady = setupNotReady;
         MessagesMeasured = messagesMeasured;
         P99 = p99;
+        ResultsWriteFailed = resultsWriteFailed;
     }
 
     public bool AssignmentFailed { get; }
@@ -42,6 +43,9 @@ public sealed class ConsumerBenchmarkResult
     public long MessagesMeasured { get; }
 
     public long P99 { get; }
+
+    /// <summary>The run measured records but could not write its results file.</summary>
+    public bool ResultsWriteFailed { get; }
 }
 
 /// <summary>
@@ -64,7 +68,7 @@ public static class ConsumerBenchmark
             if (Monotonic() - joinStart >= config.JoinTimeoutSeconds)
             {
                 Console.Error.WriteLine("ERROR: timed out waiting for assignment");
-                backend.Close();
+                CloseQuietly(backend);
                 return new ConsumerBenchmarkResult(assignmentFailed: true, setupNotReady: false, 0, 0);
             }
         }
@@ -80,46 +84,51 @@ public static class ConsumerBenchmark
 
         Console.WriteLine(">>> at live edge");
 
-        LoadDriver? loadDriver = LoadDriver.MaybeStart(config);
-
-        if (!AwaitPipelineReady(config, poll))
-        {
-            // Unlike Python, which leaks its spawn_producer process here, stop the load driver.
-            loadDriver?.Stop();
-            backend.Close();
-            return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
-        }
-
-        var measurement = new Measurement(config, metrics);
-        measurement.Begin();
+        LoadDriver? loadDriver = null;
         try
         {
-            while (!PerfSignals.Terminating)
-            {
-                foreach (PolledRecord record in poll())
-                {
-                    measurement.ProcessRecord(record.TimestampMs, record.NBytes);
-                }
+            loadDriver = LoadDriver.MaybeStart(config);
 
-                if (measurement.TimeLimitReached() || measurement.NoDataTimeout())
+            if (!AwaitPipelineReady(config, poll))
+            {
+                return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
+            }
+
+            var measurement = new Measurement(config, metrics);
+            measurement.Begin();
+            double measuredDuration;
+            try
+            {
+                while (!PerfSignals.Terminating)
                 {
-                    break;
+                    measurement.ProcessPoll(poll());
+                    if (measurement.TimeLimitReached() || measurement.NoDataTimeout())
+                    {
+                        break;
+                    }
                 }
             }
-        }
-        catch (MeasurementDone)
-        {
+            catch (MeasurementDone)
+            {
+            }
+            finally
+            {
+                measuredDuration = measurement.MeasuredDuration();
+                metrics.SetMeasurementEnd(Metrics.NowMs());
+                loadDriver?.Stop();
+                loadDriver = null;
+                metrics.StopCollecting();
+            }
+
+            // Before the close, so a failing close cannot discard the results.
+            return Summarize(config, measurement, measuredDuration, metrics);
         }
         finally
         {
-            double measuredDuration = measurement.MeasuredDuration();
-            metrics.SetMeasurementEnd(Metrics.NowMs());
+            // As Python, every exit stops the load driver.
             loadDriver?.Stop();
-            backend.Close();
-            measurement.SetFinalDuration(measuredDuration);
+            CloseQuietly(backend);
         }
-
-        return Summarize(config, measurement, metrics);
     }
 
     public static async Task<ConsumerBenchmarkResult> RunAsync(ConsumerBenchmarkConfig config, IAsyncConsumerBackend backend, Metrics metrics)
@@ -135,7 +144,7 @@ public static class ConsumerBenchmark
             if (Monotonic() - joinStart >= config.JoinTimeoutSeconds)
             {
                 Console.Error.WriteLine("ERROR: timed out waiting for assignment");
-                await backend.Close().ConfigureAwait(false);
+                await CloseQuietlyAsync(backend).ConfigureAwait(false);
                 return new ConsumerBenchmarkResult(assignmentFailed: true, setupNotReady: false, 0, 0);
             }
         }
@@ -152,46 +161,51 @@ public static class ConsumerBenchmark
 
         Console.WriteLine(">>> at live edge");
 
-        LoadDriver? loadDriver = LoadDriver.MaybeStart(config);
-
-        if (!await AwaitPipelineReadyAsync(config, poll).ConfigureAwait(false))
-        {
-            // Unlike Python, which leaks its spawn_producer process here, stop the load driver.
-            loadDriver?.Stop();
-            await backend.Close().ConfigureAwait(false);
-            return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
-        }
-
-        var measurement = new Measurement(config, metrics);
-        measurement.Begin();
+        LoadDriver? loadDriver = null;
         try
         {
-            while (!PerfSignals.Terminating)
-            {
-                foreach (PolledRecord record in await poll().ConfigureAwait(false))
-                {
-                    measurement.ProcessRecord(record.TimestampMs, record.NBytes);
-                }
+            loadDriver = LoadDriver.MaybeStart(config);
 
-                if (measurement.TimeLimitReached() || measurement.NoDataTimeout())
+            if (!await AwaitPipelineReadyAsync(config, poll).ConfigureAwait(false))
+            {
+                return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
+            }
+
+            var measurement = new Measurement(config, metrics);
+            measurement.Begin();
+            double measuredDuration;
+            try
+            {
+                while (!PerfSignals.Terminating)
                 {
-                    break;
+                    measurement.ProcessPoll(await poll().ConfigureAwait(false));
+                    if (measurement.TimeLimitReached() || measurement.NoDataTimeout())
+                    {
+                        break;
+                    }
                 }
             }
-        }
-        catch (MeasurementDone)
-        {
+            catch (MeasurementDone)
+            {
+            }
+            finally
+            {
+                measuredDuration = measurement.MeasuredDuration();
+                metrics.SetMeasurementEnd(Metrics.NowMs());
+                loadDriver?.Stop();
+                loadDriver = null;
+                metrics.StopCollecting();
+            }
+
+            // Before the close, so a failing close cannot discard the results.
+            return Summarize(config, measurement, measuredDuration, metrics);
         }
         finally
         {
-            double measuredDuration = measurement.MeasuredDuration();
-            metrics.SetMeasurementEnd(Metrics.NowMs());
+            // As Python, every exit stops the load driver.
             loadDriver?.Stop();
-            await backend.Close().ConfigureAwait(false);
-            measurement.SetFinalDuration(measuredDuration);
+            await CloseQuietlyAsync(backend).ConfigureAwait(false);
         }
-
-        return Summarize(config, measurement, metrics);
     }
 
     private static bool AwaitPipelineReady(ConsumerBenchmarkConfig config, Func<IReadOnlyList<PolledRecord>> poll)
@@ -204,7 +218,7 @@ public static class ConsumerBenchmark
             foreach (PolledRecord record in poll())
             {
                 received++;
-                if (MeasurableLatencyMs(record.TimestampMs) is not null)
+                if (IsMeasurable(record.TimestampMs))
                 {
                     measurable++;
                 }
@@ -224,7 +238,7 @@ public static class ConsumerBenchmark
             foreach (PolledRecord record in await poll().ConfigureAwait(false))
             {
                 received++;
-                if (MeasurableLatencyMs(record.TimestampMs) is not null)
+                if (IsMeasurable(record.TimestampMs))
                 {
                     measurable++;
                 }
@@ -248,18 +262,32 @@ public static class ConsumerBenchmark
         return false;
     }
 
-    private static long? MeasurableLatencyMs(long tsMs)
-    {
-        if (tsMs > 0)
-        {
-            long latency = Metrics.NowMs() - tsMs;
-            if (latency >= 0)
-            {
-                return latency;
-            }
-        }
+    // Python's _measurable_latency_ms: the gate needs a CreateTime and a non-negative latency.
+    private static bool IsMeasurable(long tsMs) => tsMs > 0 && Metrics.NowMs() - tsMs >= 0;
 
-        return null;
+    // Python's _close_consumer: a close error is a warning, which neither discards the results nor fails the run.
+    private static void CloseQuietly(IConsumerBackend backend)
+    {
+        try
+        {
+            backend.Close();
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"WARNING: closing the consumer failed: {e.GetType().Name}: {e.Message}");
+        }
+    }
+
+    private static async Task CloseQuietlyAsync(IAsyncConsumerBackend backend)
+    {
+        try
+        {
+            await backend.Close().ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"WARNING: closing the consumer failed: {e.GetType().Name}: {e.Message}");
+        }
     }
 
     private static void PrintHeader(ConsumerBenchmarkConfig config)
@@ -274,7 +302,8 @@ public static class ConsumerBenchmark
         Console.WriteLine(new string('=', 72));
     }
 
-    private static ConsumerBenchmarkResult Summarize(ConsumerBenchmarkConfig config, Measurement m, Metrics metrics)
+    private static ConsumerBenchmarkResult Summarize(
+        ConsumerBenchmarkConfig config, Measurement m, double duration, Metrics metrics)
     {
         long[] hist = m.LatencyHist;
         long p50 = LatencyHistogram.PercentileFromHist(hist, 0.50);
@@ -283,50 +312,29 @@ public static class ConsumerBenchmark
         long p99 = LatencyHistogram.PercentileFromHist(hist, 0.99);
         long p999 = LatencyHistogram.PercentileFromHist(hist, 0.999);
 
-        long total = 0;
-        long weighted = 0;
-        long min = 0;
-        long max = 0;
-        bool sawMin = false;
-        for (int ms = 0; ms < hist.Length; ms++)
-        {
-            long c = hist[ms];
-            if (c == 0)
-            {
-                continue;
-            }
+        // Exact, never from the clamped buckets.
+        double avg = m.LatencySamples > 0 ? (double)m.LatencySumMs / m.LatencySamples : 0.0;
+        long min = m.LatencyMinMs ?? 0;
+        long max = m.LatencyMaxMs;
 
-            total += c;
-            weighted += ms * c;
-            if (!sawMin)
-            {
-                min = ms;
-                sawMin = true;
-            }
+        long measured = m.MeasuredMessages;
+        double thrMsg = duration > 0 ? measured / duration : 0.0;
+        double thrMib = duration > 0 ? (measured * (double)config.MessageSize) / (1024.0 * 1024.0) / duration : 0.0;
 
-            max = ms;
-        }
-
-        double avg = total > 0 ? (double)weighted / total : 0.0;
-        double duration = m.FinalDurationSeconds;
-        double thrMsg = duration > 0 ? m.MeasuredMessages / duration : 0.0;
-        double thrMib = duration > 0 ? (m.MeasuredMessages * (double)config.MessageSize) / (1024.0 * 1024.0) / duration : 0.0;
-
-        // rss_avg_mb (MB), as Python's consumer summary; the producer harnesses report rss_avg_kib.
         ExternalMetricsAggregations agg = metrics.ExternalMetricsAggregations();
-        (double Cpu, double RssMb)? external = agg.TotalExternalMetrics > 0
-            ? (agg.AverageCpu, agg.AverageRss / (1024.0 * 1024.0))
-            : null;
+        bool external = agg.TotalExternalMetrics > 0;
+        double cpu = external ? agg.AverageCpu : 0.0;
+        double rssMb = external ? agg.AverageRss / (1024.0 * 1024.0) : 0.0;
 
         Console.WriteLine();
         Console.WriteLine(new string('=', 72));
         Console.WriteLine($"SUMMARY - CLIENT_VERSION={config.ClientVersion} (warmup excluded)");
         Console.WriteLine(new string('=', 72));
-        Console.WriteLine($"Measured messages: {m.MeasuredMessages}");
+        Console.WriteLine($"Measured messages: {measured}");
         Console.WriteLine($"Duration:          {duration:F2} s");
         Console.WriteLine($"Throughput:        {thrMsg:F0} msg/s  ({thrMib:F2} MiB/s)");
         Console.WriteLine($"E2E latency (ms):  min={min} avg={avg:F2} p50={p50} p90={p90} p95={p95} p99={p99} p99.9={p999} max={max}");
-        if (external is (double cpu, double rssMb))
+        if (external)
         {
             Console.WriteLine($"CPU (% one core):  avg={cpu:F1}");
             Console.WriteLine($"RSS (MB):          avg={rssMb:F1}");
@@ -334,63 +342,61 @@ public static class ConsumerBenchmark
 
         Console.WriteLine(new string('=', 72));
 
-        WriteResultsJson(config, m.MeasuredMessages, duration, thrMsg, thrMib, min, avg, p50, p90, p95, p99, p999, max, external);
-        return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: false, m.MeasuredMessages, p99);
+        // Not written when nothing was measured, as Python: zeros would read as a result.
+        bool writeFailed = false;
+        if (measured > 0)
+        {
+            var json = new StringBuilder(512);
+            json.Append("{\n");
+            json.Append("  \"test\": \"consumer\",\n");
+            json.Append("  \"client\": ").Append(PerfFormat.JsonString(ClientName(config))).Append(",\n");
+            json.Append("  \"client_version\": ").Append(PerfFormat.JsonString(config.ClientVersion)).Append(",\n");
+            json.Append("  \"topic\": ").Append(PerfFormat.JsonString(config.Topic)).Append(",\n");
+            json.Append("  \"messages_measured\": ").Append(PerfFormat.Num(measured)).Append(",\n");
+            json.Append("  \"duration_s\": ").Append(PerfFormat.JsonFloat(duration)).Append(",\n");
+            json.Append("  \"throughput_msg_s\": ").Append(PerfFormat.JsonFloat(thrMsg)).Append(",\n");
+            json.Append("  \"throughput_mib_s\": ").Append(PerfFormat.JsonFloat(thrMib)).Append(",\n");
+            json.Append("  \"latency_ms\": {\n");
+            json.Append("    \"min\": ").Append(PerfFormat.Num(min)).Append(",\n");
+            json.Append("    \"avg\": ").Append(PerfFormat.JsonFloat(avg)).Append(",\n");
+            json.Append("    \"p50\": ").Append(PerfFormat.Num(p50)).Append(",\n");
+            json.Append("    \"p90\": ").Append(PerfFormat.Num(p90)).Append(",\n");
+            json.Append("    \"p95\": ").Append(PerfFormat.Num(p95)).Append(",\n");
+            json.Append("    \"p99\": ").Append(PerfFormat.Num(p99)).Append(",\n");
+            json.Append("    \"p999\": ").Append(PerfFormat.Num(p999)).Append(",\n");
+            json.Append("    \"max\": ").Append(PerfFormat.Num(max)).Append('\n');
+            json.Append("  },\n");
+
+            // rss_avg_mb as the other consumer harnesses' summaries, rss_avg_kib as every harness's results.json;
+            // all three are written, 0 without a sample.
+            json.Append("  \"rss_avg_mb\": ").Append(PerfFormat.JsonFloat(rssMb)).Append(",\n");
+            json.Append("  \"cpu_avg_pct\": ").Append(PerfFormat.JsonFloat(cpu)).Append(",\n");
+            json.Append("  \"rss_avg_kib\": ").Append(PerfFormat.JsonFloat(rssMb * 1024.0)).Append('\n');
+            json.Append('}');
+
+            writeFailed = !TryWriteResults(config.ResultsFile, json.ToString());
+        }
+
+        return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: false, measured, p99, writeFailed);
     }
 
-    private static void WriteResultsJson(
-        ConsumerBenchmarkConfig config,
-        long measuredMessages,
-        double duration,
-        double thrMsg,
-        double thrMib,
-        long min,
-        double avg,
-        long p50,
-        long p90,
-        long p95,
-        long p99,
-        long p999,
-        long max,
-        (double Cpu, double RssMb)? external)
+    /// <summary>The <c>client</c> of results.json: backend, then mode, as Python's <c>_client_name</c>.</summary>
+    private static string ClientName(ConsumerBenchmarkConfig config) =>
+        "dotnet-" + (config.ClientVersion == "2" ? "librdkafka" : "rust") + (config.AsyncMode ? "-async" : string.Empty) + "-consumer";
+
+    // Unlike Python, which only logs it, a failed write fails the run.
+    private static bool TryWriteResults(string path, string contents)
     {
-        var sb = new StringBuilder(512);
-        sb.Append("{\n");
-        sb.Append("  \"client_version\": \"").Append(config.ClientVersion).Append("\",\n");
-        sb.Append("  \"topic\": \"").Append(config.Topic).Append("\",\n");
-        sb.Append("  \"messages_measured\": ").Append(measuredMessages.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("  \"duration_s\": ").Append(PerfFormat.JsonFloat(duration)).Append(",\n");
-        sb.Append("  \"throughput_msg_s\": ").Append(PerfFormat.JsonFloat(thrMsg)).Append(",\n");
-        sb.Append("  \"throughput_mib_s\": ").Append(PerfFormat.JsonFloat(thrMib)).Append(",\n");
-        sb.Append("  \"latency_ms\": {\n");
-        sb.Append("    \"min\": ").Append(min.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"avg\": ").Append(PerfFormat.JsonFloat(avg)).Append(",\n");
-        sb.Append("    \"p50\": ").Append(p50.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"p90\": ").Append(p90.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"p95\": ").Append(p95.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"p99\": ").Append(p99.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"p999\": ").Append(p999.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-        sb.Append("    \"max\": ").Append(max.ToString(CultureInfo.InvariantCulture)).Append('\n');
-        if (external is (double cpu, double rssMb))
-        {
-            sb.Append("  },\n");
-            sb.Append("  \"cpu_avg_pct\": ").Append(PerfFormat.JsonFloat(cpu)).Append(",\n");
-            sb.Append("  \"rss_avg_mb\": ").Append(PerfFormat.JsonFloat(rssMb)).Append('\n');
-        }
-        else
-        {
-            sb.Append("  }\n");
-        }
-
-        sb.Append("}");
-
         try
         {
-            File.WriteAllText("results.json", sb.ToString());
+            File.WriteAllText(path, contents);
+            Console.WriteLine($"Results summary written to: {path}");
+            return true;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            // Non-fatal, as in Python: the summary is already on stdout.
+            Console.Error.WriteLine($"Could not write {path}: {e.Message}");
+            return false;
         }
     }
 
@@ -403,7 +409,7 @@ public static class ConsumerBenchmark
 
     /// <summary>
     /// The loop state <see cref="Run"/> and <see cref="RunAsync"/> share, Python's <c>_Measurement</c>: the warmup to
-    /// measure switch, the latency histogram and the stop conditions.
+    /// measure switch, the latency histogram, the exact latency sum, min and max, and the stop conditions.
     /// </summary>
     private sealed class Measurement
     {
@@ -418,7 +424,7 @@ public static class ConsumerBenchmark
         {
             _cfg = cfg;
             _metrics = metrics;
-            LatencyHist = LatencyHistogram.New();
+            LatencyHist = LatencyHistogram.New(LatencyHistogram.ConsumerMaxLatencyMs);
             _warmupComplete = cfg.WarmupSeconds <= 0;
         }
 
@@ -426,7 +432,14 @@ public static class ConsumerBenchmark
 
         internal long MeasuredMessages { get; private set; }
 
-        internal double FinalDurationSeconds { get; private set; }
+        internal long LatencySamples { get; private set; }
+
+        internal long LatencySumMs { get; private set; }
+
+        internal long? LatencyMinMs { get; private set; }
+
+        // Starts at 0, as Python's latency_max_ms.
+        internal long LatencyMaxMs { get; private set; }
 
         internal void Begin()
         {
@@ -442,39 +455,23 @@ public static class ConsumerBenchmark
             _noDataDeadline = Monotonic() + ConsumerBenchmarkConfig.NoDataBudgetSeconds;
         }
 
-        internal void ProcessRecord(long tsMs, int nbytes)
+        /// <summary>
+        /// Feeds one poll's records, reading the clocks once when the poll returned, as Python's <c>run</c> passes
+        /// <c>poll_now_ms</c>: the harness's own per-record work is not counted as latency. The latency is the wall
+        /// clock minus the record's CreateTime, which is wall clock too.
+        /// </summary>
+        internal void ProcessPoll(IReadOnlyList<PolledRecord> records)
         {
-            _consumeStart ??= Monotonic();
-            double now = Monotonic();
-
-            if (!_warmupComplete)
+            if (records.Count == 0)
             {
-                if (now - _consumeStart.Value >= _cfg.WarmupSeconds)
-                {
-                    _warmupComplete = true;
-                    _measureStart = now;
-
-                    // Excludes the warmup's CPU from the first measured sample.
-                    _metrics.ResetCpuBaseline();
-                    _metrics.SetMeasurementStart(Metrics.NowMs());
-                    Console.WriteLine($">>> warmup complete ({_cfg.WarmupSeconds}s); measuring");
-                }
-
                 return;
             }
 
-            if (MeasurableLatencyMs(tsMs) is long latency)
+            long pollNowMs = Metrics.NowMs();
+            double now = Monotonic();
+            for (int i = 0; i < records.Count; i++)
             {
-                LatencyHistogram.Record(LatencyHist, latency);
-                _metrics.AddLatency(latency);
-                _metrics.AddBytes(nbytes);
-                _metrics.AddMessages(1);
-                MeasuredMessages++;
-            }
-
-            if (_cfg.NumMessages > 0 && MeasuredMessages >= _cfg.NumMessages)
-            {
-                throw new MeasurementDone();
+                ProcessRecord(records[i], pollNowMs, now);
             }
         }
 
@@ -494,6 +491,56 @@ public static class ConsumerBenchmark
 
         internal double MeasuredDuration() => _measureStart is double start ? Monotonic() - start : 0.0;
 
-        internal void SetFinalDuration(double seconds) => FinalDurationSeconds = seconds;
+        // Python's process_record: the warmup is timed from the first record.
+        private void ProcessRecord(PolledRecord record, long pollNowMs, double now)
+        {
+            _consumeStart ??= now;
+
+            if (!_warmupComplete)
+            {
+                if (now - _consumeStart.Value >= _cfg.WarmupSeconds)
+                {
+                    _warmupComplete = true;
+                    _measureStart = now;
+
+                    // Excludes the warmup's CPU from the first measured sample.
+                    _metrics.ResetCpuBaseline();
+                    _metrics.SetMeasurementStart(Metrics.NowMs());
+                    Console.WriteLine($">>> warmup complete ({_cfg.WarmupSeconds}s); measuring");
+                }
+
+                return;
+            }
+
+            // Every measured record counts towards throughput; only one with a CreateTime has a latency.
+            _metrics.AddBytes(record.NBytes);
+            _metrics.AddMessages(1);
+            MeasuredMessages++;
+            if (record.TimestampMs > 0)
+            {
+                long latency = pollNowMs - record.TimestampMs;
+
+                // A negative latency (a clock step) lands in bucket 0 and is still counted.
+                LatencyHistogram.Record(LatencyHist, latency);
+                LatencySumMs += latency;
+                if (LatencyMinMs is not long min || latency < min)
+                {
+                    LatencyMinMs = latency;
+                }
+
+                if (latency > LatencyMaxMs)
+                {
+                    LatencyMaxMs = latency;
+                }
+
+                _metrics.AddLatency(latency);
+                LatencySamples++;
+            }
+
+            if (_cfg.NumMessages > 0 && MeasuredMessages >= _cfg.NumMessages)
+            {
+                throw new MeasurementDone();
+            }
+        }
     }
 }

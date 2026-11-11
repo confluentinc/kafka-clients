@@ -42,7 +42,7 @@ public sealed class PublicProducerCountedDrainTests
     public async Task Drain_IsCountedAsAUse_CloseDoesNotRefuseIt_AndTheDestroyDoes()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         NativeProducer native = NativeOf(producer);
         using ManualResetEventSlim entered = new ManualResetEventSlim();
         using ManualResetEventSlim release = new ManualResetEventSlim();
@@ -103,7 +103,7 @@ public sealed class PublicProducerCountedDrainTests
     }
 
     /// <summary>A delivery callback that signals it is running, then waits until it is released.</summary>
-    private sealed class Parking : IDeliveryCallback
+    private sealed class Parking : ICallback
     {
         private readonly ManualResetEventSlim _entered;
         private readonly ManualResetEventSlim _release;

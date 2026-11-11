@@ -18,6 +18,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 
 namespace Confluent.Kafka.Admin;
 
@@ -26,15 +27,21 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.LogDirDescription</c>.
 /// </summary>
 /// <remarks>
-/// <see cref="Error"/> is a field of a description the broker returned, not a failure of the
+/// <see cref="Error()"/> is a field of a description the broker returned, not a failure of the
 /// query: it means this log directory is offline or unreadable (Java's
 /// <c>KafkaStorageException</c> or <c>UnknownServerException</c>). The per-broker future in
-/// <see cref="DescribeLogDirsResult.Descriptions"/> and
-/// <see cref="AsyncDescribeLogDirsResult.Descriptions"/> succeeds, as in Java.
+/// <see cref="DescribeLogDirsResult.Descriptions()"/> and
+/// <see cref="AsyncDescribeLogDirsResult.Descriptions()"/> succeeds, as in Java.
 /// </remarks>
 public sealed class LogDirDescription
 {
     private const long UnknownVolumeBytes = -1L;
+
+    private readonly ApiException? _error;
+    private readonly IReadOnlyDictionary<TopicPartition, ReplicaInfo> _replicaInfos;
+    private readonly long? _totalBytes;
+    private readonly long? _usableBytes;
+    private readonly bool _isCordoned;
 
     /// <summary>
     /// Initializes a description with unreported volume sizes and an uncordoned directory —
@@ -47,7 +54,7 @@ public sealed class LogDirDescription
     /// <param name="replicaInfos">The replicas hosted in this directory.</param>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
     public LogDirDescription(
-        KafkaException? error, IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos)
+        ApiException? error, IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos)
         : this(error, replicaInfos, null, null, false)
     {
     }
@@ -70,7 +77,7 @@ public sealed class LogDirDescription
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
     public LogDirDescription(
-        KafkaException? error,
+        ApiException? error,
         IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
         long? totalBytes,
         long? usableBytes)
@@ -107,7 +114,7 @@ public sealed class LogDirDescription
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
     public LogDirDescription(
-        KafkaException? error,
+        ApiException? error,
         IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
         long? totalBytes,
         long? usableBytes,
@@ -118,47 +125,51 @@ public sealed class LogDirDescription
             throw new ArgumentNullException(nameof(replicaInfos));
         }
 
-        Error = error;
+        _error = error;
 
-        ReplicaInfos = replicaInfos is IDictionary<TopicPartition, ReplicaInfo> mutable
+        _replicaInfos = replicaInfos is IDictionary<TopicPartition, ReplicaInfo> mutable
             ? new ReadOnlyDictionary<TopicPartition, ReplicaInfo>(mutable)
             : replicaInfos;
-        TotalBytes = totalBytes == UnknownVolumeBytes ? null : totalBytes;
-        UsableBytes = usableBytes == UnknownVolumeBytes ? null : usableBytes;
-        IsCordoned = isCordoned;
+        _totalBytes = totalBytes == UnknownVolumeBytes ? null : totalBytes;
+        _usableBytes = usableBytes == UnknownVolumeBytes ? null : usableBytes;
+        _isCordoned = isCordoned;
     }
 
     /// <summary>
     /// The directory-level error, or <see langword="null"/> when the directory is healthy —
-    /// Java's <c>error()</c>, whose <c>ApiException</c> maps to <see cref="KafkaException"/>.
+    /// Java's <c>error()</c>.
     /// </summary>
+    /// <returns>The directory-level error, or <see langword="null"/> when the directory is healthy.</returns>
     /// <remarks>
     /// Non-null does not mean the query failed: see the type remarks.
     /// </remarks>
-    public KafkaException? Error { get; }
+    public ApiException? Error() => _error;
 
     /// <summary>
     /// The replicas hosted in this directory, keyed by topic partition — Java's
     /// <c>replicaInfos()</c>.
     /// </summary>
+    /// <returns>The replicas hosted in this directory, keyed by topic partition.</returns>
     /// <remarks>
     /// A read-only view over the caller's map, as Java's <c>Collections.unmodifiableMap</c> is:
     /// the caller's own changes stay visible, and a change through a cast back to a mutable
     /// dictionary throws <see cref="NotSupportedException"/>.
     /// </remarks>
-    public IReadOnlyDictionary<TopicPartition, ReplicaInfo> ReplicaInfos { get; }
+    public IReadOnlyDictionary<TopicPartition, ReplicaInfo> ReplicaInfos() => _replicaInfos;
 
     /// <summary>
     /// The total size in bytes of the volume this directory is on, or
     /// <see langword="null"/> when the broker did not report it — Java's
     /// <c>totalBytes()</c>, an <c>OptionalLong</c>.
     /// </summary>
+    /// <returns>The total size in bytes of the volume this directory is on, or <see langword="null"/> when the
+    /// broker did not report it.</returns>
     /// <remarks>
     /// Java's <c>UNKNOWN_VOLUME_BYTES</c> (<c>-1</c>), which Java's constructor turns into
     /// <c>OptionalLong.empty()</c>, becomes <see langword="null"/>; <c>0</c> is a real size.
-    /// Unlike <see cref="DeletedRecords.LowWatermark"/>, where <c>-1</c> is a value.
+    /// Unlike <see cref="DeletedRecords.LowWatermark()"/>, where <c>-1</c> is a value.
     /// </remarks>
-    public long? TotalBytes { get; }
+    public long? TotalBytes() => _totalBytes;
 
     /// <summary>
     /// The usable size in bytes of the volume this directory is on, or
@@ -166,14 +177,15 @@ public sealed class LogDirDescription
     /// <c>usableBytes()</c>.
     /// </summary>
     /// <remarks>
-    /// <inheritdoc cref="TotalBytes" path="/remarks"/>
+    /// <inheritdoc cref="TotalBytes()" path="/remarks"/>
     /// </remarks>
-    public long? UsableBytes { get; }
+    public long? UsableBytes() => _usableBytes;
 
     /// <summary>
     /// Whether this log directory is cordoned — Java's <c>isCordoned()</c>.
     /// </summary>
-    public bool IsCordoned { get; }
+    /// <returns>Whether this log directory is cordoned.</returns>
+    public bool IsCordoned() => _isCordoned;
 
     /// <summary>
     /// A diagnostic rendering following Java's <c>toString()</c>.
@@ -183,7 +195,7 @@ public sealed class LogDirDescription
     {
         StringBuilder replicas = new StringBuilder("{");
         bool first = true;
-        foreach (KeyValuePair<TopicPartition, ReplicaInfo> replica in ReplicaInfos)
+        foreach (KeyValuePair<TopicPartition, ReplicaInfo> replica in _replicaInfos)
         {
             if (!first)
             {
@@ -200,9 +212,9 @@ public sealed class LogDirDescription
             CultureInfo.InvariantCulture,
             "LogDirDescription(replicaInfos={0}, error={1}, totalBytes={2}, usableBytes={3}, isCordoned={4})",
             replicas,
-            Error is null ? "null" : Error.Message,
-            TotalBytes is null ? "empty" : TotalBytes.Value.ToString(CultureInfo.InvariantCulture),
-            UsableBytes is null ? "empty" : UsableBytes.Value.ToString(CultureInfo.InvariantCulture),
-            IsCordoned ? "true" : "false");
+            _error is null ? "null" : _error.Message,
+            _totalBytes is null ? "empty" : _totalBytes.Value.ToString(CultureInfo.InvariantCulture),
+            _usableBytes is null ? "empty" : _usableBytes.Value.ToString(CultureInfo.InvariantCulture),
+            _isCordoned ? "true" : "false");
     }
 }

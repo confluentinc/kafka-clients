@@ -35,11 +35,11 @@ internal static class ConsumerMain
 
         Dictionary<string, string> consumerConfig = V2Config.BuildConsumerConfig(config);
 
-        using var metrics = new Metrics();
+        using Metrics metrics = Metrics.ForConsumer();
         ConsumerBenchmarkResult result;
         if (config.AsyncMode)
         {
-            var backend = new V2AsyncConsumerBackend(consumerConfig, config.PollTimeoutMs, config.BatchSize);
+            var backend = new V2AsyncConsumerBackend(consumerConfig, config.PollTimeoutMs, V2Config.ConsumeBatch(config));
             try
             {
                 result = await ConsumerBenchmark.RunAsync(config, backend, metrics).ConfigureAwait(false);
@@ -51,7 +51,7 @@ internal static class ConsumerMain
         }
         else
         {
-            using var backend = new V2SyncConsumerBackend(consumerConfig, config.PollTimeoutMs, config.BatchSize);
+            using var backend = new V2SyncConsumerBackend(consumerConfig, config.PollTimeoutMs, V2Config.ConsumeBatch(config));
             result = ConsumerBenchmark.Run(config, backend, metrics);
         }
 
@@ -63,7 +63,7 @@ internal static class ConsumerMain
             return ConsumerBenchmarkResult.SetupNotReadyExitCode;
         }
 
-        if (result.AssignmentFailed)
+        if (result.AssignmentFailed || result.ResultsWriteFailed)
         {
             return 1;
         }

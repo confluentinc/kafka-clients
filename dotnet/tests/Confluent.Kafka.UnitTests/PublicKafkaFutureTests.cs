@@ -25,11 +25,13 @@ using Confluent.Kafka.Internal;
 using Confluent.Kafka.Producer;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Tests the public <see cref="KafkaFuture{T}"/> over a <see cref="KafkaFutureImpl{T}"/>: the default-value guard,
-/// the same-instance contract of <c>Get()</c>, identity equality, <c>IsDone</c>, the conversion to
+/// the same-instance contract of <c>Get()</c>, identity equality, <c>IsDone()</c>, the conversion to
 /// <see cref="KafkaFuture"/>, and the member set.
 /// </summary>
 public sealed class PublicKafkaFutureTests
@@ -61,11 +63,11 @@ public sealed class PublicKafkaFutureTests
 
         for (int call = 0; call < 2; call++)
         {
-            AssertDefaultThrows(() => viaDefault.IsDone);
-            AssertDefaultThrows(() => viaNew.IsDone);
+            AssertDefaultThrows(() => viaDefault.IsDone());
+            AssertDefaultThrows(() => viaNew.IsDone());
         }
 
-        AssertDefaultThrows(() => default(KafkaFuture<long>).IsDone);
+        AssertDefaultThrows(() => default(KafkaFuture<long>).IsDone());
     }
 
     [Theory]
@@ -77,11 +79,11 @@ public sealed class PublicKafkaFutureTests
         KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
         KafkaFuture<RecordMetadata> copy = future;
 
-        Assert.False(future.IsDone);
-        Assert.False(copy.IsDone);
+        Assert.False(future.IsDone());
+        Assert.False(copy.IsDone());
 
         RecordMetadata metadata = NewMetadata();
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         object? observed = null;
         Thread waiter = StartThread(() =>
         {
@@ -95,16 +97,16 @@ public sealed class PublicKafkaFutureTests
             }
         });
         Assert.False(waiter.Join(TimeSpan.FromMilliseconds(100)), "Get() returned before the latch completed.");
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
 
         Assert.True(outcome == "result" ? completion.Complete(metadata) : completion.CompleteWithError(cause));
 
-        Assert.True(future.IsDone);
-        Assert.True(copy.IsDone);
+        Assert.True(future.IsDone());
+        Assert.True(copy.IsDone());
         Assert.True(waiter.Join(s_deadline), $"Get() did not return within {s_deadline}.");
-        Assert.Same(outcome == "result" ? metadata : cause, observed);
+        Assert.Same(outcome == "result" ? metadata : cause, outcome == "result" ? observed : FutureAssert.Unwrapped(observed));
 
-        Assert.True(future.IsDone);
+        Assert.True(future.IsDone());
     }
 
     [Fact]
@@ -130,7 +132,7 @@ public sealed class PublicKafkaFutureTests
                 {
                     if (!start.SignalAndWait(s_deadline))
                     {
-                        throw new TimeoutException("The reader threads did not all start.");
+                        throw new System.TimeoutException("The reader threads did not all start.");
                     }
 
                     for (int call = 0; call < CallsPerThread; call++)
@@ -159,18 +161,18 @@ public sealed class PublicKafkaFutureTests
     public void Get_AfterSetException_RethrowsTheSameInstance_Unwrapped()
     {
         const string Message = "Delivery failed: the broker rejected the record.";
-        KafkaException cause = new KafkaException(7, Message, isRetriable: true);
+        KafkaException cause = new Common.Errors.TimeoutException(Message);
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
         Assert.True(completion.CompleteWithError(cause));
         KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
 
         for (int call = 0; call < 2; call++)
         {
-            KafkaException thrown = Assert.Throws<KafkaException>(() => future.Get());
+            KafkaTimeoutException thrown = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get());
             Assert.Same(cause, thrown);
             Assert.Equal(Message, thrown.Message);
             Assert.Equal(7, thrown.Code);
-            Assert.True(thrown.IsRetriable);
+            Assert.IsAssignableFrom<Common.Errors.RetriableException>(thrown);
             Assert.Null(thrown.InnerException);
         }
     }
@@ -235,10 +237,10 @@ public sealed class PublicKafkaFutureTests
         AssertDefaultThrows(() => future.Get(TimeSpan.Zero));
         AssertDefaultThrows(() => future.Get(cancellation.Token));
         AssertDefaultThrows(() => future.GetNow(NewMetadata()));
-        AssertDefaultThrows(() => future.IsCancelled);
-        AssertDefaultThrows(() => future.IsCompletedExceptionally);
+        AssertDefaultThrows(() => future.IsCancelled());
+        AssertDefaultThrows(() => future.IsCompletedExceptionally());
         AssertDefaultThrows(() => future.Cancel(true));
-        AssertDefaultThrows(() => future.ThenApply(metadata => metadata.Offset));
+        AssertDefaultThrows(() => future.ThenApply(metadata => metadata.Offset()));
         AssertDefaultThrows(() => future.WhenComplete((metadata, error) => { }));
 
         Assert.Equal(typeof(KafkaFuture<RecordMetadata>).ToString(), future.ToString());
@@ -267,7 +269,7 @@ public sealed class PublicKafkaFutureTests
     public void OnceDone_ThenApplyWhenCompleteAndAllOf_RunInsideTheCall(string outcome)
     {
         RecordMetadata metadata = NewMetadata();
-        KafkaException failure = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException failure = new Common.Errors.TimeoutException("The operation failed.");
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
         KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
@@ -283,7 +285,7 @@ public sealed class PublicKafkaFutureTests
         KafkaFuture<long> applied = future.ThenApply(value =>
         {
             appliedOn = Environment.CurrentManagedThreadId;
-            return value.Offset;
+            return value.Offset();
         });
         KafkaFuture<RecordMetadata> completed = future.WhenComplete((value, error) =>
         {
@@ -293,14 +295,14 @@ public sealed class PublicKafkaFutureTests
         });
         KafkaFuture all = KafkaFuture.AllOf(KafkaFuture.CompletedFuture(1), future);
 
-        Assert.True(applied.IsDone);
-        Assert.True(completed.IsDone);
-        Assert.True(all.IsDone);
+        Assert.True(applied.IsDone());
+        Assert.True(completed.IsDone());
+        Assert.True(all.IsDone());
         Assert.Equal(caller, completedOn);
         if (outcome == "succeeded")
         {
             Assert.Equal(caller, appliedOn);
-            Assert.Equal(metadata.Offset, applied.Get());
+            Assert.Equal(metadata.Offset(), applied.Get());
             Assert.Same(metadata, seenValue);
             Assert.Null(seenError);
             Assert.Same(metadata, completed.Get());
@@ -332,17 +334,17 @@ public sealed class PublicKafkaFutureTests
         Assert.True(erased == typed.Erase());
         Assert.True(erased == new KafkaFuture(impl));
         Assert.Equal(typed.GetHashCode(), erased.GetHashCode());
-        Assert.False(erased.IsDone);
+        Assert.False(erased.IsDone());
         Assert.True(impl.Complete(NewMetadata()));
-        Assert.True(erased.IsDone);
+        Assert.True(erased.IsDone());
         erased.GetNow();
 
         KafkaFutureImpl<RecordMetadata> failing = new KafkaFutureImpl<RecordMetadata>();
         KafkaFuture erasedFailure = new KafkaFuture<RecordMetadata>(failing);
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
-        Assert.Same(cause, Assert.Throws<KafkaException>(() => erasedFailure.GetNow()));
-        Assert.True(erasedFailure.IsCompletedExceptionally);
+        Assert.Same(cause, FutureAssert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
+        Assert.True(erasedFailure.IsCompletedExceptionally());
     }
 
     [Fact]
@@ -417,19 +419,19 @@ public sealed class PublicKafkaFutureTests
         future.WhenComplete((value, error) => ran.Enqueue(("WhenComplete", Environment.CurrentManagedThreadId)));
         source.Finish(42);
 
-        Assert.True(future.IsDone);
-        Assert.True(future.IsDone);
+        Assert.True(future.IsDone());
+        Assert.True(future.IsDone());
         future.WhenComplete((value, error) => ran.Enqueue(("WhenCompleteAfterIsDone", Environment.CurrentManagedThreadId)));
         Assert.Empty(ran);
         Assert.Equal(0, source.Reads);
-        Assert.False(applied.IsDone);
+        Assert.False(applied.IsDone());
 
         object? answer = OnNewThread(
             () => read switch
             {
                 "GetNow" => future.GetNow(-1),
-                "IsCancelled" => future.IsCancelled,
-                _ => future.IsCompletedExceptionally,
+                "IsCancelled" => future.IsCancelled(),
+                _ => future.IsCompletedExceptionally(),
             },
             out int reader);
 
@@ -443,9 +445,9 @@ public sealed class PublicKafkaFutureTests
         Assert.Equal(1, source.Reads);
 
         Assert.Equal(42, future.GetNow(-1));
-        Assert.False(future.IsCancelled);
-        Assert.False(future.IsCompletedExceptionally);
-        Assert.True(future.IsDone);
+        Assert.False(future.IsCancelled());
+        Assert.False(future.IsCompletedExceptionally());
+        Assert.True(future.IsDone());
         Assert.Equal(43, applied.GetNow(-1));
         Assert.Equal(3, ran.Count);
         Assert.Equal(1, source.Reads);
@@ -459,10 +461,10 @@ public sealed class PublicKafkaFutureTests
         int ran = 0;
         future.WhenComplete((value, error) => Interlocked.Increment(ref ran));
 
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.Equal(0, source.Reads);
         Assert.Equal(-1, future.GetNow(-1));
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.Equal(0, Volatile.Read(ref ran));
         Assert.Equal(1, source.Reads);
     }
@@ -475,7 +477,7 @@ public sealed class PublicKafkaFutureTests
         Assert.True(future.Cancel(true));
         Assert.True(future.Cancel(false));
         Assert.True(future.Cancel(true));
-        Assert.True(future.IsCancelled);
+        Assert.True(future.IsCancelled());
         Assert.Throws<OperationCanceledException>(() => future.GetNow(-1));
     }
 
@@ -512,9 +514,9 @@ public sealed class PublicKafkaFutureTests
                 "System.Boolean Cancel(System.Boolean)",
                 "System.Boolean Equals(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
                 "System.Boolean Equals(System.Object)",
-                "System.Boolean get_IsCancelled()",
-                "System.Boolean get_IsCompletedExceptionally()",
-                "System.Boolean get_IsDone()",
+                "System.Boolean IsCancelled()",
+                "System.Boolean IsCompletedExceptionally()",
+                "System.Boolean IsDone()",
                 "System.Int32 GetHashCode()",
                 "System.String ToString()",
             },
@@ -551,16 +553,7 @@ public sealed class PublicKafkaFutureTests
                 .ToArray());
 
         Assert.Empty(type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
-        PropertyInfo[] properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
-        Assert.Equal(
-            new[] { "IsCancelled", "IsCompletedExceptionally", "IsDone" },
-            properties.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
-        Assert.All(properties, property =>
-        {
-            Assert.Equal(typeof(bool), property.PropertyType);
-            Assert.True(property.CanRead);
-            Assert.False(property.CanWrite);
-        });
+        Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
         FieldInfo[] fields = type.GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.All(fields, field =>
         {
@@ -606,7 +599,7 @@ public sealed class PublicKafkaFutureTests
 
     private static void AssertFailsWith(KafkaException failure, Action call)
     {
-        KafkaException thrown = Assert.Throws<KafkaException>(call);
+        KafkaTimeoutException thrown = FutureAssert.Throws<KafkaTimeoutException>(call);
         Assert.Same(failure, thrown);
         Assert.Equal("The operation failed.", thrown.Message);
     }
