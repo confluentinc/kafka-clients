@@ -135,6 +135,16 @@ newer.
   given where a serializer goes throws `IllegalArgumentError` "... did you
   forget '()'?". `ProducerRecord<K, V>` is generic: its key and value are
   what the serializers take, checked at `send()` when there is no serializer.
+- `MockProducer`, a TypeScript translation of Java's: `new MockProducer()` and
+  `new MockProducer({ autoComplete, partitioner, keySerializer,
+  valueSerializer })` (the form taking a `Cluster` is not translated, so the
+  partition is always 0; `Partitioner` is a placeholder type), `send`,
+  `flush` and `close` returning Promises as `KafkaProducer`'s do,
+  `[Symbol.asyncDispose]`, `history()`, `clear()`, `completeNext()`,
+  `errorNext(e)`, `closed()`, `flushed()` and Java's public fields
+  `sendException`, `flushException` and `closeException`, an injected error
+  being thrown again as the same instance. Its transaction members,
+  `partitionsFor`, `metrics` and `setMockMetrics` are not translated yet.
 - `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
   in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
   `Node` (a data object) and `PartitionInfo` (Java's methods; no public

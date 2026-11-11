@@ -29,7 +29,9 @@
 //     a method there) and no public instance field, except a `readonly` one
 //     translating a Java `public final` instance field of its Java class or
 //     a supertype, on a class whose constructor runs `Object.freeze(this);`
-//     as a top-level statement (`SecurityProtocol.id`), and never one named
+//     as a top-level statement (`SecurityProtocol.id`), or a mutable one
+//     translating a Java `public` mutable instance field
+//     (`MockProducer.sendException`), and never one named
 //     as a `java.lang.Enum` method on an enum (`name`, `ordinal`: Java's
 //     `SecurityProtocol.name` field and `name()` are one member here, the
 //     method);
@@ -76,6 +78,15 @@ function javaFinalField(index, cls, name) {
   return index
     .chain(cls)
     .some((c) => c.fields.some((f) => f.name === name && f.visibility === 'public' && f.final && !f.static));
+}
+
+/**
+ * Whether Java class `cls` declares a public mutable (not final) instance
+ * field `name`, which its translation keeps as a mutable field
+ * (`MockProducer.sendException`).
+ */
+function javaMutableField(cls, name) {
+  return cls.fields.some((f) => f.name === name && f.visibility === 'public' && !f.final && !f.static && !f.deprecated);
 }
 
 /**
@@ -145,6 +156,10 @@ module.exports = {
         } else if (m.isStatic && !m.isReadonly) {
           findings.push({ kind: 'static-mutable', subject, at, message: 'is a static property that is not readonly' });
         } else if (m.isStatic) {
+          continue;
+        } else if (!m.isReadonly && cls && javaMutableField(cls, m.name)) {
+          // A Java public mutable field, which the caller sets (Java's
+          // MockProducer's injected errors).
           continue;
         } else if (!m.isReadonly) {
           findings.push({ kind: 'mutable-field', subject, at, message: 'is a public mutable field: make it readonly' });

@@ -208,8 +208,8 @@ Conventions" for the rules, and update this table in the same commit as the work
 | P4 | Built-in factories (`stringSerializer()`, …) | **blocked: "The list of serde factories"** |
 | P4 | A string key/value without a serializer | **blocked: Q24/Q27** (today: accepted, `encodeLikeJava`) |
 | P4 | Whether serde methods must all be async | **blocked: Q50** |
-| P5 | `MockProducer` (TS translation): send/flush/close/history/clear/completeNext/errorNext/closed/flushed, public exception fields | missing |
-| P5 | `MockProducer` constructor forms, `partitionsFor`, `metrics`, `setMockMetrics` | **blocked: Q30 list, Q25, Q23** |
+| P5 | `MockProducer` (TS translation): send/flush/close/history/clear/completeNext/errorNext/closed/flushed, public exception fields | done: `MockProducer()` and `MockProducer({ autoComplete, partitioner, keySerializer, valueSerializer })` (`Partitioner` a placeholder `unknown`), `sendException` / `flushException` / `closeException`; non-transactional `MockProducerTest` cases translated but `testPartitioner` (needs a `Cluster`) |
+| P5 | `MockProducer(cluster, …)` constructor, `partitionsFor` / `partitionsForException`, `metrics`, `setMockMetrics` | **blocked: Q30 list, Q25, Q23** |
 | P6 | Error constructors `{ message, cause, … }` | done (in PR #312) |
 | P6 | Payload getters and payload constructors (`unauthorizedTopics()`, `recordTooLargePartitions()`, …) | **blocked: Q25** for collection payloads, Q23 for `Long`; a scalar payload may go ahead |
 | P6 | Second constructor argument error class | **blocked: Q39** |

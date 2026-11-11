@@ -41,6 +41,8 @@
 // | CompletionStage<T>                           | Promise<T>                              |
 // | KafkaFuture.BaseFunction<A, B>, BiConsumer   | the alias of the same name: KafkaFuture.BaseFunction<A, B> |
 // | Throwable                                    | unknown (anything a function may throw)  |
+// | Exception, RuntimeException                  | Error (as the send callback's exception) |
+// | Partitioner, Cluster, MetricConfig (placeholders) | unknown                             |
 // | ? (an unbounded wildcard)                    | any type                                 |
 // | T, as a bare value's type                    | Bare<T> (Extract<T, BareValue>), at the bare parameter only |
 // | List / Set / Collection<T>, T[]              | an array of T                           |
@@ -78,7 +80,7 @@ const AWAITED_RETURNS = new Map([
     'a serializer may return a Promise, which the producer awaits before it hands the record over',
   ],
 ]);
-const { mappedItems, functionType, constantsOnly, formParameters } = require('../java_ts');
+const { mappedItems, functionType, constantsOnly, formParameters, PLACEHOLDERS } = require('../java_ts');
 
 const NUMBERS = new Set(['byte', 'short', 'int', 'long', 'float', 'double', 'Byte', 'Short', 'Integer', 'Long', 'Float', 'Double', 'Number']);
 const LISTS = new Set(['List', 'Set', 'Collection', 'SortedSet', 'Queue']);
@@ -217,6 +219,10 @@ module.exports = {
         );
       }
       if (j.name === 'Throwable') return (t.flags & ts.TypeFlags.Unknown) !== 0;
+      if (j.name === 'Exception' || j.name === 'RuntimeException') return symbolName(t) === 'Error';
+      // The types the client does not translate, placeholders typed unknown
+      // (root CLAUDE.md, JavaScript Binding Conventions, Scope).
+      if (PLACEHOLDERS.has(j.name)) return (t.flags & ts.TypeFlags.Unknown) !== 0;
       if (j.name === '?') return true;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
@@ -336,7 +342,12 @@ module.exports = {
         if (m.kind === 'method') {
           const sig = checker.getSignatureFromDeclaration(node);
           const javaReturn = (sameArity || forms[0] || jm.overloads[0]).return_type;
-          const blocking = waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`);
+          // A mock's member of the client interface mirrors the client's
+          // (`MockProducer.send` returns what `KafkaProducer.send` does), so
+          // the mock stands in for it.
+          const mirrored = item.name.startsWith('Mock') ? `Kafka${subject.slice('Mock'.length)}` : null;
+          const blocking =
+            waiting.has(subject) || (mirrored !== null && waiting.has(mirrored)) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`);
           const awaited = AWAITED_RETURNS.has(`${jm.owner.fqn}#${jm.name}`);
           if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }

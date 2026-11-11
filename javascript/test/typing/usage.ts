@@ -28,6 +28,7 @@ import {
   type Callback,
   type CloseArgs,
   KafkaProducer,
+  MockProducer,
   ProducerConfig,
   type ProducerConfigs,
   ProducerRecord,
@@ -591,3 +592,26 @@ async function serializers(): Promise<void> {
   await Promise.all([typed.close(), bytes.close(), half.close()]);
 }
 void serializers;
+
+// MockProducer: the producer methods return KafkaProducer's types, and its
+// type arguments are inferred from the serializers, as KafkaProducer's.
+async function mock(): Promise<void> {
+  const typed = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: stringSerializer, valueSerializer: orderSerializer });
+  expectTypeOf(typed).toEqualTypeOf<MockProducer<string, Order>>();
+  expectTypeOf(new MockProducer()).toEqualTypeOf<MockProducer<Uint8Array, Uint8Array>>();
+  const future = await typed.send(new ProducerRecord({ topic: 't', key: 'k', value: { id: 1 } }));
+  expectTypeOf(future).toEqualTypeOf<KafkaFuture<RecordMetadata>>();
+  // @ts-expect-error a number key for a string serializer
+  await typed.send(new ProducerRecord({ topic: 't', key: 1, value: { id: 1 } }));
+  expectTypeOf(typed.history()).toEqualTypeOf<ProducerRecord<string | null, Order | null>[]>();
+  expectTypeOf(typed.completeNext()).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.errorNext(new Error('x'))).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.flushed()).toEqualTypeOf<boolean>();
+  typed.sendException = new Error('injected');
+  typed.sendException = null;
+  // @ts-expect-error the constructor taking a Cluster is not translated
+  void new MockProducer({ cluster: null, autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null });
+  await typed.flush();
+  await typed.close({ timeout: 0 });
+}
+void mock;

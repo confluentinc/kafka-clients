@@ -63,6 +63,10 @@ const JAVA_NAMES = new Map([
       reason: "Java's KafkaFuture#isCompletedExceptionally, which javascript/CLAUDE.md keeps (\"KafkaFuture is Java's\")",
     },
   ],
+  ...['sendException', 'flushException', 'closeException'].map((name) => [
+    name,
+    { reason: `Java's public field MockProducer#${name}, which the TypeScript MockProducer keeps as a field of the same name` },
+  ]),
   [
     'exception',
     {

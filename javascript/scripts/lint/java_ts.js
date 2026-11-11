@@ -90,6 +90,14 @@ const DATA_CLASSES = new Set([
 ]);
 
 /**
+ * The Java types the client does not translate, which a signature that cannot
+ * be dropped takes as a placeholder typed `unknown` (root CLAUDE.md,
+ * JavaScript Binding Conventions, Scope: `export type Partitioner =
+ * unknown`): their members are not asked for.
+ */
+const PLACEHOLDERS = new Set(['Partitioner', 'Cluster', 'MetricConfig']);
+
+/**
  * The Java functional interfaces translated as a function type
  * (javascript/CLAUDE.md "Java shape, JS idiom": `Callback` is a function):
  * mapped, but their members are not.
@@ -594,6 +602,7 @@ module.exports = {
   PREFIX,
   ERROR_ALLOWANCE,
   DATA_CLASSES,
+  PLACEHOLDERS,
   ENUM_IMPLICIT,
   JavaIndex,
   javaIndexOf,

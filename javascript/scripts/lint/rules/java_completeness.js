@@ -36,6 +36,8 @@
 //     index lists them, and the invented `toJSON()`, which returns the name
 //     (root CLAUDE.md, JavaScript Binding Conventions, Class family);
 //   - an abstract class: not its constructor, which only a subclass calls;
+//   - a placeholder type (`export type Partitioner = unknown`, PLACEHOLDERS):
+//     nothing, the Java class not being translated;
 //   - any class: not `equals` / `hashCode`, which the client does not
 //     translate, by the user's decision of 2026-11-05 (PLAN.md §8): no
 //     JavaScript operator or collection calls them.
@@ -43,7 +45,7 @@
 // asked as a class is.
 
 const { atNode } = require('../location');
-const { ENUM_IMPLICIT, javaIndexOf, mappedItems, itemMembers, javaMember, shortName, constantsOnly, functionType } =
+const { ENUM_IMPLICIT, PLACEHOLDERS, javaIndexOf, mappedItems, itemMembers, javaMember, shortName, constantsOnly, functionType } =
   require('../java_ts');
 
 /** The instance method JavaScript adds to every enum (root CLAUDE.md, JavaScript Binding Conventions, Class family). */
@@ -68,6 +70,8 @@ module.exports = {
       if (item.tags.jsOnly || isError || java === null || !java.cls) continue;
       const cls = java.cls;
       if (functionType(cls)) continue;
+      // A placeholder of a type the client does not translate has no members.
+      if (PLACEHOLDERS.has(cls.path[cls.path.length - 1]) && item.kind !== 'class') continue;
       const covered = new Set();
       for (const m of itemMembers(ts, item)) {
         const jm = javaMember(index, cls, m);

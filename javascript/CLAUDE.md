@@ -394,6 +394,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `send()`: a `ProducerRecord<K, V>` holds any key and value). TypeScript
   infers `null`, not `never`, for a null key or value, so `send` takes a
   `ProducerRecord<K | null, V | null>`.
+- `MockProducer` (root conventions, Implementation over the FFI) is a
+  TypeScript translation of Java's mock, calling no addon: its producer
+  methods (`send`, `flush`, `close`) return Promises as `KafkaProducer`'s do,
+  so it stands in for it (the rule linter's `check-type-mapping` reads a
+  `Mock...` member as its `Kafka...` peer's), its own methods are
+  synchronous, and Java's public mutable fields (`sendException`, ...) stay
+  mutable fields (`check-data-objects` allows a Java `public` non-final
+  field). The constructor taking a `Cluster` is left out (its only extra
+  parameter is untranslated; the list of forms Q30 leaves out is not decided
+  yet in the root conventions); `Partitioner` is a placeholder `unknown`.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with
