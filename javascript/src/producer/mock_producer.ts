@@ -172,10 +172,13 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
   // Map<TopicPartition, Long>, whose key has value equality).
   readonly #offsets = new Map<string, number>();
   #closed = false;
-  // What a callback's Promise rejected with after the synchronous
-  // completeNext() / errorNext() that ran it had returned: raised by the next
-  // send(), flush() or close() of the mock, once.
-  #deferredError: { error: unknown } | null = null;
+  // What the callback Promises that completeNext(), errorNext() and flush()
+  // started rejected with, oldest first: each later send(), flush() or close()
+  // raises the oldest one (Python's AsyncMockProducer._mock_callback_errors).
+  readonly #callbackErrors: unknown[] = [];
+  // The callback Promises started and not settled yet, each made never to
+  // reject, which flush() and close() wait for (Python's _await_callbacks).
+  readonly #running = new Set<Promise<void>>();
 
   /**
    * Create a mock producer.
@@ -355,7 +358,9 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
     this.#sent.push(record);
     if (this.#autoComplete) {
       const settled = complete(completion, null);
-      if (settled !== undefined) await settled;
+      // send() itself rejects with this callback's error; flush() and close()
+      // still wait for the callback.
+      if (settled !== undefined) await this.#track(settled, false);
     } else {
       this.#completions.push(completion);
     }
@@ -384,9 +389,11 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    *   argument
    *
    * @remarks `flushException`, when set, is the rejection, the same
-   * instance. What a callback throws is the rejection, and the calls queued
-   * behind it stay uncompleted; a rejected callback Promise is the rejection
-   * too, once the callbacks already started have settled.
+   * instance. It settles only once every callback Promise already started
+   * (its own, and those `completeNext()` and `errorNext()` started) has
+   * settled. What a callback throws is then the rejection, and the calls
+   * queued behind it stay uncompleted; else the oldest error a callback
+   * Promise rejected with, the others kept, in order, for later calls.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {
@@ -395,17 +402,56 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
       this.#throwDeferred();
       if (this.#closed) throw illegalState(CLOSED_MESSAGE);
       if (this.flushException !== null) throw this.flushException;
-      const settling: Promise<void>[] = [];
-      for (let completion = this.#completions.shift(); completion !== undefined; completion = this.#completions.shift()) {
-        const settled = complete(completion, null);
-        if (settled !== undefined) settling.push(settled);
-      }
-      return Promise.all(settling).then(() => undefined);
     } catch (error) {
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks, the injected error or a callback threw, as Java's mock throws it
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks or the injected error threw, as Java's mock throws it
       return Promise.reject(error);
     }
+    let thrown: { error: unknown } | null = null;
+    try {
+      for (let completion = this.#completions.shift(); completion !== undefined; completion = this.#completions.shift()) {
+        const settled = complete(completion, null);
+        if (settled !== undefined) void this.#track(settled, true);
+      }
+    } catch (error) {
+      // A callback that threw: the completions behind it stay queued, as
+      // Java's flush() stops there.
+      thrown = { error };
+    }
+    // Settles only once every callback already started has, its own and
+    // those completeNext() and errorNext() started; then a callback that
+    // threw, else the oldest kept error, is the rejection.
+    return this.#awaitCallbacks().then(() => {
+      if (thrown !== null) throw thrown.error;
+      this.#throwDeferred();
+    });
   }
+
+  // Waits for every callback Promise started, those started meanwhile too.
+  async #awaitCallbacks(): Promise<void> {
+    while (this.#running.size > 0) await Promise.all([...this.#running]);
+  }
+
+  // Tracks a started callback's Promise until it settles: a rejection is
+  // kept in order when `keep`, else the returned Promise rejects with it
+  // (send()'s own callback). The tracked Promise never rejects.
+  #track(settled: Promise<void>, keep: boolean): Promise<void> {
+    let failure: { error: unknown } | null = null;
+    const tracked: Promise<void> = settled.then(
+      () => {
+        this.#running.delete(tracked);
+      },
+      (error: unknown) => {
+        this.#running.delete(tracked);
+        if (keep) this.#callbackErrors.push(error);
+        else failure = { error };
+      },
+    );
+    this.#running.add(tracked);
+    return tracked.then(() => {
+      if (failure !== null) throw failure.error;
+    });
+  }
+
 
   /**
    * Closes the mock: later calls of `send()` and `flush()` reject with
@@ -416,9 +462,9 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
    * @remarks `closeException`, when set, is the rejection, the same
-   * instance, and the mock stays open. Java's mock closes no serializer. An
-   * error kept from a callback's Promise (`completeNext()`) is the rejection
-   * once the mock is closed.
+   * instance, and the mock stays open. Java's mock closes no serializer. The
+   * mock closes, then waits for every callback Promise already started; the
+   * oldest error one rejected with is then the rejection.
    */
   close(): Promise<void>;
   /**
@@ -439,8 +485,8 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
       CLOSE_FORMS.match(options, arguments.length);
       if (this.closeException !== null) throw this.closeException;
       this.#closed = true;
-      this.#throwDeferred();
-      return Promise.resolve();
+      // Once the callbacks already started settled, the oldest kept error.
+      return this.#awaitCallbacks().then(() => this.#throwDeferred());
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check or the injected error threw, as Java's mock throws it
       return Promise.reject(error);
@@ -521,8 +567,9 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
    * propagates, and the record's future then never completes. *(deviation,
    * as Python's `AsyncMockProducer`)* A callback's Promise that rejects does
    * so after this call returned: the record's future never completes, and
-   * the error is kept and raised by the next `send()`, `flush()` or
-   * `close()` of the mock. Why: the call is synchronous, as Java's, and
+   * the error is kept, in order, each later `send()`, `flush()` or `close()`
+   * raising the oldest one (`flush()` and `close()` first wait for the
+   * callbacks already started). Why: the call is synchronous, as Java's, and
    * cannot wait for the Promise. Goes when: never.
    */
   completeNext(): boolean {
@@ -562,26 +609,18 @@ export class MockProducer<K = Uint8Array, V = Uint8Array> {
 
   // Java's errorNext: the earliest completion, if any, completed with `e`.
   // A callback's Promise that rejects does so after this call returned: its
-  // error is kept for the next send(), flush() or close() (Python's
+  // error is kept, in order, for the later send(), flush() or close() (Python's
   // AsyncMockProducer keeps it the same way).
   #completeEarliest(e: unknown): boolean {
     const completion = this.#completions.shift();
     if (completion === undefined) return false;
     const settled = complete(completion, e);
-    if (settled !== undefined) {
-      void settled.catch((error: unknown) => {
-        if (this.#deferredError === null) this.#deferredError = { error };
-      });
-    }
+    if (settled !== undefined) void this.#track(settled, true);
     return true;
   }
 
-  // Throws, once, the error a callback's Promise rejected with after the call
-  // that ran it had returned.
+  // Throws the oldest error a callback's Promise rejected with, if any.
   #throwDeferred(): void {
-    const deferred = this.#deferredError;
-    if (deferred === null) return;
-    this.#deferredError = null;
-    throw deferred.error;
+    if (this.#callbackErrors.length > 0) throw this.#callbackErrors.shift();
   }
 }
