@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
+
 namespace Confluent.Kafka.Common;
 
 /// <summary>
@@ -25,10 +27,11 @@ namespace Confluent.Kafka.Common;
 /// singleton.
 /// </para>
 /// <para>
-/// Java's <c>value</c> field and <c>valueOf(byte)</c> factory are not ported: a cast gives the
-/// value. Where Java's <c>valueOf</c> throws <c>IllegalArgumentException</c> for another byte,
-/// <see cref="Admin.IAdmin.ElectLeaders"/> throws <see cref="System.ArgumentOutOfRangeException"/>
-/// for a value cast in from outside the two members.
+/// Java's <c>value</c> field is not ported: a cast gives the value. Java's static
+/// <c>valueOf(byte)</c> is <see cref="ElectionTypeMethods.ValueOf"/>.
+/// <see cref="Admin.IAdmin.ElectLeaders"/> reads a value cast in from outside the two members as
+/// <see cref="ElectionTypeMethods.ValueOf"/> reads it, and throws its <see cref="IllegalArgumentException"/>:
+/// <c>Value &lt;value&gt; must be one of [PREFERRED, UNCLEAN]</c>, with the whole number for one outside a byte.
 /// </para>
 /// </remarks>
 public enum ElectionType
@@ -44,4 +47,41 @@ public enum ElectionType
     /// <c>UNCLEAN</c> (value 1).
     /// </summary>
     UNCLEAN = 1,
+}
+
+/// <summary>
+/// The members Java declares on the <see cref="ElectionType"/> enum itself, which a C# enum cannot carry. From
+/// C# 14 the static one is called on the enum (<c>ElectionType.ValueOf(…)</c>); older C# calls it on this class.
+/// </summary>
+public static class ElectionTypeMethods
+{
+    private const string ValuesText = "[" + nameof(ElectionType.PREFERRED) + ", " + nameof(ElectionType.UNCLEAN) + "]";
+
+    extension(ElectionType)
+    {
+        /// <summary>Return the election type with the given value — Java's <c>valueOf(byte)</c>.</summary>
+        /// <param name="value">The value.</param>
+        /// <returns>The election type.</returns>
+        /// <exception cref="IllegalArgumentException">
+        /// No election type has <paramref name="value"/>:
+        /// <c>Value &lt;value&gt; must be one of [PREFERRED, UNCLEAN]</c>.
+        /// </exception>
+        public static ElectionType ValueOf(byte value) => value switch
+        {
+            (byte)ElectionType.PREFERRED => ElectionType.PREFERRED,
+            (byte)ElectionType.UNCLEAN => ElectionType.UNCLEAN,
+            _ => throw NotOneOf(value),
+        };
+    }
+
+    // A value outside a byte, which Java's byte cannot hold, gets ValueOf's message with the whole number.
+    internal static ElectionType RequireDefined(ElectionType type)
+    {
+        int value = (int)type;
+        return value is >= byte.MinValue and <= byte.MaxValue ? ElectionType.ValueOf((byte)value) : throw NotOneOf(value);
+    }
+
+    private static IllegalArgumentException NotOneOf(int value) =>
+        new IllegalArgumentException(
+            "Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of " + ValuesText);
 }

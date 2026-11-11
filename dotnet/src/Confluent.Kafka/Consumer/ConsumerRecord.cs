@@ -160,19 +160,12 @@ public sealed class ConsumerRecord<TKey, TValue>
         + ", partition = " + _partition.ToString(CultureInfo.InvariantCulture)
         + ", leaderEpoch = " + JavaText.ValueOf(_leaderEpoch)
         + ", offset = " + _offset.ToString(CultureInfo.InvariantCulture)
-        + ", " + TimestampTypeText(_timestampType) + " = " + _timestamp.ToString(CultureInfo.InvariantCulture)
+        + ", " + TimestampTypeMethods.ToString(_timestampType)
+        + " = " + _timestamp.ToString(CultureInfo.InvariantCulture)
         + ", deliveryCount = null"
         + ", serialized key size = " + _serializedKeySize.ToString(CultureInfo.InvariantCulture)
         + ", serialized value size = " + _serializedValueSize.ToString(CultureInfo.InvariantCulture)
         + ", headers = " + _headers
         + ", key = " + JavaText.ValueOf(_key)
         + ", value = " + JavaText.ValueOf(_value) + ")";
-
-    private static string TimestampTypeText(TimestampType type) => type switch
-    {
-        Common.Record.TimestampType.NO_TIMESTAMP_TYPE => "NoTimestampType",
-        Common.Record.TimestampType.CREATE_TIME => "CreateTime",
-        Common.Record.TimestampType.LOG_APPEND_TIME => "LogAppendTime",
-        _ => ((int)type).ToString(CultureInfo.InvariantCulture),
-    };
 }

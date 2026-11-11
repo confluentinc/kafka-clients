@@ -77,7 +77,7 @@ public sealed class TranslateAdminEnumNameTests
         Assert.Equal(Enum.GetValues(typeof(TransactionState)).Length, s_transactionStates.Length);
         foreach ((TransactionState member, string java) in s_transactionStates)
         {
-            Assert.Equal(java, TranslateAdmin.TransactionStateName(member));
+            Assert.Equal(java, TransactionState.ToString(member));
             Assert.Equal(member, Assert.Single(TranslateAdmin.TransactionStates(new[] { java })));
             Assert.Equal(
                 java,
@@ -86,6 +86,8 @@ public sealed class TranslateAdminEnumNameTests
 
         Assert.Equal(
             TransactionState.UNKNOWN, Assert.Single(TranslateAdmin.TransactionStates(new[] { "PREPARE_ABORT" })));
+        Assert.Equal(TransactionState.UNKNOWN, Assert.Single(TranslateAdmin.TransactionStates(new[] { "ongoing" })));
+        Assert.Equal(TransactionState.UNKNOWN, Assert.Single(TranslateAdmin.TransactionStates(new[] { "" })));
     }
 
     [Fact]
@@ -94,7 +96,7 @@ public sealed class TranslateAdminEnumNameTests
         Assert.Equal(Enum.GetValues(typeof(GroupState)).Length, s_groupStates.Length);
         foreach ((GroupState member, string java) in s_groupStates)
         {
-            Assert.Equal(java, TranslateAdmin.GroupStateName(member));
+            Assert.Equal(java, GroupState.ToString(member));
             Assert.Equal(member, Assert.Single(TranslateAdmin.GroupStates(new[] { java })));
             Assert.Equal(
                 member, Assert.Single(TranslateAdmin.GroupStates(new[] { java.ToUpperInvariant() })));
@@ -109,13 +111,30 @@ public sealed class TranslateAdminEnumNameTests
         Assert.Equal(GroupState.UNKNOWN, Assert.Single(TranslateAdmin.GroupStates(new[] { "PREPARING_REBALANCE" })));
     }
 
+    [Theory]
+    [InlineData("A\u00DFigning", GroupState.ASSIGNING)]
+    [InlineData("\u017Ftable", GroupState.STABLE)]
+    [InlineData("Ass\u0131gn\u0131ng", GroupState.ASSIGNING)]
+    [InlineData("\uFB06able", GroupState.STABLE)]
+    [InlineData("", GroupState.UNKNOWN)]
+    public void GroupState_ParsesAsJavasParse_UpperCasingBothSides(string name, GroupState expected) =>
+        Assert.Equal(expected, Assert.Single(TranslateAdmin.GroupStates(new[] { name })));
+
+    [Theory]
+    [InlineData("Cla\u017F\u017Fic", GroupType.UNKNOWN)]
+    [InlineData("cla\u00DFic", GroupType.UNKNOWN)]
+    [InlineData("CONSUMER", GroupType.CONSUMER)]
+    [InlineData("", GroupType.UNKNOWN)]
+    public void GroupType_ParsesAsJavasParse_LowerCasingBothSides(string name, GroupType expected) =>
+        Assert.Equal(expected, Assert.Single(TranslateAdmin.GroupTypes(new[] { name })));
+
     [Fact]
     public void GroupType_GoesOutAsJavasToString_AndParsesBackIgnoringCase()
     {
         Assert.Equal(Enum.GetValues(typeof(GroupType)).Length, s_groupTypes.Length);
         foreach ((GroupType member, string java) in s_groupTypes)
         {
-            Assert.Equal(java, TranslateAdmin.GroupTypeName(member));
+            Assert.Equal(java, GroupType.ToString(member));
             Assert.Equal(member, Assert.Single(TranslateAdmin.GroupTypes(new[] { java })));
             Assert.Equal(member, Assert.Single(TranslateAdmin.GroupTypes(new[] { java.ToLowerInvariant() })));
             Assert.Equal(
@@ -133,7 +152,7 @@ public sealed class TranslateAdminEnumNameTests
         Assert.Equal(Enum.GetValues(typeof(ClassicGroupState)).Length, s_classicGroupStates.Length);
         foreach ((ClassicGroupState member, string java) in s_classicGroupStates)
         {
-            Assert.Equal(java, TranslateAdmin.ClassicGroupStateName(member));
+            Assert.Equal(java, ClassicGroupState.ToString(member));
             Assert.Equal(
                 java,
                 TranslateAdmin.ClassicGroupDescriptionToProto(

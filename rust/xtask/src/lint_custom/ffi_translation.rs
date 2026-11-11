@@ -2994,6 +2994,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            static_fields: BTreeSet::new(),
             enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,

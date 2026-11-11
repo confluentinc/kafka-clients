@@ -222,7 +222,7 @@ internal static unsafe class UserScramCredentialMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         int iterations = NativeMethods.ScramCredentialInfoIterations(info, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        return new ScramCredentialInfo(ScramMechanisms.FromType(unchecked((byte)type)), iterations);
+        return new ScramCredentialInfo(ScramMechanism.FromType(unchecked((byte)type)), iterations);
     }
 
     private static IntPtr Mechanism(ScramMechanism mechanism)

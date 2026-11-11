@@ -23,12 +23,13 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Checks that the four ACL value-type constructors store an undefined enum value as that enum's <c>UNKNOWN</c>, as
 /// Java's <c>fromCode</c> does, equal and with an equal hash to one built from <c>UNKNOWN</c>, for codes that fit an
-/// <c>int8_t</c> and codes that do not; and that the <c>ANY</c> / <c>MATCH</c> sentinels are kept, and still rejected
-/// where Java rejects them.
+/// <c>int8_t</c> and codes that do not (one whose low byte is a member's code included); and that the <c>ANY</c> /
+/// <c>MATCH</c> sentinels are kept, and still rejected where Java rejects them.
 /// </summary>
 public sealed class PublicAclUndefinedCodeTests
 {
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -48,6 +49,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -67,6 +69,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -86,6 +89,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -105,6 +109,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -122,6 +127,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -139,6 +145,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]
@@ -156,6 +163,7 @@ public sealed class PublicAclUndefinedCodeTests
     }
 
     [Theory]
+    [InlineData(-253)]
     [InlineData(-1)]
     [InlineData(16)]
     [InlineData(99)]

@@ -120,14 +120,13 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
 - **One file per Java top-level class**, named after the C# type, with the class's Java nested types
   nested in it. A C# type that only completes a Java class sits in that class's file: the
   non-generic `KafkaFuture` (Java's `KafkaFuture<Void>`) beside `KafkaFuture<T>`, a static class
-  holding a Java enum's methods beside the enum (`<Enum>Methods`, §3 Java names rule 9; today's
-  `ScramMechanisms`, `UpgradeTypes`, `SecurityProtocols`, `SslClientAuths`, `GroupProtocols` and
-  `GroupStateExtensions` are baselined until renamed), and the `<Interface>Extensions` class and
+  holding a Java enum's methods beside the enum (`<Enum>Methods`, §3 Java names rule 9), and the
+  `<Interface>Extensions` class and
   `I<Interface>With<Method>` interfaces beside the interface whose Java default methods they carry (§3
   Java names rule 10). A Java nested type leaves its outer class only where C# cannot keep Java's name
   inside it (CS0102: a member of the outer type has that name), and then sits beside it, in the same
   namespace: `GroupMembershipOperation` (Java `CloseOptions.GroupMembershipOperation`, ledger 109),
-  `ConfigResourceType` (Java `ConfigResource.Type`, M15/P3 D16), `AlterConfigOpType` (Java
+  `ConfigResourceType` (Java `ConfigResource.Type`, M15/P3 D16), `OpType` (Java
   `AlterConfigOp.OpType`), `UpgradeType` (Java `FeatureUpdate.UpgradeType`, beside Java's
   `upgradeType()` method, ledger 368).
 - **A .NET-only public type** lives in the namespace and folder of the Java-backed type it pairs
@@ -754,7 +753,7 @@ its C# realization, and where the enforcing rule lives.
 | `Callback` (producer, `send(record, Callback)`) | `ICallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name. Except `beginTransaction()`: the core drains the queued sends first, so it waits, and `IAsyncProducer` makes it a `Task`, as Python's async classes make it `async def` | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
-| a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling, as a C# field: a `const` for a primitive or a string that Java holds as a compile-time constant (`RecordMetadata.UNKNOWN_PARTITION`), a `static readonly` field otherwise (`Uuid.ZERO_UUID`, `Uuid.RESERVED`, `KafkaPrincipal.ANONYMOUS`, the filters' `ANY`, the mock admin clients' `DEFAULT_LOG_DIRS`, the config classes' computed defaults and collections, ledger 386), never a property; an enum member keeps the constant's name (`ResourceType.ANY`); numeric values unchanged. A .NET-only type with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`) the text the binding prints or sends is Java's, from an internal map, and the enum's own `ToString()` is a recorded deviation. The eight config classes (`ProducerConfig`, `ConsumerConfig`, `AdminClientConfig`, `TopicConfig`, `SaslConfigs`, `SslConfigs`, `SecurityConfig`, `LogLevelConfig`) carry only Java's `public static final` fields, generated from `kafka/` (`*.g.cs`, `cargo xtask generate-error-codes`), each with Java's declared type: a Java compile-time constant is a `const`, any other field a `static readonly` field (ledger 386), a `List` an `IReadOnlyList`, a `Set` an `IReadOnlyCollection`. Their Java methods and the three client classes' constructors are not translated (M22/P2) | ledger 285; M22/P2 |
+| a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling, as a C# field: a `const` for a primitive or a string that Java holds as a compile-time constant (`RecordMetadata.UNKNOWN_PARTITION`), a `static readonly` field otherwise (`Uuid.ZERO_UUID`, `Uuid.RESERVED`, `KafkaPrincipal.ANONYMOUS`, the filters' `ANY`, the mock admin clients' `DEFAULT_LOG_DIRS`, the config classes' computed defaults and collections, ledger 386), never a property; an enum member keeps the constant's name (`ResourceType.ANY`); numeric values unchanged. A .NET-only type with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`, `SslClientAuth`) the enum's `ToString()` prints the constant, and Java's text is the static `<Enum>.ToString(value)` of its `<Enum>Methods` class, which the binding also prints and sends. The eight config classes (`ProducerConfig`, `ConsumerConfig`, `AdminClientConfig`, `TopicConfig`, `SaslConfigs`, `SslConfigs`, `SecurityConfig`, `LogLevelConfig`) carry only Java's `public static final` fields, generated from `kafka/` (`*.g.cs`, `cargo xtask generate-error-codes`), each with Java's declared type: a Java compile-time constant is a `const`, any other field a `static readonly` field (ledger 386), a `List` an `IReadOnlyList`, a `Set` an `IReadOnlyCollection`. Their Java methods and the three client classes' constructors are not translated (M22/P2) | ledger 285; M22/P2 |
 | a Java method, getters included (`topic()`, `isDone()`, `getName()`, `hasOffset()`) | a C# **method** with the PascalCase of Java's exact name, `get`, `is`, `has` and `should` kept (`Topic()`, `IsDone()`, `GetName()`, `RecordMetadata.HasOffset()`, `Uuid.GetMostSignificantBits()`), never a property; a member whose .NET name drifted from Java takes Java's (`TopicPartitionInfo.Isr()`, `IMetric.MetricName()` / `MetricValue()`, `ClientQuotaFilterComponent.Match()`). A Java static method is a C# static method: `Serdes.String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, each returning one shared stateless instance. Where a method is named like a type (`UpgradeType UpgradeType()`), an expression inside the class that reaches the type's members qualifies the type (`Admin.UpgradeType.UPGRADE` in `FeatureUpdate`, `Resource.ResourceType.ANY` in `ResourcePattern` and `ResourcePatternFilter`), since C# binds the simple name to the method group there; a type position needs no qualification (`TopicPartition TopicPartition()`) | ledger 365 |
 | a getter and a setter of one name (`timeoutMs()`, `timeoutMs(Integer)`) | two overloads: `TimeoutMs()` reads, `TimeoutMs(int? timeoutMs)` sets and returns what Java's setter returns (the class itself for Java's `this` and for `AbstractOptions`' `T`, since .NET has no `AbstractOptions`; `void` for `RemoveMembersFromConsumerGroupOptions.Reason(string)` and `KafkaPrincipal.TokenAuthenticated(bool)`). An Options class is built by Java's chain, `new CreateTopicsOptions().TimeoutMs(5000).ValidateOnly(true)`; there is no object initializer and no keyword constructor | ledger 366; ffi §C1 (Options) |
 | a setter Java names apart from its getter (`ListGroupsOptions.inGroupStates`, `ListTransactionsOptions.filterStates`) | Java's setter name (`InGroupStates(..)`, `WithProtocolTypes(..)`, `WithTypes(..)`, `FilterStates(..)`, `FilterProducerIds(..)`, `FilterOnDuration(..)`, `FilterOnTransactionalIdPattern(..)`) beside Java's getter (`GroupStates()`, `FilteredStates()`); no setter where Java has none (`ListOffsetsOptions` takes its `IsolationLevel` through Java's constructor) | ledger 367 |
@@ -797,6 +796,15 @@ each goes when the reason it gives goes:
   future already failed with Java's `IllegalArgumentException` *(deviation: Java fails it only
   after the call, and with the call's error if the call failed; the Result cannot see that)*, and
   `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
+- **Undefined enum values.** A number cast to an enum that names no member (`(ResourceType)99`), which a Java
+  or Python enum cannot hold, is read as the enum's own Java lookup reads that number: `UNKNOWN` for the four
+  ACL enums, `ConfigResourceType`, `ScramMechanism` and `UpgradeType` (`fromCode`, `forId`, `fromType`), and
+  Java's `IllegalArgumentException` with Java's message for `IsolationLevel` (`forId`) and `ElectionType`
+  (`valueOf(byte)`), the whole number in the message, never truncated into a member. Where Java has no lookup
+  that answers (`OpType.forId`'s null, `TransactionState`, `GroupState`, `GroupType`,
+  `GroupMembershipOperation`), the call throws `ArgumentOutOfRangeException`. An instance member reads the
+  value as it is and never throws (`((AclOperation)99).Code()` is `99`). It stays: a C# cast can always make
+  such a value.
 - **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
   `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
   `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
@@ -867,8 +875,10 @@ out of date). The rule:
    the `TimeUnit` that qualifies it are one `TimeSpan`.
 7. .NET's own forms: `ToString`, `Equals` (with `==` and `!=`), `GetHashCode`; `CompareTo`;
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
-   `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`. A
-   member that overrides or implements a `System` member keeps its parameter names. A method may end with an
+   `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.
+   `Enum.GetValues` and `CompareTo` order by value, not by Java's declaration (`ConfigResourceType`…), and
+   `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. A member that overrides
+   or implements a `System` member keeps its parameter names. A method may end with an
    optional `CancellationToken cancellationToken`.
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
    `Map` overload, and an overload taking a `java.util.regex.Pattern` is not translated. A Java abstract
@@ -878,7 +888,10 @@ out of date). The rule:
    `extension(ScramMechanism)` block, so a C# 14 caller writes `ScramMechanism.FromMechanismName(…)` and an
    older one `ScramMechanismMethods.FromMechanismName(…)`. Its instance methods go in an
    `extension(ScramMechanism mechanism)` block or are `this` extension methods: `mechanism.MechanismName()` on
-   every C# version.
+   every C# version. A Java field of the enum (`SslClientAuth.VALUES`) is a `static readonly` field of the
+   `<Enum>Methods` class, outside the blocks, since a block cannot hold one (CS9282). Java's `toString()` override
+   is a static `ToString(<Enum>)` in the `extension(<Enum>)` block: an instance extension named `ToString` is never
+   called.
 10. A Java interface's `default` method is not declared on the .NET interface, which cannot hold a body on
     netstandard2.0. It is an extension method in a top-level static class named after the interface without
     its `I` plus `Extensions`, beside it (`ConsumerRebalanceListenerExtensions`). An interface

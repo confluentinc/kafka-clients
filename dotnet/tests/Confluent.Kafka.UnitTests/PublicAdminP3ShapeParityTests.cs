@@ -205,6 +205,9 @@ public sealed class PublicAdminP3ShapeParityTests
     [InlineData(5)]
     [InlineData(-1)]
     [InlineData(255)]
+    [InlineData(258)]
+    [InlineData(288)]
+    [InlineData(-254)]
     [InlineData(int.MaxValue)]
     public void ConfigResource_AnUndefinedType_IsStoredAsUnknown(int undefinedId)
     {
