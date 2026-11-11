@@ -204,7 +204,7 @@ Conventions" for the rules, and update this table in the same commit as the work
 | P1 | `RecordMetadata` public constructor | **blocked: Q23** (`long` parameters) |
 | P2 | `partitionsFor` (Promise via `partitions_for_cb`), gRPC `PartitionsFor`, 4 `JS_GRPC_SKIPS` | **blocked: Q25** (`List<PartitionInfo>`); native walk of `kafka_List_t` can be written first |
 | P3 | `metrics()` (sync, `metrics_err`), `MetricName`, `Metric`, gRPC `Metrics`, 2 `JS_GRPC_SKIPS` | **blocked: Q25** (`Map`), Q23 (long values) |
-| P4 | Serde shape, `keySerializer`/`valueSerializer` constructor keys, inferred generics, serializing in `send()`, async serdes awaited, serde `close()` at client close, factory-without-`()` hint | missing |
+| P4 | Serde shape, `keySerializer`/`valueSerializer` constructor keys, inferred generics, serializing in `send()`, async serdes awaited, serde `close()` at client close, factory-without-`()` hint | done (`common/serialization` `Serializer`; a null key or value infers `null`, not `never`, so `send` takes `ProducerRecord<K \| null, V \| null>`) |
 | P4 | Built-in factories (`stringSerializer()`, …) | **blocked: "The list of serde factories"** |
 | P4 | A string key/value without a serializer | **blocked: Q24/Q27** (today: accepted, `encodeLikeJava`) |
 | P4 | Whether serde methods must all be async | **blocked: Q50** |
