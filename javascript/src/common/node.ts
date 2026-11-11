@@ -16,8 +16,9 @@
 // Class family): Java's no-argument value methods are readonly fields set in
 // the constructor (`node.id`, `node.host`, `node.isEmpty`), and Java's three
 // public constructors are one constructor taking one object of their named
-// parameters. Java's equals() and hashCode() are not translated (no
-// JavaScript operator or collection calls them).
+// parameters. Java's equals() and hashCode() are left out: how they are
+// translated is not decided yet (Q29, the fixed table for the JDK interfaces
+// and toString()).
 //
 // Not translated: Java's protected constructor Node(id, host, port, rack,
 // isFenced, idString), which only a subclass calls.

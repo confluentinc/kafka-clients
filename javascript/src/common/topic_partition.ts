@@ -15,8 +15,9 @@
 // Java's TopicPartition, a data class (root CLAUDE.md, JavaScript Binding
 // Conventions, Class family): `tp.topic` and `tp.partition` are readonly
 // fields, and the object is frozen when it is created, so a key cannot change
-// after it goes into a map. Java's equals() and hashCode() are not translated
-// (no JavaScript operator or collection calls them).
+// after it goes into a map. Java's equals() and hashCode() are left out: how
+// they are translated is not decided yet (Q29, the fixed table for the JDK
+// interfaces and toString()).
 
 import { JavaForms } from '../internal/args';
 

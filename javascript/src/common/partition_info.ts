@@ -15,8 +15,9 @@
 // Java's PartitionInfo. It is not a data class (root CLAUDE.md, JavaScript
 // Binding Conventions, Class family: the data-class list does not name it),
 // so it keeps Java's methods, `topic()`, `partition()` and `leader()`, over
-// private fields. Java's equals() and hashCode() are not translated (no
-// JavaScript operator or collection calls them).
+// private fields. Java's equals() and hashCode() are left out: how they are
+// translated is not decided yet (Q29, the fixed table for the JDK interfaces
+// and toString()).
 //
 // Not translated: Java's public constructors, which take Node[] arrays, and
 // the Node[] getters replicas(), inSyncReplicas() and offlineReplicas(): how
