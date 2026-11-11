@@ -257,13 +257,20 @@ test('values of the wrong type are TypeErrors', () => {
     message: `${FORMS}; got a string`,
   });
   assert.throws(() => new ProducerRecord({ topic: 1, value: 'v' }), { name: 'TypeError', message: 'topic must be a string' });
-  assert.throws(() => new ProducerRecord({ topic: 't', key: 1, value: 'v' }), {
+  // A key and a value are what the producer's serializers take, as Java's
+  // ProducerRecord<K, V> holds any K and V: without a serializer, send()
+  // refuses one that is not bytes or a string.
+  const order = { id: 1 };
+  const typed = new ProducerRecord({ topic: 't', key: 1, value: order });
+  assert.equal(typed.key, 1);
+  assert.equal(typed.value, order);
+  assert.throws(() => typed.internalToNative(), {
     name: 'TypeError',
-    message: 'key must be a Buffer, a Uint8Array, a string or null',
+    message: 'key must be a Buffer, a Uint8Array, a string or null when the producer has no key serializer',
   });
-  assert.throws(() => new ProducerRecord({ topic: 't', value: {} }), {
+  assert.throws(() => new ProducerRecord({ topic: 't', value: {} }).internalToNative(), {
     name: 'TypeError',
-    message: 'value must be a Buffer, a Uint8Array, a string or null',
+    message: 'value must be a Buffer, a Uint8Array, a string or null when the producer has no value serializer',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', partition: 1.5, key: null, value: 'v' }), {
     name: 'TypeError',
@@ -346,8 +353,8 @@ test('send seals the headers once the fields are checked, as Java\'s doSend call
 const REASSIGNED = [
   ['value', undefined, { name: 'TypeError', message: "value must not be undefined. Pass null for Java's null, which sends a tombstone." }],
   ['key', undefined, { name: 'TypeError', message: "key must not be undefined. Leave the key out, or pass null for Java's null" }],
-  ['key', 42, { name: 'TypeError', message: 'key must be a Buffer, a Uint8Array, a string or null' }],
-  ['value', {}, { name: 'TypeError', message: 'value must be a Buffer, a Uint8Array, a string or null' }],
+  ['key', 42, { name: 'TypeError', message: 'key must be a Buffer, a Uint8Array, a string or null when the producer has no key serializer' }],
+  ['value', {}, { name: 'TypeError', message: 'value must be a Buffer, a Uint8Array, a string or null when the producer has no value serializer' }],
   ['headers', [['h', null]], { name: 'TypeError', message: 'a header must be a Header' }],
   ['headers', [{ key: 'h', value: null }], { name: 'TypeError', message: 'a header must be a Header' }],
   ['headers', [undefined], { name: 'TypeError', message: 'a header must not be undefined. Pass a Header, or leave it out' }],
@@ -382,7 +389,8 @@ test('a field reassigned after the constructor is checked again at send, with th
   // as given: it reads a parameter left out as null, and refuses undefined in
   // its form check, with the same messages).
   for (const [field, value, expected] of REASSIGNED) {
-    if (value === undefined) continue;
+    // The constructor takes any key and value (the serializers' input).
+    if (value === undefined || field === 'key' || field === 'value') continue;
     const options = { topic: 't', partition: 0, timestamp: 1, key: 'k', value: 'v', headers: [H('h', bytes('x'))], [field]: value };
     assert.throws(() => new ProducerRecord(options), expected, `new ProducerRecord({${field}: ${String(value)}})`);
   }

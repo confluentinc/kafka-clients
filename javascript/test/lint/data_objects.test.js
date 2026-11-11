@@ -85,10 +85,12 @@ test('a data class with readonly fields, and classes with methods, pass', () => 
   assert.ok(r.out.includes('✅ check-data-objects: 7 item(s) checked'), r.text);
 });
 
-test("the shipped list names the producer data classes, not Header (the root's list does not)", () => {
+test("the shipped list names the data classes the client translates, not Header (the root's list does not)", () => {
   assert.deepEqual([...rule.DATA_CLASSES].sort(), [
     'org.apache.kafka.clients.producer.ProducerRecord',
     'org.apache.kafka.clients.producer.RecordMetadata',
+    'org.apache.kafka.common.Node',
+    'org.apache.kafka.common.TopicPartition',
   ]);
 });
 
@@ -149,6 +151,25 @@ test("a readonly field of a frozen object may translate a Java public final fiel
   // A class with no Java class: no Java field to translate.
   r = lint(project({ ...files, 'src/producer/proto2.ts': PROTO.replace('class Proto', 'class Proto2') }), [RULE], withData(new Set()));
   assert.deepEqual(findings(r), ['Proto2.id: is a readonly field of a class that is not a data class: make it a method']);
+});
+
+test('a mutable field may translate a Java public mutable field only (MockProducer.sendException)', () => {
+  const mutable = (fields) => {
+    const classes = [...VOID_CLOSE.filter((c) => !c.fqn.endsWith('.Proto')), javaClass('clients.producer.Proto', { overloads: [method('name')], fields })];
+    return { 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes) };
+  };
+  const source = 'export class Proto {\n  injected: Error | null = null;\n  name(): string { return "x"; }\n}\n';
+  let r = lint(project({ ...mutable([field('injected', { type: 'RuntimeException', static: false, final: false })]), 'src/producer/proto.ts': source }), [RULE], withData(new Set()));
+  assert.equal(r.status, 0, r.text);
+  // A Java final, private or static field is no such field.
+  for (const extra of [{ final: true }, { visibility: 'private' }, { static: true }]) {
+    r = lint(
+      project({ ...mutable([field('injected', { type: 'RuntimeException', static: false, final: false, ...extra })]), 'src/producer/proto.ts': source }),
+      [RULE],
+      withData(new Set()),
+    );
+    assert.deepEqual(findings(r), ['Proto.injected: is a public mutable field: make it readonly'], JSON.stringify(extra));
+  }
 });
 
 test('each other finding kind, with its exact text', () => {

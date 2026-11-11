@@ -55,6 +55,18 @@
 
 const { atNode } = require('../location');
 const { mappedMembers } = require('./java_members');
+
+/**
+ * The Java overload sets the root conventions translate as one method taking
+ * the longest form's parameters, with one signature, by member, with the
+ * reason: such a set is checked as that one form.
+ */
+const MERGED_FORMS = new Map([
+  [
+    'org.apache.kafka.common.serialization.Serializer#serialize',
+    "root CLAUDE.md, JavaScript Binding Conventions, Serialization: a serde has one method for Java's two serialize methods (a deviation), which the user implements",
+  ],
+]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 
 /**
@@ -133,7 +145,8 @@ function hostKind(type) {
  * The option names of each form of an overload set, in declaration order: a
  * parameter's Java name, except
  * that a parameter at the position of an earlier form's whose Java type maps
- * to the same host type takes that earlier name (the Python conventions'
+ * to the same host type takes that earlier name, unless the earlier form has
+ * a parameter of its own name (the Python conventions'
  * "same position, Java types mapping to the same host type -> one parameter
  * named after the earliest-declared overload": `KafkaProducer(Map configs)` /
  * `(Properties properties)` -> `configs`).
@@ -143,7 +156,14 @@ function formOptionNames(forms) {
   for (const f of forms) {
     out.push(
       f.params.map((t, i) => {
-        const earlier = out.findIndex((names, k) => names[i] !== undefined && hostKind(forms[k].params[i]) === hostKind(t));
+        // Not when the earlier form names a parameter so itself: the forms
+        // then share the name, at another position (`MockProducer(Cluster
+        // cluster, boolean autoComplete, ...)` / `(boolean autoComplete,
+        // ...)`).
+        const own = f.param_names[i];
+        const earlier = out.findIndex(
+          (names, k) => names[i] !== undefined && hostKind(forms[k].params[i]) === hostKind(t) && !(forms[k].param_names || []).includes(own),
+        );
         return earlier >= 0 ? out[earlier][i] : optionName(t, f.param_names[i]);
       }),
     );
@@ -199,7 +219,8 @@ module.exports = {
         translations.set(key, subject);
       }
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
-      const forms = liveForms(jm.overloads);
+      let forms = liveForms(jm.overloads);
+      if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
       const allNames = formOptionNames(forms);
