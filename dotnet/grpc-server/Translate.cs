@@ -393,6 +393,8 @@ internal static class Translate
             Offset = record.Offset(),
             Timestamp = record.Timestamp(),
             TimestampType = (int)record.TimestampType(),
+            SerializedKeySize = record.SerializedKeySize(),
+            SerializedValueSize = record.SerializedValueSize(),
         };
 
         if (record.Key() is not null)
