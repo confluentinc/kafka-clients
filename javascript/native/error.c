@@ -1,0 +1,154 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// kafka_common_Error_t -> a JS error. The C layer reads the error through its
+// accessors into a plain object {code, message, apiError, cause} and hands it to the factory src/internal/native.ts registered:
+// src/internal/errors.ts `fromNative` constructs the class of its code (KafkaError or a
+// subclass, or a Java built-in such as IllegalStateError). An OWNED error is
+// destroyed once read; a BORROWED one (a delivery callback's, a cause) never.
+
+#include <stdlib.h>
+
+#include "util.h"
+
+// Causes deeper than this are cut: the chain is finite, this only bounds the
+// recursion.
+#define MAX_CAUSE_DEPTH 32
+
+void error_discard(kafka_common_Error_t* e) {
+    if (e == NULL) return;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_destroy_err(e, &ffi_err);
+    // A panic inside the destroy is reported as one more owned error; freeing
+    // that one cannot be retried further.
+    kafka_common_Error_t* panic = ffi_take(&ffi_err);
+    if (panic != NULL) kafka_common_Error_destroy_err(panic, &ffi_err);
+}
+
+void error_warn(napi_env env, int js, kafka_common_Error_t* e) {
+    if (e == NULL) return;
+    AddonData* data = addon_data(env);
+    if (!js || data == NULL || data->warn == NULL) {
+        error_discard(e);
+        return;
+    }
+    // A JS exception already pending (the caller is throwing) is kept and
+    // thrown again once the warning is out.
+    bool pending = false;
+    napi_value kept = NULL;
+    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) napi_get_and_clear_last_exception(env, &kept);
+    napi_value value = error_take_to_js(env, e);
+    napi_value fn, global, ignored;
+    if (value != NULL && napi_get_reference_value(env, data->warn, &fn) == napi_ok && fn != NULL
+        && napi_get_global(env, &global) == napi_ok) {
+        napi_call_function(env, global, fn, 1, &value, &ignored);
+    }
+    // Neither the conversion nor the warning can be reported further.
+    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) napi_get_and_clear_last_exception(env, &ignored);
+    if (kept != NULL) napi_throw(env, kept);
+}
+
+static int set_named(napi_env env, napi_value obj, const char* name, napi_value value) {
+    return napi_set_named_property(env, obj, name, value) == napi_ok ? 0 : -1;
+}
+
+// The plain object for `e` (non-NULL), with its cause chain.
+static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int depth) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int code = 0;
+    const char* message = NULL;
+    int8_t api = 0;
+    const kafka_common_Error_t* source = NULL;
+    error_discard(FFI_SET(code, (int)kafka_common_Error__enum_err(e, &ffi_err)));
+    error_discard(FFI_SET(message, kafka_common_Error_message_err(e, &ffi_err)));
+    error_discard(FFI_SET(api, kafka_common_Error_is_api_error_err(e, &ffi_err)));
+    error_discard(FFI_SET(source, kafka_common_Error_source_err(e, &ffi_err)));
+
+    // apiError tells a bare KafkaException (UNKNOWN_SERVER_ERROR) from
+    // UnknownServerError, which share the id.
+    napi_value obj, v;
+    if (napi_create_object(env, &obj) != napi_ok
+        || napi_create_int32(env, code, &v) != napi_ok || set_named(env, obj, "code", v)
+        || napi_create_string_utf8(env, message != NULL ? message : "", NAPI_AUTO_LENGTH, &v) != napi_ok
+        || set_named(env, obj, "message", v)
+        || napi_get_boolean(env, api != 0, &v) != napi_ok || set_named(env, obj, "apiError", v)) {
+        return NULL;
+    }
+    if (source != NULL && depth < MAX_CAUSE_DEPTH) {
+        napi_value cause = error_object(env, source, depth + 1);
+        if (cause == NULL || set_named(env, obj, "cause", cause)) return NULL;
+    }
+    return obj;
+}
+
+// Wraps a plain error object through the registered factory, which also turns
+// its `cause` into an error too.
+static napi_value through_factory(napi_env env, napi_value obj) {
+    AddonData* data = addon_data(env);
+    if (data == NULL || data->error_factory == NULL) return obj;
+    napi_value factory, global, result;
+    if (napi_get_reference_value(env, data->error_factory, &factory) != napi_ok || factory == NULL
+        || napi_get_global(env, &global) != napi_ok
+        || napi_call_function(env, global, factory, 1, &obj, &result) != napi_ok) {
+        return NULL;
+    }
+    return result;
+}
+
+napi_value error_to_js(napi_env env, const kafka_common_Error_t* e) {
+    napi_value result;
+    if (e == NULL) {
+        NAPI_CHECK(env, napi_get_null(env, &result), NULL);
+        return result;
+    }
+    napi_value obj = error_object(env, e, 0);
+    if (obj == NULL) {
+        js_throw_last_napi_error(env, "converting a kafka_common_Error_t");
+        return NULL;
+    }
+    return through_factory(env, obj);
+}
+
+napi_value error_take_to_js(napi_env env, kafka_common_Error_t* e) {
+    napi_value result = error_to_js(env, e);
+    error_discard(e);
+    return result;
+}
+
+void error_throw_owned(napi_env env, kafka_common_Error_t* e) {
+    napi_value err = error_take_to_js(env, e);
+    if (err != NULL) napi_throw(env, err);
+}
+
+// setFactories(errorFactory, metadataFactory, warn): the JS constructors the
+// C layer hands its plain objects to, and the function it hands an error with
+// nowhere else to go (process.emitWarning). Called once, by src/, when it
+// loads the addon.
+napi_value js_set_factories(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    AddonData* data = addon_data(env);
+    if (argc != 3 || data == NULL) {
+        napi_throw_type_error(env, NULL, "setFactories(errorFactory, metadataFactory, warn)");
+        return NULL;
+    }
+    delete_ref(env, &data->error_factory);
+    delete_ref(env, &data->metadata_factory);
+    delete_ref(env, &data->warn);
+    NAPI_CHECK(env, napi_create_reference(env, argv[0], 1, &data->error_factory), NULL);
+    NAPI_CHECK(env, napi_create_reference(env, argv[1], 1, &data->metadata_factory), NULL);
+    NAPI_CHECK(env, napi_create_reference(env, argv[2], 1, &data->warn), NULL);
+    return NULL;
+}
