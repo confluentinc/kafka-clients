@@ -295,6 +295,21 @@ public sealed class TranslateTests
         Assert.Null(proto.Cause);
     }
 
+    [Fact]
+    public void DurationOfMs_IsExactWholeMilliseconds()
+    {
+        Assert.Equal(TimeSpan.FromTicks(1234 * TimeSpan.TicksPerMillisecond), Translate.DurationOfMs(1234));
+        Assert.Equal(TimeSpan.Zero, Translate.DurationOfMs(0));
+        Assert.Equal(TimeSpan.FromTicks(-TimeSpan.TicksPerMillisecond), Translate.DurationOfMs(-1));
+    }
+
+    [Fact]
+    public void DurationOfMs_BeyondATimeSpan_IsItsBound()
+    {
+        Assert.Equal(TimeSpan.MaxValue, Translate.DurationOfMs(long.MaxValue));
+        Assert.Equal(TimeSpan.MinValue, Translate.DurationOfMs(long.MinValue));
+    }
+
     private static (string, int)[] Pairs(IEnumerable<Proto.CallbackLogPartition> partitions)
     {
         List<(string, int)> pairs = new List<(string, int)>();

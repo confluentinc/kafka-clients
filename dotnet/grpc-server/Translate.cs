@@ -96,7 +96,27 @@ internal static class Translate
     }
 
     internal static TimeSpan? ConsumerTimeout(bool hasTimeoutMs, long timeoutMs) =>
-        hasTimeoutMs ? TimeSpan.FromMilliseconds(timeoutMs) : null;
+        hasTimeoutMs ? DurationOfMs(timeoutMs) : null;
+
+    // Java's Duration.ofMillis(ms) as the TimeSpan the binding takes, in whole milliseconds, as Python's
+    // _duration_of_ms: a count beyond what a TimeSpan holds, such as Long.MAX_VALUE ms (Java's unbounded
+    // wait), becomes TimeSpan.MaxValue (MinValue for a negative one), an equally unbounded wait that still
+    // fits a signed 64-bit millisecond count.
+    internal static TimeSpan DurationOfMs(long ms)
+    {
+        const long MaxMs = long.MaxValue / TimeSpan.TicksPerMillisecond;
+        if (ms > MaxMs)
+        {
+            return TimeSpan.MaxValue;
+        }
+
+        if (ms < -MaxMs)
+        {
+            return TimeSpan.MinValue;
+        }
+
+        return TimeSpan.FromTicks(ms * TimeSpan.TicksPerMillisecond);
+    }
 
     internal static Proto.ConsumerGroupMetadata GroupMetadataToProto(ConsumerGroupMetadata groupMetadata)
     {
@@ -123,7 +143,7 @@ internal static class Translate
         }
 
         CloseOptions options = CloseOptions.GroupMembershipOperation(GroupMembershipOperationFromName(request.GroupMembershipOperation));
-        return request.HasCloseTimeoutMs ? options.WithTimeout(TimeSpan.FromMilliseconds(request.CloseTimeoutMs)) : options;
+        return request.HasCloseTimeoutMs ? options.WithTimeout(DurationOfMs(request.CloseTimeoutMs)) : options;
     }
 
     internal static Proto.CurrentLagResponse CurrentLagResponse(long? lag) =>
@@ -135,7 +155,7 @@ internal static class Translate
 
     private const int LocalIllegalStateCode = -4;
 
-    private const int RequestTimedOutCode = 7;
+    private const int LocalTimeoutCode = -5;
 
     // As Python's _kafka_error_to_proto sends each class's _ffi_id: a class with an id (a KafkaException,
     // a Java-named class, CorrelationIdMismatchException) sends it; a .NET-only ArgumentException
@@ -288,7 +308,7 @@ internal static class Translate
 
     internal static Proto.KafkaError SendTimedOut() => new Proto.KafkaError
     {
-        Code = RequestTimedOutCode,
+        Code = LocalTimeoutCode,
         Message = "dotnet server: producer future timed out after 120s",
     };
 

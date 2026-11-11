@@ -250,7 +250,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         CloseProducer(request.ProducerId, null);
 
     public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
-        CloseProducer(request.ProducerId, TimeSpan.FromMilliseconds(request.TimeoutMs));
+        CloseProducer(request.ProducerId, Translate.DurationOfMs(request.TimeoutMs));
 
     private async Task<Proto.StatusResponse> Transaction(ulong producerId, Func<IAsyncProducer<byte[], byte[]>, Task> operation)
     {
