@@ -30,13 +30,17 @@ export type CloseArgs = {
 };
 
 // @public
-export type Data = Buffer | Uint8Array | string;
-
-// @public
-export class KafkaProducer {
+export class KafkaProducer<K = Uint8Array, V = Uint8Array> {
     [Symbol.asyncDispose](): Promise<void>;
     constructor(options: {
         configs: ProducerConfigs;
+        keySerializer?: never;
+        valueSerializer?: never;
+    });
+    constructor(options: {
+        configs: ProducerConfigs;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
     });
     constructor(configs: ProducerConfigs);
     close(): Promise<void>;
@@ -46,14 +50,14 @@ export class KafkaProducer {
     static readonly NETWORK_THREAD_PREFIX: string;
     static readonly PRODUCER_METRIC_GROUP_NAME: string;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K | null, V | null>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K | null, V | null>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
@@ -126,45 +130,45 @@ export class ProducerConfig {
 export type ProducerConfigs = Record<string, string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined>;
 
 // @public
-export class ProducerRecord {
+export class ProducerRecord<out K = never, out V = never> {
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp: number | null;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers: Iterable<Header> | null;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp: number | null;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers: Iterable<Header> | null;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
         topic: string;
         partition?: never;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
@@ -172,17 +176,17 @@ export class ProducerRecord {
         partition?: never;
         timestamp?: never;
         key?: never;
-        value: Data | null;
+        value: V | null;
         headers?: never;
     });
     readonly headers: Headers_2;
-    readonly key: Data | null;
+    readonly key: K | null;
     readonly partition: number | null;
     readonly timestamp: number | null;
     readonly topic: string;
     // (undocumented)
     toString(): string;
-    readonly value: Data | null;
+    readonly value: V | null;
 }
 
 // @public

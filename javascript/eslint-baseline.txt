@@ -18,6 +18,10 @@ missing clients.producer.KafkaProducer#partitionsFor
 missing clients.producer.KafkaProducer#registerMetricForSubscription
 missing clients.producer.KafkaProducer#sendOffsetsToTransaction
 missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# Serializer: the root conventions (Serialization) give a serde no
+# configure(): a serializer is given only as a constructor argument, for
+# which Java does not call it either.
+missing common.serialization.Serializer#configure
 # PartitionInfo: Java's constructors take Node[] arrays and three getters
 # return them; how a Java array other than byte[] is typed is not decided yet
 # (Q25, other collections). The client builds it through its library-only
@@ -35,10 +39,9 @@ missing clients.producer.RecordMetadata#RecordMetadata
 # check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
 # Each line names one Java form not translated, so a wrong shape of the forms
 # that are translated is still a finding.
-# KafkaProducer's constructor takes the configuration alone: JavaScript has no
-# serializers (a string is encoded as Java's StringSerializer would,
-# javascript/CLAUDE.md rule 8), and a Map and Properties are one configs type.
-overload-missing KafkaProducer.constructor/KafkaProducer(Map,Serializer,Serializer)
+# KafkaProducer's constructor: a Map and Properties are one configs type, so
+# Java's (Properties, Serializer, Serializer) form is the (Map, Serializer,
+# Serializer) one.
 overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
 # Header's constructor takes Java's (String, byte[]) form: JavaScript has no
 # ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).

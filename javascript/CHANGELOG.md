@@ -122,6 +122,23 @@ newer.
   `CancellationException` (an `IllegalStateError`). A record's future is never
   cancelled (`cancel()` returns `false`); the futures `completedFuture`,
   `allOf`, `thenApply` and `whenComplete` make can be.
+- Serializers: `new KafkaProducer({ configs, keySerializer, valueSerializer })`
+  takes a `Serializer` (`common/serialization`) for each, or `null`: an
+  object `{ serialize({ topic, headers, data }), close?() }`, Java's two
+  `serialize` methods as one. They run in `send()`, key then value, are
+  called for a null key or value too, and may return a Promise, which
+  `send()` awaits (sends not awaited one by one may then reach the producer
+  out of call order); what they return is a `Uint8Array` or `null`, copied
+  like the app's bytes. The producer's type arguments are inferred from them,
+  and a producer without them is a `KafkaProducer<Uint8Array, Uint8Array>`.
+  `close()` closes both; a failure there is a process warning. A function
+  given where a serializer goes throws `IllegalArgumentError` "... did you
+  forget '()'?". `ProducerRecord<K, V>` is generic: its key and value are
+  what the serializers take, checked at `send()` when there is no serializer.
+- `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
+  in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
+  `Node` (a data object) and `PartitionInfo` (Java's methods; no public
+  constructor yet).
 - No garbage collection closes a producer: one never closed keeps running
   until its worker or the process ends, and is then force-closed (Java's
   `close(Duration.ZERO)`): its unsent records fail, and no JS callback or

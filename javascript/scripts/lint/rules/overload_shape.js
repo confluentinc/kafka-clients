@@ -55,6 +55,18 @@
 
 const { atNode } = require('../location');
 const { mappedMembers } = require('./java_members');
+
+/**
+ * The Java overload sets the root conventions translate as one method taking
+ * the longest form's parameters, with one signature, by member, with the
+ * reason: such a set is checked as that one form.
+ */
+const MERGED_FORMS = new Map([
+  [
+    'org.apache.kafka.common.serialization.Serializer#serialize',
+    "root CLAUDE.md, JavaScript Binding Conventions, Serialization: a serde has one method for Java's two serialize methods (a deviation), which the user implements",
+  ],
+]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 
 /**
@@ -199,7 +211,8 @@ module.exports = {
         translations.set(key, subject);
       }
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
-      const forms = liveForms(jm.overloads);
+      let forms = liveForms(jm.overloads);
+      if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
       const allNames = formOptionNames(forms);

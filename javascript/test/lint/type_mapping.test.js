@@ -52,14 +52,13 @@ const PAUSE =
 const TYPED_TS = `import { Rec } from './rec';
 import { Mode } from './mode';
 import { KafkaFuture } from '../common/kafka_future';
-export type Data = Uint8Array | string;
 declare class Buffer extends Uint8Array {}
-export class Typed {
+export class Typed<K = never> {
   static readonly ON: Mode = Mode.ON;
   get count(): number { return 1; }
   get ready(): boolean | null { return null; }
   get label(): string { return ''; }
-  get key(): Data | null { return null; }
+  get key(): K | null { return null; }
   get bytes(): Buffer { return new Uint8Array() as Buffer; }
   future(): KafkaFuture<Rec> { return KafkaFuture.of(); }
   names(): string[] { return []; }
@@ -99,7 +98,7 @@ test('parseJava reads a Java type as written', () => {
   assert.deepEqual(parseJava('java.util.Optional<Long>'), { name: 'Optional', args: [{ name: 'Long', args: [], dims: 0 }], dims: 0 });
 });
 
-test('every row of the table maps: numbers, booleans, strings, Data, KafkaFuture, arrays, Duration, void and Promise', () => {
+test('every row of the table maps: numbers, booleans, strings, a type variable, KafkaFuture, arrays, Duration, void and Promise', () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
 });
@@ -294,4 +293,30 @@ test('where Java takes an Iterable<Header>, a [key, value] pair is no element: J
   assert.deepEqual(findings(r), [
     'Taker.take: parameter headers: Java Iterable<Header> is not TypeScript Iterable<Header | readonly [key: string, value: string | null]>',
   ]);
+});
+
+test("a serializer's serialize may also return a Promise of the bytes it takes (AWAITED_RETURNS)", () => {
+  const serializer = javaClass('common.serialization.Serializer', {
+    kind: 'interface',
+    overloads: [method('serialize', ['String', 'T'], { return_type: 'byte[]', param_names: ['topic', 'data'] })],
+  });
+  const source = (returned) =>
+    `export interface Serializer<T> {\n  serialize(options: { topic: string; data: T | null }): ${returned};\n}\n`;
+  const files = (returned) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, serializer]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/common/serialization/serializer.ts': source(returned),
+    });
+  // Taken from the user: a Uint8Array, as Java's byte[] taken is, or a Promise of one.
+  let r = lint(files('Uint8Array | null | Promise<Uint8Array | null>'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(files('Uint8Array | Promise<string>'), [RULE]);
+  assert.equal(r.status, 1, r.text);
+  assert.equal(findings(r).length, 1, r.text);
+  assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });

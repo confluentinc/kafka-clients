@@ -4,7 +4,6 @@
     "src/duration.ts:Duration": "the type of every parameter taking a Java Duration: a number of milliseconds or a Temporal.Duration, which the root exports",
     "src/producer/kafka_producer.ts:ProducerConfigs": "the type of the configuration map the constructor takes, Java's Map and Properties as one",
     "src/producer/kafka_producer.ts:CloseArgs": "the options object of Java's close(Duration), the timed form of the close() overload set",
-    "src/producer/producer_record.ts:Data": "the JavaScript types a key or value takes",
     "KafkaFuture.toString": "Java's KafkaFuture declares no toString(); its implementation's is kept",
     "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "SecurityProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
