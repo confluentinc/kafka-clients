@@ -118,6 +118,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private int _closingThread;
 
+    // The owner check knows a thread by a number no other thread gets, not by its ManagedThreadId, which .NET gives
+    // again to a new thread once the old one exits: an async call can still hold the consumer after the thread that
+    // made it has exited, and the new thread must not pass for it.
+    [ThreadStatic]
+    private static int s_threadNumber;
+
+    private static int s_lastThreadNumber;
+
     // An AsyncMockConsumer's Rebalance or LosePartitions refuses other threads for its whole use, as Python's mock does.
     private int _refusingUses;
 
@@ -1634,7 +1642,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         bool destroyedBefore = _destroyed;
         try
         {
-            if (!TryBeginExplicitClose(Environment.CurrentManagedThreadId))
+            if (!TryBeginExplicitClose(CurrentThreadNumber()))
             {
                 return;
             }
@@ -2686,7 +2694,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // async callback is running, which refuses it as Python's mock does.
     private bool TryEnterUse(out int owner, UseKind kind = UseKind.Owned, int thread = 0)
     {
-        owner = ChecksOwner(kind) ? (thread != 0 ? thread : Environment.CurrentManagedThreadId) : 0;
+        owner = ChecksOwner(kind) ? (thread != 0 ? thread : CurrentThreadNumber()) : 0;
         bool refused = false;
         bool closed = false;
         lock (_owner)
@@ -2770,6 +2778,24 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool RefusedWhileBusy => !IsMock || _reporter.RunsAsyncCallback || Volatile.Read(ref _refusingUses) != 0;
 
+    // Never 0, which a use records for no thread.
+    private static int CurrentThreadNumber()
+    {
+        int number = s_threadNumber;
+        if (number == 0)
+        {
+            do
+            {
+                number = Interlocked.Increment(ref s_lastThreadNumber);
+            }
+            while (number == 0);
+
+            s_threadNumber = number;
+        }
+
+        return number;
+    }
+
     private bool HeldByAnotherThread(UseKind kind, int thread) =>
         ChecksOwner(kind) && _ownerUses != 0 && _ownerThread != thread;
 
@@ -2798,7 +2824,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void ThrowIfClosed()
     {
-        int thread = Environment.CurrentManagedThreadId;
+        int thread = CurrentThreadNumber();
         bool refused;
         lock (_owner)
         {
