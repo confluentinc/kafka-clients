@@ -162,7 +162,7 @@ internal sealed class AsyncConsumerServiceImpl
             try
             {
                 ConsumerRecords<byte[], byte[]> polled =
-                    await entry.Consumer.Poll(TimeSpan.FromMilliseconds(request.TimeoutMs)).ConfigureAwait(false);
+                    await entry.Consumer.Poll(Translate.DurationOfMs(request.TimeoutMs)).ConfigureAwait(false);
                 foreach (ConsumerRecord<byte[], byte[]> record in polled)
                 {
                     records.Records.Add(Translate.RecordToProto(record));

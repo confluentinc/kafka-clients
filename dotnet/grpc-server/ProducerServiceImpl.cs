@@ -241,7 +241,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         Task.FromResult(CloseProducer(request.ProducerId, null));
 
     public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
-        Task.FromResult(CloseProducer(request.ProducerId, TimeSpan.FromMilliseconds(request.TimeoutMs)));
+        Task.FromResult(CloseProducer(request.ProducerId, Translate.DurationOfMs(request.TimeoutMs)));
 
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.ProducerCallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ProducerId));

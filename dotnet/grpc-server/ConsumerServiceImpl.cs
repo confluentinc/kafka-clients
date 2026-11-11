@@ -137,7 +137,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             Proto.ConsumerRecordList records = new Proto.ConsumerRecordList();
             lock (entry.Gate)
             {
-                ConsumerRecords<byte[], byte[]> polled = entry.Consumer.Poll(TimeSpan.FromMilliseconds(request.TimeoutMs));
+                ConsumerRecords<byte[], byte[]> polled = entry.Consumer.Poll(Translate.DurationOfMs(request.TimeoutMs));
                 foreach (ConsumerRecord<byte[], byte[]> record in polled)
                 {
                     records.Records.Add(Translate.RecordToProto(record));
