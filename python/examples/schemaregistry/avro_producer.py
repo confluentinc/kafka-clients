@@ -16,6 +16,12 @@
 #
 
 #
+# NOTE: For GA, Confluent will provide a supported Schema Registry client that
+# works with this Python client. During the preview, use the third-party
+# python-schema-registry-client package, as this example does.
+#
+
+#
 # Produces Avro records whose schema lives in Confluent Schema Registry, using
 # the python-schema-registry-client package for the registry round trip.
 #

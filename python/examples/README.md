@@ -47,6 +47,9 @@ no Kafka client dependency, wrapped in serdes of this client: the producer is gi
 package's synchronous client. Only the first record of a schema reaches the registry; the registry
 client caches the schema and its id after that.
 
+For GA, Confluent will provide a supported Schema Registry client that works with this Python client.
+During the preview, use `python-schema-registry-client` as these examples do.
+
 Install the registry client and start a Schema Registry beside the broker (see
 `rust/examples/README.md` for the container):
 
