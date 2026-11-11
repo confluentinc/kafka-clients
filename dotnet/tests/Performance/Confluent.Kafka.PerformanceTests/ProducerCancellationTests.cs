@@ -35,12 +35,12 @@ public sealed class ProducerCancellationTests
     private static readonly TimeSpan s_returnBudget = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public Task RunAsync_WithPreCancelledToken_RunsTheWarmupThenSendsNothing() =>
-        PreCancelledTokenRunsTheWarmupAsync();
+    public Task RunAsync_WithPreCancelledToken_SkipsTheWarmupAndSendsNothing() =>
+        PreCancelledTokenSkipsTheWarmupAsync();
 
     [Fact]
-    public Task RunAsync_CancelledDuringWarmup_RunsTheWarmupToItsEnd() =>
-        CancelledDuringWarmupRunsToItsEndAsync();
+    public Task RunAsync_CancelledDuringWarmup_StopsTheWarmup() =>
+        CancelledDuringWarmupStopsItAsync();
 
     [Fact]
     public Task RunAsync_CancelledMidRun_CountsTheAcceptedSends() =>
@@ -50,9 +50,9 @@ public sealed class ProducerCancellationTests
     public Task RunAsync_CancelledDuringAPacingWait_FlushesAndReports() =>
         CancelledDuringPacingFlushesAndReportsAsync();
 
-    private static async Task PreCancelledTokenRunsTheWarmupAsync()
+    private static async Task PreCancelledTokenSkipsTheWarmupAsync()
     {
-        // Each warmup send waits 0.1 s after it, so a 1 s warmup makes about ten sends.
+        // A signal ends the warmup, as in Python, so a token cancelled before it sends nothing.
         Apply(warmupSeconds: 1);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
@@ -60,22 +60,22 @@ public sealed class ProducerCancellationTests
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        Assert.InRange(result.WarmupSent, 2, 15);
+        Assert.Equal(0, result.WarmupSent);
         Assert.Equal(0, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
         Assert.Equal(result.WarmupSent, backend.SendCount);
     }
 
-    private static async Task CancelledDuringWarmupRunsToItsEndAsync()
+    private static async Task CancelledDuringWarmupStopsItAsync()
     {
-        // Cancelled on the first warmup send; the warmup still runs its whole second.
+        // Cancelled on the first warmup send, which still succeeds; the warmup then stops.
         Apply(warmupSeconds: 1);
         using var cts = new CancellationTokenSource();
         var backend = new ScriptedProducerBackend(cts, cancelOnSend: 1);
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        Assert.InRange(result.WarmupSent, 2, 15);
+        Assert.Equal(1, result.WarmupSent);
         Assert.Equal(0, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
         Assert.Equal(result.WarmupSent, backend.SendCount);
@@ -200,9 +200,9 @@ public sealed class ProducerCancellationTests
         public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value) =>
             new ValueTask<Task<PerfRecordMetadata>>(Task.FromResult(Next(topic)));
 
-        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
+        public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks)
         {
-            callback.OnCompletion(sendStartMs, Next(topic), null);
+            callback.OnCompletion(sendStartTicks, Next(topic), null);
             return default;
         }
 

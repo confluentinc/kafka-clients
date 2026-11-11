@@ -1,23 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    v3 perf executable (M13/P1, Slice 1) — the head-to-head benchmark run over OUR binding
-    (Confluent.Kafka). References the shared client-agnostic PerformanceCommon engine + our binding,
-    and adapts KafkaProducer/AsyncKafkaProducer and KafkaConsumer/AsyncKafkaConsumer (both
-    <byte[],byte[]> with Serdes.ByteArray()) to the backend interfaces. MODE={producer,consumer} selects
-    the benchmark (D8 — the client dimension is the exe boundary, so producer/consumer collapse to a
-    MODE env inside one exe).
+    v3 perf executable: the head-to-head benchmark over this repo's binding (Confluent.Kafka). It
+    references the shared, client-free PerformanceCommon engine and the binding, and adapts
+    KafkaProducer/AsyncKafkaProducer and KafkaConsumer/AsyncKafkaConsumer (both <byte[],byte[]> with
+    Serdes.ByteArray()) to the backend interfaces. MODE={producer,consumer,version} selects what runs:
+    the client is the exe boundary, so producer and consumer share one exe.
 
-    ⚠ Same-assembly collision (PLAN §1.1.1): this exe references our Confluent.Kafka; the v2 exe (Slice
-    2) references ckd's Confluent.Kafka. The two must NEVER share a project/sln — separate exes with
-    separate output dirs is what keeps the two Confluent.Kafka assemblies from colliding.
+    Same-assembly collision: this exe references this repo's Confluent.Kafka; PerfV2 references
+    confluent-kafka-dotnet's Confluent.Kafka. The two must never share a project or solution: separate
+    exes with separate output dirs keep the two Confluent.Kafka assemblies from colliding.
 
-    Two-stage build (CLAUDE.md §7.1): the `cargo build` ffi step must produce the native cdylib FIRST;
-    the ProjectReference to Confluent.Kafka carries the native (its Content copy) transitively into this
-    exe's output, where default [DllImport] probing resolves it.
+    Two-stage build: `cargo build` must produce the native cdylib first; the ProjectReference to
+    Confluent.Kafka carries the native (its Content copy) transitively into this exe's output, where
+    default [DllImport] probing resolves it.
 
-    Directory.Build.props (at dotnet/) auto-applies (#nullable enable, dotnet/runtime code
-    style, TreatWarningsAsErrors, strong-name signing). Kept OUT of Confluent.Kafka.sln (D4).
+    Directory.Build.props (at dotnet/) auto-applies (#nullable enable, dotnet/runtime code style,
+    TreatWarningsAsErrors, strong-name signing). Kept out of Confluent.Kafka.sln.
   -->
 
   <PropertyGroup>
@@ -28,6 +27,14 @@
     <!-- Perf executable — never packed, no XML doc file (so no CS1591). -->
     <IsPackable>false</IsPackable>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!--
+      The runtime every client is measured on, pinned rather than left to the SDK defaults: Workstation
+      GC with background (concurrent) collection, and tiered PGO on. MODE=version reports what the
+      process actually runs with.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
     <!--
       CA1031: the mode entry points catch System.Exception broadly on purpose — a faithful port of the
       Python perf tests' `try/except Exception` around baseline capture / verification, which logs and
