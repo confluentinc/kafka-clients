@@ -175,7 +175,10 @@ export class ProducerRecord<out K = never, out V = never> {
    * `{topic, key, value}` or `{topic, value}`; one a constructor leaves out is
    * what it passes (`null`, no headers). `null` is Java's `null`; a key set to
    * `undefined` is refused (leave the key out). The fields are `readonly` but
-   * not frozen: `send()` checks them again.
+   * not frozen: `send()` checks them again. An omitted key or value binds
+   * `never`, and a `null` one `null` (one signature per Java constructor
+   * cannot bind it to `never`), so the producers take a
+   * `ProducerRecord<K | null, V | null>`.
    */
   constructor(options: {
     /** The topic the record will be appended to. */

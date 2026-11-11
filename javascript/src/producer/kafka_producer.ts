@@ -388,6 +388,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> {
    * Every failure rejects the returned Promise, an argument check's and the
    * closed check's included: `send()` never throws.
    *
+   * The record is typed `ProducerRecord<K | null, V | null>`: a record built
+   * with a `null` key or value is a `ProducerRecord<null, ...>`, as
+   * `ProducerRecord` has one signature per Java constructor, which binds a
+   * `null` argument to `null` rather than `never`.
+   *
    * Inside a callback, do not call `flush()` or `close()` of the same
    * producer, run a transaction call, or await the future of a record sent
    * later: each waits for the callback itself. Before the callback's first
