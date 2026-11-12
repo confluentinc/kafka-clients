@@ -10,6 +10,8 @@
 | `async_consumer.py` | `consumer_context_manager.py` on asyncio: `AsyncKafkaConsumer` in an `async with` block, with a listener whose methods are coroutines. |
 | `admin.py` | Creates a topic with `Admin`, reads each topic's `KafkaFuture` with `get()` (a failure arrives as `ExecutionError`, the error being its `__cause__`), and lists the topics. |
 | `async_admin.py` | The same on asyncio: `AsyncAdmin` in an `async with` block; a call returns its result at once and each `AsyncKafkaFuture` is awaited through `get()`. |
+| `schemaregistry/avro_producer.py` | Sends 10 `User` records as Avro to `avro-users`, registering the schema in Schema Registry. |
+| `schemaregistry/avro_consumer.py` | Reads them back from `avro-users`, decoding each value with the schema fetched from Schema Registry. |
 
 ## Running them
 
@@ -17,7 +19,7 @@ Build the client into the repository's venv, then start a broker:
 
 ```bash
 make devel-build-python        # from the repository root
-docker run -d --rm --name kafka -p 9092:9092 apache/kafka:4.3.1
+docker run -d --rm --name kafka -p 9092:9092 apache/kafka:4.4.0
 ```
 
 ```bash
@@ -33,6 +35,13 @@ The other producers take the same arguments as `producer.py`, and the other cons
 
 Start a second consumer in the same group to see a rebalance: each consumer prints the partitions
 it is assigned and the ones revoked from it.
+
+## Schema Registry examples
+
+`schemaregistry/` has an Avro producer and a consumer that reads what it writes.
+They need a Schema Registry and the third-party `python-schema-registry-client` package. For GA,
+we have plans to provide a Confluent supported Schema Registry client that works with this Python
+client. See [`schemaregistry/README.md`](schemaregistry/README.md) for why and how to run them.
 
 ## Notes
 
