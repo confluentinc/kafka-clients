@@ -133,8 +133,9 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   with: an async peer with its sync type (`AsyncKafkaProducer`, `IAsyncProducer` and
   `IAsyncCallback` in `Producer/`; every `Async*Result`, `AsyncKafkaAdminClient`,
   `AsyncMockAdminClient` and `IAsyncAdmin` in `Admin/`; `AsyncKafkaFuture` in `Common/`), the types
-  carrying Java's default methods with their interface (§3 Java names rule 10; today the base class
-  `ConsumerRebalanceListenerBase`), the
+  carrying Java's default methods with their interface (§3 Java names rule 10:
+  `ConsumerRebalanceListenerExtensions` and `IConsumerRebalanceListenerWithPartitionsLost` beside
+  `IConsumerRebalanceListener`, `Admin` beside `IAdmin`), the
   shared consumer surface with `IConsumer` (`IConsumerCommon`), the Rust-only `ConsumerHandle` with
   the consumer (the core's `consumer::ConsumerHandle`), and a C#-only enum with the type that takes
   it (`ClientQuotaMatchType` with `ClientQuotaFilterComponent` in `Common/Quota/`). *(Python keeps an
@@ -237,9 +238,13 @@ public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V
     public TKey? Key();                          // null (ref) = no key; three-state via the serializer (§4)
     public TValue? Value();                      // null (ref) = tombstone; three-state via the serializer (§4)
     public Headers Headers();                    // the record's own copy; read-only once a KafkaProducer sends it
-    public ProducerRecord(string topic, TValue? value,
-        TKey? key = default, int? partition = null, long? timestamp = null,
-        IEnumerable<Header>? headers = null);   // Java's checks, topic → timestamp → partition
+    public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value,
+        IEnumerable<Header>? headers);           // Java's checks, topic → timestamp → partition
+    public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value);
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<Header>? headers);
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value);
+    public ProducerRecord(string topic, TKey? key, TValue? value);
+    public ProducerRecord(string topic, TValue? value);   // Java's six, key before value; no optional parameters
     // Equals, GetHashCode and ToString are Java's (topic, partition, headers, key, value, timestamp)
 }
 
@@ -437,7 +442,16 @@ public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>
 
 public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerRecords<K,V>`
     : IReadOnlyCollection<ConsumerRecord<TKey, TValue>> {
+    public static readonly ConsumerRecords<TKey, TValue> EMPTY;   // one per closed generic type
+    public ConsumerRecords(IReadOnlyDictionary<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> records,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets);   // both copied
+    public IReadOnlyList<ConsumerRecord<TKey, TValue>> Records(TopicPartition partition);
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets();   // the core's, read before the batch is freed
+    public IEnumerable<ConsumerRecord<TKey, TValue>> Records(string topic);
+    public IReadOnlyCollection<TopicPartition> Partitions();
     public int Count();                                    // Java's count(); IReadOnlyCollection<T>.Count is explicit
+    public bool IsEmpty();
+    public static ConsumerRecords<TKey, TValue> Empty();
 }
 
 public interface IConsumerCommon {               // shared sync surface (IAsyncConsumer + IConsumer)
@@ -627,10 +641,10 @@ each piece is wired (async/sync split per the idiom map). Already wired:
 interface, a `Task` on `IAsyncConsumer`: decision 22, ledger 103). The **typed generic
 `Consumer<K,V>`** is now **shipped** (M6/P1b — generic-only conversion + the zero-copy
 typed poll; see §4), plus the **rebalance listener** — `IConsumerRebalanceListener`
-(+ `ConsumerRebalanceListenerBase`), the `Subscribe(topics, callback)` overload on
+(+ `IConsumerRebalanceListenerWithPartitionsLost`, M23/P5), the `Subscribe(topics, callback)` overload on
 both interfaces, and `MockConsumer`'s inherent `Rebalance(newAssignment)` driver and
 `AsyncMockConsumer`'s awaitable one (M9/P6; see the §4 listener row), and its async form
-`IAsyncConsumerRebalanceListener` (+ `AsyncConsumerRebalanceListenerBase`) on
+`IAsyncConsumerRebalanceListener` (+ `IAsyncConsumerRebalanceListenerWithPartitionsLost`, M23/P5) on
 `IAsyncConsumer` (M19/P1), plus pattern subscribe
 (`Subscribe(SubscriptionPattern[, listener])`, M23/P2), plus the **offset-commit
 callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads,
@@ -748,7 +762,7 @@ its C# realization, and where the enforcing rule lives.
 | `IllegalArgumentException` / `IllegalStateException` | The Java-named classes, with Java's message, for the binding's own checks too, so a check and the core's error for one condition have one class. A closed client throws `IllegalStateException` with its Java message: "Cannot perform operation after producer has been closed", "This consumer has already been closed.", "Cannot accept new calls when AdminClient is closing." The admin client throws it at the call *(deviation, as Python's: Java's `KafkaAdminClient` returns the Result and fails its futures with it; the native handle is gone after `Close`, so the call has no Result to return; ffi §C1)*. A .NET-only precondition (Java throws `NullPointerException` or nothing) keeps `ArgumentNullException` / `ArgumentOutOfRangeException`, except a negative timeout on a consumer lookup Java does not check (`Committed`, `PartitionsFor`, `ListTopics`, `OffsetsForTimes`, `BeginningOffsets`, `EndOffsets`): it throws `IllegalArgumentException` with the core's "Timeout must not be negative", the error the core's `_with_timeout` forms return (ffi §B5). A disposed `ConsumerHandle` keeps `ObjectDisposedException`. | validate **before** the FFI call — ffi §A5 |
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws `WakeupException` (**one-shot**), as Java's | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `ConcurrentModificationException`, sync and async, with Java's `acquire()` message, from the binding's owner check and the core's -2 alike (decision 17). | ffi §B5 |
-| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase` carry Java's `onPartitionsLost` default. Registered by the `Subscribe(topics, callback)` and `Subscribe(pattern, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
+| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). Java's `onPartitionsLost` default is an extension method in `ConsumerRebalanceListenerExtensions` / `AsyncConsumerRebalanceListenerExtensions`; a listener replaces it by implementing `I…WithPartitionsLost` (rule 10), and `Subscribe` refuses a public `OnPartitionsLost` without it. Registered by the `Subscribe(topics, callback)` and `Subscribe(pattern, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)` (`exception` is `Exception?`, the class of the error's id); passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**); on `IAsyncConsumer` also `IAsyncOffsetCommitCallback` — `Task OnComplete(offsets, exception)`, passed to two more `CommitAsync` overloads (M19/P1) | On `IConsumer` it runs inline on the caller's thread, inside the blocking call that delivers it (`Poll`, `Commit`, `Close`, …); on `IAsyncConsumer`, on the consumer's drain thread (`confluent-kafka-consumer-pump`) (decision 27). `offsets` is `null` on a failed commit (decision 22). An exception it throws, or the async form's faulted or cancelled `Task`, propagates out of the consumer call that delivered it (decision 12, ledger 47). See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | `Callback` (producer, `send(record, Callback)`) | `ICallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name. Except `beginTransaction()`: the core drains the queued sends first, so it waits, and `IAsyncProducer` makes it a `Task`, as Python's async classes make it `async def` | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
@@ -1086,13 +1100,10 @@ listener there runs inline, and an async listener's continuation runs wherever i
 completes. The sync consumer takes the sync listener only.
 
 Java's `onPartitionsLost` default (delegate to revoked) cannot live on an interface: C#
-default interface methods need .NET Standard 2.1, and the floor is netstandard2.0. It lives on
-the public abstract `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase`
-(`definition-of-done.md` §7 types that exist because of a Java behaviour). §3 Java names rule 10
-replaces them: the default becomes an extension method in `ConsumerRebalanceListenerExtensions` and
-`AsyncConsumerRebalanceListenerExtensions`, which `IConsumerRebalanceListenerWithPartitionsLost` and
-`IAsyncConsumerRebalanceListenerWithPartitionsLost` replace; until then CKRDA0013 baselines
-`OnPartitionsLost` on the two interfaces. A listener calls
+default interface methods need .NET Standard 2.1, and the floor is netstandard2.0. Rule 10 puts it in
+`ConsumerRebalanceListenerExtensions` and `AsyncConsumerRebalanceListenerExtensions`;
+`IConsumerRebalanceListenerWithPartitionsLost` and `IAsyncConsumerRebalanceListenerWithPartitionsLost` replace it
+(M23/P5). A listener calls
 back into its own consumer directly, and the consumer routes the call to `ConsumerHandle`
 (ledger 114; the §4 reentrancy row below).
 

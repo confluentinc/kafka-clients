@@ -56,7 +56,7 @@ internal static class UnreachableProducers
     internal static string Topic(string prefix) => prefix + "-" + Guid.NewGuid().ToString("N");
 
     internal static ProducerRecord<byte[], byte[]> Record(string topic) =>
-        new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"));
+        new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v"));
 
     internal static string MetadataTimeout(string topic, int maxBlockMs) =>
         $"Topic {topic} not present in metadata after {maxBlockMs} ms.";

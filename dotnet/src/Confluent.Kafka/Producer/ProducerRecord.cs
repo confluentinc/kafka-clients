@@ -42,27 +42,23 @@ public sealed class ProducerRecord<TKey, TValue>
     private readonly Headers _headers;
 
     /// <summary>
-    /// Initializes a record from the topic and value, as Java's <c>ProducerRecord(topic, value)</c>, and the optional
-    /// key, partition, timestamp and headers.
+    /// Creates a record with a specified timestamp to be sent to a specified topic and partition.
     /// </summary>
-    /// <param name="topic">The destination topic (required, non-null).</param>
-    /// <param name="value">
-    /// The record value, or <see langword="null"/> for a tombstone (subject to the serializer). An empty value
-    /// differs from a null one only if the serializer keeps the difference, as <see cref="Serdes.ByteArray()"/> does.
-    /// </param>
-    /// <param name="key">
-    /// The record key, or <see langword="null"/> for no key (subject to the serializer).
-    /// </param>
+    /// <param name="topic">The topic the record will be appended to.</param>
     /// <param name="partition">
-    /// The target partition, or <see langword="null"/> to let the producer choose. Must be
-    /// non-negative when specified.
+    /// The partition to which the record should be sent, or <see langword="null"/> to let the producer choose one.
     /// </param>
     /// <param name="timestamp">
-    /// The record timestamp (milliseconds since epoch), or <see langword="null"/> to let the
-    /// producer stamp it. Must be non-negative when specified.
+    /// The timestamp of the record, in milliseconds since epoch. If <see langword="null"/>, the producer will assign
+    /// the timestamp using the current time.
+    /// </param>
+    /// <param name="key">The key that will be included in the record.</param>
+    /// <param name="value">
+    /// The record contents. An empty value differs from a <see langword="null"/> one only if the serializer keeps the
+    /// difference, as <see cref="Serdes.ByteArray()"/> does.
     /// </param>
     /// <param name="headers">
-    /// The headers to include in the record, copied into the record's own <see cref="Headers()"/>; a
+    /// The headers that will be included in the record, copied into the record's own <see cref="Headers()"/>; a
     /// <see langword="null"/> sequence gives no headers.
     /// </param>
     /// <exception cref="ArgumentNullException">
@@ -74,11 +70,11 @@ public sealed class ProducerRecord<TKey, TValue>
     /// </exception>
     public ProducerRecord(
         string topic,
+        int? partition,
+        long? timestamp,
+        TKey? key,
         TValue? value,
-        TKey? key = default,
-        int? partition = null,
-        long? timestamp = null,
-        IEnumerable<Header>? headers = null)
+        IEnumerable<Header>? headers)
     {
         _topic = topic ?? throw new IllegalArgumentException("Topic cannot be null.");
 
@@ -105,6 +101,84 @@ public sealed class ProducerRecord<TKey, TValue>
         _key = key;
         _value = value;
         _headers = new Headers(headers);
+    }
+
+    /// <summary>
+    /// Creates a record with a specified timestamp to be sent to a specified topic and partition.
+    /// </summary>
+    /// <param name="topic">The topic the record will be appended to.</param>
+    /// <param name="partition">
+    /// The partition to which the record should be sent, or <see langword="null"/> to let the producer choose one.
+    /// </param>
+    /// <param name="timestamp">
+    /// The timestamp of the record, in milliseconds since epoch. If <see langword="null"/>, the producer will assign
+    /// the timestamp using the current time.
+    /// </param>
+    /// <param name="key">The key that will be included in the record.</param>
+    /// <param name="value">The record contents.</param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topic"/> is null, or <paramref name="timestamp"/> or <paramref name="partition"/> is
+    /// specified and negative; the timestamp is checked first.
+    /// </exception>
+    public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value)
+        : this(topic, partition, timestamp, key, value, null)
+    {
+    }
+
+    /// <summary>Creates a record to be sent to a specified topic and partition.</summary>
+    /// <param name="topic">The topic the record will be appended to.</param>
+    /// <param name="partition">
+    /// The partition to which the record should be sent, or <see langword="null"/> to let the producer choose one.
+    /// </param>
+    /// <param name="key">The key that will be included in the record.</param>
+    /// <param name="value">The record contents.</param>
+    /// <param name="headers">
+    /// The headers that will be included in the record, copied into the record's own <see cref="Headers()"/>; a
+    /// <see langword="null"/> sequence gives no headers.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="headers"/> contains a <see langword="null"/> header.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topic"/> is null, or <paramref name="partition"/> is specified and negative.
+    /// </exception>
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<Header>? headers)
+        : this(topic, partition, null, key, value, headers)
+    {
+    }
+
+    /// <summary>Creates a record to be sent to a specified topic and partition.</summary>
+    /// <param name="topic">The topic the record will be appended to.</param>
+    /// <param name="partition">
+    /// The partition to which the record should be sent, or <see langword="null"/> to let the producer choose one.
+    /// </param>
+    /// <param name="key">The key that will be included in the record.</param>
+    /// <param name="value">The record contents.</param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topic"/> is null, or <paramref name="partition"/> is specified and negative.
+    /// </exception>
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value)
+        : this(topic, partition, null, key, value, null)
+    {
+    }
+
+    /// <summary>Creates a record to be sent to Kafka.</summary>
+    /// <param name="topic">The topic the record will be appended to.</param>
+    /// <param name="key">The key that will be included in the record.</param>
+    /// <param name="value">The record contents.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="topic"/> is null.</exception>
+    public ProducerRecord(string topic, TKey? key, TValue? value)
+        : this(topic, null, null, key, value, null)
+    {
+    }
+
+    /// <summary>Creates a record with no key.</summary>
+    /// <param name="topic">The topic this record should be sent to.</param>
+    /// <param name="value">The record contents.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="topic"/> is null.</exception>
+    public ProducerRecord(string topic, TValue? value)
+        : this(topic, null, null, default, value, null)
+    {
     }
 
     /// <summary>The destination topic.</summary>

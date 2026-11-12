@@ -31,11 +31,23 @@ public sealed class AlterUserScramCredentialsResult
     private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
-    // Internal, unlike Java's public constructor: a recorded deviation. The dictionary is held
-    // by reference, as Java holds an unmodifiable view over its map.
-    internal AlterUserScramCredentialsResult(IReadOnlyDictionary<string, KafkaFuture> futures)
+    /// <summary>Creates a result over the given futures, keyed by user name.</summary>
+    /// <param name="futures">The future of each user's alteration. The map is copied.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    public AlterUserScramCredentialsResult(IReadOnlyDictionary<string, KafkaFuture> futures)
     {
-        _values = futures ?? throw new ArgumentNullException(nameof(futures));
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
+        Dictionary<string, KafkaFuture> copy = new Dictionary<string, KafkaFuture>(futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFuture> entry in futures)
+        {
+            copy.Add(entry.Key, entry.Value);
+        }
+
+        _values = copy;
     }
 
     private AlterUserScramCredentialsResult(

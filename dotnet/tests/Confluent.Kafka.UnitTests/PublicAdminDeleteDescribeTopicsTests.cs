@@ -342,7 +342,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             TestTimeout.Dispose(mock);
         }
 
-        IAdmin real = new KafkaAdminClient(
+        IAdmin real = IAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         try
         {
@@ -430,7 +430,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task G1_10_TheNameCollectionForms_ForwardTheirOptions()
     {
-        IAsyncAdmin real = new AsyncKafkaAdminClient(
+        IAsyncAdmin real = IAsyncAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
@@ -465,7 +465,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     public void G1_10_ANullNameCollection_IsRejectedWithItsParameterName()
     {
         IAdmin mock = MockAdminClient.Create().Build();
-        IAdmin real = new KafkaAdminClient(
+        IAdmin real = IAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         try
         {

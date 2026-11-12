@@ -113,7 +113,7 @@ public sealed class PublicProducerFlushDrainTests
         for (int i = 0; i < SendCount; i++)
         {
             sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(
-                Topic, Encoding.UTF8.GetBytes($"value-{i}"), partition: 0)).Delivery();
+                Topic, value: Encoding.UTF8.GetBytes($"value-{i}"), partition: 0, key: null)).Delivery();
         }
 
         return sends;

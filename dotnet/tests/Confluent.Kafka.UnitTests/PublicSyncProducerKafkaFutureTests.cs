@@ -175,7 +175,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
             KafkaFuture<RecordMetadata> future = default;
             TestTimeout.Run(
                 () => future = producer.Send(
-                    new ProducerRecord<byte[], byte[]>(ApiTopic, Encoding.UTF8.GetBytes("v")), callback),
+                    new ProducerRecord<byte[], byte[]>(ApiTopic, value: Encoding.UTF8.GetBytes("v")), callback),
                 s_deadline);
 
             Exception first = null!;
@@ -407,7 +407,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     }
 
     private static ProducerRecord<byte[], byte[]> Record() =>
-        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0);
+        new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null);
 
     private static bool IsDone(KafkaFuture<RecordMetadata> future) => future.IsDone();
 

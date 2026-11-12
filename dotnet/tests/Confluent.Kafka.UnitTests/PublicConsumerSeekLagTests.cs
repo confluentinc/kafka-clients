@@ -72,7 +72,7 @@ public sealed class PublicConsumerSeekLagTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
-        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(offset, metadata, leaderEpoch)), s_deadline);
+        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(offset, leaderEpoch, metadata)), s_deadline);
 
         Assert.Equal(offset, await PositionOf(consumer, tp));
     }
@@ -235,7 +235,7 @@ public sealed class PublicConsumerSeekLagTests
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
 
-        consumer.Seek(tp, new OffsetAndMetadata(42, "meta", 7));
+        consumer.Seek(tp, new OffsetAndMetadata(42, 7, "meta"));
 
         Assert.Equal(42L, consumer.Position(tp));
     }
@@ -362,7 +362,7 @@ public sealed class PublicConsumerSeekLagTests
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         await TestTimeout.Run(() => consumer.Seek(tp, 5L), s_deadline);
-        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(6, "m", 2)), s_deadline);
+        await TestTimeout.Run(() => consumer.Seek(tp, new OffsetAndMetadata(6, 2, "m")), s_deadline);
         long? lag = await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline);
 
         Assert.Equal(6L, await PositionOf(consumer, tp));

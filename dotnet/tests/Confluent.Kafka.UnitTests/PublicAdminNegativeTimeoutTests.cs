@@ -55,7 +55,7 @@ public sealed class PublicAdminNegativeTimeoutTests
     [Fact]
     public async Task X2_RealClient_ANegativeTimeout_FailsExactlyAsAZeroTimeout()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
+        IAsyncAdmin admin = IAsyncAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 

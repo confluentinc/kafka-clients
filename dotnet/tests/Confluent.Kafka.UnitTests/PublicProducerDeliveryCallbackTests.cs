@@ -60,7 +60,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         RecordMetadata returned = await WithTimeout(producer.Send(
             new ProducerRecord<byte[], byte[]>(
-                Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2),
+                Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 2),
             callback));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
@@ -87,7 +87,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         await WithTimeout(producer.Send(
-            new ProducerRecord<byte[], byte[]>(NonAscii, Encoding.UTF8.GetBytes("v"), partition: 0),
+            new ProducerRecord<byte[], byte[]>(NonAscii, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null),
             callback));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
@@ -105,7 +105,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         await WithTimeout(producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null),
             callback));
 
         Assert.Single(await SettledCompletions(callback, expected: 1));
@@ -129,10 +129,10 @@ public sealed class PublicProducerDeliveryCallbackTests
         for (int i = 0; i < RecordCount; i++)
         {
             sends.Add(producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"shared-{i}"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"shared-{i}"), partition: 0, key: null),
                 shared));
             sends.Add(producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"each-{i}"), partition: 1),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"each-{i}"), partition: 1, key: null),
                 perRecord[i]));
         }
 
@@ -157,7 +157,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         TaskStateProbeCallback probe = new TaskStateProbeCallback();
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), probe).Delivery();
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), probe).Delivery();
         probe.Task = sendTask;
 
         DriveUntilResolved(producer.CompleteNext);
@@ -185,7 +185,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         {
             getThreadId = Environment.CurrentManagedThreadId;
             RecordMetadata metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback).Get();
             invokedAtReturn = callback.Completions.Count == 1;
             threadsAtReturn = callback.Threads;
             return metadata;
@@ -218,7 +218,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             try
             {
                 producer.Send(
-                    new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
+                    new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback).Get();
             }
             catch (Confluent.Kafka.ExecutionException)
             {
@@ -246,7 +246,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 3), callback);
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 3, key: null), callback);
 
         // Code 2 = CorruptMessage, which the core classifies retriable / non-fatal.
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("boom-delivery")));
@@ -284,7 +284,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v")), callback);
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v")), callback);
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("no-partition")));
         await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
@@ -310,7 +310,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             : new InjectedException("the injected instance");
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 1), callback);
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 1, key: null), callback);
         DriveUntilResolved(() => producer.ErrorNext(injected));
 
         Exception failure = await Assert.ThrowsAnyAsync<Exception>(() => WithTimeout(sendTask));
@@ -331,7 +331,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 1), callback);
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 1, key: null), callback);
         DriveUntilResolved(() => producer.ErrorNext(null));
 
         RecordMetadata metadata = await WithTimeout(sendTask);
@@ -353,7 +353,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
         Assert.Throws<IllegalStateException>(() => producer.SendInline(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback));
 
         Assert.Empty(callback.Completions);
     }
@@ -371,7 +371,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         ThrowingSerializer<byte[]>.BoomException error = Assert.Throws<ThrowingSerializer<byte[]>.BoomException>(
             () => producer.SendInline(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback));
 
         Assert.Same(throwing.LastThrown, error);
         Assert.Equal(1, throwing.InvocationCount);
@@ -406,7 +406,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         ThrowingDeliveryCallback throwing = new ThrowingDeliveryCallback("boom-callback");
 
         RecordMetadata first = await WithTimeout(producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("first"), partition: 0), throwing));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("first"), partition: 0, key: null), throwing));
 
         Assert.True(throwing.WasInvoked);
         Assert.Equal(Topic, first.Topic());
@@ -414,7 +414,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         RecordingDeliveryCallback recording = new RecordingDeliveryCallback();
         RecordMetadata second = await WithTimeout(producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("second"), partition: 0), recording));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("second"), partition: 0, key: null), recording));
 
         Assert.Equal(1L, second.Offset());
         Assert.Single(await SettledCompletions(recording, expected: 1));
@@ -435,7 +435,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         for (int i = 0; i < RecordCount; i++)
         {
             sends.Add(producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0), throwing));
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"v-{i}"), partition: 0, key: null), throwing));
         }
 
         RecordMetadata[] results = null!;
@@ -460,7 +460,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             Flavor producer = Flavor.Create(flavor);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             await WithTimeout(producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null),
                 new ThrowingDeliveryCallback(marker)));
         }
         finally
@@ -485,11 +485,11 @@ public sealed class PublicProducerDeliveryCallbackTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ReentrantDeliveryCallback reentrant = new ReentrantDeliveryCallback(
             () => producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("retry"), partition: 1),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("retry"), partition: 1, key: null),
                 new RecordingDeliveryCallback()));
 
         RecordMetadata first = await WithTimeout(producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("first"), partition: 0),
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("first"), partition: 0, key: null),
             reentrant));
 
         Assert.Equal(0, first.Partition());
@@ -519,7 +519,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
             () => producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null),
                 callback).AsTask(),
             s_deadline);
         Task<RecordMetadata> wait = future.Get(cts.Token);
@@ -550,7 +550,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         // ArgumentNullException(nameof(callback)) sets no custom message, so ParamName is the contract.
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => producer.SendInline(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback: null));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback: null));
 
         Assert.Equal("callback", error.ParamName);
     }
@@ -579,7 +579,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         TestTimeout.Dispose(producer);
 
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => producer.SendInline(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback: null));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback: null));
         Assert.Equal("callback", error.ParamName);
     }
 

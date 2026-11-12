@@ -15,117 +15,20 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Common.Quota;
-using Confluent.Kafka.Internal;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Three small Java-parity points: the three <c>*Result</c> constructors Java declares public, kept internal here on
-/// both flavours as a recorded deviation; the result collections Java returns as unmodifiable views; and the closed
-/// SCRAM alteration hierarchy.
+/// Two small Java-parity points: the result collections Java returns as unmodifiable views, and the closed SCRAM
+/// alteration hierarchy.
 /// </summary>
 public sealed class PublicAdminParityLowsTests
 {
-    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
-
-    [Fact]
-    public async Task G4_10_DescribeClientQuotasResult_ConstructorIsInternal_ARecordedDeviation()
-    {
-        AssertJavaTwinConstructorIsInternal(
-            typeof(DescribeClientQuotasResult),
-            typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>));
-        AssertJavaTwinConstructorIsInternal(
-            typeof(AsyncDescribeClientQuotasResult),
-            typeof(AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>));
-
-        ClientQuotaEntity entity = new ClientQuotaEntity(
-            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = "alice" });
-        IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> quotas =
-            new Dictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>
-            {
-                [entity] = new Dictionary<string, double>(StringComparer.Ordinal) { ["producer_byte_rate"] = 1024 },
-            };
-        KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities =
-            KafkaFutureImpl.CompletedFuture(quotas);
-
-        AsyncDescribeClientQuotasResult result = new AsyncDescribeClientQuotasResult(
-            new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities));
-
-        Assert.Same(entities.GetWrappedAsync(), result.Entities().Get());
-        Assert.Same(quotas, await TestTimeout.Run(() => result.Entities().Get(), s_deadline));
-
-        ArgumentNullException thrown =
-            Assert.Throws<ArgumentNullException>(() => new AsyncDescribeClientQuotasResult(default));
-        Assert.Equal("entities", thrown.ParamName);
-    }
-
-    [Fact]
-    public async Task G4_10_AlterClientQuotasResult_ConstructorIsInternal_ARecordedDeviation()
-    {
-        AssertJavaTwinConstructorIsInternal(
-            typeof(AlterClientQuotasResult), typeof(IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture>));
-        AssertJavaTwinConstructorIsInternal(
-            typeof(AsyncAlterClientQuotasResult), typeof(IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture>));
-
-        ClientQuotaEntity alice = new ClientQuotaEntity(
-            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = "alice" });
-        ClientQuotaEntity bob = new ClientQuotaEntity(
-            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = "bob" });
-        KafkaException failure = new KafkaException("bob failed");
-        Dictionary<ClientQuotaEntity, AsyncKafkaFuture> futures = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>
-        {
-            [alice] = new AsyncKafkaFuture(TestFutures.Done()),
-        };
-
-        AsyncAlterClientQuotasResult result = new AsyncAlterClientQuotasResult(futures);
-
-        Assert.Same(futures, result.Values());
-        await TestTimeout.Run(() => result.All().Get(), s_deadline);
-
-        futures[bob] = new AsyncKafkaFuture(TestFutures.Failed(failure));
-        KafkaException thrown =
-            await FutureAssert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
-        Assert.Same(failure, thrown);
-
-        Assert.Equal(
-            "futures",
-            Assert.Throws<ArgumentNullException>(() => new AsyncAlterClientQuotasResult(null!)).ParamName);
-    }
-
-    [Fact]
-    public async Task G4_10_AlterUserScramCredentialsResult_ConstructorIsInternal_ARecordedDeviation()
-    {
-        AssertJavaTwinConstructorIsInternal(
-            typeof(AlterUserScramCredentialsResult), typeof(IReadOnlyDictionary<string, KafkaFuture>));
-        AssertJavaTwinConstructorIsInternal(
-            typeof(AsyncAlterUserScramCredentialsResult), typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>));
-
-        KafkaException failure = new KafkaException("bob failed");
-        Dictionary<string, AsyncKafkaFuture> futures = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
-        {
-            ["alice"] = new AsyncKafkaFuture(TestFutures.Done()),
-            ["bob"] = new AsyncKafkaFuture(TestFutures.Failed(failure)),
-        };
-
-        AsyncAlterUserScramCredentialsResult result = new AsyncAlterUserScramCredentialsResult(futures);
-
-        Assert.Same(futures, result.Values());
-        KafkaException thrown =
-            await FutureAssert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
-        Assert.Same(failure, thrown);
-
-        Assert.Equal(
-            "futures",
-            Assert.Throws<ArgumentNullException>(() => new AsyncAlterUserScramCredentialsResult(null!)).ParamName);
-    }
-
     [Fact]
     public void G3_11_PartitionReassignment_ListsAreReadOnly()
     {
@@ -183,15 +86,5 @@ public sealed class PublicAdminParityLowsTests
         Assert.True(constructor.IsFamilyAndAssembly, "expected a private protected constructor");
         Assert.True(typeof(UserScramCredentialUpsertion).IsSealed);
         Assert.True(typeof(UserScramCredentialDeletion).IsSealed);
-    }
-
-    private static void AssertJavaTwinConstructorIsInternal(Type result, Type parameterType)
-    {
-        Assert.Empty(result.GetConstructors(BindingFlags.Instance | BindingFlags.Public));
-
-        ConstructorInfo? twin = result.GetConstructor(
-            BindingFlags.Instance | BindingFlags.NonPublic, null, new[] { parameterType }, null);
-        Assert.True(twin is not null, $"{result.Name} has no ({parameterType.Name}) constructor");
-        Assert.True(twin!.IsAssembly, $"{result.Name}({parameterType.Name}) is not internal");
     }
 }

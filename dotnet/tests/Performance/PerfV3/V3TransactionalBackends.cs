@@ -138,7 +138,7 @@ internal sealed class V3SyncTransactionalProducer : ITransactionalProducer
     }
 
     public ValueTask<object?> Send(string topic, byte[]? key, byte[]? value) =>
-        new(_producer.Send(new ProducerRecord<byte[], byte[]>(topic, value!, key!)));
+        new(_producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value!, key: key!)));
 
     public ValueTask<PerfRecordMetadata> Delivered(object pending) =>
         new(V3TransactionalFactory.Metadata(((KafkaFuture<RecordMetadata>)pending).Get()));
@@ -189,7 +189,7 @@ internal sealed class V3AsyncTransactionalProducer : ITransactionalProducer
     public ValueTask BeginTransaction() => new(_producer.BeginTransaction());
 
     public async ValueTask<object?> Send(string topic, byte[]? key, byte[]? value) =>
-        await _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value!, key!)).ConfigureAwait(false);
+        await _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value!, key: key!)).ConfigureAwait(false);
 
     public async ValueTask<PerfRecordMetadata> Delivered(object pending) =>
         V3TransactionalFactory.Metadata(await ((AsyncKafkaFuture<RecordMetadata>)pending).Get().ConfigureAwait(false));

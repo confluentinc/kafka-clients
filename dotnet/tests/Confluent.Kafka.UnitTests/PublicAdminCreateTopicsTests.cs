@@ -201,7 +201,7 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public void CancellingAValuesFuture_LeavesTheAccessorsAllAndAFreshValuesFuturePending()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
         try
         {
             CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("linked", 1, 1) });
@@ -240,7 +240,7 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task CancellingAnAsyncValuesFuture_LeavesTheAccessorsAllAndAFreshValuesFuturePending()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
         try
         {
             AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("linked", 1, 1) });
@@ -280,8 +280,8 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task Values_IsAFreshDependantPerAccess_SoOneReadAfterACancelIsNotCancelled()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
-        AsyncKafkaAdminClient asyncAdmin = new AsyncKafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
+        IAsyncAdmin asyncAdmin = IAsyncAdmin.Create(s_unreachable);
         try
         {
             CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
@@ -313,7 +313,7 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public void Refinement_OfACancelledTopicFuture_IsCancelledAsADependant()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
         try
         {
             CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("linked", 1, 1) });

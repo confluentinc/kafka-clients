@@ -78,7 +78,7 @@ public sealed class SerializedProducerRecordTests
     private static SerializedProducerRecord Serialize(
         ReadOnlyMemory<byte>? key, ReadOnlyMemory<byte>? value, bool mock) =>
         SerializedProducerRecord.Serialize(
-            new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(Topic, value, key),
+            new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(Topic, value: value, key: key),
             MemorySerializer.Instance,
             null,
             MemorySerializer.Instance,

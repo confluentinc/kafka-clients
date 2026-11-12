@@ -908,7 +908,7 @@ internal static class TranslateAdmin
         {
             int? leaderEpoch = proto.Offset.HasLeaderEpoch ? proto.Offset.LeaderEpoch : (int?)null;
             map[Translate.Tp(proto.Partition)] =
-                new OffsetAndMetadata(proto.Offset.Offset, proto.Offset.Metadata, leaderEpoch);
+                new OffsetAndMetadata(proto.Offset.Offset, leaderEpoch, proto.Offset.Metadata);
         }
 
         return map;

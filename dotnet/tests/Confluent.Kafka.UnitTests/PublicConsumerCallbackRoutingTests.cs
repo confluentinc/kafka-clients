@@ -1405,29 +1405,29 @@ public sealed class PublicConsumerCallbackRoutingTests
         new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
-    private sealed class SyncListener : ConsumerRebalanceListenerBase
+    private sealed class SyncListener : IConsumerRebalanceListener
     {
         private readonly Action _onAssigned;
 
         internal SyncListener(Action onAssigned) => _onAssigned = onAssigned;
 
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
     }
 
     /// <summary>An async listener that runs the function it is given when partitions are assigned.</summary>
-    private sealed class AsyncListener : AsyncConsumerRebalanceListenerBase
+    private sealed class AsyncListener : IAsyncConsumerRebalanceListener
     {
         private readonly Func<Task> _onAssigned;
 
         internal AsyncListener(Func<Task> onAssigned) => _onAssigned = onAssigned;
 
-        public override Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
 
-        public override Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
     }
 
     /// <summary>A commit callback that runs the action it is given.</summary>

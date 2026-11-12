@@ -77,8 +77,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        SerdeGuard.Check(_keyDeserializer, SerdeGuard.Consumer, disposes: false);
-        SerdeGuard.Check(_valueDeserializer, SerdeGuard.Consumer, disposes: false);
+        SerdeGuard.Check(_keyDeserializer, DefaultMethodGuard.Consumer, disposes: false);
+        SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: false);
         _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
         _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.CreateMock(autoOffsetReset);
@@ -447,9 +447,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>MockConsumer.losePartitions(Collection)</c>).
     /// </summary>
     /// <remarks>
-    /// The buffered records of the lost partitions are cleared; then, while a listener is registered,
-    /// <c>OnPartitionsLost</c> fires with them on the consumer's drain thread; then they leave the
-    /// <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
+    /// The buffered records of the lost partitions are cleared; then, while a listener is registered, its
+    /// <c>OnPartitionsLost</c> extension method (<see cref="ConsumerRebalanceListenerExtensions"/> or
+    /// <see cref="AsyncConsumerRebalanceListenerExtensions"/>) runs with them on the consumer's drain thread; then they
+    /// leave the <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
     /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
     /// <see cref="IllegalStateException"/>, as Java's.
     /// </remarks>

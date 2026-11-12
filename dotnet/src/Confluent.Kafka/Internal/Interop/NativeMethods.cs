@@ -667,6 +667,9 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_records_with_partition_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerRecordsRecordsWithPartition(IntPtr self, IntPtr partition, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_next_offsets_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordsNextOffsets(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecords_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerRecordsDestroy(IntPtr self, ref IntPtr outErr);
 

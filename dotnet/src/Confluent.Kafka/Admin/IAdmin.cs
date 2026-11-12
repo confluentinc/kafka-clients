@@ -1515,3 +1515,34 @@ public interface IAdmin : IDisposable
     /// </remarks>
     void Close();
 }
+
+/// <summary>
+/// The static method Java declares on the <see cref="IAdmin"/> interface, which an interface cannot carry on
+/// netstandard2.0. From C# 14 it is called on the interface (<c>IAdmin.Create(…)</c>); older C# calls it on this class.
+/// </summary>
+public static class Admin
+{
+    extension(IAdmin)
+    {
+        /// <summary>Create a new Admin with the given configuration.</summary>
+        /// <remarks>
+        /// From code in a <c>Confluent.Kafka.*</c> namespace, write <c>IAdmin.Create</c> (C# 14) or the full name
+        /// <c>Confluent.Kafka.Admin.Admin.Create</c>: there <c>Admin</c> names the namespace.
+        /// </remarks>
+        /// <param name="conf">
+        /// The admin client configuration, keyed by Java's dotted names (<c>bootstrap.servers</c> or
+        /// <c>bootstrap.controllers</c> is required): each value of the type Java's <c>ConfigDef</c> accepts for its
+        /// key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the key's validator
+        /// refuses <c>null</c>.
+        /// </param>
+        /// <returns>The new KafkaAdminClient.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="conf"/> is null.</exception>
+        /// <exception cref="ConfigException">
+        /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+        /// <c>null</c>, or the client refuses a value.
+        /// </exception>
+        /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+        public static IAdmin Create(IReadOnlyDictionary<string, object?> conf) =>
+            new KafkaAdminClient(conf ?? throw new ArgumentNullException(nameof(conf)));
+    }
+}

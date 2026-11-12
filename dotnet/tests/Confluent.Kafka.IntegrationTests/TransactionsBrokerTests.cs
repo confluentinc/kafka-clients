@@ -81,7 +81,7 @@ public sealed class TransactionsBrokerTests
         producer.BeginTransaction();
         foreach (ConsumerRecord<string, string> record in records)
         {
-            producer.Send(new ProducerRecord<string, string>(sink, record.Value()!.ToUpperInvariant(), record.Value(), partition: 0));
+            producer.Send(new ProducerRecord<string, string>(sink, value: record.Value()!.ToUpperInvariant(), key: record.Value(), partition: 0));
         }
 
         producer.SendOffsetsToTransaction(
@@ -124,7 +124,7 @@ public sealed class TransactionsBrokerTests
         await producer.BeginTransaction();
         foreach (ConsumerRecord<string, string> record in records)
         {
-            await producer.Send(new ProducerRecord<string, string>(sink, record.Value()!.ToUpperInvariant(), record.Value(), partition: 0));
+            await producer.Send(new ProducerRecord<string, string>(sink, value: record.Value()!.ToUpperInvariant(), key: record.Value(), partition: 0));
         }
 
         await producer.SendOffsetsToTransaction(
@@ -154,8 +154,8 @@ public sealed class TransactionsBrokerTests
             producer.BeginTransaction();
             KafkaFuture<RecordMetadata>[] aborted =
             {
-                producer.Send(new ProducerRecord<string, string>(topic, "x1", partition: 0)),
-                producer.Send(new ProducerRecord<string, string>(topic, "x2", partition: 0)),
+                producer.Send(new ProducerRecord<string, string>(topic, value: "x1", partition: 0, key: null)),
+                producer.Send(new ProducerRecord<string, string>(topic, value: "x2", partition: 0, key: null)),
             };
 
             // The records reach the log before the abort marks them aborted.
@@ -163,7 +163,7 @@ public sealed class TransactionsBrokerTests
             Assert.Equal(new[] { 0L, 1L }, aborted.Select(future => future.Get(s_get).Offset()));
             producer.AbortTransaction();
             producer.BeginTransaction();
-            producer.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+            producer.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
             producer.CommitTransaction();
         }
 
@@ -181,8 +181,8 @@ public sealed class TransactionsBrokerTests
             await producer.BeginTransaction();
             AsyncKafkaFuture<RecordMetadata>[] aborted =
             {
-                await producer.Send(new ProducerRecord<string, string>(topic, "x1", partition: 0)),
-                await producer.Send(new ProducerRecord<string, string>(topic, "x2", partition: 0)),
+                await producer.Send(new ProducerRecord<string, string>(topic, value: "x1", partition: 0, key: null)),
+                await producer.Send(new ProducerRecord<string, string>(topic, value: "x2", partition: 0, key: null)),
             };
 
             // The records reach the log before the abort marks them aborted.
@@ -191,7 +191,7 @@ public sealed class TransactionsBrokerTests
             Assert.Equal(1L, (await aborted[1].Get(s_get)).Offset());
             await producer.AbortTransaction();
             await producer.BeginTransaction();
-            await producer.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+            await producer.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
             await producer.CommitTransaction();
         }
 
@@ -208,13 +208,13 @@ public sealed class TransactionsBrokerTests
 
         fenced.InitTransactions();
         fenced.BeginTransaction();
-        fenced.Send(new ProducerRecord<string, string>(topic, "fenced", partition: 0));
+        fenced.Send(new ProducerRecord<string, string>(topic, value: "fenced", partition: 0, key: null));
         fenced.Flush();
 
         // Initializing the newer producer aborts the older one's open transaction and fences it.
         fencing.InitTransactions();
         fencing.BeginTransaction();
-        fencing.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+        fencing.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
 
         ProducerFencedException error = Assert.Throws<ProducerFencedException>(() => fenced.CommitTransaction());
         Assert.Equal(FencedMessage, error.Message);
@@ -235,13 +235,13 @@ public sealed class TransactionsBrokerTests
 
         await fenced.InitTransactions();
         await fenced.BeginTransaction();
-        await fenced.Send(new ProducerRecord<string, string>(topic, "fenced", partition: 0));
+        await fenced.Send(new ProducerRecord<string, string>(topic, value: "fenced", partition: 0, key: null));
         await fenced.Flush();
 
         // Initializing the newer producer aborts the older one's open transaction and fences it.
         await fencing.InitTransactions();
         await fencing.BeginTransaction();
-        await fencing.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+        await fencing.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
 
         ProducerFencedException error = await Assert.ThrowsAsync<ProducerFencedException>(() => fenced.CommitTransaction());
         Assert.Equal(FencedMessage, error.Message);
@@ -259,7 +259,7 @@ public sealed class TransactionsBrokerTests
             IdempotentConfigs(), Serdes.String().Serializer(), Serdes.String().Serializer()))
         {
             KafkaFuture<RecordMetadata>[] futures = values
-                .Select(value => producer.Send(new ProducerRecord<string, string>(topic, value, partition: 0)))
+                .Select(value => producer.Send(new ProducerRecord<string, string>(topic, value: value, partition: 0, key: null)))
                 .ToArray();
             producer.Flush();
             Assert.Equal(Enumerable.Range(0, 100).Select(i => (long)i), futures.Select(future => future.Get(s_get).Offset()));
@@ -279,7 +279,7 @@ public sealed class TransactionsBrokerTests
             List<AsyncKafkaFuture<RecordMetadata>> futures = new List<AsyncKafkaFuture<RecordMetadata>>();
             foreach (string value in values)
             {
-                futures.Add(await producer.Send(new ProducerRecord<string, string>(topic, value, partition: 0)));
+                futures.Add(await producer.Send(new ProducerRecord<string, string>(topic, value: value, partition: 0, key: null)));
             }
 
             await producer.Flush();
@@ -317,7 +317,7 @@ public sealed class TransactionsBrokerTests
         using KafkaProducer<string, string> seed = new KafkaProducer<string, string>(Configs(), Serdes.String().Serializer(), Serdes.String().Serializer());
         foreach (string value in new[] { "a", "b", "c" })
         {
-            seed.Send(new ProducerRecord<string, string>(source, value, partition: 0)).Get(s_get);
+            seed.Send(new ProducerRecord<string, string>(source, value: value, partition: 0, key: null)).Get(s_get);
         }
 
         return (source, sink);

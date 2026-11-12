@@ -235,7 +235,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
             // Same `value` / `key` / `callback` references across sends — nothing here is
             // re-allocated per send except what the send path itself allocates.
             ProducerRecord<byte[], byte[]> record =
-                new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0);
+                new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0);
             tasks[i] = callback is null
                 ? producer.Send(record).Delivery()
                 : producer.Send(record, callback).Delivery();

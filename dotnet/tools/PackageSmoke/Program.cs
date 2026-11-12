@@ -72,7 +72,7 @@ internal static class Program
 
         using (var mock = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer()))
         {
-            RecordMetadata metadata = mock.Send(new ProducerRecord<string, string>("smoke", "value", "key")).Get();
+            RecordMetadata metadata = mock.Send(new ProducerRecord<string, string>("smoke", value: "value", key: "key")).Get();
             Console.WriteLine($"OK: MockProducer sent to {metadata.Topic()}-{metadata.Partition()}@{metadata.Offset()}");
             mock.Close();
         }

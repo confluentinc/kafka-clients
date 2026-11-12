@@ -402,9 +402,5 @@ public sealed class PublicConsumerCommitCallbackLifetimeTests
         }
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 }

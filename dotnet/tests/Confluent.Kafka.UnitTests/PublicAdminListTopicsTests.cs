@@ -121,7 +121,7 @@ public sealed class PublicAdminListTopicsTests
     [Fact]
     public async Task TheAsyncRealClient_FailsTheFutureAndBothProjections_WithTheCoresErrorOnClose()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
         try
         {
             AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions().ListInternal(true));
@@ -312,7 +312,7 @@ public sealed class PublicAdminListTopicsTests
         SafeAdminResultHandle native;
         if (async)
         {
-            AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+            IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
             AsyncListTopicsResult result = admin.ListTopics();
             handle = HandleOf(ImplOf(result.NamesToListings()));
             native = result.Native!;
@@ -326,7 +326,7 @@ public sealed class PublicAdminListTopicsTests
         }
         else
         {
-            KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+            IAdmin admin = IAdmin.Create(s_unreachable);
             ListTopicsResult result = admin.ListTopics();
             handle = HandleOf(ImplOf(result.NamesToListings()));
             native = result.Native!;
@@ -452,8 +452,8 @@ public sealed class PublicAdminListTopicsTests
     {
         Mock => MockAdminClient.Create().Build(),
         AsyncMock => AsyncMockAdminClient.Create().Build(),
-        Real => new KafkaAdminClient(s_unreachable),
-        _ => new AsyncKafkaAdminClient(s_unreachable),
+        Real => IAdmin.Create(s_unreachable),
+        _ => IAsyncAdmin.Create(s_unreachable),
     };
 
     private static async Task DisposeAny(object admin)

@@ -621,16 +621,16 @@ public sealed class ConsumerCommitCallbackBridgeTests
     }
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
-    private sealed class SyncListener : ConsumerRebalanceListenerBase
+    private sealed class SyncListener : IConsumerRebalanceListener
     {
         private readonly Action _onAssigned;
 
         internal SyncListener(Action onAssigned) => _onAssigned = onAssigned;
 
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
     }
 }
