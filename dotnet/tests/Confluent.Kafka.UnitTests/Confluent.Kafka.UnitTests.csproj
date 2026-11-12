@@ -51,10 +51,11 @@
     versions (System.Memory to 4.0.5.0, where this folder holds 4.0.1.2), so loading them fails.
     The build writes a redirect only for an assembly referenced at two versions, and none is, so
     it writes no .dll.config. For a name redirected twice the first redirect wins, so these win
-    over the test host's.
+    over the test host's. Skipped in design-time builds (dotnet format, IDEs), which load the project
+    without building its references, so the copied assemblies may not exist yet.
   -->
   <Target Name="RedirectToCopiedAssemblies" AfterTargets="ResolveAssemblyReferences" BeforeTargets="GenerateBindingRedirects"
-          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework'">
+          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(DesignTimeBuild)' != 'true'">
     <ItemGroup>
       <_CopiedManagedAssembly Include="@(ReferenceCopyLocalPaths)"
                               Condition="'%(Extension)' == '.dll' and '%(ReferenceCopyLocalPaths.AssetType)' != 'native' and '%(ReferenceCopyLocalPaths.Culture)' == ''" />
