@@ -1174,6 +1174,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     pub(crate) async fn run(mut self) {
         use futures_util::FutureExt;
 
+        let trace_id = Arc::as_ptr(&self.running) as usize;
+        hang_trace(trace_id, format_args!("io: run started"));
         log::debug!("Consumer network thread started");
         while self.is_running() {
             // Re-check the shutdown signal first so `signal_close()`
@@ -1200,6 +1202,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 tokio::task::yield_now().await;
             }
         }
+        hang_trace(trace_id, format_args!("io: loop exited, cleanup starts"));
         // Java 4.4 `ConsumerNetworkThread#run`: the `finally { cleanup(); }` sits outside the
         // `catch (Throwable)`, so a failure in `cleanup()` leaves `run()` and
         // reaches `KafkaThread`'s uncaught-exception handler, which logs it at
@@ -1210,8 +1213,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // the panic unwinds out of `block_on`, skips `done`, and only reaches
         // stderr through the default panic hook.
         if let Err(payload) = std::panic::AssertUnwindSafe(self.cleanup()).catch_unwind().await {
+            hang_trace(trace_id, format_args!("io: cleanup panicked"));
             log::error!("Uncaught error in consumer network task: {}", panic_payload_message(&*payload));
         }
+        hang_trace(trace_id, format_args!("io: cleanup finished"));
     }
 
     /// Runs [`Self::run`] on a dedicated `std::thread` named
@@ -1225,21 +1230,133 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// production loop too.
     pub(crate) fn spawn_dedicated(self) -> (tokio::sync::oneshot::Receiver<()>, std::thread::JoinHandle<()>) {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let trace_id = Arc::as_ptr(&self.running) as usize;
         let thread_handle = std::thread::Builder::new()
             .name("kafka-consumer-io".into())
             .spawn(move || {
+                hang_trace(trace_id, format_args!("io: thread started"));
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("build consumer io runtime");
                 rt.block_on(self.run());
+                hang_trace(trace_id, format_args!("io: block_on returned"));
                 // Signal the close path that the bg loop + `cleanup()`
                 // have finished. Errors (receiver dropped before close)
                 // are benign — `await_join` treats them as a clean exit.
-                let _ = done_tx.send(());
+                let sent = done_tx.send(()).is_ok();
+                hang_trace(trace_id, format_args!("io: done sent, receiver alive={sent}"));
+                drop(rt);
+                hang_trace(trace_id, format_args!("io: runtime dropped, thread ends"));
             })
             .expect("spawn consumer io thread");
+        hang_trace(trace_id, format_args!("app: io thread spawned"));
         (done_rx, thread_handle)
+    }
+}
+
+/// Temporary, for the macOS CI hang investigation: when
+/// `CONFLUENT_KAFKA_HANG_TRACE_DIR` names a folder, appends `event` for the
+/// consumer whose background-loop flag is at `id` to `rust-trace-<pid>.log`
+/// there, one unbuffered line per event: milliseconds since the epoch, the
+/// thread's name, the consumer's id and the event.
+pub(crate) fn hang_trace(id: usize, event: std::fmt::Arguments<'_>) {
+    hang_trace_keyed("io", id, event);
+}
+
+/// [`hang_trace`] for any client: the line's key is `<kind>=<id in hex>`
+/// (`prod` for a producer, `sender` for its Sender task).
+pub(crate) fn hang_trace_keyed(kind: &str, id: usize, event: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    if let Some(file) = hang_trace_file() {
+        let ms = hang_trace_now_ms();
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed").replace(' ', "_");
+        let line = format!("{ms} {name} {kind}={id:x} {event}\n");
+        if let Ok(mut file) = file.lock() {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+fn hang_trace_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
+    static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        let dir = std::env::var_os("CONFLUENT_KAFKA_HANG_TRACE_DIR")?;
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = std::path::Path::new(&dir).join(format!("rust-trace-{}.log", std::process::id()));
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(std::sync::Mutex::new)
+    })
+    .as_ref()
+}
+
+fn hang_trace_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+/// Whether the hang trace is on (`CONFLUENT_KAFKA_HANG_TRACE_DIR` names a folder).
+pub(crate) fn hang_trace_enabled() -> bool {
+    hang_trace_file().is_some()
+}
+
+tokio::task_local! {
+    /// Temporary, for the macOS CI hang investigation: the key and iteration of
+    /// the producer Sender whose `run_once` is running, set around it so that
+    /// [`hang_step`] in the shared network code records the Sender's steps only.
+    pub(crate) static HANG_TRACE_SENDER: (usize, u64);
+}
+
+/// The iterations of each Sender whose steps are written to the trace; every
+/// later step is only recorded, for [`hang_step_of`].
+const HANG_TRACE_LOGGED_ITERATIONS: u64 = 3;
+
+/// Each Sender's last step: its iteration, the step and when it was recorded.
+type HangSteps = std::sync::Mutex<std::collections::HashMap<usize, (u64, &'static str, u128)>>;
+
+fn hang_steps() -> &'static HangSteps {
+    static STEPS: std::sync::OnceLock<HangSteps> = std::sync::OnceLock::new();
+    STEPS.get_or_init(Default::default)
+}
+
+/// Records `step` as the current step of the Sender whose `run_once` is
+/// running, and writes it with `detail` during its first iterations. Does
+/// nothing outside a Sender or with the trace off.
+pub(crate) fn hang_step(step: &'static str, detail: std::fmt::Arguments<'_>) {
+    if !hang_trace_enabled() {
+        return;
+    }
+    let Ok((id, iteration)) = HANG_TRACE_SENDER.try_with(|current| *current) else {
+        return;
+    };
+    if let Ok(mut steps) = hang_steps().lock() {
+        steps.insert(id, (iteration, step, hang_trace_now_ms()));
+    }
+    if iteration < HANG_TRACE_LOGGED_ITERATIONS {
+        hang_trace_keyed("sender", id, format_args!("sender: iteration {iteration}: {step} {detail}"));
+    }
+}
+
+/// The Sender's last recorded step: its iteration, the step and how many
+/// milliseconds ago it was recorded.
+pub(crate) fn hang_step_of(id: usize) -> Option<(u64, &'static str, u128)> {
+    let steps = hang_steps().lock().ok()?;
+    steps
+        .get(&id)
+        .map(|&(iteration, step, at)| (iteration, step, hang_trace_now_ms().saturating_sub(at)))
+}
+
+/// Forgets a Sender that ended.
+pub(crate) fn hang_step_forget(id: usize) {
+    if let Ok(mut steps) = hang_steps().lock() {
+        steps.remove(&id);
     }
 }
 

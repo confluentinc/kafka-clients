@@ -1457,7 +1457,13 @@ impl Selectable for Selector {
         }
 
         let made_read_progress_last_call = self.made_read_progress_last_poll;
+        // Temporary, for the macOS CI hang investigation: the producer Sender's steps (`hang_step`).
+        crate::consumer::internals::hang_step(
+            "selector: clear starts",
+            format_args!("channels={}", self.channels.len()),
+        );
         self.clear().await;
+        crate::consumer::internals::hang_step("selector: clear done", format_args!(""));
         self.poll_pending_connects();
 
         let data_in_buffers = !self.channels_with_buffered_read.is_empty();
@@ -1541,12 +1547,17 @@ impl Selectable for Selector {
             // Process channels with buffered data (reads only)
             if data_in_buffers {
                 let buffered_ids: Vec<Arc<str>> = self.channels_with_buffered_read.drain().collect();
+                crate::consumer::internals::hang_step(
+                    "selector: buffered reads and writes start",
+                    format_args!("channels={}", buffered_ids.len()),
+                );
                 for id in &buffered_ids {
                     if self.channels.contains_key(id) {
                         self.poll_channel_reads(id, false, start_select).await;
                     }
                 }
                 self.poll_channels_write_concurrent(&buffered_ids, start_select).await;
+                crate::consumer::internals::hang_step("selector: buffered reads and writes done", format_args!(""));
             }
 
             // Pass 1: Connect + Read the *ready* channels (sequential, fast).
@@ -1576,6 +1587,10 @@ impl Selectable for Selector {
                     }
                 }
             }
+            crate::consumer::internals::hang_step(
+                "selector: reads start",
+                format_args!("channels={}", channel_ids.len()),
+            );
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(&**id);
@@ -1585,7 +1600,12 @@ impl Selectable for Selector {
             self.immediately_connected_keys.clear();
 
             // Pass 2: Write the same set of channels concurrently.
+            crate::consumer::internals::hang_step(
+                "selector: writes start",
+                format_args!("channels={}", channel_ids.len()),
+            );
             self.poll_channels_write_concurrent(&channel_ids, start_select).await;
+            crate::consumer::internals::hang_step("selector: writes done", format_args!(""));
 
             // Consumed this iteration's ready set; its readiness events have been
             // drained (try_read → WouldBlock / write completed), so the prior
@@ -1718,6 +1738,13 @@ impl Selectable for Selector {
                     // `Selector.wakeup()` before `select()` makes that `select()`
                     // return at once. The early return is harmless (empty
                     // `responses`); the caller simply loops.
+                    crate::consumer::internals::hang_step(
+                        "selector: wait starts",
+                        format_args!(
+                            "remaining_ms={} any_interested={any_interested}",
+                            dl.saturating_duration_since(tokio::time::Instant::now()).as_millis()
+                        ),
+                    );
                     let woke_by_wakeup = if !any_interested {
                         tokio::select! {
                             biased;
@@ -1732,6 +1759,10 @@ impl Selectable for Selector {
                             _ = tokio::time::sleep_until(dl) => false,
                         }
                     };
+                    crate::consumer::internals::hang_step(
+                        "selector: wait done",
+                        format_args!("woke_by_wakeup={woke_by_wakeup}"),
+                    );
                     if woke_by_wakeup {
                         if self.any_channel_mid_receive() {
                             // Mid-message: don't abandon the in-flight receive to
