@@ -175,7 +175,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         foreach (ConfigResource resource in resources)
         {
             alterations[resource] =
-                new[] { new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), AlterConfigOpType.SET) };
+                new[] { new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), OpType.SET) };
         }
 
         return alterations;

@@ -59,7 +59,7 @@ const HEADER: &str = "\
 #   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
 #   method    <class>  <static|instance|default>  <name(Type name, ...)>   (default: an interface's default method)
-#   field     <class>  <NAME>
+#   field     <class>  <static|instance>  <NAME>
 #   constant  <class>  <NAME>   (an enum constant)
 ";
 
@@ -248,12 +248,16 @@ pub(crate) fn render(
             if deprecated || class.field_visibility.get(name) != Some(&Visibility::Public) {
                 continue;
             }
-            let item = if class.enum_constants.contains(name) {
-                "constant"
+            if class.enum_constants.contains(name) {
+                lines.push(format!("constant\t{marker}\t{name}"));
             } else {
-                "field"
-            };
-            lines.push(format!("{item}\t{marker}\t{name}"));
+                let scope = if class.static_fields.contains(name) {
+                    "static"
+                } else {
+                    "instance"
+                };
+                lines.push(format!("field\t{marker}\t{scope}\t{name}"));
+            }
         }
         lines.sort();
         lines.dedup();
@@ -359,7 +363,7 @@ mod tests {
             [
                 "type\torg.apache.kafka.common.Node\tclass\t-",
                 "ctor\torg.apache.kafka.common.Node\tNode(int id, String host, int port)",
-                "field\torg.apache.kafka.common.Node\tNO_ID",
+                "field\torg.apache.kafka.common.Node\tstatic\tNO_ID",
                 "method\torg.apache.kafka.common.Node\tinstance\tid()",
                 "method\torg.apache.kafka.common.Node\tstatic\tnoNode()",
             ]
@@ -471,6 +475,41 @@ mod tests {
                 "method\torg.apache.kafka.common.IsolationLevel\tinstance\tordinal()",
                 "method\torg.apache.kafka.common.IsolationLevel\tstatic\tvalueOf(String ?)",
                 "method\torg.apache.kafka.common.IsolationLevel\tstatic\tvalues()",
+            ]
+        );
+    }
+
+    #[test]
+    fn marks_a_fields_scope() {
+        let protocol = r#"
+            package x;
+            public enum SecurityProtocol {
+                PLAINTEXT(0, "PLAINTEXT");
+                public static final List<SecurityProtocol> VALUES = List.of(values());
+                public final short id;
+                public final String name;
+                SecurityProtocol(int id, String name) { this.id = (short) id; this.name = name; }
+            }
+        "#;
+        let configs = "package x; public interface Configs { String KEY = \"key\"; }";
+        let index = index(&[
+            (&["common", "security", "auth"], protocol, false),
+            (&["common"], configs, false),
+        ]);
+        let lines = body(
+            &index,
+            &public(&[
+                "org.apache.kafka.common.Configs",
+                "org.apache.kafka.common.security.auth.SecurityProtocol",
+            ]),
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("field")).collect::<Vec<_>>(),
+            [
+                "field\torg.apache.kafka.common.Configs\tstatic\tKEY",
+                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tid",
+                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tname",
+                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic\tVALUES",
             ]
         );
     }

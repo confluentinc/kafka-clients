@@ -125,13 +125,13 @@ public sealed class AdminConfigsSubmitArgumentTests
     }
 
     [Theory]
-    [InlineData(AlterConfigOpType.SET, "1", 0)]
-    [InlineData(AlterConfigOpType.DELETE, null, 1)]
-    [InlineData(AlterConfigOpType.APPEND, "x,y", 2)]
-    [InlineData(AlterConfigOpType.SUBTRACT, "", 3)]
-    [InlineData(AlterConfigOpType.SET, "", 0)]
-    [InlineData(AlterConfigOpType.DELETE, "ignored", 1)]
-    public void AnOperation_ReachesTheCore_AsItsNameValueAndJavaId(AlterConfigOpType type, string? value, int javaId)
+    [InlineData(OpType.SET, "1", 0)]
+    [InlineData(OpType.DELETE, null, 1)]
+    [InlineData(OpType.APPEND, "x,y", 2)]
+    [InlineData(OpType.SUBTRACT, "", 3)]
+    [InlineData(OpType.SET, "", 0)]
+    [InlineData(OpType.DELETE, "ignored", 1)]
+    public void AnOperation_ReachesTheCore_AsItsNameValueAndJavaId(OpType type, string? value, int javaId)
     {
         AlterConfigOp op = new AlterConfigOp(new ConfigEntry("cfg.näme", value), type);
         List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>();
@@ -183,14 +183,14 @@ public sealed class AdminConfigsSubmitArgumentTests
 
         await Alter(admin, Ops(
             s_topicResource,
-            new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET),
-            new AlterConfigOp(new ConfigEntry("cleanup.policy", string.Empty), AlterConfigOpType.SET)));
+            new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), OpType.SET),
+            new AlterConfigOp(new ConfigEntry("cleanup.policy", string.Empty), OpType.SET)));
         Config set = await Describe(admin, s_topicResource);
         Assert.Equal("1000", set.Get("retention.ms")!.Value());
         Assert.Equal(string.Empty, set.Get("cleanup.policy")!.Value());
 
         await Alter(admin, Ops(
-            s_topicResource, new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.DELETE)));
+            s_topicResource, new AlterConfigOp(new ConfigEntry("retention.ms", null), OpType.DELETE)));
         Config deleted = await Describe(admin, s_topicResource);
         Assert.Null(deleted.Get("retention.ms"));
         Assert.Equal(string.Empty, deleted.Get("cleanup.policy")!.Value());
@@ -207,11 +207,11 @@ public sealed class AdminConfigsSubmitArgumentTests
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(ReferenceComparer.Instance)
             {
                 [new ConfigResource(ConfigResourceType.TOPIC, Topic)] =
-                    new[] { new AlterConfigOp(new ConfigEntry("retention.ms", "1"), AlterConfigOpType.SET) },
+                    new[] { new AlterConfigOp(new ConfigEntry("retention.ms", "1"), OpType.SET) },
                 [new ConfigResource(ConfigResourceType.TOPIC, Topic)] = new[]
                 {
-                    new AlterConfigOp(new ConfigEntry("retention.ms", "2"), AlterConfigOpType.SET),
-                    new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), AlterConfigOpType.SET),
+                    new AlterConfigOp(new ConfigEntry("retention.ms", "2"), OpType.SET),
+                    new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), OpType.SET),
                 },
             };
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, null));

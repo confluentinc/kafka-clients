@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Resource;
 
@@ -21,19 +20,20 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// Java's <c>fromCode</c> fallback for the four ACL enums: a defined member is kept, anything else
 /// becomes that enum's <c>UNKNOWN</c>, so the binding keys an ACL answer by the value the core keys
-/// it by.
+/// it by. A value is read through the enum's own <c>FromCode</c>; one outside a <see langword="byte"/> is
+/// <c>UNKNOWN</c> too, never the member its low byte would name.
 /// </summary>
 internal static class AclEnumCodes
 {
     internal static AclOperation DefinedOrUnknown(AclOperation value) =>
-        Enum.IsDefined(typeof(AclOperation), value) ? value : AclOperation.UNKNOWN;
+        (uint)value <= byte.MaxValue ? AclOperation.FromCode((byte)value) : AclOperation.UNKNOWN;
 
     internal static AclPermissionType DefinedOrUnknown(AclPermissionType value) =>
-        Enum.IsDefined(typeof(AclPermissionType), value) ? value : AclPermissionType.UNKNOWN;
+        (uint)value <= byte.MaxValue ? AclPermissionType.FromCode((byte)value) : AclPermissionType.UNKNOWN;
 
     internal static ResourceType DefinedOrUnknown(ResourceType value) =>
-        Enum.IsDefined(typeof(ResourceType), value) ? value : ResourceType.UNKNOWN;
+        (uint)value <= byte.MaxValue ? ResourceType.FromCode((byte)value) : ResourceType.UNKNOWN;
 
     internal static PatternType DefinedOrUnknown(PatternType value) =>
-        Enum.IsDefined(typeof(PatternType), value) ? value : PatternType.UNKNOWN;
+        (uint)value <= byte.MaxValue ? PatternType.FromCode((byte)value) : PatternType.UNKNOWN;
 }

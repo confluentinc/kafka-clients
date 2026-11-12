@@ -105,8 +105,13 @@ internal sealed partial class NativeAdminClient
                     AdminStrings.Validate(protocolType, nameof(options));
                 }
 
-                RequireDefinedFilter(options.GroupStates(), GroupMarshal.NameFromState, nameof(ListGroupsOptions.GroupStates));
-                RequireDefinedFilter(options.Types(), GroupMarshal.NameFromType, nameof(ListGroupsOptions.Types));
+                RequireDefinedFilter(
+                    options.GroupStates(),
+                    GroupMarshal.NameFromState,
+                    nameof(ListGroupsOptions),
+                    nameof(ListGroupsOptions.GroupStates));
+                RequireDefinedFilter(
+                    options.Types(), GroupMarshal.NameFromType, nameof(ListGroupsOptions), nameof(ListGroupsOptions.Types));
             }
 
             SafeAdminResultHandle result = CallWithOptions(
@@ -206,7 +211,7 @@ internal sealed partial class NativeAdminClient
     }
 
     private static void RequireDefinedFilter<T>(
-        IReadOnlyCollection<T> values, Func<T, string?> name, string propertyName)
+        IReadOnlyCollection<T> values, Func<T, string?> name, string optionsName, string propertyName)
         where T : struct
     {
         foreach (T value in values)
@@ -216,7 +221,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentOutOfRangeException(
                     "options",
                     value,
-                    $"{nameof(ListGroupsOptions)}.{propertyName} must contain only defined {typeof(T).Name} members.");
+                    $"{optionsName}.{propertyName} must contain only defined {typeof(T).Name} members.");
             }
         }
     }

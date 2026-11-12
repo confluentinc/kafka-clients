@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Common;
 
 /// <summary>
@@ -34,11 +40,8 @@ namespace Confluent.Kafka.Common;
 /// </para>
 /// <para>
 /// <c>ToString()</c> gives the Java constant name (<c>STABLE</c>), not Java's <c>toString()</c>
-/// text (<c>"Stable"</c>): a recorded deviation.
-/// </para>
-/// <para>
-/// Java's <c>parse(String)</c> is not published, a recorded deviation: it decodes a wire
-/// spelling the caller never sees.
+/// text (<c>"Stable"</c>): a recorded deviation. Java's text is <c>ClassicGroupState.ToString(state)</c>
+/// on C# 14, and <see cref="ClassicGroupStateMethods.ToString(ClassicGroupState)"/> on older C#.
 /// </para>
 /// </remarks>
 public enum ClassicGroupState
@@ -63,4 +66,62 @@ public enum ClassicGroupState
 
     /// <summary>Java's <c>EMPTY</c>.</summary>
     EMPTY,
+}
+
+/// <summary>
+/// The static methods Java declares on the <see cref="ClassicGroupState"/> enum itself, which a C# enum cannot
+/// carry. From C# 14 they are called on the enum (<c>ClassicGroupState.Parse(…)</c>); older C# calls them on this
+/// class.
+/// </summary>
+public static class ClassicGroupStateMethods
+{
+    private static readonly Dictionary<string, ClassicGroupState> s_byUpperCaseText = ByUpperCaseText();
+
+    extension(ClassicGroupState)
+    {
+        /// <summary>
+        /// The state whose Java <c>toString()</c> text is <paramref name="name"/>, in any case — Java's
+        /// <c>parse(String)</c>: both are upper-cased as Java's <c>toUpperCase(Locale.ROOT)</c> does.
+        /// </summary>
+        /// <param name="name">The text, such as <c>"PreparingRebalance"</c>.</param>
+        /// <returns>
+        /// The state, or <see cref="ClassicGroupState.UNKNOWN"/> when no state has that text.
+        /// </returns>
+        /// <exception cref="ArgumentNullException"><paramref name="name"/> is <see langword="null"/>.</exception>
+        public static ClassicGroupState Parse(string name) =>
+            s_byUpperCaseText.TryGetValue(
+                JavaText.ToUpperRoot(name ?? throw new ArgumentNullException(nameof(name))),
+                out ClassicGroupState state)
+                ? state
+                : ClassicGroupState.UNKNOWN;
+
+        /// <summary>Java's <c>toString()</c> text of <paramref name="state"/>, such as <c>"Stable"</c>.</summary>
+        /// <param name="state">The state.</param>
+        /// <returns>The text, or the number for a value that is no constant.</returns>
+        public static string ToString(ClassicGroupState state) =>
+            TextOf(state) ?? ((int)state).ToString(CultureInfo.InvariantCulture);
+    }
+
+    internal static string? TextOf(ClassicGroupState state) =>
+        state switch
+        {
+            ClassicGroupState.UNKNOWN => "Unknown",
+            ClassicGroupState.PREPARING_REBALANCE => "PreparingRebalance",
+            ClassicGroupState.COMPLETING_REBALANCE => "CompletingRebalance",
+            ClassicGroupState.STABLE => "Stable",
+            ClassicGroupState.DEAD => "Dead",
+            ClassicGroupState.EMPTY => "Empty",
+            _ => null,
+        };
+
+    private static Dictionary<string, ClassicGroupState> ByUpperCaseText()
+    {
+        var table = new Dictionary<string, ClassicGroupState>(StringComparer.Ordinal);
+        foreach (ClassicGroupState state in (ClassicGroupState[])Enum.GetValues(typeof(ClassicGroupState)))
+        {
+            table.Add(JavaText.ToUpperRoot(TextOf(state)!), state);
+        }
+
+        return table;
+    }
 }

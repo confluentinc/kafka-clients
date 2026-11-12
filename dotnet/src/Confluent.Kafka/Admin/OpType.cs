@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Admin;
 /// nested type of the same name would not compile (<c>CS0102</c>).
 /// </para>
 /// </remarks>
-public enum AlterConfigOpType
+public enum OpType
 {
     /// <summary>Set the entry's value — Java's <c>SET</c> (id 0).</summary>
     SET = 0,
@@ -49,4 +49,36 @@ public enum AlterConfigOpType
     /// <c>SUBTRACT</c> (id 3).
     /// </summary>
     SUBTRACT = 3,
+}
+
+/// <summary>
+/// The members Java declares on the <see cref="OpType"/> enum itself, which a C# enum cannot carry. From
+/// C# 14 the static one is called on the enum (<c>OpType.ForId(…)</c>); older C# calls it on this class.
+/// </summary>
+public static class OpTypeMethods
+{
+    extension(OpType)
+    {
+        /// <summary>
+        /// Return the operation type with the given id, or <see langword="null"/> if no type has it — Java's
+        /// <c>forId(byte)</c>.
+        /// </summary>
+        /// <param name="id">The id.</param>
+        /// <returns>The operation type, or <see langword="null"/>; never throws.</returns>
+        public static OpType? ForId(byte id) => id switch
+        {
+            (byte)OpType.SET => OpType.SET,
+            (byte)OpType.DELETE => OpType.DELETE,
+            (byte)OpType.APPEND => OpType.APPEND,
+            (byte)OpType.SUBTRACT => OpType.SUBTRACT,
+            _ => null,
+        };
+    }
+
+    extension(OpType opType)
+    {
+        /// <summary>Return the id of this operation type — Java's <c>id()</c>.</summary>
+        /// <returns>The id, which is the member's value.</returns>
+        public byte Id() => unchecked((byte)opType);
+    }
 }

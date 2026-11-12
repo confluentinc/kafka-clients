@@ -130,41 +130,9 @@ internal static class GroupMarshal
         return singleton;
     }
 
-    internal static string? NameFromType(GroupType type) =>
-        type switch
-        {
-            GroupType.UNKNOWN => "Unknown",
-            GroupType.CONSUMER => "Consumer",
-            GroupType.CLASSIC => "Classic",
-            GroupType.SHARE => "Share",
-            GroupType.STREAMS => "Streams",
-            _ => null,
-        };
+    internal static string? NameFromType(GroupType type) => GroupTypeMethods.TextOf(type);
 
-    internal static string? NameFromState(GroupState state) =>
-        state switch
-        {
-            GroupState.UNKNOWN => "Unknown",
-            GroupState.PREPARING_REBALANCE => "PreparingRebalance",
-            GroupState.COMPLETING_REBALANCE => "CompletingRebalance",
-            GroupState.STABLE => "Stable",
-            GroupState.DEAD => "Dead",
-            GroupState.EMPTY => "Empty",
-            GroupState.ASSIGNING => "Assigning",
-            GroupState.RECONCILING => "Reconciling",
-            GroupState.NOT_READY => "NotReady",
-            _ => null,
-        };
+    internal static string? NameFromState(GroupState state) => GroupStateMethods.TextOf(state);
 
-    internal static string? NameFromClassicState(ClassicGroupState state) =>
-        state switch
-        {
-            ClassicGroupState.UNKNOWN => "Unknown",
-            ClassicGroupState.PREPARING_REBALANCE => "PreparingRebalance",
-            ClassicGroupState.COMPLETING_REBALANCE => "CompletingRebalance",
-            ClassicGroupState.STABLE => "Stable",
-            ClassicGroupState.DEAD => "Dead",
-            ClassicGroupState.EMPTY => "Empty",
-            _ => null,
-        };
+    internal static string? NameFromClassicState(ClassicGroupState state) => ClassicGroupStateMethods.TextOf(state);
 }
