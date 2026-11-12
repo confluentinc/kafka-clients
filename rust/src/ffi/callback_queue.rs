@@ -165,19 +165,26 @@ impl CallbackQueue {
     /// the queue is [closed](Self::close), runs `job` on the calling thread
     /// instead.
     pub(crate) fn push(&self, job: CallbackJob) {
+        let _ = self.push_reporting(job);
+    }
+
+    /// Temporary, for the macOS CI hang investigation: [`Self::push`],
+    /// returning `None` when the queue was closed and `job` ran on the calling
+    /// thread, else whether the vector was empty and whether a hook was called.
+    pub(crate) fn push_reporting(&self, job: CallbackJob) -> Option<(bool, bool)> {
         let was_empty = {
             let mut pending = lock(&self.pending);
             if self.closed.load(Ordering::Relaxed) {
                 drop(pending);
                 job();
-                return;
+                return None;
             }
             let was_empty = pending.is_empty();
             pending.push_back(job);
             was_empty
         };
         self.pushed.notify_one();
-        self.notify_if(was_empty);
+        Some((was_empty, self.notify_if(was_empty)))
     }
 
     /// Closes the queue, for a client's `_destroy` that has stopped the
@@ -254,9 +261,9 @@ impl CallbackQueue {
     /// calls with the GIL held. So two calls of the hook can overlap, when a
     /// drain runs between two pushes, and [`set_notify`](Self::set_notify)
     /// does not wait for a call in flight.
-    fn notify_if(&self, was_empty: bool) {
+    fn notify_if(&self, was_empty: bool) -> bool {
         if !was_empty {
-            return;
+            return false;
         }
         let registered = *lock(&self.notify);
         if let Some((notify, opaque)) = registered {
@@ -264,7 +271,9 @@ impl CallbackQueue {
             // by the C caller, who keeps the opaque alive until it destroys the
             // client; replacing the hook does not wait for this call.
             unsafe { notify(opaque.0) };
+            return true;
         }
+        false
     }
 
     /// Registers the hook fired on every empty-to-non-empty transition, or
