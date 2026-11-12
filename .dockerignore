@@ -1,5 +1,5 @@
 # Build context filter for the multilanguage gRPC server images
-# (python/Dockerfile.grpc{,.async}, c/Dockerfile.grpc).
+# (python/Dockerfile.grpc{,.async}, c/Dockerfile.grpc, dotnet/Dockerfile.grpc{,.async}).
 #
 # Those builds use the repo root as their context so they can COPY from
 # rust/target/, python/, c/ and rust/multilanguage-test-server/. Without this file the
@@ -9,9 +9,13 @@
 #
 # Only the handful of paths the Dockerfiles actually COPY are re-included.
 
-# Everything cargo produces, except the four artifacts the images need: the C
-# image takes confluent_kafka.h, the Python images confluent_kafka_bindings.h.
+# Everything cargo produces, except the artifacts the images need: the library
+# of the profile the images are built from (RUST_PROFILE, debug for the tests),
+# confluent_kafka.h for the C image and confluent_kafka_bindings.h for the
+# Python images.
 rust/target
+!rust/target/debug/libconfluent_kafka.a
+!rust/target/debug/libconfluent_kafka.so
 !rust/target/release/libconfluent_kafka.a
 !rust/target/release/libconfluent_kafka.so
 !rust/target/include/confluent_kafka.h

@@ -26,7 +26,29 @@ GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
 # building/formatting/testing the .sln never drags it in.
 DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
+# The cargo profile directory of the Rust library the tests link,
+# $(RUST_PROJECT_ROOT)/target/$(RUST_PROFILE): the debug all-features build, the
+# library unit the Rust tests build (rust/Makefile `devel-build-all-features`).
+# CARGO_PROFILE_PROP points Confluent.Kafka.csproj's native copy at it, whatever
+# $(DOTNET_CONFIG) is; every build and test of the test paths passes it. pack-dotnet
+# and the perf benchmarks build and link the release library instead.
+RUST_PROFILE ?= debug
+RUST_BUILD_TARGET = $(if $(filter release,$(RUST_PROFILE)),build,devel-build-all-features)
+CARGO_PROFILE_PROP = -p:CargoProfileDir=$(RUST_PROFILE)
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
+
+# `$(call selected_run,<options> -- <command>)` runs the command only when the
+# test selection (the file TEST_SELECTION names, see the root's
+# `select-tests`) selects its section (`dotnet.solution`, `dotnet.soak`,
+# `dotnet.performance`, `dotnet.grpc`), and always when none applies. With
+# `--dotnet`, an argument `{}` stands for the `--filter` selecting the tests the
+# section names, and-ed with the `--dotnet-filter` expression, or for that
+# expression alone when the whole suite runs. See `cargo xtask help`
+# (`selected-run`). The subshell keeps the `cd`, which cargo needs to find the
+# toolchain and the `xtask` alias, from leaking into the rest of the recipe;
+# for the same reason an environment variable for the command goes after `--`
+# through `env`.
+selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
 .PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	pack-dotnet package-check-dotnet
@@ -34,12 +56,13 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
 # root (as for python/ and c/) so the Dockerfile can copy from
-# rust/target/release/, dotnet/, and the rust/multilanguage-test-server/ proto
-# crate. Requires `cargo build --features ffi --release` to have produced the
-# Linux libconfluent_kafka.so in rust/target/release/ first.
+# rust/target/$(RUST_PROFILE)/, dotnet/, and the rust/multilanguage-test-server/ proto
+# crate. Requires the Linux libconfluent_kafka.so in rust/target/$(RUST_PROFILE)/
+# first (the root's devel-build-rust-all-features).
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
 		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc \
 		$(REPO_ROOT)
 
@@ -52,6 +75,7 @@ grpc-image:
 grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
 		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.async \
 		$(REPO_ROOT)
 
@@ -60,15 +84,15 @@ grpc-image-async:
 # where rust/tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
 # brings the ASP.NET Core 10 runtime but no ASP.NET Core 8 one; the Docker images
 # publish the net8.0 leg instead. Invoked by the root `build-grpc-native-dotnet`,
-# which builds the Rust release artifacts first.
+# which builds the debug all-features Rust library first.
 #
-# `-c Release` is PINNED rather than $(DOTNET_CONFIG): Confluent.Kafka.csproj's
-# native-copy <Content> item copies rust/target/$(CargoProfileDir)/libconfluent_kafka.*
-# into the output, CargoProfileDir follows the configuration, and only the release
-# native is built by build-rust-all-features. A Debug build would copy a stale or
-# missing debug native instead.
+# Confluent.Kafka.csproj's native-copy <Content> item copies
+# rust/target/$(CargoProfileDir)/libconfluent_kafka.* into the output, and
+# CargoProfileDir follows the configuration unless it is given: $(CARGO_PROFILE_PROP)
+# points it at the debug library the root builds, with the .NET configuration
+# pinned to Release.
 grpc-native:
-	$(DOTNET) build -c Release -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
+	$(DOTNET) build -c Release $(CARGO_PROFILE_PROP) -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
 
 # The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
 # server images, then run the `__grpc_dotnet` tests of the Rust harness against
@@ -78,7 +102,7 @@ grpc-native:
 # INTEGRATION_TEST_PROTOCOL in the environment.
 #
 # Cross-arch guard: both Dockerfiles COPY the *host-built*
-# rust/target/release/libconfluent_kafka.so straight into a Linux container. On a
+# rust/target/$(RUST_PROFILE)/libconfluent_kafka.so straight into a Linux container. On a
 # non-Linux host that artifact is Mach-O / absent (no ELF .so), so the image
 # cannot build. Cross-compiling host->Linux is out of scope for a dev-box run, so
 # off Linux this SELF-SKIPS with a loud notice and exits 0. It is NOT skipped in
@@ -101,7 +125,7 @@ test-integration:
 		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
 		printf '\n'; \
 		printf 'The .NET gRPC-server images COPY the host-built\n'; \
-		printf '  rust/target/release/libconfluent_kafka.so\n'; \
+		printf '  rust/target/$(RUST_PROFILE)/libconfluent_kafka.so\n'; \
 		printf 'into a Linux container. On this host that artifact is\n'; \
 		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
 		printf 'This container arm runs only in CI'"'"'s amd64 Linux verify-dotnet jobs.\n'; \
@@ -109,7 +133,7 @@ test-integration:
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
-		$(MAKE) grpc-image grpc-image-async && \
+		$(call selected_run,--section dotnet.grpc -- $(MAKE) -C $(CURDIR) grpc-image grpc-image-async) && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet; \
 	fi
 
@@ -119,10 +143,10 @@ test-integration:
 # the native would not exist and the csproj's EnsureNativeLibraryExists target
 # fails fast.
 #
-# rust/Makefile's `build` (`cargo build --features ffi --release`) is the minimal
-# build the binding needs (the ffi cdylib + header, in the release profile
-# $(DOTNET_CONFIG)=Release maps to); it is deliberately narrower than the root's
-# `build-rust-all-features` used by the integration arm. It runs in
+# rust/Makefile's `devel-build-all-features` is the debug all-features library,
+# the one the Rust tests and the other bindings' tests build, so it compiles
+# nothing after them; $(CARGO_PROFILE_PROP) makes the .NET build copy it, with
+# the .NET configuration left at $(DOTNET_CONFIG). It runs in
 # $(RUST_PROJECT_ROOT) (see the header), so it works whether this Makefile is
 # invoked here or via the root Makefile.
 #
@@ -134,8 +158,8 @@ test-integration:
 # cannot execute on Linux; test execution is net8.0 + net10.0 only (see
 # test-dotnet).
 build-dotnet:
-	$(MAKE) -C $(RUST_PROJECT_ROOT) build
-	$(DOTNET) build -c $(DOTNET_CONFIG) $(SOLUTION)
+	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOLUTION)
 
 # build + format-check + the solution's tests: the unit tests (Mock* tests, no
 # broker) and the integration tests (a Testcontainers broker; they skip without
@@ -151,13 +175,15 @@ build-dotnet:
 #
 # DOTNET_TEST_FILTER, empty by default, is a `dotnet test --filter` expression for
 # both test lines. The root's test-dotnet-macos-docker sets it to leave the
-# integration tests out, as Python's macOS job runs only its unit tests.
+# integration tests out, as Python's macOS job runs only its unit tests. The
+# test selection's `dotnet.solution` narrows it further. The build and the format
+# check always run.
 DOTNET_TEST_FILTER ?=
 
 test-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
+	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOLUTION) {})
+	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOLUTION) {})
 	$(MAKE) test-soak-dotnet
 
 # ---------------------------------------------------------------------------
@@ -186,11 +212,11 @@ SOAK_CLIENT := $(SOAK_DIR)/SoakClient/SoakClient.csproj
 SOAK_TESTS := $(SOAK_DIR)/SoakClient.Tests/SoakClient.Tests.csproj
 
 test-soak-dotnet: build-dotnet
-	$(DOTNET) build -c $(DOTNET_CONFIG) $(SOAK_TESTS)
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOAK_TESTS)
 	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS)
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS)
+	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOAK_TESTS) {})
+	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOAK_TESTS) {})
 
 # ---------------------------------------------------------------------------
 # The Confluent.Kafka NuGet package.
@@ -243,10 +269,10 @@ GRPC_SERVER_PROJECT := $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServe
 GRPC_SERVER_TESTS := $(REPO_ROOT)/dotnet/tests/Confluent.Kafka.GrpcServer.UnitTests/Confluent.Kafka.GrpcServer.UnitTests.csproj
 
 test-grpc-server-dotnet: build-dotnet
-	$(DOTNET) build -c $(DOTNET_CONFIG) $(GRPC_SERVER_TESTS)
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(GRPC_SERVER_TESTS)
 	$(DOTNET) format $(GRPC_SERVER_PROJECT) --verify-no-changes
 	$(DOTNET) format $(GRPC_SERVER_TESTS) --verify-no-changes
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(GRPC_SERVER_TESTS)
+	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(GRPC_SERVER_TESTS)
 
 # ---------------------------------------------------------------------------
 # Performance suite. Kept OUT of the solution (like grpc-server), so
@@ -292,9 +318,9 @@ CLIENT_VERSION ?= 3
 # Docker-free ones, so a new Docker-free test file is covered here automatically
 # instead of silently running nowhere but the Docker target.
 perf-unit-test-dotnet: build-dotnet
-	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(PERF_TESTS) --filter 'FullyQualifiedName!~PerfV3SmokeTests'
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) --filter 'FullyQualifiedName!~PerfV3SmokeTests'
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(PERF_V3)/PerfV3.csproj
+	$(call selected_run,--section dotnet.performance --dotnet --dotnet-filter 'FullyQualifiedName!~PerfV3SmokeTests' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(PERF_TESTS) {})
+	$(call selected_run,--section dotnet.performance --dotnet --dotnet-filter 'FullyQualifiedName!~PerfV3SmokeTests' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(PERF_TESTS) {})
 
 # Env-driven producer/consumer benchmarks (manual; need a reachable broker via
 # BOOTSTRAP_SERVERS). CLIENT_VERSION selects the exe: 3 (default) = PerfV3 (our
@@ -342,4 +368,4 @@ consumer-perf-test-dotnet:
 test-integration-perf-dotnet:
 	$(MAKE) -C $(RUST_PROJECT_ROOT) build
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
-	PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS)
+	$(call selected_run,--section dotnet.performance --dotnet -- env PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) {})

@@ -2,14 +2,14 @@ version: v1.0
 name: publish-pypi
 
 # The manual "Publish to PyPI" promotion of publish-testpypi.yml, itself the
-# "Publish to Test PyPI" promotion of semaphore.yml. It publishes a Python
+# "Publish to Test PyPI" promotion of release.yml. It publishes a Python
 # version to PyPI from the build of its python/v<version> tag, with exactly
 # the wheels that this workflow published to Test PyPI and that passed the
 # post-publish checks there (see publish-testpypi.yml and the Python release
-# blocks of semaphore.yml). Its blocks run on the tag of any Python version,
+# blocks of release.yml). Its blocks run on the tag of any Python version,
 # a pre-release (an aN, bN or rcN suffix) or a dev version (.devN) included:
 # both publishes are manual, so a version reaches PyPI only when someone
-# promotes it twice. The tag pattern must stay the pattern of semaphore.yml.
+# promotes it twice. The tag pattern must stay the pattern of release.yml.
 #
 # A promotion can be started even from a failed pipeline, so the publish job
 # does not rely on the result of the build it was promoted from:

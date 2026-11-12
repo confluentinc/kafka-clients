@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 #
-# The start of every Linux and macOS job of semaphore.yml, sourced as the first command of each
+# The start of every Linux and macOS job of semaphore.yml and release.yml, sourced as the first command of each
 # block's task prologue (`. .semaphore/job-start.sh`) so that its environment stays in the job's
 # shell. The global prologue runs only `checkout`, because it also runs on the Windows agents,
 # whose shell is PowerShell; the Windows blocks start with .semaphore/job-start.ps1 instead.
