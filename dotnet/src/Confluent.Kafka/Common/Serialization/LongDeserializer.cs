@@ -1,4 +1,4 @@
-// Copyright 2025 Confluent Inc.
+// Copyright 2026 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,36 +13,22 @@
 // limitations under the License.
 
 using System;
-using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Common.Serialization;
 
-namespace Confluent.Kafka.Internal.Serialization;
+using Confluent.Kafka.Common.Errors;
+
+namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
-/// The serde behind <see cref="Serdes.Long()"/>: 8 big-endian bytes, as Java's <c>LongSerializer</c> and
-/// <c>LongDeserializer</c>.
+/// Java's <c>LongDeserializer</c>: 8 big-endian bytes as a <see cref="long"/>, Java's nullable <c>Long</c>.
 /// </summary>
-internal sealed class Int64Serde : ISerde<long>
+public sealed class LongDeserializer : IDeserializer<long?>
 {
-    public ReadOnlyMemory<byte>? Serialize(string topic, long data) =>
-        new[]
-        {
-            (byte)(data >> 56),
-            (byte)(data >> 48),
-            (byte)(data >> 40),
-            (byte)(data >> 32),
-            (byte)(data >> 24),
-            (byte)(data >> 16),
-            (byte)(data >> 8),
-            (byte)data,
-        };
-
-    public long Deserialize(string topic, ReadOnlySpan<byte> data)
+    /// <inheritdoc/>
+    public long? Deserialize(string topic, ReadOnlySpan<byte> data)
     {
         if (data.Length != 8)
         {
-            throw new SerializationException(
-                "Size of data received by LongDeserializer is not 8");
+            throw new SerializationException("Size of data received by LongDeserializer is not 8");
         }
 
         long value = 0;

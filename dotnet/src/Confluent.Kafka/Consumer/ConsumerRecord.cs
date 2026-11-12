@@ -21,18 +21,19 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Consumer;
 
 /// <summary>
-/// A record returned by <c>Poll</c>, Java's <c>org.apache.kafka.clients.consumer.ConsumerRecord&lt;K, V&gt;</c>.
+/// A key/value pair to be received from Kafka, with the topic name and partition number it is received from and its
+/// offset in that partition, Java's <c>org.apache.kafka.clients.consumer.ConsumerRecord&lt;K, V&gt;</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The key and value are the deserializers' output; the topic and the headers are owned copies, so the record
-/// stays valid after the poll's native batch is freed. There is no public constructor: records come only from
-/// <c>Poll</c>.
+/// A polled record's key and value are the deserializers' output, and its topic and headers are owned copies, so
+/// the record stays valid after the poll's native batch is freed.
 /// </para>
 /// <para>
 /// An absent key, or an absent value (a tombstone), is <c>default(TKey)</c> / <c>default(TValue)</c>, and the
-/// deserializer is not called; an empty one is deserialized from an empty span. To tell a tombstone from a zero
-/// value, use a nullable value type, such as <c>ConsumerRecord&lt;string, long?&gt;</c>.
+/// deserializer is not called; an empty one is deserialized from an empty span. That default is
+/// <see langword="null"/> for a reference type and for a nullable value type, such as the <c>long?</c> of
+/// <c>Serdes.Long()</c>, so <c>ConsumerRecord&lt;string, long?&gt;</c> reads a tombstone as <see langword="null"/>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
@@ -50,37 +51,131 @@ public sealed class ConsumerRecord<TKey, TValue>
     private readonly long _offset;
     private readonly long _timestamp;
     private readonly TimestampType _timestampType;
-    private readonly TKey _key;
-    private readonly TValue _value;
+    private readonly TKey? _key;
+    private readonly TValue? _value;
     private readonly Headers _headers;
     private readonly int? _leaderEpoch;
     private readonly int _serializedKeySize;
     private readonly int _serializedValueSize;
+    private readonly short? _deliveryCount;
 
-    internal ConsumerRecord(
+    /// <summary>
+    /// Creates a record to be received from a specified topic and partition (provided for compatibility with Kafka 0.9
+    /// before the message format supported timestamps and before serialized metadata were exposed).
+    /// </summary>
+    /// <param name="topic">The topic this record is received from.</param>
+    /// <param name="partition">The partition of the topic this record is received from.</param>
+    /// <param name="offset">The offset of this record in the corresponding Kafka partition.</param>
+    /// <param name="key">The key of the record, if one exists (<see langword="null"/> is allowed).</param>
+    /// <param name="value">The record contents.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="topic"/> is <see langword="null"/>.</exception>
+    public ConsumerRecord(string topic, int partition, long offset, TKey? key, TValue? value)
+        : this(
+            topic,
+            partition,
+            offset,
+            NO_TIMESTAMP,
+            Common.Record.TimestampType.NO_TIMESTAMP_TYPE,
+            NULL_SIZE,
+            NULL_SIZE,
+            key,
+            value,
+            new Headers(),
+            null)
+    {
+    }
+
+    /// <summary>Creates a record to be received from a specified topic and partition.</summary>
+    /// <param name="topic">The topic this record is received from.</param>
+    /// <param name="partition">The partition of the topic this record is received from.</param>
+    /// <param name="offset">The offset of this record in the corresponding Kafka partition.</param>
+    /// <param name="timestamp">The timestamp of the record.</param>
+    /// <param name="timestampType">The timestamp type.</param>
+    /// <param name="serializedKeySize">The length of the serialized key.</param>
+    /// <param name="serializedValueSize">The length of the serialized value.</param>
+    /// <param name="key">The key of the record, if one exists (<see langword="null"/> is allowed).</param>
+    /// <param name="value">The record contents.</param>
+    /// <param name="headers">The headers of the record, kept as given.</param>
+    /// <param name="leaderEpoch">
+    /// The leader epoch of the record, or <see langword="null"/> (it may be absent for legacy record formats).
+    /// </param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topic"/> or <paramref name="headers"/> is <see langword="null"/>; the topic is checked first.
+    /// </exception>
+    public ConsumerRecord(
         string topic,
         int partition,
         long offset,
         long timestamp,
         TimestampType timestampType,
-        TKey key,
-        TValue value,
+        int serializedKeySize,
+        int serializedValueSize,
+        TKey? key,
+        TValue? value,
+        Headers headers,
+        int? leaderEpoch)
+        : this(
+            topic,
+            partition,
+            offset,
+            timestamp,
+            timestampType,
+            serializedKeySize,
+            serializedValueSize,
+            key,
+            value,
+            headers,
+            leaderEpoch,
+            null)
+    {
+    }
+
+    /// <summary>Creates a record to be received from a specified topic and partition.</summary>
+    /// <param name="topic">The topic this record is received from.</param>
+    /// <param name="partition">The partition of the topic this record is received from.</param>
+    /// <param name="offset">The offset of this record in the corresponding Kafka partition.</param>
+    /// <param name="timestamp">The timestamp of the record.</param>
+    /// <param name="timestampType">The timestamp type.</param>
+    /// <param name="serializedKeySize">The length of the serialized key.</param>
+    /// <param name="serializedValueSize">The length of the serialized value.</param>
+    /// <param name="key">The key of the record, if one exists (<see langword="null"/> is allowed).</param>
+    /// <param name="value">The record contents.</param>
+    /// <param name="headers">The headers of the record, kept as given.</param>
+    /// <param name="leaderEpoch">
+    /// The leader epoch of the record, or <see langword="null"/> (it may be absent for legacy record formats).
+    /// </param>
+    /// <param name="deliveryCount">
+    /// The delivery count of the record, or <see langword="null"/> (it may be absent when deliveries are not counted).
+    /// </param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topic"/> or <paramref name="headers"/> is <see langword="null"/>; the topic is checked first.
+    /// </exception>
+    public ConsumerRecord(
+        string topic,
+        int partition,
+        long offset,
+        long timestamp,
+        TimestampType timestampType,
+        int serializedKeySize,
+        int serializedValueSize,
+        TKey? key,
+        TValue? value,
         Headers headers,
         int? leaderEpoch,
-        int serializedKeySize,
-        int serializedValueSize)
+        short? deliveryCount)
     {
-        _topic = topic;
+        _topic = topic ?? throw new IllegalArgumentException("Topic cannot be null");
+        _headers = headers ?? throw new IllegalArgumentException("Headers cannot be null");
         _partition = partition;
         _offset = offset;
         _timestamp = timestamp;
         _timestampType = timestampType;
-        _key = key;
-        _value = value;
-        _headers = headers;
-        _leaderEpoch = leaderEpoch;
         _serializedKeySize = serializedKeySize;
         _serializedValueSize = serializedValueSize;
+        _key = key;
+        _value = value;
+        _leaderEpoch = leaderEpoch;
+        _deliveryCount = deliveryCount;
     }
 
     /// <summary>The topic name.</summary>
@@ -112,14 +207,14 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The deserialized key, or <c>default(TKey)</c> when the key is absent; the deserializer is not
     /// called then.</returns>
-    public TKey Key() => _key;
+    public TKey? Key() => _key;
 
     /// <summary>
     /// The deserialized value, or <c>default(TValue)</c> for a tombstone; the deserializer is not called then.
     /// </summary>
     /// <returns>The deserialized value, or <c>default(TValue)</c> for a tombstone; the deserializer is not called
     /// then.</returns>
-    public TValue Value() => _value;
+    public TValue? Value() => _value;
 
     /// <summary>The record headers; empty when the record has none.</summary>
     /// <returns>The record headers; empty when the record has none.</returns>
@@ -131,6 +226,16 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The record's leader epoch, or <see langword="null"/> when the record format has none.</returns>
     public int? LeaderEpoch() => _leaderEpoch;
+
+    /// <summary>
+    /// The delivery count of the record, if available (Java's <c>Optional&lt;Short&gt; deliveryCount()</c>).
+    /// Deliveries are counted for records delivered by share groups.
+    /// </summary>
+    /// <returns>
+    /// The delivery count, or <see langword="null"/> when deliveries are not counted, as for every record this
+    /// consumer polls.
+    /// </returns>
+    public short? DeliveryCount() => _deliveryCount;
 
     /// <summary>
     /// The size of the serialized, uncompressed key in bytes, or <c>-1</c> if the key is
@@ -150,8 +255,7 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>
     /// A diagnostic rendering in Java's <c>toString()</c> form: the timestamp is named by Java's
-    /// <c>TimestampType</c> text (<c>CreateTime</c>), and the delivery count, which only a share group's records
-    /// carry, is <c>null</c>.
+    /// <c>TimestampType</c> text (<c>CreateTime</c>), and an absent leader epoch or delivery count is <c>null</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
@@ -159,19 +263,12 @@ public sealed class ConsumerRecord<TKey, TValue>
         + ", partition = " + _partition.ToString(CultureInfo.InvariantCulture)
         + ", leaderEpoch = " + JavaText.ValueOf(_leaderEpoch)
         + ", offset = " + _offset.ToString(CultureInfo.InvariantCulture)
-        + ", " + TimestampTypeText(_timestampType) + " = " + _timestamp.ToString(CultureInfo.InvariantCulture)
-        + ", deliveryCount = null"
+        + ", " + TimestampTypeMethods.ToString(_timestampType)
+        + " = " + _timestamp.ToString(CultureInfo.InvariantCulture)
+        + ", deliveryCount = " + JavaText.ValueOf(_deliveryCount)
         + ", serialized key size = " + _serializedKeySize.ToString(CultureInfo.InvariantCulture)
         + ", serialized value size = " + _serializedValueSize.ToString(CultureInfo.InvariantCulture)
         + ", headers = " + _headers
         + ", key = " + JavaText.ValueOf(_key)
         + ", value = " + JavaText.ValueOf(_value) + ")";
-
-    private static string TimestampTypeText(TimestampType type) => type switch
-    {
-        Common.Record.TimestampType.NO_TIMESTAMP_TYPE => "NoTimestampType",
-        Common.Record.TimestampType.CREATE_TIME => "CreateTime",
-        Common.Record.TimestampType.LOG_APPEND_TIME => "LogAppendTime",
-        _ => ((int)type).ToString(CultureInfo.InvariantCulture),
-    };
 }

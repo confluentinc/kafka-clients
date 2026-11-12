@@ -63,9 +63,9 @@ public sealed class TransactionsBrokerTests
         (string source, string sink) = await SeededRoundTripTopicsAsync();
         TopicPartition tp = new TopicPartition(source, 0);
         using KafkaConsumer<string, string> consumer = new KafkaConsumer<string, string>(
-            GroupConfigs("read_committed"), Serdes.String(), Serdes.String());
+            GroupConfigs("read_committed"), Serdes.String().Deserializer(), Serdes.String().Deserializer());
         using KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
-            TransactionalConfigs("dotnet-eos-txn"), Serdes.String(), Serdes.String());
+            TransactionalConfigs("dotnet-eos-txn"), Serdes.String().Serializer(), Serdes.String().Serializer());
 
         consumer.Subscribe(new[] { source });
         List<ConsumerRecord<string, string>> records = new List<ConsumerRecord<string, string>>();
@@ -81,7 +81,7 @@ public sealed class TransactionsBrokerTests
         producer.BeginTransaction();
         foreach (ConsumerRecord<string, string> record in records)
         {
-            producer.Send(new ProducerRecord<string, string>(sink, record.Value().ToUpperInvariant(), record.Value(), partition: 0));
+            producer.Send(new ProducerRecord<string, string>(sink, value: record.Value()!.ToUpperInvariant(), key: record.Value(), partition: 0));
         }
 
         producer.SendOffsetsToTransaction(
@@ -106,9 +106,9 @@ public sealed class TransactionsBrokerTests
         (string source, string sink) = await SeededRoundTripTopicsAsync();
         TopicPartition tp = new TopicPartition(source, 0);
         await using AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(
-            GroupConfigs("read_committed"), Serdes.String(), Serdes.String());
+            GroupConfigs("read_committed"), Serdes.String().Deserializer(), Serdes.String().Deserializer());
         await using AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            TransactionalConfigs("dotnet-eos-txn"), Serdes.String(), Serdes.String());
+            TransactionalConfigs("dotnet-eos-txn"), Serdes.String().Serializer(), Serdes.String().Serializer());
 
         await consumer.Subscribe(new[] { source });
         List<ConsumerRecord<string, string>> records = new List<ConsumerRecord<string, string>>();
@@ -124,7 +124,7 @@ public sealed class TransactionsBrokerTests
         await producer.BeginTransaction();
         foreach (ConsumerRecord<string, string> record in records)
         {
-            await producer.Send(new ProducerRecord<string, string>(sink, record.Value().ToUpperInvariant(), record.Value(), partition: 0));
+            await producer.Send(new ProducerRecord<string, string>(sink, value: record.Value()!.ToUpperInvariant(), key: record.Value(), partition: 0));
         }
 
         await producer.SendOffsetsToTransaction(
@@ -148,14 +148,14 @@ public sealed class TransactionsBrokerTests
     {
         string topic = await TopicAsync("dotnet-abort");
         using (KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
-            TransactionalConfigs("dotnet-abort-txn"), Serdes.String(), Serdes.String()))
+            TransactionalConfigs("dotnet-abort-txn"), Serdes.String().Serializer(), Serdes.String().Serializer()))
         {
             producer.InitTransactions();
             producer.BeginTransaction();
             KafkaFuture<RecordMetadata>[] aborted =
             {
-                producer.Send(new ProducerRecord<string, string>(topic, "x1", partition: 0)),
-                producer.Send(new ProducerRecord<string, string>(topic, "x2", partition: 0)),
+                producer.Send(new ProducerRecord<string, string>(topic, value: "x1", partition: 0, key: null)),
+                producer.Send(new ProducerRecord<string, string>(topic, value: "x2", partition: 0, key: null)),
             };
 
             // The records reach the log before the abort marks them aborted.
@@ -163,7 +163,7 @@ public sealed class TransactionsBrokerTests
             Assert.Equal(new[] { 0L, 1L }, aborted.Select(future => future.Get(s_get).Offset()));
             producer.AbortTransaction();
             producer.BeginTransaction();
-            producer.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+            producer.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
             producer.CommitTransaction();
         }
 
@@ -175,14 +175,14 @@ public sealed class TransactionsBrokerTests
     {
         string topic = await TopicAsync("dotnet-abort");
         await using (AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            TransactionalConfigs("dotnet-abort-txn"), Serdes.String(), Serdes.String()))
+            TransactionalConfigs("dotnet-abort-txn"), Serdes.String().Serializer(), Serdes.String().Serializer()))
         {
             await producer.InitTransactions();
             await producer.BeginTransaction();
             AsyncKafkaFuture<RecordMetadata>[] aborted =
             {
-                await producer.Send(new ProducerRecord<string, string>(topic, "x1", partition: 0)),
-                await producer.Send(new ProducerRecord<string, string>(topic, "x2", partition: 0)),
+                await producer.Send(new ProducerRecord<string, string>(topic, value: "x1", partition: 0, key: null)),
+                await producer.Send(new ProducerRecord<string, string>(topic, value: "x2", partition: 0, key: null)),
             };
 
             // The records reach the log before the abort marks them aborted.
@@ -191,7 +191,7 @@ public sealed class TransactionsBrokerTests
             Assert.Equal(1L, (await aborted[1].Get(s_get)).Offset());
             await producer.AbortTransaction();
             await producer.BeginTransaction();
-            await producer.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+            await producer.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
             await producer.CommitTransaction();
         }
 
@@ -203,18 +203,18 @@ public sealed class TransactionsBrokerTests
     {
         string topic = await TopicAsync("dotnet-fence");
         Dictionary<string, object?> configs = TransactionalConfigs("dotnet-fence-txn");
-        using KafkaProducer<string, string> fenced = new KafkaProducer<string, string>(configs, Serdes.String(), Serdes.String());
-        using KafkaProducer<string, string> fencing = new KafkaProducer<string, string>(configs, Serdes.String(), Serdes.String());
+        using KafkaProducer<string, string> fenced = new KafkaProducer<string, string>(configs, Serdes.String().Serializer(), Serdes.String().Serializer());
+        using KafkaProducer<string, string> fencing = new KafkaProducer<string, string>(configs, Serdes.String().Serializer(), Serdes.String().Serializer());
 
         fenced.InitTransactions();
         fenced.BeginTransaction();
-        fenced.Send(new ProducerRecord<string, string>(topic, "fenced", partition: 0));
+        fenced.Send(new ProducerRecord<string, string>(topic, value: "fenced", partition: 0, key: null));
         fenced.Flush();
 
         // Initializing the newer producer aborts the older one's open transaction and fences it.
         fencing.InitTransactions();
         fencing.BeginTransaction();
-        fencing.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+        fencing.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
 
         ProducerFencedException error = Assert.Throws<ProducerFencedException>(() => fenced.CommitTransaction());
         Assert.Equal(FencedMessage, error.Message);
@@ -229,19 +229,19 @@ public sealed class TransactionsBrokerTests
         string topic = await TopicAsync("dotnet-fence");
         Dictionary<string, object?> configs = TransactionalConfigs("dotnet-fence-txn");
         await using AsyncKafkaProducer<string, string> fenced =
-            new AsyncKafkaProducer<string, string>(configs, Serdes.String(), Serdes.String());
+            new AsyncKafkaProducer<string, string>(configs, Serdes.String().Serializer(), Serdes.String().Serializer());
         await using AsyncKafkaProducer<string, string> fencing =
-            new AsyncKafkaProducer<string, string>(configs, Serdes.String(), Serdes.String());
+            new AsyncKafkaProducer<string, string>(configs, Serdes.String().Serializer(), Serdes.String().Serializer());
 
         await fenced.InitTransactions();
         await fenced.BeginTransaction();
-        await fenced.Send(new ProducerRecord<string, string>(topic, "fenced", partition: 0));
+        await fenced.Send(new ProducerRecord<string, string>(topic, value: "fenced", partition: 0, key: null));
         await fenced.Flush();
 
         // Initializing the newer producer aborts the older one's open transaction and fences it.
         await fencing.InitTransactions();
         await fencing.BeginTransaction();
-        await fencing.Send(new ProducerRecord<string, string>(topic, "kept", partition: 0));
+        await fencing.Send(new ProducerRecord<string, string>(topic, value: "kept", partition: 0, key: null));
 
         ProducerFencedException error = await Assert.ThrowsAsync<ProducerFencedException>(() => fenced.CommitTransaction());
         Assert.Equal(FencedMessage, error.Message);
@@ -256,10 +256,10 @@ public sealed class TransactionsBrokerTests
         string topic = await TopicAsync("dotnet-idempotent");
         string[] values = Enumerable.Range(0, 100).Select(i => "v" + i).ToArray();
         using (KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
-            IdempotentConfigs(), Serdes.String(), Serdes.String()))
+            IdempotentConfigs(), Serdes.String().Serializer(), Serdes.String().Serializer()))
         {
             KafkaFuture<RecordMetadata>[] futures = values
-                .Select(value => producer.Send(new ProducerRecord<string, string>(topic, value, partition: 0)))
+                .Select(value => producer.Send(new ProducerRecord<string, string>(topic, value: value, partition: 0, key: null)))
                 .ToArray();
             producer.Flush();
             Assert.Equal(Enumerable.Range(0, 100).Select(i => (long)i), futures.Select(future => future.Get(s_get).Offset()));
@@ -274,12 +274,12 @@ public sealed class TransactionsBrokerTests
         string topic = await TopicAsync("dotnet-idempotent");
         string[] values = Enumerable.Range(0, 100).Select(i => "v" + i).ToArray();
         await using (AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            IdempotentConfigs(), Serdes.String(), Serdes.String()))
+            IdempotentConfigs(), Serdes.String().Serializer(), Serdes.String().Serializer()))
         {
             List<AsyncKafkaFuture<RecordMetadata>> futures = new List<AsyncKafkaFuture<RecordMetadata>>();
             foreach (string value in values)
             {
-                futures.Add(await producer.Send(new ProducerRecord<string, string>(topic, value, partition: 0)));
+                futures.Add(await producer.Send(new ProducerRecord<string, string>(topic, value: value, partition: 0, key: null)));
             }
 
             await producer.Flush();
@@ -296,10 +296,10 @@ public sealed class TransactionsBrokerTests
     {
         // Offset 2 is the abort marker, 3 the committed record, 4 its marker.
         Assert.Equal(
-            new (long, string)[] { (0, "x1"), (1, "x2"), (3, "kept") },
+            new (long, string?)[] { (0, "x1"), (1, "x2"), (3, "kept") },
             ReadAll(topic, 3, "read_uncommitted").Select(record => (record.Offset(), record.Value())));
         Assert.Equal(
-            new (long, string)[] { (3, "kept") },
+            new (long, string?)[] { (3, "kept") },
             ReadAll(topic, 1, "read_committed").Select(record => (record.Offset(), record.Value())));
     }
 
@@ -314,10 +314,10 @@ public sealed class TransactionsBrokerTests
     {
         string source = await TopicAsync("dotnet-eos-in");
         string sink = await TopicAsync("dotnet-eos-out");
-        using KafkaProducer<string, string> seed = new KafkaProducer<string, string>(Configs(), Serdes.String(), Serdes.String());
+        using KafkaProducer<string, string> seed = new KafkaProducer<string, string>(Configs(), Serdes.String().Serializer(), Serdes.String().Serializer());
         foreach (string value in new[] { "a", "b", "c" })
         {
-            seed.Send(new ProducerRecord<string, string>(source, value, partition: 0)).Get(s_get);
+            seed.Send(new ProducerRecord<string, string>(source, value: value, partition: 0, key: null)).Get(s_get);
         }
 
         return (source, sink);
@@ -371,7 +371,7 @@ public sealed class TransactionsBrokerTests
     private List<ConsumerRecord<string, string>> ReadAll(string topic, int count, string isolationLevel)
     {
         using KafkaConsumer<string, string> consumer =
-            new KafkaConsumer<string, string>(GroupConfigs(isolationLevel), Serdes.String(), Serdes.String());
+            new KafkaConsumer<string, string>(GroupConfigs(isolationLevel), Serdes.String().Deserializer(), Serdes.String().Deserializer());
         TopicPartition tp = new TopicPartition(topic, 0);
         consumer.Assign(new[] { tp });
         consumer.Seek(tp, 0);

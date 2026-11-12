@@ -62,6 +62,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const string NullListenerMessage = "RebalanceListener cannot be null";
 
+    private const string OnPartitionsLostMethod = "OnPartitionsLost(IReadOnlyCollection<TopicPartition>)";
+
     private const string NullSubscribePatternMessage = "Topic pattern to subscribe to cannot be null";
 
     private const string NullMockPatternMessage = "Topic pattern cannot be null";
@@ -117,6 +119,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private int _ownerUses;
 
     private int _closingThread;
+
+    // The owner check knows a thread by a number no other thread gets, not by its ManagedThreadId, which .NET gives
+    // again to a new thread once the old one exits: an async call can still hold the consumer after the thread that
+    // made it has exited, and the new thread must not pass for it.
+    [ThreadStatic]
+    private static int s_threadNumber;
+
+    private static int s_lastThreadNumber;
 
     // An AsyncMockConsumer's Rebalance or LosePartitions refuses other threads for its whole use, as Python's mock does.
     private int _refusingUses;
@@ -488,7 +498,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
         TimeSpan timeout,
         IDeserializer<TKey> keyDeserializer,
-        IDeserializer<TValue> valueDeserializer)
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
+        IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders)
     {
         long timeoutMs = TimerTimeoutMs(timeout);
         RefuseInsideACallback();
@@ -506,7 +518,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind;
         try
         {
-            copied = ConsumerRecordsMarshal.CopyOut(records, keyDeserializer, valueDeserializer, out error, out rewind);
+            copied = ConsumerRecordsMarshal.CopyOut(
+                records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
         }
         finally
         {
@@ -746,14 +759,50 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // listener and never stores the subscribe's own. MockConsumer registers it, as Java's does.
     private bool Unsubscribes(string[] topics) => topics.Length == 0 && !IsMock;
 
-    // Java checks the listener before the topics.
-    private static void RequireListener(object listener)
+    // Java checks the listener before the topics. A listener with a public OnPartitionsLost the consumer would never
+    // call, since its type lacks the interface that replaces Java's default, is refused right after the null check.
+    // Only a method of the form's return type counts: a Task OnPartitionsLost on a sync listener, or a void one on an
+    // async listener, implements the other form's interface.
+    private static void RequireListener(IConsumerRebalanceListener listener)
+    {
+        RequireNotNull(listener);
+        if (listener is not IConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener, typeof(void)))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                listener,
+                OnPartitionsLostMethod,
+                nameof(IConsumerRebalanceListenerWithPartitionsLost),
+                DefaultMethodGuard.Consumer);
+        }
+    }
+
+    private static void RequireListener(IAsyncConsumerRebalanceListener listener)
+    {
+        RequireNotNull(listener);
+        if (listener is not IAsyncConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener, typeof(Task)))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                listener,
+                OnPartitionsLostMethod,
+                nameof(IAsyncConsumerRebalanceListenerWithPartitionsLost),
+                DefaultMethodGuard.Consumer);
+        }
+    }
+
+    private static void RequireNotNull(object listener)
     {
         if (listener is null)
         {
             throw new IllegalArgumentException(NullListenerMessage);
         }
     }
+
+    private static bool DeclaresOnPartitionsLost(object listener, Type returnType) =>
+        DefaultMethodGuard.DeclaresReturning(
+            listener,
+            returnType,
+            nameof(IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost),
+            typeof(IReadOnlyCollection<TopicPartition>));
 
     // KafkaConsumer refuses a null collection or topic with Java's messages, and the core refuses a blank topic
     // with the same text. Java's KafkaConsumer checks group.id first, so without one the refusal is the core's
@@ -1634,7 +1683,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         bool destroyedBefore = _destroyed;
         try
         {
-            if (!TryBeginExplicitClose(Environment.CurrentManagedThreadId))
+            if (!TryBeginExplicitClose(CurrentThreadNumber()))
             {
                 return;
             }
@@ -2686,7 +2735,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // async callback is running, which refuses it as Python's mock does.
     private bool TryEnterUse(out int owner, UseKind kind = UseKind.Owned, int thread = 0)
     {
-        owner = ChecksOwner(kind) ? (thread != 0 ? thread : Environment.CurrentManagedThreadId) : 0;
+        owner = ChecksOwner(kind) ? (thread != 0 ? thread : CurrentThreadNumber()) : 0;
         bool refused = false;
         bool closed = false;
         lock (_owner)
@@ -2770,6 +2819,24 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool RefusedWhileBusy => !IsMock || _reporter.RunsAsyncCallback || Volatile.Read(ref _refusingUses) != 0;
 
+    // Never 0, which a use records for no thread.
+    private static int CurrentThreadNumber()
+    {
+        int number = s_threadNumber;
+        if (number == 0)
+        {
+            do
+            {
+                number = Interlocked.Increment(ref s_lastThreadNumber);
+            }
+            while (number == 0);
+
+            s_threadNumber = number;
+        }
+
+        return number;
+    }
+
     private bool HeldByAnotherThread(UseKind kind, int thread) =>
         ChecksOwner(kind) && _ownerUses != 0 && _ownerThread != thread;
 
@@ -2798,7 +2865,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void ThrowIfClosed()
     {
-        int thread = Environment.CurrentManagedThreadId;
+        int thread = CurrentThreadNumber();
         bool refused;
         lock (_owner)
         {

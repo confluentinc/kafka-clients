@@ -79,15 +79,7 @@ internal sealed partial class NativeAdminClient
         EnterUse();
         try
         {
-            if (electionType != ElectionType.PREFERRED && electionType != ElectionType.UNCLEAN)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(electionType),
-                    electionType,
-                    "The election type must be ElectionType.PREFERRED or ElectionType.UNCLEAN.");
-            }
-
-            IntPtr nativeElectionType = NativeElectionType(electionType);
+            IntPtr nativeElectionType = NativeElectionType(ElectionTypeMethods.RequireDefined(electionType));
             IntPtr list = NewElectionPartitions(partitions, out IntPtr[] natives);
             SafeAdminResultHandle result;
             try

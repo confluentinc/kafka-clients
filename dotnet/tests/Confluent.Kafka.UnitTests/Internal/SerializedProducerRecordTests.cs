@@ -33,14 +33,14 @@ public sealed class SerializedProducerRecordTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Serialize_NullAndEmpty_StayDistinct(bool wrapInvalidCast)
+    public void Serialize_NullAndEmpty_StayDistinct(bool mock)
     {
-        SerializedProducerRecord nullKey = Serialize(null, ReadOnlyMemory<byte>.Empty, wrapInvalidCast);
+        SerializedProducerRecord nullKey = Serialize(null, ReadOnlyMemory<byte>.Empty, mock);
         Assert.False(nullKey.Key.HasValue);
         Assert.True(nullKey.Value.HasValue);
         Assert.Equal(0, nullKey.Value.GetValueOrDefault().Length);
 
-        SerializedProducerRecord nullValue = Serialize(ReadOnlyMemory<byte>.Empty, null, wrapInvalidCast);
+        SerializedProducerRecord nullValue = Serialize(ReadOnlyMemory<byte>.Empty, null, mock);
         Assert.True(nullValue.Key.HasValue);
         Assert.Equal(0, nullValue.Key.GetValueOrDefault().Length);
         Assert.False(nullValue.Value.HasValue);
@@ -49,13 +49,13 @@ public sealed class SerializedProducerRecordTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Serialize_ArraySlices_KeepTheirArrayOffsetAndLength(bool wrapInvalidCast)
+    public void Serialize_ArraySlices_KeepTheirArrayOffsetAndLength(bool mock)
     {
         byte[] keyArray = new byte[16];
         byte[] valueArray = new byte[32];
 
         SerializedProducerRecord record = Serialize(
-            new ReadOnlyMemory<byte>(keyArray, 3, 5), new ReadOnlyMemory<byte>(valueArray, 3, 20), wrapInvalidCast);
+            new ReadOnlyMemory<byte>(keyArray, 3, 5), new ReadOnlyMemory<byte>(valueArray, 3, 20), mock);
 
         AssertArraySlice(keyArray, 3, 5, record.Key);
         AssertArraySlice(valueArray, 3, 20, record.Value);
@@ -64,24 +64,26 @@ public sealed class SerializedProducerRecordTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Serialize_NativeMemory_KeepsItsManagerStartAndLength(bool wrapInvalidCast)
+    public void Serialize_NativeMemory_KeepsItsManagerStartAndLength(bool mock)
     {
         using NativeMemoryManager key = new NativeMemoryManager(16);
         using NativeMemoryManager value = new NativeMemoryManager(64);
 
-        SerializedProducerRecord record = Serialize(key.Memory.Slice(3, 8), value.Memory, wrapInvalidCast);
+        SerializedProducerRecord record = Serialize(key.Memory.Slice(3, 8), value.Memory, mock);
 
         AssertNative(key, 3, 8, record.Key);
         AssertNative(value, 0, 64, record.Value);
     }
 
     private static SerializedProducerRecord Serialize(
-        ReadOnlyMemory<byte>? key, ReadOnlyMemory<byte>? value, bool wrapInvalidCast) =>
+        ReadOnlyMemory<byte>? key, ReadOnlyMemory<byte>? value, bool mock) =>
         SerializedProducerRecord.Serialize(
-            new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(Topic, value, key),
+            new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(Topic, value: value, key: key),
             MemorySerializer.Instance,
+            null,
             MemorySerializer.Instance,
-            wrapInvalidCast);
+            null,
+            mock);
 
     private static void AssertArraySlice(byte[] array, int offset, int length, ReadOnlyMemory<byte>? actual)
     {

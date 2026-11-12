@@ -48,7 +48,8 @@ function Invoke-Native {
     }
 }
 
-# Runs a script block up to $Attempts times, $DelaySeconds apart, for steps that reach the network.
+# Runs a script block up to $Attempts times, $DelaySeconds apart, for steps that can fail for a moment:
+# a download, or a file Windows still holds. Any failure is retried, a lasting one too.
 function Invoke-Retry {
     param([scriptblock] $Action, [int] $Attempts = 3, [int] $DelaySeconds = 30)
     for ($attempt = 1; ; $attempt++) {

@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using Confluent.Kafka.Common;
@@ -27,7 +28,8 @@ namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
 /// Copies a native poll batch into owned <see cref="ConsumerRecords{TKey, TValue}"/>, deserializing each key and
-/// value from a span over the batch, and stops at the first record that fails to deserialize.
+/// value from a span over the batch, with the batch's next offsets, and stops at the first record that fails to
+/// deserialize.
 /// </summary>
 internal static class ConsumerRecordsMarshal
 {
@@ -35,11 +37,16 @@ internal static class ConsumerRecordsMarshal
         Array.Empty<KeyValuePair<TopicPartition, long>>();
 
     // On a failure, the records before the failing one are returned, and rewind holds each partition's first
-    // record not returned: the failing one, and the first record of every later partition in the batch.
+    // record not returned: the failing one, and the first record of every later partition in the batch. A
+    // partition in rewind has as next offset its last returned record's offset + 1 with that record's leader epoch,
+    // or none when no record of it was returned; every other partition keeps the batch's. A deserializer's headers
+    // form, given when it has one, is called with the headers the record then carries.
     internal static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue>(
         IntPtr records,
         IDeserializer<TKey> keyDeserializer,
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
         IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders,
         out RecordDeserializationException? error,
         out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
     {
@@ -47,23 +54,31 @@ internal static class ConsumerRecordsMarshal
         rewind = s_noRewind;
         if (records == IntPtr.Zero)
         {
-            return Empty<TKey, TValue>();
+            return ConsumerRecords<TKey, TValue>.EMPTY;
         }
 
         IntPtr outErr = IntPtr.Zero;
         int count = NativeMethods.ConsumerRecordsCount(records, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets = NextOffsets(records);
         if (count <= 0)
         {
-            return Empty<TKey, TValue>();
+            // A poll that only moved past control records gives next offsets and no records.
+            return nextOffsets.Count == 0
+                ? ConsumerRecords<TKey, TValue>.EMPTY
+                : ConsumerRecords<TKey, TValue>.Owned(
+                    new List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>>(0),
+                    nextOffsets);
         }
 
-        List<ConsumerRecord<TKey, TValue>> list = new List<ConsumerRecord<TKey, TValue>>(count);
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition;
         IntPtr partitions = NativeMethods.ConsumerRecordsPartitions(records, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         try
         {
             int partitionCount = Size(partitions);
+            byPartition =
+                new List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>>(partitionCount);
             RecordReader reader = default;
             for (int p = 0; p < partitionCount; p++)
             {
@@ -77,16 +92,21 @@ internal static class ConsumerRecordsMarshal
                 try
                 {
                     int size = Size(partitionRecords);
+                    List<ConsumerRecord<TKey, TValue>> list = new List<ConsumerRecord<TKey, TValue>>(size);
                     for (int i = 0; i < size; i++)
                     {
                         IntPtr record = Get(partitionRecords, i);
-                        error = reader.Copy(record, topic, partitionId, keyDeserializer, valueDeserializer, list);
+                        error = reader.Copy(
+                            record, topic, partitionId, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, list);
                         if (error is not null)
                         {
                             rewind = Rewind(records, partitions, p, error);
-                            return new ConsumerRecords<TKey, TValue>(list);
+                            AddPartition(byPartition, topic, partitionId, list);
+                            return Build(byPartition, Cut(nextOffsets, rewind, byPartition));
                         }
                     }
+
+                    AddPartition(byPartition, topic, partitionId, list);
                 }
                 finally
                 {
@@ -99,7 +119,7 @@ internal static class ConsumerRecordsMarshal
             DestroyList(partitions);
         }
 
-        return new ConsumerRecords<TKey, TValue>(list);
+        return Build(byPartition, nextOffsets);
     }
 
     internal static IReadOnlyList<KeyValuePair<TopicPartition, long>> FirstPositions(IntPtr records)
@@ -131,8 +151,84 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    private static ConsumerRecords<TKey, TValue> Empty<TKey, TValue>() =>
-        new ConsumerRecords<TKey, TValue>(Array.Empty<ConsumerRecord<TKey, TValue>>());
+    // A partition none of whose records was returned gets no entry.
+    private static void AddPartition<TKey, TValue>(
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition,
+        string topic,
+        int partition,
+        List<ConsumerRecord<TKey, TValue>> records)
+    {
+        if (records.Count > 0)
+        {
+            byPartition.Add(new KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>(
+                new TopicPartition(topic, partition), records.AsReadOnly()));
+        }
+    }
+
+    private static ConsumerRecords<TKey, TValue> Build<TKey, TValue>(
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets) =>
+        byPartition.Count == 0 && nextOffsets.Count == 0
+            ? ConsumerRecords<TKey, TValue>.EMPTY
+            : ConsumerRecords<TKey, TValue>.Owned(byPartition, nextOffsets);
+
+    // The batch's owned map is copied and freed here, before the batch it was read from is.
+    private static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets(IntPtr records)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr map = NativeMethods.ConsumerRecordsNextOffsets(records, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            return OffsetMapMarshal.CopyOut(map);
+        }
+        finally
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.MapDestroy(map, ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref destroyErr);
+        }
+    }
+
+    private static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Cut<TKey, TValue>(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets,
+        IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind,
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition)
+    {
+        Dictionary<TopicPartition, OffsetAndMetadata> cut =
+            new Dictionary<TopicPartition, OffsetAndMetadata>(nextOffsets.Count + 1);
+        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in nextOffsets)
+        {
+            cut.Add(entry.Key, entry.Value);
+        }
+
+        foreach (KeyValuePair<TopicPartition, long> position in rewind)
+        {
+            cut.Remove(position.Key);
+            ConsumerRecord<TKey, TValue>? last = LastReturned(byPartition, position.Key);
+            if (last is not null)
+            {
+                cut[position.Key] = new OffsetAndMetadata(last.Offset() + 1, last.LeaderEpoch(), string.Empty);
+            }
+        }
+
+        return cut;
+    }
+
+    private static ConsumerRecord<TKey, TValue>? LastReturned<TKey, TValue>(
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition,
+        TopicPartition partition)
+    {
+        foreach (KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>> entry in byPartition)
+        {
+            if (entry.Key.Equals(partition))
+            {
+                return entry.Value[entry.Value.Count - 1];
+            }
+        }
+
+        return null;
+    }
 
     private static List<KeyValuePair<TopicPartition, long>> Rewind(
         IntPtr records,
@@ -271,10 +367,12 @@ internal static class ConsumerRecordsMarshal
     private static unsafe byte[]? CopyBytes(IntPtr bytes) =>
         bytes == IntPtr.Zero ? null : CopyBytes(*(KafkaBytes*)bytes);
 
-    private static unsafe T Deserialize<T>(IDeserializer<T> deserializer, string topic, IntPtr bytes)
+    private static unsafe T? Deserialize<T>(
+        IDeserializer<T> deserializer, IDeserializerWithHeaders<T>? withHeaders, string topic, Headers headers, IntPtr bytes)
     {
         KafkaBytes* view = (KafkaBytes*)bytes;
-        return deserializer.Deserialize(topic, new ReadOnlySpan<byte>((void*)view->Data, Math.Max(view->Length, 0)));
+        ReadOnlySpan<byte> data = new ReadOnlySpan<byte>((void*)view->Data, Math.Max(view->Length, 0));
+        return withHeaders is null ? deserializer.Deserialize(topic, data) : withHeaders.Deserialize(topic, headers, data);
     }
 
     private static RecordDeserializationException NewError(
@@ -338,7 +436,9 @@ internal static class ConsumerRecordsMarshal
             string topic,
             int partition,
             IDeserializer<TKey> keyDeserializer,
+            IDeserializerWithHeaders<TKey>? keyWithHeaders,
             IDeserializer<TValue> valueDeserializer,
+            IDeserializerWithHeaders<TValue>? valueWithHeaders,
             List<ConsumerRecord<TKey, TValue>> records)
         {
             IntPtr outErr = IntPtr.Zero;
@@ -353,12 +453,12 @@ internal static class ConsumerRecordsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             Headers headers = CopyHeaders(record);
 
-            TKey deserializedKey = default!;
+            TKey? deserializedKey = default;
             if (key != IntPtr.Zero)
             {
                 try
                 {
-                    deserializedKey = Deserialize(keyDeserializer, topic, key);
+                    deserializedKey = Deserialize(keyDeserializer, keyWithHeaders, topic, headers, key);
                 }
                 catch (Exception cause)
                 {
@@ -368,12 +468,12 @@ internal static class ConsumerRecordsMarshal
                 }
             }
 
-            TValue deserializedValue = default!;
+            TValue? deserializedValue = default;
             if (value != IntPtr.Zero)
             {
                 try
                 {
-                    deserializedValue = Deserialize(valueDeserializer, topic, value);
+                    deserializedValue = Deserialize(valueDeserializer, valueWithHeaders, topic, headers, value);
                 }
                 catch (Exception cause)
                 {
@@ -391,8 +491,8 @@ internal static class ConsumerRecordsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
 
             records.Add(new ConsumerRecord<TKey, TValue>(
-                topic, partition, offset, timestamp, timestampType, deserializedKey, deserializedValue, headers,
-                leaderEpoch < 0 ? null : leaderEpoch, serializedKeySize, serializedValueSize));
+                topic, partition, offset, timestamp, timestampType, serializedKeySize, serializedValueSize,
+                deserializedKey, deserializedValue, headers, leaderEpoch < 0 ? null : leaderEpoch));
             return null;
         }
 

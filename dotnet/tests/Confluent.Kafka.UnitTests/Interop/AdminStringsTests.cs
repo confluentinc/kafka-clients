@@ -326,7 +326,7 @@ public sealed class AdminStringsTests
         ConfigResource resource, string name, string value) =>
         new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
         {
-            [resource] = new[] { new AlterConfigOp(new ConfigEntry(name, value), AlterConfigOpType.SET) },
+            [resource] = new[] { new AlterConfigOp(new ConfigEntry(name, value), OpType.SET) },
         };
 
     private static ClientQuotaFilter UserFilter(string name) =>

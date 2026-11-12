@@ -135,6 +135,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
+    /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
+    /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
@@ -170,6 +173,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
+    /// <c>Task OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
+    /// but does not implement <see cref="IAsyncConsumerRebalanceListenerWithPartitionsLost"/>.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
@@ -271,6 +277,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <paramref name="callback"/> is null, or <paramref name="pattern"/> is null or its pattern is empty, with the
     /// message of Java's <c>KafkaConsumer</c> on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and of Java's
     /// <c>MockConsumer</c> on an <see cref="AsyncMockConsumer{TKey, TValue}"/>.
+    /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
+    /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
+    /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.
@@ -320,6 +329,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <paramref name="callback"/> is null, or <paramref name="pattern"/> is null or its pattern is empty, with the
     /// message of Java's <c>KafkaConsumer</c> on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and of Java's
     /// <c>MockConsumer</c> on an <see cref="AsyncMockConsumer{TKey, TValue}"/>.
+    /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
+    /// <c>Task OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
+    /// but does not implement <see cref="IAsyncConsumerRebalanceListenerWithPartitionsLost"/>.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.

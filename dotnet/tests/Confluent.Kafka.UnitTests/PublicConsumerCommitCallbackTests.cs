@@ -51,7 +51,7 @@ public sealed class PublicConsumerCommitCallbackTests
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
-                [first] = new OffsetAndMetadata(42, "meta-x", 7),
+                [first] = new OffsetAndMetadata(42, 7, "meta-x"),
                 [second] = new OffsetAndMetadata(9),
             },
             callback);
@@ -201,7 +201,7 @@ public sealed class PublicConsumerCommitCallbackTests
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
-                [partition] = new OffsetAndMetadata(31, "no-callback-meta", 2),
+                [partition] = new OffsetAndMetadata(31, 2, "no-callback-meta"),
             });
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed = consumer.Committed(new[] { partition });
@@ -411,10 +411,10 @@ public sealed class PublicConsumerCommitCallbackTests
             m => m.Name == "CommitAsync" && m.GetParameters().Select(p => p.ParameterType).SequenceEqual(parameters));
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static void AssertTheConsumedPosition(TopicPartition partition, Completion completion)
     {

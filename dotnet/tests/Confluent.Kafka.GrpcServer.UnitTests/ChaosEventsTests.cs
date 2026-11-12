@@ -214,7 +214,7 @@ public sealed class ChaosEventsTests
     [Fact]
     public void Rebalance_FromTheListener_IsObservedBetweenBeforeAndAfter()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         List<Proto.WorkloadEvent> events = new List<Proto.WorkloadEvent>();
         ChaosRebalanceListener listener = new ChaosRebalanceListener(events.Add, consumer, checkCommits: false);
 

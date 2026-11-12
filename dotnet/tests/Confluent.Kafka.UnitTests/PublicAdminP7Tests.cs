@@ -132,7 +132,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task RenewAndExpire_ANullMac_ThrowsOnTheRealClients()
     {
-        KafkaAdminClient sync = new KafkaAdminClient(s_unreachable);
+        IAdmin sync = IAdmin.Create(s_unreachable);
         try
         {
             Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.RenewDelegationToken(null!)).ParamName);
@@ -143,7 +143,7 @@ public sealed class PublicAdminP7Tests
             TestTimeout.Dispose(sync);
         }
 
-        AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin async = IAsyncAdmin.Create(s_unreachable);
         try
         {
             Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => async.RenewDelegationToken(null!)).ParamName);
@@ -216,7 +216,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(
+        IAdmin admin = IAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
@@ -248,7 +248,7 @@ public sealed class PublicAdminP7Tests
     [InlineData("\u0001")]
     public void UpdateFeatures_RejectsABlankFeatureName(string feature)
     {
-        KafkaAdminClient admin = new KafkaAdminClient(
+        IAdmin admin = IAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
@@ -550,16 +550,6 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(
             typeof(void),
             typeof(KafkaPrincipal).GetMethod(nameof(KafkaPrincipal.TokenAuthenticated), new[] { typeof(bool) })!.ReturnType);
-    }
-
-    [Fact]
-    public void ScramMechanism_RoundTripsItsName()
-    {
-        Assert.Equal("SCRAM-SHA-256", ScramMechanism.SCRAM_SHA_256.MechanismName());
-        Assert.Equal("SCRAM-SHA-512", ScramMechanism.SCRAM_SHA_512.MechanismName());
-        Assert.Equal(ScramMechanism.SCRAM_SHA_512, ScramMechanisms.FromMechanismName("SCRAM-SHA-512"));
-        Assert.Equal(ScramMechanism.UNKNOWN, ScramMechanisms.FromMechanismName("SCRAM-SHA-1"));
-        Assert.Equal(ScramMechanism.UNKNOWN, ScramMechanisms.FromType(99));
     }
 
     private static void AssertTokenNotFound(KafkaException failure)

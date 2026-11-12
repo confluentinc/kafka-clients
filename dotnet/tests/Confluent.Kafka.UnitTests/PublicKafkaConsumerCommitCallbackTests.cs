@@ -445,7 +445,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
             config["enable.auto.commit"] = autoCommit ? "true" : "false";
         }
 
-        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
+        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
     }
 
     private static KafkaConsumer<byte[], byte[]> NewListenerConsumer()
@@ -468,13 +468,13 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
     }
 
     /// <summary>A listener that does nothing.</summary>
-    private sealed class NoopListener : ConsumerRebalanceListenerBase
+    private sealed class NoopListener : IConsumerRebalanceListener
     {
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
     }

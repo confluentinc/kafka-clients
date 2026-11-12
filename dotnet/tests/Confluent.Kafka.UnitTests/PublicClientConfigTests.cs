@@ -438,7 +438,8 @@ public sealed class PublicClientConfigTests
     [MemberData(nameof(AllClients))]
     public void TestNoneIsNullProducerCommon_test_clients_null_configs(string client)
     {
-        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Create(client, null!)).ParamName);
+        string parameter = client is KafkaAdminClientClient or AsyncKafkaAdminClientClient ? "conf" : "configs";
+        Assert.Equal(parameter, Assert.Throws<ArgumentNullException>(() => Create(client, null!)).ParamName);
     }
 
     [Theory]
@@ -534,12 +535,12 @@ public sealed class PublicClientConfigTests
 
     private static IDisposable Create(string client, IReadOnlyDictionary<string, object?> configs) => client switch
     {
-        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray()),
-        KafkaAdminClientClient => new KafkaAdminClient(configs),
-        AsyncKafkaAdminClientClient => new AsyncKafkaAdminClient(configs),
+        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        KafkaAdminClientClient => IAdmin.Create(configs),
+        AsyncKafkaAdminClientClient => IAsyncAdmin.Create(configs),
         _ => throw new ArgumentOutOfRangeException(nameof(client), client, null),
     };
 

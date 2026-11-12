@@ -80,21 +80,21 @@ public class PublicJavaMemberShapeTests
         Assert.Null(typeof(ConsumerRecords<,>).GetProperty("Count", BindingFlags.Public | BindingFlags.Instance));
 
         ConsumerRecords<byte[], byte[]> records = new ConsumerRecords<byte[], byte[]>(
-            new[]
+            new Dictionary<TopicPartition, IReadOnlyList<ConsumerRecord<byte[], byte[]>>>
             {
-                Record(0),
-                Record(1),
-            });
+                [new TopicPartition("t", 0)] = new[] { Record(0), Record(1) },
+            },
+            new Dictionary<TopicPartition, OffsetAndMetadata>());
         Assert.Equal(2, records.Count());
         Assert.Equal(2, ((IReadOnlyCollection<ConsumerRecord<byte[], byte[]>>)records).Count);
 
         static ConsumerRecord<byte[], byte[]> Record(long offset) => new ConsumerRecord<byte[], byte[]>(
-            "t", 0, offset, 0, TimestampType.CREATE_TIME, new byte[] { 1 }, new byte[] { 2 }, new Headers(),
-            leaderEpoch: null, serializedKeySize: 1, serializedValueSize: 1);
+            "t", 0, offset, 0, TimestampType.CREATE_TIME, 1, 1, new byte[] { 1 }, new byte[] { 2 }, new Headers(),
+            leaderEpoch: null);
     }
 
     [Fact]
-    public void Serdes_AreJavasStaticMethods_EachOverTheSameStatelessInstance()
+    public void Serdes_AreJavasStaticMethods_EachReturningANewSerde()
     {
         Assert.Empty(typeof(Serdes).GetProperties(BindingFlags.Public | BindingFlags.Static));
 
@@ -102,21 +102,29 @@ public class PublicJavaMemberShapeTests
         {
             ("String", typeof(ISerde<string>)),
             ("ByteArray", typeof(ISerde<byte[]>)),
-            ("Integer", typeof(ISerde<int>)),
-            ("Long", typeof(ISerde<long>)),
-            ("Double", typeof(ISerde<double>)),
-            ("UUID", typeof(ISerde<Guid>)),
+            ("Integer", typeof(ISerde<int?>)),
+            ("Long", typeof(ISerde<long?>)),
+            ("Short", typeof(ISerde<short?>)),
+            ("Float", typeof(ISerde<float?>)),
+            ("Double", typeof(ISerde<double?>)),
+            ("ByteBuffer", typeof(ISerde<ReadOnlyMemory<byte>?>)),
+            ("UUID", typeof(ISerde<Guid?>)),
+            ("Boolean", typeof(ISerde<bool?>)),
             ("Void", typeof(ISerde<object?>)),
         })
         {
             MethodInfo method = typeof(Serdes).GetMethod(name, BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null)!;
             Assert.NotNull(method);
             Assert.Equal(type, method.ReturnType);
-            Assert.Same(method.Invoke(null, null), method.Invoke(null, null));
+            Assert.NotSame(method.Invoke(null, null), method.Invoke(null, null));
         }
 
         Assert.Equal(
-            new[] { "ByteArray", "Double", "Integer", "Long", "String", "UUID", "Void" },
+            new[]
+            {
+                "Boolean", "ByteArray", "ByteBuffer", "Double", "Float", "Integer", "Long", "SerdeFrom", "SerdeFrom",
+                "Short", "String", "UUID", "Void",
+            },
             typeof(Serdes).GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
                 .Select(method => method.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));
@@ -183,7 +191,7 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Admin.MockAdminClient.DEFAULT_LOG_DIRS",
         "Confluent.Kafka.Common.Acl.AccessControlEntryFilter.ANY",
         "Confluent.Kafka.Common.Acl.AclBindingFilter.ANY",
-        "Confluent.Kafka.Common.Config.SslClientAuths.VALUES",
+        "Confluent.Kafka.Common.Config.SslClientAuthMethods.VALUES",
         "Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.INSTANCE",
         "Confluent.Kafka.Common.Errors.DisconnectException.INSTANCE",
         "Confluent.Kafka.Common.Quota.ClientQuotaEntity.CLIENT_ID",
@@ -199,6 +207,7 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Common.Uuid.ZERO_UUID",
         "Confluent.Kafka.Consumer.ConsumerRecord`2.NO_TIMESTAMP",
         "Confluent.Kafka.Consumer.ConsumerRecord`2.NULL_SIZE",
+        "Confluent.Kafka.Consumer.ConsumerRecords`2.EMPTY",
         "Confluent.Kafka.Producer.AsyncKafkaProducer`2.NETWORK_THREAD_PREFIX",
         "Confluent.Kafka.Producer.AsyncKafkaProducer`2.PRODUCER_METRIC_GROUP_NAME",
         "Confluent.Kafka.Producer.KafkaProducer`2.NETWORK_THREAD_PREFIX",

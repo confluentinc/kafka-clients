@@ -41,6 +41,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     private readonly NativeProducer _native;
     private readonly ISerializer<TKey> _keySerializer;
     private readonly ISerializer<TValue> _valueSerializer;
+    private readonly ISerializerWithHeaders<TKey>? _keyWithHeaders;
+    private readonly ISerializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
     /// Creates a broker-free mock producer with the key and value serializers, as Java's <c>MockProducer</c> takes them.
@@ -56,6 +58,10 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <exception cref="ArgumentNullException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
+    /// </exception>
     public AsyncMockProducer(
         ISerializer<TKey> keySerializer,
         ISerializer<TValue> valueSerializer,
@@ -63,6 +69,10 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
+        SerdeGuard.Check(_keySerializer, DefaultMethodGuard.Producer, disposes: false);
+        SerdeGuard.Check(_valueSerializer, DefaultMethodGuard.Producer, disposes: false);
+        _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
+        _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
         _native = NativeProducer.CreateMock(autoComplete, NativeProducer.PumpThreadName);
     }
 
@@ -134,7 +144,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
         // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
-            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: false);
+            SerializedProducerRecord.Serialize(
+                record, _keySerializer, _keyWithHeaders, _valueSerializer, _valueWithHeaders, mock: true);
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }

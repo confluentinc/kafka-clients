@@ -186,7 +186,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public async Task OnTheAsyncMock_WhileARebalanceRefusesOtherThreads_ANullArgument_IsReportedAfterTheRefusal()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -504,7 +504,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public void InsideACallback_WithoutAGroupId_GroupMetadataAndCommitted_ReportTheGroupIdBeforeTheRoute()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(Config(groupId: false), Serdes.ByteArray(), Serdes.ByteArray());
+        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(Config(groupId: false), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable disposal = TestTimeout.Disposal(consumer);
         ConsumerCallbackReporter reporter = Reporter(consumer);
         Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -677,10 +677,10 @@ public sealed class PublicConsumerCheckOrderTests
 
     private static object Create(string kind, bool groupId) => kind switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
+        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)
@@ -837,10 +837,6 @@ public sealed class PublicConsumerCheckOrderTests
         }
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 
     /// <summary>An asynchronous rebalance listener that does nothing.</summary>
@@ -849,8 +845,6 @@ public sealed class PublicConsumerCheckOrderTests
         public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
 
         public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>A commit callback that does nothing.</summary>

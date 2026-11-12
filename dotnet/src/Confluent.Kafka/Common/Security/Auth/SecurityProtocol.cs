@@ -41,9 +41,10 @@ public enum SecurityProtocol : short
 
 /// <summary>
 /// The static methods Java declares on the <see cref="SecurityProtocol"/> enum itself, which a C# enum cannot
-/// carry.
+/// carry. From C# 14 they are called on the enum (<c>SecurityProtocol.ForName(…)</c>); older C# calls them on this
+/// class.
 /// </summary>
-public static class SecurityProtocols
+public static class SecurityProtocolMethods
 {
     private const string JavaClass = "org.apache.kafka.common.security.auth.SecurityProtocol";
 
@@ -55,48 +56,51 @@ public static class SecurityProtocols
         nameof(SecurityProtocol.SASL_SSL),
     });
 
-    /// <summary>The names of the protocols, in Java's declaration order — Java's <c>names()</c>.</summary>
-    /// <returns>A read-only list, the same one on every call.</returns>
-    public static IReadOnlyList<string> Names() => s_names;
-
-    /// <summary>The protocol whose id is <paramref name="id"/> — Java's <c>forId(short)</c>.</summary>
-    /// <param name="id">The protocol id.</param>
-    /// <returns>The protocol, or <see langword="null"/> when no protocol has that id.</returns>
-    public static SecurityProtocol? ForId(short id) =>
-        id switch
-        {
-            (short)SecurityProtocol.PLAINTEXT => SecurityProtocol.PLAINTEXT,
-            (short)SecurityProtocol.SSL => SecurityProtocol.SSL,
-            (short)SecurityProtocol.SASL_PLAINTEXT => SecurityProtocol.SASL_PLAINTEXT,
-            (short)SecurityProtocol.SASL_SSL => SecurityProtocol.SASL_SSL,
-            _ => null,
-        };
-
-    /// <summary>
-    /// The protocol named <paramref name="name"/>, in any case — Java's <c>forName(String)</c>.
-    /// </summary>
-    /// <param name="name">The protocol name.</param>
-    /// <returns>The protocol.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="name"/> is <see langword="null"/>.</exception>
-    /// <exception cref="IllegalArgumentException">
-    /// No protocol has the upper-cased name, with Java's message
-    /// "No enum constant org.apache.kafka.common.security.auth.SecurityProtocol.&lt;NAME&gt;".
-    /// </exception>
-    public static SecurityProtocol ForName(string name)
+    extension(SecurityProtocol)
     {
-        if (name is null)
-        {
-            throw new ArgumentNullException(nameof(name));
-        }
+        /// <summary>The names of the protocols, in Java's declaration order — Java's <c>names()</c>.</summary>
+        /// <returns>A read-only list, the same one on every call.</returns>
+        public static IReadOnlyList<string> Names() => s_names;
 
-        string upper = JavaText.ToUpperRoot(name);
-        return upper switch
+        /// <summary>The protocol whose id is <paramref name="id"/> — Java's <c>forId(short)</c>.</summary>
+        /// <param name="id">The protocol id.</param>
+        /// <returns>The protocol, or <see langword="null"/> when no protocol has that id.</returns>
+        public static SecurityProtocol? ForId(short id) =>
+            id switch
+            {
+                (short)SecurityProtocol.PLAINTEXT => SecurityProtocol.PLAINTEXT,
+                (short)SecurityProtocol.SSL => SecurityProtocol.SSL,
+                (short)SecurityProtocol.SASL_PLAINTEXT => SecurityProtocol.SASL_PLAINTEXT,
+                (short)SecurityProtocol.SASL_SSL => SecurityProtocol.SASL_SSL,
+                _ => null,
+            };
+
+        /// <summary>
+        /// The protocol named <paramref name="name"/>, in any case — Java's <c>forName(String)</c>.
+        /// </summary>
+        /// <param name="name">The protocol name.</param>
+        /// <returns>The protocol.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="name"/> is <see langword="null"/>.</exception>
+        /// <exception cref="IllegalArgumentException">
+        /// No protocol has the upper-cased name, with Java's message
+        /// "No enum constant org.apache.kafka.common.security.auth.SecurityProtocol.&lt;NAME&gt;".
+        /// </exception>
+        public static SecurityProtocol ForName(string name)
         {
-            nameof(SecurityProtocol.PLAINTEXT) => SecurityProtocol.PLAINTEXT,
-            nameof(SecurityProtocol.SSL) => SecurityProtocol.SSL,
-            nameof(SecurityProtocol.SASL_PLAINTEXT) => SecurityProtocol.SASL_PLAINTEXT,
-            nameof(SecurityProtocol.SASL_SSL) => SecurityProtocol.SASL_SSL,
-            _ => throw new IllegalArgumentException("No enum constant " + JavaClass + "." + upper),
-        };
+            if (name is null)
+            {
+                throw new ArgumentNullException(nameof(name));
+            }
+
+            string upper = JavaText.ToUpperRoot(name);
+            return upper switch
+            {
+                nameof(SecurityProtocol.PLAINTEXT) => SecurityProtocol.PLAINTEXT,
+                nameof(SecurityProtocol.SSL) => SecurityProtocol.SSL,
+                nameof(SecurityProtocol.SASL_PLAINTEXT) => SecurityProtocol.SASL_PLAINTEXT,
+                nameof(SecurityProtocol.SASL_SSL) => SecurityProtocol.SASL_SSL,
+                _ => throw new IllegalArgumentException("No enum constant " + JavaClass + "." + upper),
+            };
+        }
     }
 }

@@ -51,7 +51,7 @@ public sealed class PublicProducerHeadersAllocationTests
     [Fact]
     public void SyncSend_RecordWithHeaders_AllocatesNothingPerHeader()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<byte[], byte[]> plain = Record(0);
         ProducerRecord<byte[], byte[]> withHeaders = Record(HeaderCount);
@@ -82,7 +82,7 @@ public sealed class PublicProducerHeadersAllocationTests
     public async Task AsyncSend_RecordWithHeaders_AllocatesNothingPerHeader()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<byte[], byte[]> plain = Record(0);
         ProducerRecord<byte[], byte[]> withHeaders = Record(HeaderCount);
@@ -118,7 +118,7 @@ public sealed class PublicProducerHeadersAllocationTests
         }
 
         return new ProducerRecord<byte[], byte[]>(
-            Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0, headers: headers);
+            Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 0, headers: headers);
     }
 
     private static long MeasureSync(

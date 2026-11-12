@@ -40,8 +40,8 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
 
     public ChaosWorkloadServiceImpl()
         : this(
-            static config => new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray()),
-            static config => new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray()))
+            static config => new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+            static config => new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()))
     {
     }
 
@@ -120,7 +120,7 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
             while (!workload.IsStopRequested)
             {
                 ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(
-                    topic, ChaosEvents.Value(index, msgSize), ChaosEvents.Key(index));
+                    topic, value: ChaosEvents.Value(index, msgSize), key: ChaosEvents.Key(index));
 
                 // Open the record's in-flight window before handing it over; its delivery
                 // callback's event closes it.

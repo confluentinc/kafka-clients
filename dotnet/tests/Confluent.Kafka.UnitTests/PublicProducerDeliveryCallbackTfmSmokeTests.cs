@@ -40,7 +40,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public async Task AsyncMockProducer_SendWithCallback_RoundTrips()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
@@ -48,7 +48,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         await TestTimeout.Run(
             async () => metadata = await producer.Send(
                 new ProducerRecord<byte[], byte[]>(
-                    Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0),
+                    Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 0),
                 callback).Delivery(),
             s_deadline);
 
@@ -65,14 +65,14 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public void MockProducer_SendWithCallback_RoundTrips()
     {
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
         RecordMetadata metadata = default!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 0, key: null),
                 callback).Get(),
             s_deadline);
 
@@ -88,12 +88,12 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public async Task AsyncMockProducer_SendWithCallback_FailurePath_DeliversPlaceholderMetadata()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 1),
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 1, key: null),
             callback).Delivery();
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-delivery-error")));
 
@@ -117,10 +117,10 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Dictionary<string, object?> config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
 
         AsyncKafkaProducer<byte[], byte[]> asyncProducer =
-            new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable asyncProducerDisposal = TestTimeout.Disposal(asyncProducer);
         KafkaProducer<byte[], byte[]> syncProducer =
-            new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
+            new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable syncProducerDisposal = TestTimeout.Disposal(syncProducer);
 
         Assert.NotNull(typeof(AsyncKafkaProducer<byte[], byte[]>).GetMethod(

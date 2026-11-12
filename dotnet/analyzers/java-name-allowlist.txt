@@ -48,22 +48,75 @@ missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consu
 overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.AddRecord(System.String,System.Int32,System.Int64,System.Byte[],System.Byte[])
 overload M:Confluent.Kafka.Consumer.MockConsumer`2.AddRecord(System.String,System.Int32,System.Int64,System.Byte[],System.Byte[])
 
-# N1: a Java enum's toString() override; a C# enum cannot override ToString() (ledger 285).
-missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#toString()
-missing T:Confluent.Kafka.Common.ClassicGroupState org.apache.kafka.common.ClassicGroupState#toString()
-missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString()
-missing T:Confluent.Kafka.Common.GroupType org.apache.kafka.common.GroupType#toString()
-missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#toString()
-missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#toString()
+# M2: Java's commitSync is Commit, as Python's commit(): every binding uses that one name, and CommitSync would
+# put "Sync" on the async consumers.
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync()
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync()
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map,Duration)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit(System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit(System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.TimeSpan)
 
-# N2: a Java enum's fields: the integer one is the enum's value, the others are reached through Java's
-# methods (Python's enum rule).
+# N2: a Java enum's fields: the integer one is the enum's value, the others are reached through Java's methods or
+# ToString() (Python's enum rule, ledger 373): TimestampType#name's text is TimestampType.ToString(t), and
+# SecurityProtocol#name and GroupProtocol#name are the constant's name, which ToString() prints.
 missing T:Confluent.Kafka.Common.ElectionType org.apache.kafka.common.ElectionType#value
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#id
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#name
+missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#id
+missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#name
+missing T:Confluent.Kafka.Consumer.GroupProtocol org.apache.kafka.clients.consumer.GroupProtocol#name
 
 # T4: Java's ConfigResource.Type; a bare `Type` would clash with System.Type (M15/P3 D16). See the pairs.
 unmatched T:Confluent.Kafka.Common.Config.ConfigResourceType
+
+# T8: Java's ClientQuotaFilterComponent.match() is an Optional<String> that can itself be null, three states (the name
+# matched exactly, the default name, any specified name) that a string? cannot hold; MatchType() tells them apart. A
+# .NET-only deviation recorded in dotnet/CLAUDE.md §3's idiom map.
+unmatched M:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.MatchType
+unmatched T:Confluent.Kafka.Common.Quota.ClientQuotaMatchType
 
 # The async forms of a callback-taking overload: Python's async callbacks (ledgers 47 and 48).
 overload M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.CommitAsync(Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
@@ -137,3 +190,39 @@ default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTopics(System.Collections.Ge
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConsumerGroupOffsets(System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions)
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition},Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+
+# Java's deserialize(String, Headers, ByteBuffer): its default on Deserializer and its overrides on the built-in
+# deserializers. .NET passes the bytes as one ReadOnlySpan<byte> form, for byte[] and ByteBuffer alike (ledger 458), so
+# DeserializerExtensions and IDeserializerWithHeaders carry the byte[] form only.
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.BooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.ByteBufferDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.DoubleDeserializer org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.FloatDeserializer org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.IntegerDeserializer org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.LongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.ShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.StringDeserializer org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.UUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.VoidDeserializer org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,Headers,ByteBuffer)
+
+# Java's close() on Serializer and Deserializer is an optional IDisposable (dotnet/CLAUDE.md §3 rule 7; ledgers 377,
+# 383): a serializer or deserializer that holds a resource implements IDisposable, and the client it is given to disposes
+# it; there is no ISerializerWithClose or IDeserializerWithClose (row 464).
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
+missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#close()
+
+# Java's close() on Serde and WrapperSerde is Dispose (dotnet/CLAUDE.md §3 rule 7): ISerde<T> is IDisposable, and its
+# Dispose closes the two halves as Java's close() does (row 461). The clients keep Close() beside Dispose, with another
+# contract, so their close() stays required.
+missing T:Confluent.Kafka.Common.Serialization.ISerde`1 org.apache.kafka.common.serialization.Serde#close()
+missing T:Confluent.Kafka.Common.Serialization.Serdes.WrapperSerde`1 org.apache.kafka.common.serialization.Serdes$WrapperSerde#close()
+
+# Java's serdeFrom(Class<T> type) is SerdeFrom<T>(): the type argument stands for Java's class token, so the method
+# takes no parameter and picks the built-in serde with no reflection (row 465).
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#serdeFrom(Class)
+overload M:Confluent.Kafka.Common.Serialization.Serdes.SerdeFrom``1
+
+# Java's Serdes() constructor, the default one of a class used only for its static methods: Serdes is a static class,
+# which has no constructor.
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Serdes()

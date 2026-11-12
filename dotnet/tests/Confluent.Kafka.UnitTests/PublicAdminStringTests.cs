@@ -88,7 +88,7 @@ public sealed class PublicAdminStringTests
                 admin.IncrementalAlterConfigs(new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
                     [new ConfigResource(ConfigResourceType.TOPIC, bad)] =
-                        new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
+                        new[] { new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET) },
                 })),
             ["alterReplicaLogDirs:topic"] = ("replicaAssignment", (admin, bad) =>
                 admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>
@@ -338,8 +338,8 @@ public sealed class PublicAdminStringTests
     [InlineData("nul")]
     public async Task RealClient_SingleGroupListConsumerGroupOffsets_BlamesGroupId(string kind)
     {
-        AsyncKafkaAdminClient admin =
-            new AsyncKafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
+        IAsyncAdmin admin =
+            IAsyncAdmin.Create(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         ArgumentException rejected =
@@ -434,7 +434,7 @@ public sealed class PublicAdminStringTests
         new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
         {
             [new ConfigResource(ConfigResourceType.TOPIC, topic)] =
-                new[] { new AlterConfigOp(new ConfigEntry(configName, configValue), AlterConfigOpType.SET) },
+                new[] { new AlterConfigOp(new ConfigEntry(configName, configValue), OpType.SET) },
         };
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(string topic, string metadata) =>

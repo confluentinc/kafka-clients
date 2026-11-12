@@ -166,12 +166,9 @@ public sealed class PublicAdminP7ShapeParityTests
     }
 
     [Fact]
-    public void AlterUserScramCredentialsResult_Constructor_IsInternalAndRejectsNull()
+    public void AlterUserScramCredentialsResult_Constructor_IsPublicAndRejectsNull()
     {
-        Assert.Empty(typeof(AlterUserScramCredentialsResult).GetConstructors());
-        ConstructorInfo constructor = Assert.Single(
-            typeof(AlterUserScramCredentialsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
-            candidate => candidate.IsAssembly);
+        ConstructorInfo constructor = Assert.Single(typeof(AlterUserScramCredentialsResult).GetConstructors());
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, KafkaFuture>),
             Assert.Single(constructor.GetParameters()).ParameterType);

@@ -195,7 +195,7 @@ public sealed class ProducerServiceTests
     {
         using ProducerServer server = ProducerServer.Create(flavour);
         ulong producerId = server.RegisterTransactionalMock();
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         ulong groupMetadataId = server.GroupMetadata.Add(consumer.GroupMetadata());
         Proto.TransactionRequest request = new Proto.TransactionRequest { ProducerId = producerId };
         Assert.Null((await server.Service.InitTransactions(request, server.Context)).Error);
@@ -215,8 +215,8 @@ public sealed class ProducerServiceTests
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> sent =
             Assert.Single(server.MockConsumerGroupOffsetsHistory());
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets = sent["dummy.group.id"];
-        Assert.Equal(new OffsetAndMetadata(5, string.Empty, null), offsets[new TopicPartition("t", 0)]);
-        Assert.Equal(new OffsetAndMetadata(9, "m", 3), offsets[new TopicPartition("t", 1)]);
+        Assert.Equal(new OffsetAndMetadata(5, null, string.Empty), offsets[new TopicPartition("t", 0)]);
+        Assert.Equal(new OffsetAndMetadata(9, 3, "m"), offsets[new TopicPartition("t", 1)]);
     }
 
     private static Task<Proto.SendResponse> SendOnAnotherThread(ProducerServer server, ulong producerId) =>

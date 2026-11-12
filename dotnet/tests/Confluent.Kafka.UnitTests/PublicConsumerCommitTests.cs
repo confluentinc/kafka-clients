@@ -38,12 +38,12 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_ThenCommitted_RoundTripsOffsetMetadataAndEpoch()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await AssignOf(consumer, new[] { tp });
 
-        OffsetAndMetadata oam = new OffsetAndMetadata(42, "meta-x", 7);
+        OffsetAndMetadata oam = new OffsetAndMetadata(42, 7, "meta-x");
         await CommitOffsetsOf(
             consumer, new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = oam });
 
@@ -58,7 +58,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullMetadataAndEpoch_RoundTripsAsEmptyMetadataAndNullEpoch()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 1);
         await AssignOf(consumer, new[] { tp });
@@ -78,7 +78,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NoOffsets_ResolvesBrokerFree()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await CommitOf(consumer);
@@ -87,7 +87,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_EmptyMap_ResolvesBrokerFree()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await CommitOffsetsOf(consumer, new Dictionary<TopicPartition, OffsetAndMetadata>());
@@ -96,7 +96,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitAsync_CompletesOnceAccepted()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await TestTimeout.Run(() => consumer.CommitAsync(), s_deadline);
@@ -105,7 +105,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitAsync_ViaIAsyncConsumerInterface_Completes()
     {
-        AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncConsumer<byte[], byte[]> consumer = mock;
 
@@ -115,7 +115,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullOffsets_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Commit(null!));
@@ -124,7 +124,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullElementTopic_ThrowsArgument()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
@@ -138,7 +138,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullOffsetValue_ThrowsArgument()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
@@ -170,7 +170,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public void OffsetAndMetadata_AllThreeSet_AreStored()
     {
-        OffsetAndMetadata value = new OffsetAndMetadata(5, "m", 3);
+        OffsetAndMetadata value = new OffsetAndMetadata(5, 3, "m");
 
         Assert.Equal(5, value.Offset());
         Assert.Equal("m", value.Metadata());
@@ -189,7 +189,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Commit());
@@ -198,7 +198,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitOffsets_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         await Assert.ThrowsAsync<IllegalStateException>(
@@ -211,7 +211,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitAsync_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(() => { _ = consumer.CommitAsync(); });
@@ -220,7 +220,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -231,7 +231,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitOffsets_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();

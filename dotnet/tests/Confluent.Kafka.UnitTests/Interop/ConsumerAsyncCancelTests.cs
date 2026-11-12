@@ -119,7 +119,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledSubscribe_SendsNoWakeup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await AssertCancelSendsNoWakeup(consumer, token => consumer.Subscribe(new[] { Topic }, token));
@@ -133,7 +133,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledUnsubscribe_SendsNoWakeup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Subscribe(new[] { Topic }));
@@ -148,7 +148,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledWakeableOperation_PostsItsWakeDecisionToThePump()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -204,7 +204,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task CancellingAnAsyncPoll_WakesTheConsumerAndLetsItEnd()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Subscribe(new[] { Topic }));
@@ -232,7 +232,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task CancellingACallWhoseCompletionIsQueued_LeavesNoWakeupArmed()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -257,7 +257,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task CancellingAnAsyncPollReturningRecords_SeeksThemBack()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0, s_tp1 }));
@@ -293,12 +293,12 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task DisposeDuringAnOperationWhoseCompletionIsQueued_ClosesOnlyAfterTheCompletionRan()
     {
-        Thread warmUp = new Thread(new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()).Dispose);
+        Thread warmUp = new Thread(new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()).Dispose);
         warmUp.IsBackground = true;
         warmUp.Start();
         Assert.True(warmUp.Join(s_deadline));
 
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         SafeConsumerHandle handle = HandleOf(consumer);
         Task unsubscribe;
         Thread disposing = new Thread(consumer.Dispose);
@@ -323,7 +323,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task DisposeDuringAPendingOperation_Returns_AndTheOperationEndsWithItsOwnError()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await WithDeadline(consumer.Assign(new[] { s_tp0 }));
         Task<IReadOnlyDictionary<TopicPartition, long>> pending = consumer.BeginningOffsets(new[] { s_tp0 });
         await Task.Delay(TimeSpan.FromMilliseconds(200));
@@ -371,7 +371,7 @@ public sealed class ConsumerAsyncCancelTests
     private static async Task AssertAssignedCancelSendsNoWakeup(
         Func<AsyncMockConsumer<byte[], byte[]>, CancellationToken, Task> operation)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -388,7 +388,7 @@ public sealed class ConsumerAsyncCancelTests
         Func<AsyncKafkaConsumer<byte[], byte[]>, CancellationToken, Task> operation)
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));

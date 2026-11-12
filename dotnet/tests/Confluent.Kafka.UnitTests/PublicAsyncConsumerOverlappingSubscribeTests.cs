@@ -354,7 +354,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     {
         if (kind == Kind.AsyncMockConsumer)
         {
-            return new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            return new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         }
 
         Dictionary<string, object?> config = new Dictionary<string, object?>
@@ -367,7 +367,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
             config["group.id"] = "overlapping-subscribe-group";
         }
 
-        return new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
+        return new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
     }
 
     private static NativeConsumer Native(object consumer) =>
@@ -506,10 +506,6 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 
     /// <summary>An asynchronous rebalance listener that does nothing.</summary>
@@ -518,7 +514,5 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
         public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
 
         public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 }

@@ -46,8 +46,9 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
     /// <summary>The renamed types, one <c>.NET type name</c> and Java type per line.</summary>
     public const string PairsFile = "java-name-pairs.txt";
 
+    // The members every Java enum has, by signature: a valueOf of other parameters is the enum's own.
     private static readonly HashSet<string> s_enumBuiltIns =
-        new HashSet<string>(StringComparer.Ordinal) { "name", "ordinal", "values", "valueOf" };
+        new HashSet<string>(StringComparer.Ordinal) { "name()", "ordinal()", "values()", "valueOf(String)" };
 
     private static readonly DiagnosticDescriptor s_nameRule = new DiagnosticDescriptor(
         DiagnosticIds.JavaName,
@@ -174,7 +175,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     replaceable[replacement.Main] = methods;
                 }
 
-                methods.Add(replacement.Method);
+                methods.Add(replacement.Suffix);
             }
 
             HashSet<string> pairedMarkers = new HashSet<string>(
@@ -301,7 +302,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         }
 
         // A user replaces a Java default method by implementing an interface named after the .NET interface plus With and
-        // the method's name without a leading On, which extends it and declares only that method.
+        // the default's replacement suffix (ReplacementSuffix), which extends it and declares only that method.
         private Dictionary<INamedTypeSymbol, Replacement> Replacements(List<(INamedTypeSymbol Type, Pairing Pairing)> pairings)
         {
             Dictionary<INamedTypeSymbol, JavaType> mains = new Dictionary<INamedTypeSymbol, JavaType>(SymbolEqualityComparer.Default);
@@ -332,12 +333,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     }
 
                     string suffix = type.Name.Substring(main.Name.Length + "With".Length);
-                    JavaMember? replaced = _api.Chain(java)
+                    IReadOnlyList<JavaType> chain = _api.Chain(java);
+                    JavaMember? replaced = chain
                         .SelectMany(link => link.Members)
-                        .FirstOrDefault(m => m.IsDefault && ReplacementSuffix(DotNetNameOf(m.Name)) == suffix);
+                        .FirstOrDefault(m => m.IsDefault && ReplacementSuffix(m, chain) == suffix);
                     if (replaced is not null)
                     {
-                        replacements[type] = new Replacement(main, java, DotNetNameOf(replaced.Name));
+                        replacements[type] = new Replacement(main, java, DotNetNameOf(replaced.Name), suffix);
                         break;
                     }
                 }
@@ -404,14 +406,18 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             HashSet<string> jdk = _api.JdkSupertypes(java);
             List<JavaMember> visible = chain.SelectMany(link => link.Members).ToList();
             // A Java supertype's members are checked on the .NET type that translates the supertype, when this type
-            // derives from it; otherwise they are required here.
-            HashSet<INamedTypeSymbol> netChain = new HashSet<INamedTypeSymbol>(NetChain(type), SymbolEqualityComparer.Default);
+            // derives from it, a generic one through any of its constructions; otherwise they are required here.
+            HashSet<INamedTypeSymbol> netChain = new HashSet<INamedTypeSymbol>(
+                NetChain(type).Select(t => t.OriginalDefinition),
+                SymbolEqualityComparer.Default);
             List<JavaMember> required = chain
                 .Where(link => link == java || !pairedTypes[link.Marker].Any(netChain.Contains))
                 .SelectMany(link => link.Members)
                 .Where(m => m.Kind != JavaMemberKind.Constructor || m.DeclaringType == java.Marker)
                 .Where(m => m.Kind != JavaMemberKind.Method || !m.IsStatic || m.DeclaringType == java.Marker)
-                .Where(m => type.TypeKind != TypeKind.Enum || m.Kind != JavaMemberKind.Method || !s_enumBuiltIns.Contains(m.Name))
+                .Where(m => type.TypeKind != TypeKind.Enum
+                    || m.Kind != JavaMemberKind.Method
+                    || !s_enumBuiltIns.Contains(m.Name + "(" + string.Join(",", m.ParameterTypes) + ")"))
                 .ToList();
             Dictionary<string, string> javaMethods = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (JavaMember method in visible.Where(m => m.Kind == JavaMemberKind.Method))
@@ -428,7 +434,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             foreach (JavaMember field in required.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant))
             {
-                if (!netChain.Any(t => t.GetMembers(field.Name).Any(m => m.DeclaredAccessibility == Accessibility.Public)))
+                // A Java enum's static field is a static readonly field of its Methods class, as an extension block holds none.
+                bool onCompanion = type.TypeKind == TypeKind.Enum
+                    && field.Kind == JavaMemberKind.Field
+                    && field.IsStatic
+                    && companions.Any(c => c.GetMembers(field.Name)
+                        .Any(m => m is IFieldSymbol { IsStatic: true, IsReadOnly: true, DeclaredAccessibility: Accessibility.Public }));
+                if (!onCompanion && !netChain.Any(t => t.GetMembers(field.Name).Any(m => m.DeclaredAccessibility == Accessibility.Public)))
                 {
                     findings.Add(Missing(typeId, field.Marker, typeLocation));
                 }
@@ -440,13 +452,18 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        // An interface that replaces a Java default method declares that method alone, with Java's parameters.
+        // An interface that replaces a Java default method declares that method alone, with Java's parameters: the
+        // default overloads of that name with its suffix.
         private void CheckReplacement(INamedTypeSymbol type, Replacement replacement, List<Finding> findings)
         {
+            IReadOnlyList<JavaType> chain = _api.Chain(replacement.Java);
             List<JavaOverload> defaults = JavaOverloads(
-                _api.Chain(replacement.Java)
+                chain
                     .SelectMany(link => link.Members.Select(m => (link, m)))
-                    .Where(p => p.m.Kind == JavaMemberKind.Method && p.m.IsDefault && DotNetNameOf(p.m.Name) == replacement.Method),
+                    .Where(p => p.m.Kind == JavaMemberKind.Method
+                        && p.m.IsDefault
+                        && DotNetNameOf(p.m.Name) == replacement.Method
+                        && ReplacementSuffix(p.m, chain) == replacement.Suffix),
                 new List<JavaMember>(),
                 isExceptionConstructor: false);
             string javaName = replacement.Java.SimpleName + "." + JavaNameIn(defaults, replacement.Method);
@@ -590,7 +607,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     isExceptionConstructor: false);
                 foreach ((NetOverload n, JavaOverload j) in Match(type, java.SimpleName + "." + JavaNameIn(javaOverloads, name), net, javaOverloads, findings))
                 {
-                    CheckPlace(type, companions, replaceable, java, name, n, j, findings);
+                    CheckPlace(type, companions, replaceable, java, chain, name, n, j, findings);
                 }
             }
 
@@ -620,12 +637,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         }
 
         // Where a matched .NET method sits: a Java interface's default method in its Extensions class with an interface
-        // to replace it, never on the interface; a Java enum's static method in an extension block for the enum.
+        // to replace it, never on the interface; a Java enum's static method, and its toString() override as a static
+        // ToString of the enum, in an extension block for the enum.
         private static void CheckPlace(
             INamedTypeSymbol type,
             List<INamedTypeSymbol> companions,
             HashSet<string> replaceable,
             JavaType java,
+            IReadOnlyList<JavaType> chain,
             string name,
             NetOverload net,
             JavaOverload javaOverload,
@@ -635,6 +654,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             {
                 return;
             }
+
+            string suffix = javaOverload.Member.IsDefault ? ReplacementSuffix(javaOverload.Member, chain) : string.Empty;
 
             bool inBlock = net.Method.ContainingType.IsExtension;
             bool inCompanion = companions.Contains(
@@ -646,14 +667,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 findings.Add(new Finding(
                     "default " + DocId(net.Method),
                     "Java's " + javaName + " is a default method: it is an extension method in " + JavaNameOf(type)
-                        + "Extensions, and " + type.Name + "With" + ReplacementSuffix(name) + " replaces it",
+                        + "Extensions, and " + type.Name + "With" + suffix + " replaces it",
                     LocationOf(net.Method)));
             }
-            else if (javaOverload.Member.IsDefault && inCompanion && !replaceable.Contains(name))
+            else if (javaOverload.Member.IsDefault && inCompanion && !replaceable.Contains(suffix))
             {
                 findings.Add(new Finding(
                     "with " + DocId(type) + " " + javaOverload.Reported.Marker,
-                    "has no " + type.Name + "With" + ReplacementSuffix(name) + " that extends it and declares Java's default " + javaName
+                    "has no " + type.Name + "With" + suffix + " that extends it and declares Java's default " + javaName
                         + ", so a user cannot replace it",
                     LocationOf(type)));
             }
@@ -663,6 +684,16 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     "static " + DocId(net.Method),
                     "Java's " + javaName + " is static: it goes in an extension(" + type.Name + ") block, so C# 14 calls it on "
                         + "the enum",
+                    LocationOf(net.Method)));
+            }
+            else if (type.TypeKind == TypeKind.Enum
+                && javaOverload.Member is { Name: "toString", IsStatic: false, ParameterTypes.Length: 0 }
+                && !(inBlock && net.Method.IsStatic))
+            {
+                findings.Add(new Finding(
+                    "static " + DocId(net.Method),
+                    "Java's " + javaName + "() is a static ToString(" + type.Name + ") in an extension(" + type.Name + ") block: C# "
+                        + "never calls an extension ToString() over Enum.ToString()",
                     LocationOf(net.Method)));
             }
         }
@@ -683,7 +714,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         // One NetOverload per signature: a method declared on an interface and on the class implementing it is one
         // overload. Overloads taking an async form of a callback come last, so a Java overload pairs with the sync form.
         // A companion's extension method stands for an instance method of the type, its receiver not compared; a member
-        // of an extension block keeps its own static or instance form.
+        // of an extension block keeps its own static or instance form, except an enum's static ToString(<Enum>), which
+        // stands for Java's toString() override.
         private static List<NetOverload> Overloads(INamedTypeSymbol type, List<INamedTypeSymbol> companions, IEnumerable<IMethodSymbol> methods)
         {
             List<NetOverload> overloads = new List<NetOverload>();
@@ -694,10 +726,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     inBlock ? method.ContainingType.ContainingType : method.ContainingType,
                     SymbolEqualityComparer.Default);
                 bool declaredHere = inCompanion || SymbolEqualityComparer.Default.Equals(method.ContainingType, type);
-                bool onReceiver = inCompanion
-                    && !inBlock
-                    && method.IsExtensionMethod
-                    && IsReceiver(method.Parameters[0].Type, type);
+                bool onReceiver = (inCompanion
+                        && !inBlock
+                        && method.IsExtensionMethod
+                        && IsReceiver(method.Parameters[0].Type, type))
+                    || IsEnumToString(type, method, inCompanion);
                 IEnumerable<IParameterSymbol> parameters = onReceiver ? method.Parameters.Skip(1) : method.Parameters;
                 NetOverload overload = new NetOverload(
                     method,
@@ -718,6 +751,17 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             return overloads.OrderBy(o => o.AsyncParameters).ToList();
         }
+
+        // Whether a method of an enum's companion is a static string ToString of the enum, the form of Java's toString().
+        private static bool IsEnumToString(INamedTypeSymbol type, IMethodSymbol method, bool inCompanion) =>
+            inCompanion
+            && type.TypeKind == TypeKind.Enum
+            && method.Name == "ToString"
+            && method.IsStatic
+            && !method.IsExtensionMethod
+            && method.ReturnType.SpecialType == SpecialType.System_String
+            && method.Parameters.Length == 1
+            && IsReceiver(method.Parameters[0].Type, type);
 
         // A method that overrides or implements a .NET built-in member keeps that member's parameter names.
         private static bool NamedByBase(INamedTypeSymbol type, IMethodSymbol method)
@@ -772,7 +816,33 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 overloads.Add(new JavaOverload(chosen, reported, isRequired, names, types));
             }
 
-            return overloads;
+            // A .NET span stands for Java's byte[] and a ReadOnlyMemory for its ByteBuffer, and both fit either, so an
+            // overload taking a byte[] is tried before its twin taking a ByteBuffer in its place.
+            return overloads.OrderBy(o => overloads.Any(other => IsByteBufferTwin(o, other)) ? 1 : 0).ToList();
+        }
+
+        // Whether `buffer` is `array` with a ByteBuffer where `array` takes a byte[], and otherwise the same.
+        private static bool IsByteBufferTwin(JavaOverload buffer, JavaOverload array)
+        {
+            if (buffer.Member.Name != array.Member.Name || buffer.Types.Length != array.Types.Length)
+            {
+                return false;
+            }
+
+            bool twin = false;
+            for (int i = 0; i < buffer.Types.Length; i++)
+            {
+                if (buffer.Types[i] == "ByteBuffer" && array.Types[i] == "byte[]")
+                {
+                    twin = true;
+                }
+                else if (buffer.Types[i] != array.Types[i])
+                {
+                    return false;
+                }
+            }
+
+            return twin;
         }
 
         // Whether `optional` is `other` with an Optional in place of one of its parameter types.
@@ -1192,6 +1262,54 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
     private static string ReplacementSuffix(string method) =>
         method.Length > 2 && method.StartsWith("On", StringComparison.Ordinal) && char.IsUpper(method[2]) ? method.Substring(2) : method;
 
+    // A default that overloads another method of its name is named after the parameters it adds to the shortest other
+    // overload: serialize(String, Headers, T) beside serialize(String, T) gives ISerializerWithHeaders. When another
+    // default of the name adds parameters of the same names with other types, their types are added too. A default that
+    // adds no named parameter keeps its method's name.
+    private static string ReplacementSuffix(JavaMember member, IReadOnlyList<JavaType> chain)
+    {
+        List<JavaMember> sameName = chain
+            .SelectMany(link => link.Members)
+            .Where(m => m.Kind == JavaMemberKind.Method && m.Name == member.Name)
+            .ToList();
+        List<int>? added = Added(member, sameName);
+        if (added is null)
+        {
+            return ReplacementSuffix(DotNetNameOf(member.Name));
+        }
+
+        string names = string.Concat(added.Select(i => Pascal(member.ParameterNames[i])));
+        string types = string.Concat(added.Select(i => member.ParameterTypes[i]));
+        bool collides = sameName.Any(other => other.IsDefault
+            && Added(other, sameName) is { } otherAdded
+            && string.Concat(otherAdded.Select(i => Pascal(other.ParameterNames[i]))) == names
+            && string.Concat(otherAdded.Select(i => other.ParameterTypes[i])) != types);
+        return collides
+            ? string.Concat(added.Select(i => Pascal(member.ParameterNames[i]) + Pascal(member.ParameterTypes[i].Replace("[]", "Array"))))
+            : names;
+    }
+
+    // The places of the parameters a method adds to the shortest other overload of its name; null when it overloads
+    // nothing, or adds no parameter whose name the list spells.
+    private static List<int>? Added(JavaMember member, List<JavaMember> sameName)
+    {
+        JavaMember? shortest = sameName
+            .Where(m => !m.ParameterTypes.SequenceEqual(member.ParameterTypes))
+            .OrderBy(m => m.ParameterTypes.Length)
+            .FirstOrDefault();
+        if (shortest is null)
+        {
+            return null;
+        }
+
+        List<int> added = Enumerable.Range(0, member.ParameterNames.Length)
+            .Where(i => !shortest.ParameterNames.Contains(member.ParameterNames[i]))
+            .ToList();
+        return added.Count == 0 || added.Any(i => member.ParameterNames[i] == "?") ? null : added;
+    }
+
+    private static string Pascal(string name) => char.ToUpperInvariant(name[0]) + name.Substring(1);
+
     private static string WithoutAsync(string name)
     {
         if (name.Length > 6 && name.StartsWith("IAsync", StringComparison.Ordinal) && char.IsUpper(name[6]))
@@ -1248,14 +1366,15 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
     }
 
     /// <summary>An interface through which a user replaces a Java default method: the .NET interface it extends, that
-    /// interface's Java type, and the .NET name of the default method.</summary>
+    /// interface's Java type, the .NET name of the default method, and what follows With in the interface's name.</summary>
     private sealed class Replacement
     {
-        internal Replacement(INamedTypeSymbol main, JavaType java, string method)
+        internal Replacement(INamedTypeSymbol main, JavaType java, string method, string suffix)
         {
             Main = main;
             Java = java;
             Method = method;
+            Suffix = suffix;
         }
 
         internal INamedTypeSymbol Main { get; }
@@ -1263,6 +1382,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         internal JavaType Java { get; }
 
         internal string Method { get; }
+
+        internal string Suffix { get; }
     }
 
     /// <summary>One finding: its key, what it means, and where it is reported.</summary>

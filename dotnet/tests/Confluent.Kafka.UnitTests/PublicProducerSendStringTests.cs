@@ -196,17 +196,17 @@ public sealed class PublicProducerSendStringTests
         {
             case Kafka:
                 return new SyncSubject(
-                    new KafkaProducer<string, string>(Unreachable(), Serdes.String(), Serdes.String()), historyCount: null);
+                    new KafkaProducer<string, string>(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer()), historyCount: null);
             case AsyncKafka:
                 return new AsyncSubject(
-                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String(), Serdes.String()),
+                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer()),
                     historyCount: null);
             case Mock:
-                MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String(), Serdes.String());
+                MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
                 return new SyncSubject(mock, mock.HistoryCount);
             case AsyncMock:
                 AsyncMockProducer<string, string> asyncMock =
-                    new AsyncMockProducer<string, string>(Serdes.String(), Serdes.String());
+                    new AsyncMockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
                 return new AsyncSubject(asyncMock, asyncMock.HistoryCount);
             default:
                 throw new ArgumentOutOfRangeException(nameof(producer), producer, null);
@@ -216,9 +216,9 @@ public sealed class PublicProducerSendStringTests
     private static ProducerRecord<string, string> Record(string topic, string headerKey) =>
         new ProducerRecord<string, string>(
             topic,
-            "value",
-            "key",
-            headers: new[] { new Header("first", Bytes("1")), new Header(headerKey, Bytes("2")) });
+            value: "value",
+            key: "key",
+            headers: new[] { new Header("first", Bytes("1")), new Header(headerKey, Bytes("2")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>

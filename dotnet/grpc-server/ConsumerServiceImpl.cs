@@ -75,11 +75,11 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             // An empty or all-blank config selects a MockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
             }
             else
             {
-                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
+                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
             }
         }
         catch (Exception ex)
@@ -278,7 +278,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             {
                 int? leaderEpoch = request.HasLeaderEpoch ? request.LeaderEpoch : (int?)null;
                 string metadata = request.HasMetadata ? request.Metadata : string.Empty;
-                c.Seek(partition, new OffsetAndMetadata(request.Offset, metadata, leaderEpoch));
+                c.Seek(partition, new OffsetAndMetadata(request.Offset, leaderEpoch, metadata));
             }
             else
             {

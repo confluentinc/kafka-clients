@@ -48,6 +48,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     private readonly NativeConsumer _native;
     private readonly IDeserializer<TKey> _keyDeserializer;
     private readonly IDeserializer<TValue> _valueDeserializer;
+    private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
+    private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
@@ -64,6 +66,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// </exception>
     public AsyncMockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
@@ -71,12 +77,17 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
+        SerdeGuard.Check(_keyDeserializer, DefaultMethodGuard.Consumer, disposes: false);
+        SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: false);
+        _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
+        _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.CreateMock(autoOffsetReset);
     }
 
     /// <inheritdoc/>
     public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
-        _native.PollWithCallback(timeout, _keyDeserializer, _valueDeserializer, cancellationToken);
+        _native.PollWithCallback(
+            timeout, _keyDeserializer, _keyWithHeaders, _valueDeserializer, _valueWithHeaders, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
@@ -436,9 +447,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>MockConsumer.losePartitions(Collection)</c>).
     /// </summary>
     /// <remarks>
-    /// The buffered records of the lost partitions are cleared; then, while a listener is registered,
-    /// <c>OnPartitionsLost</c> fires with them on the consumer's drain thread; then they leave the
-    /// <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
+    /// The buffered records of the lost partitions are cleared; then, while a listener is registered, its
+    /// <c>OnPartitionsLost</c> extension method (<see cref="ConsumerRebalanceListenerExtensions"/> or
+    /// <see cref="AsyncConsumerRebalanceListenerExtensions"/>) runs with them on the consumer's drain thread; then they
+    /// leave the <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
     /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
     /// <see cref="IllegalStateException"/>, as Java's.
     /// </remarks>

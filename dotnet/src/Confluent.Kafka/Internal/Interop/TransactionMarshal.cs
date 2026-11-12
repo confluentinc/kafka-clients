@@ -26,21 +26,11 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class TransactionMarshal
 {
-    internal static string WireName(TransactionState state) => NameFromState(state) ?? "Unknown";
+    internal static string WireName(TransactionState state) =>
+        NameFromState(state)
+        ?? throw new ArgumentOutOfRangeException(nameof(state), state, "Not a defined TransactionState member.");
 
-    internal static string? NameFromState(TransactionState state) =>
-        state switch
-        {
-            TransactionState.ONGOING => "Ongoing",
-            TransactionState.PREPARE_ABORT => "PrepareAbort",
-            TransactionState.PREPARE_COMMIT => "PrepareCommit",
-            TransactionState.COMPLETE_ABORT => "CompleteAbort",
-            TransactionState.COMPLETE_COMMIT => "CompleteCommit",
-            TransactionState.EMPTY => "Empty",
-            TransactionState.PREPARE_EPOCH_FENCE => "PrepareEpochFence",
-            TransactionState.UNKNOWN => "Unknown",
-            _ => null,
-        };
+    internal static string? NameFromState(TransactionState state) => TransactionStateMethods.TextOf(state);
 
     internal static IntPtr Singleton(TransactionState state)
     {

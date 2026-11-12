@@ -38,13 +38,13 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendAutoComplete_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = default!;
         await TestTimeout.Run(
             async () => metadata = await producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)).Delivery(),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 0)).Delivery(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic());
@@ -55,11 +55,11 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualComplete_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 0, key: null)).Delivery();
         Assert.True(producer.CompleteNext());
 
         RecordMetadata metadata = default!;
@@ -71,11 +71,11 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualError_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 0, key: null)).Delivery();
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
         await FutureAssert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
@@ -87,8 +87,8 @@ public sealed class PublicProducerSendTfmSmokeTests
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
             new System.Collections.Generic.Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
-            Serdes.ByteArray(),
-            Serdes.ByteArray());
+            Serdes.ByteArray().Serializer(),
+            Serdes.ByteArray().Serializer());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }

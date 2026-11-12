@@ -55,7 +55,7 @@ public sealed class PublicProducerSendHeadersTests
         CallLog serializer = new CallLog(calls);
         KafkaProducer<string, string> producer = new KafkaProducer<string, string>(Unreachable(), serializer, serializer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "value", "key");
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "value", key: "key");
 
         record.Headers().Add(new Header("test", Bytes("header2")));
         TestTimeout.Run(() => _ = producer.Send(record), s_deadline);
@@ -73,7 +73,7 @@ public sealed class PublicProducerSendHeadersTests
         AsyncKafkaProducer<string, string> producer =
             new AsyncKafkaProducer<string, string>(Unreachable(), serializer, serializer);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "value", "key");
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "value", key: "key");
         record.Headers().Add(new Header("test", Bytes("header2")));
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(record);
@@ -87,7 +87,7 @@ public sealed class PublicProducerSendHeadersTests
     public void KafkaProducer_SerializerFailure_LeavesTheHeadersWritable()
     {
         KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
-            Unreachable(), new ThrowingSerializer<string>(), Serdes.String());
+            Unreachable(), new ThrowingSerializer<string>(), Serdes.String().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -100,7 +100,7 @@ public sealed class PublicProducerSendHeadersTests
     public async Task AsyncKafkaProducer_SerializerFailure_LeavesTheHeadersWritable()
     {
         AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            Unreachable(), Serdes.String(), new ThrowingSerializer<string>());
+            Unreachable(), Serdes.String().Serializer(), new ThrowingSerializer<string>());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -113,7 +113,7 @@ public sealed class PublicProducerSendHeadersTests
     public void KafkaProducer_ASentRecord_IsSentAgain()
     {
         KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
-            Unreachable(), Serdes.String(), Serdes.String());
+            Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
         KafkaFuture<RecordMetadata> first = default;
@@ -132,7 +132,7 @@ public sealed class PublicProducerSendHeadersTests
     public async Task AsyncKafkaProducer_ASentRecord_IsSentAgain()
     {
         AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            Unreachable(), Serdes.String(), Serdes.String());
+            Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
         ValueTask<AsyncKafkaFuture<RecordMetadata>> first = producer.Send(record);
@@ -148,9 +148,9 @@ public sealed class PublicProducerSendHeadersTests
     [Fact]
     public void MockProducer_LeavesTheHeadersWritable()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", Bytes("v"));
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"));
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(() => metadata = producer.Send(record).Get(), s_deadline);
@@ -164,9 +164,9 @@ public sealed class PublicProducerSendHeadersTests
     public async Task AsyncMockProducer_LeavesTheHeadersWritable()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
-        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", Bytes("v"));
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"));
 
         RecordMetadata metadata = await TestTimeout.Run(() => producer.Send(record).Delivery(), s_deadline);
 
@@ -207,7 +207,7 @@ public sealed class PublicProducerSendHeadersTests
     }
 
     private static ProducerRecord<string, string> Record() =>
-        new ProducerRecord<string, string>(Topic, "value", "key", headers: new[] { new Header("h", Bytes("1")) });
+        new ProducerRecord<string, string>(Topic, value: "value", key: "key", headers: new[] { new Header("h", Bytes("1")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>
@@ -225,7 +225,7 @@ public sealed class PublicProducerSendHeadersTests
 
         internal CallLog(List<(string Topic, string? Data)> calls) => _calls = calls;
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, string data)
+        public ReadOnlyMemory<byte>? Serialize(string topic, string? data)
         {
             _calls.Add((topic, data));
             return data is null ? (ReadOnlyMemory<byte>?)null : Encoding.UTF8.GetBytes(data);

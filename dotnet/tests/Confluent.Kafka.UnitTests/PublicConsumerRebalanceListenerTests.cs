@@ -47,16 +47,15 @@ public sealed class PublicConsumerRebalanceListenerTests
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     [Fact]
-    public void ConsumerRebalanceListenerBase_OnPartitionsLost_DelegatesToRevoked()
+    public void OnPartitionsLost_OnAPlainListener_RunsRevoked_JavasDefault()
     {
-        // Java's onPartitionsLost default lives on the base class, as netstandard2.0 has no default interface methods.
-        RecordingListenerBase listener = new RecordingListenerBase();
+        DefaultLostRecordingListener listener = new DefaultLostRecordingListener();
         TopicPartition[] partitions = { new TopicPartition(Topic, 1) };
 
         listener.OnPartitionsLost(partitions);
@@ -295,7 +294,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         TopicPartition tp2 = new TopicPartition(Topic, 2);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        RecordingListenerBase listener = new RecordingListenerBase();
+        DefaultLostRecordingListener listener = new DefaultLostRecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
 
         consumer.Rebalance(new[] { tp0, tp1 });
@@ -309,12 +308,12 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     [Fact]
-    public void LosePartitions_WithAListenerBase_FallsBackToRevoked_JavasDefault()
+    public void LosePartitions_WithAPlainListener_RunsRevoked_JavasDefault()
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        RecordingListenerBase listener = new RecordingListenerBase();
+        DefaultLostRecordingListener listener = new DefaultLostRecordingListener();
         consumer.Subscribe(new[] { Topic }, listener);
         consumer.Rebalance(new[] { tp0, new TopicPartition(Topic, 1) });
 
@@ -446,7 +445,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     public void SyncMock_AListener_CallsBackIntoTheMock()
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             List<string> seen = new List<string>();
@@ -489,7 +488,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     public void SyncMock_ACommitInsideOnPartitionsRevoked_Succeeds()
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             consumer.Subscribe(new[] { Topic }, new DelegateListener(revoked: _ => consumer.Commit(Offsets(tp0, 7))));
@@ -642,7 +641,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             await TestTimeout.Run(
@@ -674,7 +673,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
         try
         {
             List<TopicPartition[]> lost = new List<TopicPartition[]>();
@@ -730,12 +729,12 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     [Fact]
-    public async Task AsyncMock_AsyncListenerBase_LosePartitions_FallsBackToRevoked_JavasDefault()
+    public async Task AsyncMock_APlainAsyncListener_LosePartitions_RunsRevoked_JavasDefault()
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
-        AsyncRecordingListenerBase listener = new AsyncRecordingListenerBase();
+        AsyncDefaultLostRecordingListener listener = new AsyncDefaultLostRecordingListener();
         await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
         await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0, new TopicPartition(Topic, 1) }), s_deadline);
 
@@ -824,9 +823,9 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     [Fact]
-    public async Task AsyncConsumerRebalanceListenerBase_OnPartitionsLost_DelegatesToRevoked()
+    public async Task AsyncOnPartitionsLost_OnAPlainListener_RunsRevoked_JavasDefault()
     {
-        AsyncRecordingListenerBase listener = new AsyncRecordingListenerBase();
+        AsyncDefaultLostRecordingListener listener = new AsyncDefaultLostRecordingListener();
         TopicPartition[] partitions = { new TopicPartition(Topic, 1) };
 
         await listener.OnPartitionsLost(partitions);
@@ -989,7 +988,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         "[" + string.Join(", ", partitions.Select(tp => tp.Topic() + "-" + tp.Partition())) + "]";
 
     /// <summary>A listener that runs the actions it is given for revoked and assigned partitions.</summary>
-    private sealed class DelegateListener : IConsumerRebalanceListener
+    private sealed class DelegateListener : IConsumerRebalanceListenerWithPartitionsLost
     {
         private readonly Action<IReadOnlyCollection<TopicPartition>>? _revoked;
         private readonly Action<IReadOnlyCollection<TopicPartition>>? _assigned;
@@ -1012,7 +1011,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     /// <summary>An async listener that runs the functions it is given for revoked and lost partitions.</summary>
-    private sealed class AsyncDelegateListener : IAsyncConsumerRebalanceListener
+    private sealed class AsyncDelegateListener : IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
         private readonly Func<IReadOnlyCollection<TopicPartition>, Task>? _revoked;
         private readonly Func<IReadOnlyCollection<TopicPartition>, Task>? _lost;
@@ -1035,7 +1034,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     /// <summary>Records the partitions each listener method receives.</summary>
-    private sealed class RecordingListener : IConsumerRebalanceListener
+    private sealed class RecordingListener : IConsumerRebalanceListenerWithPartitionsLost
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
 
@@ -1053,17 +1052,17 @@ public sealed class PublicConsumerRebalanceListenerTests
             Lost.Add(partitions.ToArray());
     }
 
-    /// <summary>Records the partitions each method receives, with the base's default for lost partitions.</summary>
-    private sealed class RecordingListenerBase : ConsumerRebalanceListenerBase
+    /// <summary>Records the partitions each method receives; a lost partition runs its revoked method, Java's default.</summary>
+    private sealed class DefaultLostRecordingListener : IConsumerRebalanceListener
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
 
         internal List<TopicPartition[]> Assigned { get; } = new List<TopicPartition[]>();
 
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
             Revoked.Add(partitions.ToArray());
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
             Assigned.Add(partitions.ToArray());
     }
 
@@ -1083,14 +1082,10 @@ public sealed class PublicConsumerRebalanceListenerTests
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
             throw Thrown;
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 
     /// <summary>A listener whose lost method throws an InvalidOperationException.</summary>
-    private sealed class ThrowingOnLostListener : IConsumerRebalanceListener
+    private sealed class ThrowingOnLostListener : IConsumerRebalanceListenerWithPartitionsLost
     {
         internal ThrowingOnLostListener(string message)
         {
@@ -1112,7 +1107,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     /// <summary>An async listener that records, after a yield, the partitions each method receives.</summary>
-    private sealed class AsyncRecordingListener : IAsyncConsumerRebalanceListener
+    private sealed class AsyncRecordingListener : IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
 
@@ -1137,21 +1132,21 @@ public sealed class PublicConsumerRebalanceListenerTests
         }
     }
 
-    /// <summary>An async listener with the base's default for lost partitions, recording after a yield.</summary>
-    private sealed class AsyncRecordingListenerBase : AsyncConsumerRebalanceListenerBase
+    /// <summary>An async listener recording after a yield; a lost partition runs its revoked method, Java's default.</summary>
+    private sealed class AsyncDefaultLostRecordingListener : IAsyncConsumerRebalanceListener
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
 
         internal List<TopicPartition[]> Assigned { get; } = new List<TopicPartition[]>();
 
-        public override async Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public async Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
             TopicPartition[] copied = partitions.ToArray();
             await Task.Yield();
             Revoked.Add(copied);
         }
 
-        public override async Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        public async Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
             TopicPartition[] copied = partitions.ToArray();
             await Task.Yield();
@@ -1186,8 +1181,6 @@ public sealed class PublicConsumerRebalanceListenerTests
             await _release;
             await _afterRelease!();
         }
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>An async listener whose assigned method throws, after a yield, the exception it is given.</summary>
@@ -1207,12 +1200,10 @@ public sealed class PublicConsumerRebalanceListenerTests
             await Task.Yield();
             throw _thrown;
         }
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>Records the name and id of the thread each assigned call runs on.</summary>
-    private sealed class ThreadRecordingListener : IConsumerRebalanceListener, IAsyncConsumerRebalanceListener
+    private sealed class ThreadRecordingListener : IConsumerRebalanceListenerWithPartitionsLost, IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
         internal List<string?> ThreadNames { get; } = new List<string?>();
 
@@ -1224,7 +1215,7 @@ public sealed class PublicConsumerRebalanceListenerTests
 
         void IConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Record();
 
-        void IConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        void IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
@@ -1237,7 +1228,7 @@ public sealed class PublicConsumerRebalanceListenerTests
             return Task.CompletedTask;
         }
 
-        Task IAsyncConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
+        Task IAsyncConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
             Task.CompletedTask;
 
         private void Record()
@@ -1267,10 +1258,6 @@ public sealed class PublicConsumerRebalanceListenerTests
         {
             _entered.Set();
             _release.Wait();
-        }
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
         }
     }
 }

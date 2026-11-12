@@ -71,9 +71,9 @@ public sealed class PublicMockProducerTests : IDisposable
     private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_noOffsets =
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
-    private readonly ProducerRecord<string, string> _record1 = new ProducerRecord<string, string>(Topic, "value1", "key1");
+    private readonly ProducerRecord<string, string> _record1 = new ProducerRecord<string, string>(Topic, value: "value1", key: "key1");
 
-    private readonly ProducerRecord<string, string> _record2 = new ProducerRecord<string, string>(Topic, "value2", "key2");
+    private readonly ProducerRecord<string, string> _record2 = new ProducerRecord<string, string>(Topic, value: "value2", key: "key2");
 
     private MockProducer<string, string>? _producer;
 
@@ -86,7 +86,7 @@ public sealed class PublicMockProducerTests : IDisposable
     public void GroupMetadata_FromANeverConnectedConsumer_IsTheConfiguredGroupId()
     {
         using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(ConsumerConfig("g1"), Serdes.ByteArray(), Serdes.ByteArray());
+            new KafkaConsumer<byte[], byte[]>(ConsumerConfig("g1"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
         ConsumerGroupMetadata metadata = consumer.GroupMetadata();
 
@@ -748,9 +748,9 @@ public sealed class PublicMockProducerTests : IDisposable
     public void ShouldThrowClassCastException()
     {
         using MockProducer<object, string> customProducer =
-            new MockProducer<object, string>(new IntegerKeySerializer(), Serdes.String());
+            new MockProducer<object, string>(new IntegerKeySerializer(), Serdes.String().Serializer());
         Assert.Throws<InvalidCastException>(
-            () => customProducer.Send(new ProducerRecord<object, string>(Topic, "value1", "key1")));
+            () => customProducer.Send(new ProducerRecord<object, string>(Topic, value: "value1", key: "key1")));
     }
 
     [Fact]
@@ -817,7 +817,7 @@ public sealed class PublicMockProducerTests : IDisposable
         s_groupMetadata.GetOrAdd(groupId, id =>
         {
             using KafkaConsumer<byte[], byte[]> consumer =
-                new KafkaConsumer<byte[], byte[]>(ConsumerConfig(id), Serdes.ByteArray(), Serdes.ByteArray());
+                new KafkaConsumer<byte[], byte[]>(ConsumerConfig(id), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
             return consumer.GroupMetadata();
         });
 
@@ -863,11 +863,11 @@ public sealed class PublicMockProducerTests : IDisposable
     }
 
     private void BuildMockProducer(bool autoComplete) =>
-        _producer = new MockProducer<string, string>(Serdes.String(), Serdes.String(), autoComplete);
+        _producer = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer(), autoComplete);
 
     private sealed class IntegerKeySerializer : ISerializer<object>
     {
-        public ReadOnlyMemory<byte>? Serialize(string topic, object data) => Serdes.Integer().Serialize(topic, (int)data);
+        public ReadOnlyMemory<byte>? Serialize(string topic, object? data) => Serdes.Integer().Serializer().Serialize(topic, (int?)data);
     }
 
     private sealed class RecordingCallback : ICallback

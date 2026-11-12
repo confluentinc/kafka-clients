@@ -74,7 +74,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(Record(topic, 0, "a"));
         Assert.False(firstStage.IsCompleted, "the first record was taken inside the call");
@@ -92,7 +92,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray(), Serdes.ByteArray());
+            new KafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         KafkaFuture<RecordMetadata> warmUp = producer.Send(Record(topic, 0, "warm-up"));
         Assert.Equal(0L, warmUp.Get(s_get).Offset());
@@ -130,7 +130,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         AsyncKafkaFuture<RecordMetadata> warmUp = await producer.Send(Record(topic, 0, "warm-up"));
         Assert.Equal(0L, (await warmUp.Get(s_get)).Offset());
@@ -154,7 +154,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray());
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         AssertDelivered(producer.Send(SizedRecord(topic)).Get(s_get), keySize: 3, valueSize: 5);
         AssertDelivered(producer.Send(TombstoneRecord(topic)).Get(s_get), keySize: -1, valueSize: -1);
@@ -165,7 +165,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         AssertDelivered(await (await producer.Send(SizedRecord(topic))).Get(s_get), keySize: 3, valueSize: 5);
         AssertDelivered(await (await producer.Send(TombstoneRecord(topic))).Get(s_get), keySize: -1, valueSize: -1);
@@ -176,7 +176,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using (KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray()))
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             Assert.Equal(0L, producer.Send(HeadersRecord(topic, HeadersOf(s_headers))).Get(s_get).Offset());
         }
@@ -189,7 +189,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using (KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray()))
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             ProducerRecord<byte[], byte[]> record =
                 HeadersRecord(topic, new[] { new Header("given", Encoding.UTF8.GetBytes("1")) });
@@ -211,7 +211,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using (AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray()))
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             AsyncKafkaFuture<RecordMetadata> future = await producer.Send(HeadersRecord(topic, HeadersOf(s_headers)));
             Assert.Equal(0L, (await future.Get(s_get)).Offset());
@@ -349,7 +349,7 @@ public sealed class KafkaProducerBrokerTests
 
     private static ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> MemoryRecord(
         string topic, ReadOnlyMemory<byte>? key, ReadOnlyMemory<byte>? value) =>
-        new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(topic, value, key, partition: 0);
+        new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(topic, value: value, key: key, partition: 0);
 
     private static void AssertHeaders((string Key, byte[]? Value)[] expected, (string Key, byte[]? Value)[] actual)
     {
@@ -365,11 +365,11 @@ public sealed class KafkaProducerBrokerTests
 
     private static ProducerRecord<byte[], byte[]> HeadersRecord(string topic, Header[] headers) =>
         new ProducerRecord<byte[], byte[]>(
-            topic, Encoding.UTF8.GetBytes("v"), Encoding.UTF8.GetBytes("k"), partition: 0, headers: headers);
+            topic, value: Encoding.UTF8.GetBytes("v"), key: Encoding.UTF8.GetBytes("k"), partition: 0, headers: headers);
 
     private static ProducerRecord<byte[], byte[]> SizedRecord(string topic) =>
         new ProducerRecord<byte[], byte[]>(
-            topic, Encoding.UTF8.GetBytes("hello"), Encoding.UTF8.GetBytes("abc"), partition: 0, timestamp: s_timestamp);
+            topic, value: Encoding.UTF8.GetBytes("hello"), key: Encoding.UTF8.GetBytes("abc"), partition: 0, timestamp: s_timestamp);
 
     private static ProducerRecord<byte[], byte[]> TombstoneRecord(string topic) =>
         new ProducerRecord<byte[], byte[]>(topic, value: null, key: null, partition: 0, timestamp: s_timestamp);
@@ -384,7 +384,7 @@ public sealed class KafkaProducerBrokerTests
     }
 
     private static ProducerRecord<byte[], byte[]> Record(string topic, int partition, string value) =>
-        new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes(value), key: null, partition: partition);
+        new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes(value), key: null, partition: partition);
 
     private async Task<string> TopicAsync()
     {
@@ -432,7 +432,7 @@ public sealed class KafkaProducerBrokerTests
         {
             foreach (ConsumerRecord<byte[], byte[]> record in consumer.Poll(s_readBackPoll))
             {
-                records.Add((Offset: record.Offset(), record.Value() is null ? null : Encoding.UTF8.GetString(record.Value())));
+                records.Add((Offset: record.Offset(), record.Value() is byte[] value ? Encoding.UTF8.GetString(value) : null));
             }
         }
 
@@ -465,7 +465,7 @@ public sealed class KafkaProducerBrokerTests
             ["enable.auto.commit"] = "false",
         };
         KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             TopicPartition tp = new TopicPartition(topic, partition);

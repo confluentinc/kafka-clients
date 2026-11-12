@@ -336,7 +336,7 @@ public sealed class PublicProducerSendWithCallbackTests
     }
 
     private static ProducerRecord<byte[], byte[]> Record(string topic) =>
-        new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"));
+        new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v"));
 
     private static Dictionary<string, object?> Unreachable(int maxBlockMs) =>
         new Dictionary<string, object?>
@@ -346,10 +346,10 @@ public sealed class PublicProducerSendWithCallbackTests
         };
 
     private static KafkaProducer<byte[], byte[]> SyncUnreachable(int maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
+        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
     private static AsyncKafkaProducer<byte[], byte[]> AsyncUnreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
     private static Exception Capture(Action action)
     {

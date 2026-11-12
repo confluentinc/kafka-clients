@@ -62,7 +62,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Warm up so the measured runs are steady-state.
@@ -109,7 +109,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 3; i++)
@@ -143,7 +143,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         using NativeMemoryManager largeValue = new NativeMemoryManager(LargeValueSize);
 
         AsyncMockProducer<byte[], ReadOnlyMemory<byte>?> producer =
-            new AsyncMockProducer<byte[], ReadOnlyMemory<byte>?>(Serdes.ByteArray(), MemorySerializer.Instance);
+            new AsyncMockProducer<byte[], ReadOnlyMemory<byte>?>(Serdes.ByteArray().Serializer(), MemorySerializer.Instance);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 3; i++)
@@ -195,7 +195,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         for (int i = 0; i < SendCount; i++)
         {
             tasks[i] = producer.Send(
-                new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value, key, partition: 0)).Delivery();
+                new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value: value, key: key, partition: 0)).Delivery();
         }
 
         long after = GC.GetAllocatedBytesForCurrentThread();
@@ -218,7 +218,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         {
             // Same `value` / `key` references across sends — the value buffer is NOT re-allocated
             // per send, so any value-sized allocation here would come from the send path itself.
-            tasks[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)).Delivery();
+            tasks[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0)).Delivery();
         }
 
         long after = GC.GetAllocatedBytesForCurrentThread();

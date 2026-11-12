@@ -33,32 +33,36 @@ public enum GroupProtocol
 
 /// <summary>
 /// The static method Java declares on the <see cref="GroupProtocol"/> enum itself, which a C# enum cannot carry.
+/// From C# 14 it is called on the enum (<c>GroupProtocol.Of(…)</c>); older C# calls it on this class.
 /// </summary>
-public static class GroupProtocols
+public static class GroupProtocolMethods
 {
     private const string JavaClass = "org.apache.kafka.clients.consumer.GroupProtocol";
 
-    /// <summary>Case-insensitive group protocol lookup by name — Java's <c>of(String)</c>.</summary>
-    /// <param name="name">The name of the group protocol.</param>
-    /// <returns>The corresponding group protocol.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="name"/> is <see langword="null"/>.</exception>
-    /// <exception cref="IllegalArgumentException">
-    /// The name does not match any protocol, with Java's message
-    /// "No enum constant org.apache.kafka.clients.consumer.GroupProtocol.&lt;NAME&gt;".
-    /// </exception>
-    public static GroupProtocol Of(string name)
+    extension(GroupProtocol)
     {
-        if (name is null)
+        /// <summary>Case-insensitive group protocol lookup by name — Java's <c>of(String)</c>.</summary>
+        /// <param name="name">The name of the group protocol.</param>
+        /// <returns>The corresponding group protocol.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="name"/> is <see langword="null"/>.</exception>
+        /// <exception cref="IllegalArgumentException">
+        /// The name does not match any protocol, with Java's message
+        /// "No enum constant org.apache.kafka.clients.consumer.GroupProtocol.&lt;NAME&gt;".
+        /// </exception>
+        public static GroupProtocol Of(string name)
         {
-            throw new ArgumentNullException(nameof(name));
-        }
+            if (name is null)
+            {
+                throw new ArgumentNullException(nameof(name));
+            }
 
-        string upper = JavaText.ToUpperRoot(name);
-        return upper switch
-        {
-            nameof(GroupProtocol.CLASSIC) => GroupProtocol.CLASSIC,
-            nameof(GroupProtocol.CONSUMER) => GroupProtocol.CONSUMER,
-            _ => throw new IllegalArgumentException("No enum constant " + JavaClass + "." + upper),
-        };
+            string upper = JavaText.ToUpperRoot(name);
+            return upper switch
+            {
+                nameof(GroupProtocol.CLASSIC) => GroupProtocol.CLASSIC,
+                nameof(GroupProtocol.CONSUMER) => GroupProtocol.CONSUMER,
+                _ => throw new IllegalArgumentException("No enum constant " + JavaClass + "." + upper),
+            };
+        }
     }
 }

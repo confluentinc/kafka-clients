@@ -237,7 +237,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task Send_WithASendExceptionOrFenced_ThrowsBeforeSerializing(bool async)
     {
         ThrowingSerializer<string> serializer = new ThrowingSerializer<string>();
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "v");
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "v");
         KafkaException injected = new KafkaException("send");
         KafkaException fenced;
         if (async)
@@ -395,7 +395,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task SetFlushException_FlushFromAnAsyncCallbackAfterAnAwait_ThrowsTheSameInstance()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
         IllegalStateException injected = new IllegalStateException("flush");
         producer.SetFlushException(injected);
@@ -418,7 +418,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task SetFlushException_ConcurrentCalls_LeaveBothFlushPathsEqual()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
         using PausingException pausing = new PausingException();
 
@@ -534,7 +534,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
     private static ConsumerGroupMetadata GroupMetadata()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         return consumer.GroupMetadata();
     }
 
@@ -544,7 +544,7 @@ public sealed class PublicMockProducerTransactionControlTests
     private static Task<T> Within<T>(Task<T> task) => TestTimeout.Run(() => task, BlockingCall.Deadline);
 
     private static ProducerRecord<byte[], byte[]> Record() =>
-        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
+        new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"));
 
     /// <summary>A delivery callback that blocks the producer's completion thread until the test releases it.</summary>
     private sealed class Blocking : ICallback, IDisposable
@@ -659,11 +659,11 @@ public sealed class PublicMockProducerTransactionControlTests
         {
             if (async)
             {
-                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
+                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete);
             }
             else
             {
-                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
+                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete);
             }
         }
 
@@ -873,7 +873,7 @@ public sealed class PublicMockProducerTransactionControlTests
         }
 
         private static ProducerRecord<byte[], byte[]> Record() =>
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"));
 
         private Task Run(Action sync, Func<Task> async)
         {

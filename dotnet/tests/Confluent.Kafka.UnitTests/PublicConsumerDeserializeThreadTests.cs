@@ -39,7 +39,7 @@ public sealed class PublicConsumerDeserializeThreadTests
     [Fact]
     public void SyncPoll_DeserializesOnTheCallerThread()
     {
-        RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray());
+        RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray().Deserializer());
         MockConsumer<byte[], byte[]> consumer = ReadyToPoll(valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 1, key: new byte[] { 1 }, value: new byte[] { 2 });
@@ -57,9 +57,9 @@ public sealed class PublicConsumerDeserializeThreadTests
     [Fact]
     public async Task AsyncPoll_DeserializesOffThePumpThread()
     {
-        RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray());
+        RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray().Deserializer());
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), valueDeserializer);
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), valueDeserializer);
         try
         {
             await TestTimeout.Run(
@@ -88,7 +88,7 @@ public sealed class PublicConsumerDeserializeThreadTests
 
     private static MockConsumer<byte[], byte[]> ReadyToPoll(IDeserializer<byte[]> valueDeserializer)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), valueDeserializer);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), valueDeserializer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;

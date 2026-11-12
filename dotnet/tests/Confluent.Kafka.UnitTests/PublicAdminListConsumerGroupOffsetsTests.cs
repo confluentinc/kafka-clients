@@ -269,7 +269,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_TheSingleGroupForm_ForwardsItsOptions()
     {
-        AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
+        IAsyncAdmin real = IAsyncAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
         ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions().TimeoutMs(-1);

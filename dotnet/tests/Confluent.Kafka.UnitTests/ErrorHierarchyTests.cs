@@ -286,7 +286,7 @@ public sealed class ErrorHierarchyTests
             _ => new InvalidRecordException("an invalid record"),
         };
         var tp = new TopicPartition("error-hierarchy-topic", 0);
-        using var consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using var consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         consumer.Assign(new[] { tp });
         consumer.Seek(tp, 0);
         consumer.SetPollException(injected);

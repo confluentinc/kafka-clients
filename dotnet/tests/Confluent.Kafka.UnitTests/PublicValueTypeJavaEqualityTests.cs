@@ -179,7 +179,7 @@ public sealed class PublicValueTypeJavaEqualityTests
     public void ConsumerRecord_ToString_FollowsJava()
     {
         ConsumerRecord<string?, string?> empty = new ConsumerRecord<string?, string?>(
-            "t", 0, 0L, -1L, TimestampType.NO_TIMESTAMP_TYPE, null, null, new Headers(), null, -1, -1);
+            "t", 0, 0L, -1L, TimestampType.NO_TIMESTAMP_TYPE, -1, -1, null, null, new Headers(), null);
         Assert.Equal(
             "ConsumerRecord(topic = t, partition = 0, leaderEpoch = null, offset = 0, "
             + "NoTimestampType = -1, deliveryCount = null, serialized key size = -1, "
@@ -188,7 +188,7 @@ public sealed class PublicValueTypeJavaEqualityTests
             empty.ToString());
 
         ConsumerRecord<string, string> full = new ConsumerRecord<string, string>(
-            "orders", 3, 42L, 1700L, TimestampType.CREATE_TIME, "k", "v", new Headers(), 7, 1, 1);
+            "orders", 3, 42L, 1700L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new Headers(), 7);
         Assert.Equal(
             "ConsumerRecord(topic = orders, partition = 3, leaderEpoch = 7, offset = 42, "
             + "CreateTime = 1700, deliveryCount = null, serialized key size = 1, "
@@ -197,7 +197,7 @@ public sealed class PublicValueTypeJavaEqualityTests
             full.ToString());
 
         ConsumerRecord<string, string> appended = new ConsumerRecord<string, string>(
-            "orders", 3, 42L, 1700L, TimestampType.LOG_APPEND_TIME, "k", "v", new Headers(), null, 1, 1);
+            "orders", 3, 42L, 1700L, TimestampType.LOG_APPEND_TIME, 1, 1, "k", "v", new Headers(), null);
         Assert.Contains(", LogAppendTime = 1700, ", appended.ToString(), StringComparison.Ordinal);
     }
 

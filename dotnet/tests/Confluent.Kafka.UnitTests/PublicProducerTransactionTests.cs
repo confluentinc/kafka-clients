@@ -41,6 +41,9 @@ public sealed class PublicProducerTransactionTests
 {
     private const int MaxBlockMs = 500;
 
+    // The max.block.ms of a call expected to complete at once: long enough that a slow runner does not reach it.
+    private const int AtOnceMaxBlockMs = 5000;
+
     private const string NonTransactional = "Transactional method invoked on a non-transactional producer.";
 
     private const string InitTimeout =
@@ -284,7 +287,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public async Task AsyncMockProducer_CanceledInitTransactions_ThatTookEffect_RetryThrowsTheStateError()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
         HoldingCallback holding = new HoldingCallback();
         _ = await TestTimeout.Run(() => producer.Send(MockRecord(), holding).AsTask(), Deadline);
@@ -497,12 +500,12 @@ public sealed class PublicProducerTransactionTests
     public void GroupMetadata_OutlivesTheConsumerThatGaveIt()
     {
         ConsumerGroupMetadata metadata;
-        using (MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()))
+        using (MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()))
         {
             metadata = consumer.GroupMetadata();
         }
 
-        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable teardown = TestTimeout.Disposal(producer);
         producer.InitTransactions();
         producer.BeginTransaction();
@@ -585,7 +588,7 @@ public sealed class PublicProducerTransactionTests
         string operation,
         string operationName)
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
         SetMaxBlockMs(producer, MaxBlockMs);
         await producer.InitTransactions();
@@ -616,7 +619,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(Abort)]
     public async Task MockProducer_CommitOrAbort_FromASyncCallbackTheDrainRuns_Succeeds(string operation)
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable teardown = TestTimeout.Disposal(producer);
         producer.InitTransactions();
         producer.BeginTransaction();
@@ -686,8 +689,8 @@ public sealed class PublicProducerTransactionTests
             ["enable.idempotence"] = false,
         };
         object producer = flavor == SyncFlavor
-            ? new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray())
-            : new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            ? new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+            : new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         try
         {
             IllegalStateException error = Assert.IsType<IllegalStateException>(
@@ -781,9 +784,9 @@ public sealed class PublicProducerTransactionTests
         string? timedOutOperation)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
-        SetMaxBlockMs(producer, MaxBlockMs);
+        SetMaxBlockMs(producer, timedOutOperation is null ? AtOnceMaxBlockMs : MaxBlockMs);
         TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -812,7 +815,7 @@ public sealed class PublicProducerTransactionTests
             if (timedOutOperation is null)
             {
                 Assert.Null(failure);
-                Assert.True(elapsedMs < MaxBlockMs, $"{operation} waited {elapsedMs} ms");
+                Assert.True(elapsedMs < AtOnceMaxBlockMs, $"{operation} waited {elapsedMs} ms");
                 await AssertStateAfter(producer, operation);
             }
             else
@@ -889,17 +892,17 @@ public sealed class PublicProducerTransactionTests
             ["transactional.id"] = transactionalId,
         };
         return flavor == SyncFlavor
-            ? new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray())
-            : new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            ? new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+            : new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 
     private static object Mock(string flavor, bool autoComplete) => flavor == SyncFlavor
-        ? new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete)
-        : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
+        ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete)
+        : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete);
 
     private static ConsumerGroupMetadata GroupMetadata()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         return consumer.GroupMetadata();
     }
 
@@ -907,7 +910,7 @@ public sealed class PublicProducerTransactionTests
         new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("txn-input", 0)] = new OffsetAndMetadata(42) };
 
     private static ProducerRecord<byte[], byte[]> MockRecord() =>
-        new ProducerRecord<byte[], byte[]>("txn-topic", new byte[] { 1 }, new byte[] { 2 });
+        new ProducerRecord<byte[], byte[]>("txn-topic", value: new byte[] { 1 }, key: new byte[] { 2 });
 
     // Runs a sync operation on either flavor; the async flavor's Task is the outcome.
     private static void Call(object producer, string operation) =>

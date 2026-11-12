@@ -320,7 +320,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task G3_7_TheOptionsOnlyForm_ForwardsItsOptions()
     {
-        AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
+        IAsyncAdmin real = IAsyncAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
         ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions().TimeoutMs(-1);

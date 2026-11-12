@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Internal.Interop;
+
 namespace Confluent.Kafka.Common.Config;
 
 /// <summary>
@@ -43,7 +45,7 @@ public sealed class ConfigResource
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
     public ConfigResource(ConfigResourceType type, string name)
     {
-        _type = DefinedOrUnknown(type);
+        _type = ConfigResourceMarshal.TypeFromId((int)type);
         _name = name ?? throw new ArgumentNullException(nameof(name));
     }
 
@@ -90,9 +92,6 @@ public sealed class ConfigResource
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", ConstantName(Type()), Name());
-
-    private static ConfigResourceType DefinedOrUnknown(ConfigResourceType type) =>
-        Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.UNKNOWN;
 
     private static string ConstantName(ConfigResourceType type) => type switch
     {

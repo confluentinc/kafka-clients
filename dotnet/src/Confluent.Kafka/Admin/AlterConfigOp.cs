@@ -29,14 +29,14 @@ namespace Confluent.Kafka.Admin;
 /// validation.
 /// </para>
 /// <para>
-/// A <see cref="AlterConfigOpType.DELETE"/> whose entry value is <see langword="null"/> sends a null
+/// A <see cref="Confluent.Kafka.Admin.OpType.DELETE"/> whose entry value is <see langword="null"/> sends a null
 /// value, as in Java.
 /// </para>
 /// </remarks>
 public sealed class AlterConfigOp
 {
     private readonly ConfigEntry _configEntry;
-    private readonly AlterConfigOpType _opType;
+    private readonly OpType _opType;
 
     /// <summary>
     /// Initializes an operation — Java's
@@ -46,7 +46,7 @@ public sealed class AlterConfigOp
     /// <param name="operationType">What to do with it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="configEntry"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="operationType"/> is not a defined <see cref="AlterConfigOpType"/> member.
+    /// <paramref name="operationType"/> is not a defined <see cref="Confluent.Kafka.Admin.OpType"/> member.
     /// </exception>
     /// <remarks>
     /// The null check is stricter than Java, which stores the reference unchecked. An undefined
@@ -54,13 +54,13 @@ public sealed class AlterConfigOp
     /// and has no <c>UNKNOWN</c> member to map it to, while a C# enum accepts any integral value by
     /// cast.
     /// </remarks>
-    public AlterConfigOp(ConfigEntry configEntry, AlterConfigOpType operationType)
+    public AlterConfigOp(ConfigEntry configEntry, OpType operationType)
     {
         _configEntry = configEntry ?? throw new ArgumentNullException(nameof(configEntry));
-        if (!Enum.IsDefined(typeof(AlterConfigOpType), operationType))
+        if (!Enum.IsDefined(typeof(OpType), operationType))
         {
             throw new ArgumentOutOfRangeException(
-                nameof(operationType), operationType, "operationType must be a defined AlterConfigOpType member.");
+                nameof(operationType), operationType, "operationType must be a defined OpType member.");
         }
 
         _opType = operationType;
@@ -72,7 +72,7 @@ public sealed class AlterConfigOp
 
     /// <summary>What the operation does — Java's <c>opType()</c>.</summary>
     /// <returns>What the operation does.</returns>
-    public AlterConfigOpType OpType() => _opType;
+    public OpType OpType() => _opType;
 
     /// <summary>
     /// Value equality over the entry and the operation type — Java's <c>equals</c>, which compares
@@ -104,12 +104,12 @@ public sealed class AlterConfigOp
         string.Format(
             CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", ConstantName(OpType()), ConfigEntry());
 
-    private static string ConstantName(AlterConfigOpType opType) => opType switch
+    private static string ConstantName(OpType opType) => opType switch
     {
-        AlterConfigOpType.SET => "SET",
-        AlterConfigOpType.DELETE => "DELETE",
-        AlterConfigOpType.APPEND => "APPEND",
-        AlterConfigOpType.SUBTRACT => "SUBTRACT",
+        Confluent.Kafka.Admin.OpType.SET => "SET",
+        Confluent.Kafka.Admin.OpType.DELETE => "DELETE",
+        Confluent.Kafka.Admin.OpType.APPEND => "APPEND",
+        Confluent.Kafka.Admin.OpType.SUBTRACT => "SUBTRACT",
         _ => ((int)opType).ToString(CultureInfo.InvariantCulture),
     };
 }

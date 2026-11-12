@@ -45,18 +45,18 @@ internal static class UnreachableProducers
         Sync((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
     internal static KafkaProducer<byte[], byte[]> Sync(object maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
+        new KafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
     internal static AsyncKafkaProducer<byte[], byte[]> Async(int maxBlockMs) =>
         Async((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
     internal static AsyncKafkaProducer<byte[], byte[]> Async(object maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
     internal static string Topic(string prefix) => prefix + "-" + Guid.NewGuid().ToString("N");
 
     internal static ProducerRecord<byte[], byte[]> Record(string topic) =>
-        new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"));
+        new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v"));
 
     internal static string MetadataTimeout(string topic, int maxBlockMs) =>
         $"Topic {topic} not present in metadata after {maxBlockMs} ms.";

@@ -47,13 +47,10 @@ var config = new Dictionary<string, object?>
     ["bootstrap.servers"] = "localhost:9092",
     ["linger.ms"] = 5,
 };
-using var producer = new KafkaProducer<string, string>(config, Serdes.String(), Serdes.String());
-var record = new ProducerRecord<string, string>("orders", value: "value", key: "key");
+using var producer = new KafkaProducer<string, string>(config, new StringSerializer(), new StringSerializer());
+var record = new ProducerRecord<string, string>("orders", "key", "value");
 RecordMetadata metadata = producer.Send(record).Get();
 ```
-
-The value comes before the key in the `ProducerRecord` constructor, unlike Java's
-`ProducerRecord(topic, key, value)`, so name the arguments.
 
 ## Consuming
 
@@ -69,7 +66,7 @@ var config = new Dictionary<string, object?>
     ["group.id"] = "orders-reader",
     ["group.protocol"] = "consumer",
 };
-using var consumer = new KafkaConsumer<string, string>(config, Serdes.String(), Serdes.String());
+using var consumer = new KafkaConsumer<string, string>(config, new StringDeserializer(), new StringDeserializer());
 consumer.Subscribe(new[] { "orders" });
 foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 {

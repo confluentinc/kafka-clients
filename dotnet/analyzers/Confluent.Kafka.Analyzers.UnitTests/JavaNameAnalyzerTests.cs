@@ -83,7 +83,7 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.common.Node\tNode(int id, String host)\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\tid()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
-                + "field\torg.apache.kafka.common.Node\tNO_ID\n"));
+                + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
 
     [Fact]
     public Task APropertyWhereJavaHasAMethod_IsReportedOnce() =>
@@ -959,6 +959,158 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tconfigure(Map configs, boolean isKey)\n"
                 + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"));
 
+    private const string Serializer =
+        "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+        + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tconfigure(Map configs, boolean isKey)\n"
+        + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tserialize(String topic, Headers headers, T data)\n"
+        + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n";
+
+    [Fact]
+    public Task AnOverloadedDefault_IsReplacedByAnInterfaceNamedAfterTheParameterItAdds_AndAnotherDefaultAfterItsMethod() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface ISerializer<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public interface ISerializerWithHeaders<T> : ISerializer<T>
+                {
+                    byte[] Serialize(string topic, object headers, T data);
+                }
+
+                public interface ISerializerWithConfigure<T> : ISerializer<T>
+                {
+                    void Configure(IReadOnlyDictionary<string, object> configs, bool isKey);
+                }
+
+                public static class SerializerExtensions
+                {
+                    public static byte[] Serialize<T>(this ISerializer<T> serializer, string topic, object headers, T data) =>
+                        serializer is ISerializerWithHeaders<T> withHeaders
+                            ? withHeaders.Serialize(topic, headers, data)
+                            : serializer.Serialize(topic, data);
+
+                    public static void Configure<T>(this ISerializer<T> serializer, IReadOnlyDictionary<string, object> configs, bool isKey)
+                    {
+                        if (serializer is ISerializerWithConfigure<T> withConfigure)
+                        {
+                            withConfigure.Configure(configs, isKey);
+                        }
+                    }
+                }
+            }
+            """,
+            Files(Serializer));
+
+    [Fact]
+    public Task AnOverloadedDefaultsInterface_NamedAfterItsMethod_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface {|#1:ISerializer|}<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public interface {|#0:ISerializerWithSerialize|}<T> : ISerializer<T>
+                {
+                    byte[] Serialize(string topic, object headers, T data);
+                }
+
+                public static class SerializerExtensions
+                {
+                    public static byte[] Serialize<T>(this ISerializer<T> serializer, string topic, object headers, T data) =>
+                        serializer.Serialize(topic, data);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tdefault\tserialize(String topic, Headers headers, T data)\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"),
+            Name(0, "unmatched T:Confluent.Kafka.Common.Serialization.ISerializerWithSerialize`1: Java has no type of this name, so "
+                + "its members are not checked"),
+            Name(1, "with T:Confluent.Kafka.Common.Serialization.ISerializer`1 "
+                + "org.apache.kafka.common.serialization.Serializer#serialize(String,Headers,T): has no ISerializerWithHeaders that "
+                + "extends it and declares Java's default Serializer.serialize, so a user cannot replace it"));
+
+    [Fact]
+    public Task OneSpanForm_PairsWithJavasByteArrayOverload_LeavingItsByteBufferTwinMissing() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface {|#0:IDeserializer|}<T>
+                {
+                    T Deserialize(string topic, ReadOnlySpan<byte> data);
+                }
+
+                public interface IDeserializerWithHeaders<T> : IDeserializer<T>
+                {
+                    T Deserialize(string topic, object headers, ReadOnlySpan<byte> data);
+                }
+
+                public static class DeserializerExtensions
+                {
+                    public static T Deserialize<T>(this IDeserializer<T> deserializer, string topic, object headers, ReadOnlySpan<byte> data) =>
+                        deserializer is IDeserializerWithHeaders<T> withHeaders
+                            ? withHeaders.Deserialize(topic, headers, data)
+                            : deserializer.Deserialize(topic, data);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Deserializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Deserializer\tdefault\tdeserialize(String topic, Headers headers, ByteBuffer data)\n"
+                + "method\torg.apache.kafka.common.serialization.Deserializer\tdefault\tdeserialize(String topic, Headers headers, byte[] data)\n"
+                + "method\torg.apache.kafka.common.serialization.Deserializer\tinstance\tdeserialize(String topic, byte[] data)\n"),
+            Name(0, "missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 "
+                + "org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer): has no counterpart of "
+                + "Java's org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)"));
+
+    [Fact]
+    public Task DefaultsAddingAParameterOfOneNameWithOtherTypes_AreNamedWithTheType() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public interface IWriter
+                {
+                    void Write(string topic);
+                }
+
+                public interface IWriterWithValueInt : IWriter
+                {
+                    void Write(string topic, int value);
+                }
+
+                public interface IWriterWithValueString : IWriter
+                {
+                    void Write(string topic, string value);
+                }
+
+                public static class WriterExtensions
+                {
+                    public static void Write(this IWriter writer, string topic, int value) => writer.Write(topic);
+
+                    public static void Write(this IWriter writer, string topic, string value) => writer.Write(topic);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Writer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.Writer\tdefault\twrite(String topic, String value)\n"
+                + "method\torg.apache.kafka.common.Writer\tdefault\twrite(String topic, int value)\n"
+                + "method\torg.apache.kafka.common.Writer\tinstance\twrite(String topic)\n"));
+
     [Fact]
     public Task AJavaInterfacesStaticMethod_SitsInAStaticClassWithTheInterfacesJavaName() =>
         Verifier.VerifyWithFilesAsync(
@@ -1027,6 +1179,299 @@ public sealed class JavaNameAnalyzerTests
             Name(1, "unmatched E:Confluent.Kafka.Admin.ScramMechanismMethods.Changed: Java has no events"),
             Name(2, "unmatched F:Confluent.Kafka.Admin.ScramMechanismMethods.Limit: Java's ScramMechanism has no field or constant of "
                 + "this name"));
+
+    private const string ElectionType =
+        "type\torg.apache.kafka.common.ElectionType\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.ElectionType\tPREFERRED\n"
+        + "constant\torg.apache.kafka.common.ElectionType\tUNCLEAN\n"
+        + "method\torg.apache.kafka.common.ElectionType\tinstance\tname()\n"
+        + "method\torg.apache.kafka.common.ElectionType\tinstance\tordinal()\n"
+        + "method\torg.apache.kafka.common.ElectionType\tstatic\tvalueOf(String ?)\n"
+        + "method\torg.apache.kafka.common.ElectionType\tstatic\tvalueOf(byte value)\n"
+        + "method\torg.apache.kafka.common.ElectionType\tstatic\tvalues()\n";
+
+    [Fact]
+    public Task AJavaEnumsValueOfOfOtherParameters_IsRequired_WhereItsBuiltInValueOfIsNot() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:ElectionType|}
+                {
+                    PREFERRED,
+                    UNCLEAN,
+                }
+            }
+            """,
+            Files(ElectionType),
+            Name(0, "missing T:Confluent.Kafka.Common.ElectionType org.apache.kafka.common.ElectionType#valueOf(byte): has no "
+                + "counterpart of Java's org.apache.kafka.common.ElectionType#valueOf(byte)"));
+
+    [Fact]
+    public Task AJavaEnumsValueOfOfOtherParameters_InAnExtensionBlock_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum ElectionType
+                {
+                    PREFERRED,
+                    UNCLEAN,
+                }
+
+                public static class ElectionTypeMethods
+                {
+                    extension(ElectionType)
+                    {
+                        public static ElectionType ValueOf(byte value) => default;
+                    }
+                }
+            }
+            """,
+            Files(ElectionType));
+
+    private const string SslClientAuth =
+        "type\torg.apache.kafka.common.config.SslClientAuth\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.config.SslClientAuth\tNONE\n"
+        + "constant\torg.apache.kafka.common.config.SslClientAuth\tREQUIRED\n"
+        + "field\torg.apache.kafka.common.config.SslClientAuth\tstatic\tVALUES\n";
+
+    [Fact]
+    public Task AJavaEnumsField_IsAStaticReadonlyFieldOfItsMethodsClass() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum SslClientAuth
+                {
+                    NONE,
+                    REQUIRED,
+                }
+
+                public static class SslClientAuthMethods
+                {
+                    public static readonly IReadOnlyList<SslClientAuth> VALUES = new[] { SslClientAuth.NONE, SslClientAuth.REQUIRED };
+                }
+            }
+            """,
+            Files(SslClientAuth));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("public static IReadOnlyList<SslClientAuth> VALUES => null;")]
+    [InlineData("public static IReadOnlyList<SslClientAuth> VALUES = null;")]
+    [InlineData("internal static readonly IReadOnlyList<SslClientAuth> VALUES = null;")]
+    public Task AJavaEnumsField_AbsentOrNotAStaticReadonlyFieldOfItsMethodsClass_IsReported(string member) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum {|#0:SslClientAuth|}
+                {
+                    NONE,
+                    REQUIRED,
+                }
+
+                public static class SslClientAuthMethods
+                {
+                    {{member}}
+                }
+            }
+            """,
+            Files(SslClientAuth),
+            Name(0, "missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#VALUES: has no "
+                + "counterpart of Java's org.apache.kafka.common.config.SslClientAuth#VALUES"));
+
+    private const string SecurityProtocol =
+        "type\torg.apache.kafka.common.security.auth.SecurityProtocol\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.security.auth.SecurityProtocol\tPLAINTEXT\n"
+        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tid\n"
+        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic\tVALUES\n";
+
+    [Fact]
+    public Task AJavaEnumsInstanceField_AsAStaticReadonlyFieldOfItsMethodsClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Security.Auth
+            {
+                public enum {|#0:SecurityProtocol|}
+                {
+                    PLAINTEXT,
+                }
+
+                public static class SecurityProtocolMethods
+                {
+                    public static readonly short id = 0;
+
+                    public static readonly IReadOnlyList<SecurityProtocol> VALUES = new[] { SecurityProtocol.PLAINTEXT };
+                }
+            }
+            """,
+            Files(SecurityProtocol),
+            Name(0, "missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol "
+                + "org.apache.kafka.common.security.auth.SecurityProtocol#id: has no counterpart of Java's "
+                + "org.apache.kafka.common.security.auth.SecurityProtocol#id"));
+
+    [Fact]
+    public Task AJavaEnumsConstant_OnItsMethodsClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum {|#0:SslClientAuth|}
+                {
+                    NONE,
+                }
+
+                public static class SslClientAuthMethods
+                {
+                    public static readonly SslClientAuth REQUIRED = SslClientAuth.NONE;
+
+                    public static readonly IReadOnlyList<SslClientAuth> VALUES = new[] { SslClientAuth.NONE };
+                }
+            }
+            """,
+            Files(SslClientAuth),
+            Name(0, "missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#REQUIRED: has no "
+                + "counterpart of Java's org.apache.kafka.common.config.SslClientAuth#REQUIRED"));
+
+    private const string GroupState =
+        "type\torg.apache.kafka.common.GroupState\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.GroupState\tSTABLE\n"
+        + "method\torg.apache.kafka.common.GroupState\tinstance\tname()\n"
+        + "method\torg.apache.kafka.common.GroupState\tinstance\tordinal()\n"
+        + "method\torg.apache.kafka.common.GroupState\tinstance\ttoString()\n"
+        + "method\torg.apache.kafka.common.GroupState\tstatic\tvalueOf(String ?)\n"
+        + "method\torg.apache.kafka.common.GroupState\tstatic\tvalues()\n";
+
+    [Fact]
+    public Task AJavaEnumsToString_IsAStaticToStringOfTheEnumInAnExtensionBlock() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum GroupState
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static string ToString(GroupState state) => "Stable";
+                    }
+                }
+            }
+            """,
+            Files(GroupState));
+
+    [Theory]
+    [InlineData("extension(GroupState state) { public string {|#0:ToString|}() => \"Stable\"; }")]
+    [InlineData("public static string {|#0:ToString|}(this GroupState state) => \"Stable\";")]
+    [InlineData("public static string {|#0:ToString|}(GroupState state) => \"Stable\";")]
+    public Task AJavaEnumsToString_AsAnExtensionToStringOrAStaticOutsideABlock_IsReported(string member) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            namespace Confluent.Kafka.Common
+            {
+                public enum GroupState
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    {{member}}
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "static M:Confluent.Kafka.Common.GroupStateMethods.ToString(Confluent.Kafka.Common.GroupState): Java's "
+                + "GroupState.toString() is a static ToString(GroupState) in an extension(GroupState) block: C# never calls an "
+                + "extension ToString() over Enum.ToString()"));
+
+    [Theory]
+    [InlineData("int state", "System.Int32")]
+    [InlineData("System.DayOfWeek state", "System.DayOfWeek")]
+    public Task AJavaEnumsToString_AsAStaticToStringOfAnotherType_IsReported(string parameter, string docType) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static string {|#1:ToString|}({{parameter}}) => "Stable";
+                    }
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"),
+            Name(1, "overload M:Confluent.Kafka.Common.GroupStateMethods.ToString(" + docType + "): Java's GroupState.toString has no "
+                + "overload with 1 parameter(s)"));
+
+    [Fact]
+    public Task AJavaEnumsToString_AsAStaticToStringNotReturningAString_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static int {|#1:ToString|}(GroupState state) => 0;
+                    }
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"),
+            Name(1, "overload M:Confluent.Kafka.Common.GroupStateMethods.ToString(Confluent.Kafka.Common.GroupState): Java's "
+                + "GroupState.toString has no overload with 1 parameter(s)"));
+
+    [Fact]
+    public Task AJavaEnumsToString_WithNoForm_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"));
 
     [Fact]
     public Task AJavaAbstractClassesConstructors_AreProtected_AndATypeNothingDerivesFromHasNone() =>
@@ -1411,6 +1856,66 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\treassignments(Optional partitions, Options options)\n"
                 + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\treassignments(Set partitions, Options options)\n"
                 + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\tdeserialize(String topic, byte[] data)\n"));
+
+    [Fact]
+    public Task AClassOfAGenericInterfaceConstruction_LeavesTheInterfaceMembersToTheInterface() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface ISerializer<T>
+                {
+                    byte[] Serialize(string topic, T data);
+                }
+
+                public sealed class LongSerializer : ISerializer<long?>
+                {
+                    public byte[] Serialize(string topic, long? data) => null;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Serializer\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Serializer\tinstance\tserialize(String topic, T data)\n"
+                + "type\torg.apache.kafka.common.serialization.LongSerializer\tclass\torg.apache.kafka.common.serialization.Serializer\n"
+                + "ctor\torg.apache.kafka.common.serialization.LongSerializer\tLongSerializer()\n"
+                + "method\torg.apache.kafka.common.serialization.LongSerializer\tinstance\tserialize(String topic, Long data)\n"));
+
+    [Fact]
+    public Task ACloseablesClose_IsStillRequiredOnATypeThatIsIDisposable() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public interface {|#0:IProducer|} : IDisposable
+                {
+                    void Flush();
+                }
+            }
+
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public interface {|#1:ISerde|} : IDisposable
+                {
+                    object Serializer();
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.producer.Producer\tinterface\tCloseable\n"
+                + "method\torg.apache.kafka.clients.producer.Producer\tinstance\tclose()\n"
+                + "method\torg.apache.kafka.clients.producer.Producer\tinstance\tflush()\n"
+                + "type\torg.apache.kafka.common.serialization.Serde\tinterface\tCloseable\n"
+                + "method\torg.apache.kafka.common.serialization.Serde\tdefault\tclose()\n"
+                + "method\torg.apache.kafka.common.serialization.Serde\tinstance\tserializer()\n"),
+            Name(0, "missing T:Confluent.Kafka.Producer.IProducer org.apache.kafka.clients.producer.Producer#close(): "
+                + "has no counterpart of Java's org.apache.kafka.clients.producer.Producer#close()"),
+            Name(1, "missing T:Confluent.Kafka.Common.Serialization.ISerde org.apache.kafka.common.serialization.Serde#close(): "
+                + "has no counterpart of Java's org.apache.kafka.common.serialization.Serde#close()"));
 
     private const string Records = """
         using System.Collections;

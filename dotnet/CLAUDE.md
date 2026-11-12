@@ -120,22 +120,22 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
 - **One file per Java top-level class**, named after the C# type, with the class's Java nested types
   nested in it. A C# type that only completes a Java class sits in that class's file: the
   non-generic `KafkaFuture` (Java's `KafkaFuture<Void>`) beside `KafkaFuture<T>`, a static class
-  holding a Java enum's methods beside the enum (`<Enum>Methods`, §3 Java names rule 9; today's
-  `ScramMechanisms`, `UpgradeTypes`, `SecurityProtocols`, `SslClientAuths`, `GroupProtocols` and
-  `GroupStateExtensions` are baselined until renamed), and the `<Interface>Extensions` class and
+  holding a Java enum's methods beside the enum (`<Enum>Methods`, §3 Java names rule 9), and the
+  `<Interface>Extensions` class and
   `I<Interface>With<Method>` interfaces beside the interface whose Java default methods they carry (§3
   Java names rule 10). A Java nested type leaves its outer class only where C# cannot keep Java's name
   inside it (CS0102: a member of the outer type has that name), and then sits beside it, in the same
   namespace: `GroupMembershipOperation` (Java `CloseOptions.GroupMembershipOperation`, ledger 109),
-  `ConfigResourceType` (Java `ConfigResource.Type`, M15/P3 D16), `AlterConfigOpType` (Java
+  `ConfigResourceType` (Java `ConfigResource.Type`, M15/P3 D16), `OpType` (Java
   `AlterConfigOp.OpType`), `UpgradeType` (Java `FeatureUpdate.UpgradeType`, beside Java's
   `upgradeType()` method, ledger 368).
 - **A .NET-only public type** lives in the namespace and folder of the Java-backed type it pairs
   with: an async peer with its sync type (`AsyncKafkaProducer`, `IAsyncProducer` and
   `IAsyncCallback` in `Producer/`; every `Async*Result`, `AsyncKafkaAdminClient`,
   `AsyncMockAdminClient` and `IAsyncAdmin` in `Admin/`; `AsyncKafkaFuture` in `Common/`), the types
-  carrying Java's default methods with their interface (§3 Java names rule 10; today the base class
-  `ConsumerRebalanceListenerBase`), the
+  carrying Java's default methods with their interface (§3 Java names rule 10:
+  `ConsumerRebalanceListenerExtensions` and `IConsumerRebalanceListenerWithPartitionsLost` beside
+  `IConsumerRebalanceListener`, `Admin` beside `IAdmin`), the
   shared consumer surface with `IConsumer` (`IConsumerCommon`), the Rust-only `ConsumerHandle` with
   the consumer (the core's `consumer::ConsumerHandle`), and a C#-only enum with the type that takes
   it (`ClientQuotaMatchType` with `ClientQuotaFilterComponent` in `Common/Quota/`). *(Python keeps an
@@ -238,9 +238,13 @@ public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V
     public TKey? Key();                          // null (ref) = no key; three-state via the serializer (§4)
     public TValue? Value();                      // null (ref) = tombstone; three-state via the serializer (§4)
     public Headers Headers();                    // the record's own copy; read-only once a KafkaProducer sends it
-    public ProducerRecord(string topic, TValue? value,
-        TKey? key = default, int? partition = null, long? timestamp = null,
-        IEnumerable<Header>? headers = null);   // Java's checks, topic → timestamp → partition
+    public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value,
+        IEnumerable<Header>? headers);           // Java's checks, topic → timestamp → partition
+    public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value);
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<Header>? headers);
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value);
+    public ProducerRecord(string topic, TKey? key, TValue? value);
+    public ProducerRecord(string topic, TValue? value);   // Java's six, key before value; no optional parameters
     // Equals, GetHashCode and ToString are Java's (topic, partition, headers, key, value, timestamp)
 }
 
@@ -431,14 +435,23 @@ public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>
     public long Offset();
     public long Timestamp();
     public TimestampType TimestampType();
-    public TKey Key();           // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
-    public TValue Value();       // deserialized; default(TValue) if absent (a tombstone; deser NOT called)
+    public TKey? Key();          // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
+    public TValue? Value();      // deserialized (span → T); default(TValue) if absent (deser NOT called — decision C)
     public Headers Headers();    // the record's own, writable copies (not routed through a deserializer this phase)
 }
 
 public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerRecords<K,V>`
     : IReadOnlyCollection<ConsumerRecord<TKey, TValue>> {
+    public static readonly ConsumerRecords<TKey, TValue> EMPTY;   // one per closed generic type
+    public ConsumerRecords(IReadOnlyDictionary<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> records,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets);   // both copied
+    public IReadOnlyList<ConsumerRecord<TKey, TValue>> Records(TopicPartition partition);
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets();   // the core's, read before the batch is freed
+    public IEnumerable<ConsumerRecord<TKey, TValue>> Records(string topic);
+    public IReadOnlyCollection<TopicPartition> Partitions();
     public int Count();                                    // Java's count(); IReadOnlyCollection<T>.Count is explicit
+    public bool IsEmpty();
+    public static ConsumerRecords<TKey, TValue> Empty();
 }
 
 public interface IConsumerCommon {               // shared sync surface (IAsyncConsumer + IConsumer)
@@ -628,10 +641,10 @@ each piece is wired (async/sync split per the idiom map). Already wired:
 interface, a `Task` on `IAsyncConsumer`: decision 22, ledger 103). The **typed generic
 `Consumer<K,V>`** is now **shipped** (M6/P1b — generic-only conversion + the zero-copy
 typed poll; see §4), plus the **rebalance listener** — `IConsumerRebalanceListener`
-(+ `ConsumerRebalanceListenerBase`), the `Subscribe(topics, callback)` overload on
+(+ `IConsumerRebalanceListenerWithPartitionsLost`, M23/P5), the `Subscribe(topics, callback)` overload on
 both interfaces, and `MockConsumer`'s inherent `Rebalance(newAssignment)` driver and
 `AsyncMockConsumer`'s awaitable one (M9/P6; see the §4 listener row), and its async form
-`IAsyncConsumerRebalanceListener` (+ `AsyncConsumerRebalanceListenerBase`) on
+`IAsyncConsumerRebalanceListener` (+ `IAsyncConsumerRebalanceListenerWithPartitionsLost`, M23/P5) on
 `IAsyncConsumer` (M19/P1), plus pattern subscribe
 (`Subscribe(SubscriptionPattern[, listener])`, M23/P2), plus the **offset-commit
 callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads,
@@ -668,22 +681,36 @@ P1b's typed consumers**; `ISerializer<T>` is **now consumed by the shipped typed
 
 ```csharp
 public interface ISerializer<T> {
-    ReadOnlyMemory<byte>? Serialize(string topic, T data); // Java Serializer<T>.serialize returns byte[]; see below
+    ReadOnlyMemory<byte>? Serialize(string topic, T? data);           // Java Serializer<T>.serialize(String, T)
 }
 public interface IDeserializer<T> {
-    T Deserialize(string topic, ReadOnlySpan<byte> data); // Java Deserializer<T>.deserialize — sync, span (see below)
+    T? Deserialize(string topic, ReadOnlySpan<byte> data);            // Java Deserializer<T>.deserialize — sync, span
 }
-public interface ISerde<T> : ISerializer<T>, IDeserializer<T> { }   // Java Serde<T> — what Serdes returns
+public interface ISerde<T> : IDisposable {                            // Java Serde<T> extends Closeable
+    ISerializer<T> Serializer();
+    IDeserializer<T> Deserializer();
+}
+// Java's defaults (rule 10): ISerializerWithHeaders<T>, IDeserializerWithHeaders<T>, ISerializerWithConfigure<T>,
+// IDeserializerWithConfigure<T>, ISerdeWithConfigure<T>, with SerializerExtensions, DeserializerExtensions, SerdeExtensions.
 
-public static class Serdes {     // Java `Serdes` factory, Java's method names — Java wire-format parity
-    public static ISerde<string> String();         // UTF-8
-    public static ISerde<byte[]> ByteArray();      // identity (deserialize copies the span out)
-    public static ISerde<int>    Integer();        // 4 bytes big-endian (IntegerSerializer)
-    public static ISerde<long>   Long();           // 8 bytes big-endian (LongSerializer)
-    public static ISerde<double> Double();         // 8 bytes big-endian doubleToLongBits (DoubleSerializer)
-    public static ISerde<Guid>   UUID();           // ⚠ UUID.toString() -> UTF-8, NOT 16 raw bytes (UUIDSerializer)
-    public static ISerde<object?> Void();          // VoidSerializer (serialize null; deserialize default)
-}                                // each returns one shared, stateless instance (Java returns a new one per call)
+public static class Serdes {     // Java `Serdes`: a new serde per call, Java wire-format parity
+    public class WrapperSerde<T> : ISerdeWithConfigure<T> { … }       // Java Serdes.WrapperSerde: one pair, configured and disposed together
+    public sealed class StringSerde : WrapperSerde<string> { … }      // and one nested serde per built-in
+    public static ISerde<string>  String();      // UTF-8 unless configured (Java's encoding keys)
+    public static ISerde<byte[]>  ByteArray();
+    public static ISerde<short?>  Short();
+    public static ISerde<int?>    Integer();
+    public static ISerde<long?>   Long();
+    public static ISerde<float?>  Float();
+    public static ISerde<double?> Double();
+    public static ISerde<bool?>   Boolean();
+    public static ISerde<Guid?>   UUID();        // ⚠ UUID.toString() as text, NOT 16 raw bytes
+    public static ISerde<ReadOnlyMemory<byte>?> ByteBuffer();   // the deserializer copies (§6.4)
+    public static ISerde<object?> Void();        // the deserializer throws for any data, as Java's
+    public static ISerde<T> SerdeFrom<T>();
+    public static ISerde<T> SerdeFrom<T>(ISerializer<T> serializer, IDeserializer<T> deserializer);
+}
+// Each built-in has its public, sealed Java class: StringSerializer, StringDeserializer, LongSerializer, …
 
 public class SerializationException : KafkaException { }  // generated (§4 Error granularity); serdes throw it on malformed input
 ```
@@ -695,10 +722,11 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   native fetch slice in place and provably can't outlive the batch (can't be stored/boxed/
   awaited/sent). Sync because a span can't cross an `await` and serde is CPU-bound — also
   Java-faithful (`Deserializer<T>` is sync).
-- **Headers overload deferred** (Java's `default T deserialize(String, Headers, byte[])`, ledger 153). A C#
-  default interface method does not compile while netstandard2.0 is a target (CS8701), so the overload follows
-  §3 Java names rule 10: an extension method forwarding to the header-less form, and an interface that
-  replaces it (its name, for an overloaded default, is not decided yet).
+- **Headers.** Java's headers overloads are rule 10's: `ISerializerWithHeaders<T>` and `IDeserializerWithHeaders<T>`,
+  with extension methods running Java's default. The client tests the type once, at construction. `KafkaProducer` and
+  `AsyncKafkaProducer` pass the record's own `Headers`, writable during the call and sealed after it; the mock producers
+  pass a new, empty `Headers` to each call and drop it, as Java's `MockProducer` does on its empty cluster; the consumers
+  pass the record's own. Java's two deserializer overloads are one span form.
 - **Async serde deferred** — a note only, no async interface; a Schema-Registry path *may* later
   want one (decided then). Java's SR serdes are themselves sync.
 - **`Serialize` returns `ReadOnlyMemory<byte>?`**, not Java's `byte[]` (M23/P1, ledger 400).
@@ -710,11 +738,16 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   binding's serializers return `null` in its own `return` or as `(ReadOnlyMemory<byte>?)null`.
   The producer reads the memory until `Send` returns or throws, or, on the async producers,
   until the `ValueTask` it returns has completed (ledger 73, 402).
-- **`ISerde<T>` added** = Java's `Serde<T>` (what `Serdes.String()` returns); composes the two
-  shipped directional interfaces so a `Serdes` member offers both directions from one type. Java's
-  `Serde<T>` uses `serializer()`/`deserializer()` accessors + `Closeable`; ours extends both
-  directly. Java's `close()` is `IDisposable`: the built-in serdes are stateless and not `IDisposable`, and a
-  user's serde that is `IDisposable` is disposed by the client it was given to (§4 **Close/Dispose**).
+- **`ISerde<T>` is Java's pair.** `Serializer()` and `Deserializer()` hand out two objects; a client takes and disposes
+  only the half it is given. `Serdes.WrapperSerde<T>` holds a pair, and `Serdes.SerdeFrom` builds one.
+- **A Java boxed type is a C# nullable value type.** `Serdes.Long()` is a serde of `long?`, as Java's is "for nullable
+  `Long`": null in, null out, and a keyless record or a tombstone is null, not `0`. A user's own deserializer of a
+  non-nullable value type still gets `default(T)` for an absent field, which it is not called for (decision C).
+- **Encodings.** The String and UUID classes read Java's encoding keys in `Configure` (`key.` or `value.` plus
+  `serializer.encoding` / `deserializer.encoding`, then the plain `serializer.encoding` / `deserializer.encoding`), with
+  Java's byte rules, for the Unicode charsets, `US-ASCII` and `ISO-8859-1`; any other name is refused *(deviation: Java accepts every
+  charset. Why: no new dependency on netstandard2.0)*.
+- **Messages.** A built-in's message is the one Java's consumer path throws (the `ByteBuffer` overload).
 
 **The Java → C# idiom map** — the binding's spine. Each row: the Java construct,
 its C# realization, and where the enforcing rule lives.
@@ -729,12 +762,12 @@ its C# realization, and where the enforcing rule lives.
 | `IllegalArgumentException` / `IllegalStateException` | The Java-named classes, with Java's message, for the binding's own checks too, so a check and the core's error for one condition have one class. A closed client throws `IllegalStateException` with its Java message: "Cannot perform operation after producer has been closed", "This consumer has already been closed.", "Cannot accept new calls when AdminClient is closing." The admin client throws it at the call *(deviation, as Python's: Java's `KafkaAdminClient` returns the Result and fails its futures with it; the native handle is gone after `Close`, so the call has no Result to return; ffi §C1)*. A .NET-only precondition (Java throws `NullPointerException` or nothing) keeps `ArgumentNullException` / `ArgumentOutOfRangeException`, except a negative timeout on a consumer lookup Java does not check (`Committed`, `PartitionsFor`, `ListTopics`, `OffsetsForTimes`, `BeginningOffsets`, `EndOffsets`): it throws `IllegalArgumentException` with the core's "Timeout must not be negative", the error the core's `_with_timeout` forms return (ffi §B5). A disposed `ConsumerHandle` keeps `ObjectDisposedException`. | validate **before** the FFI call — ffi §A5 |
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws `WakeupException` (**one-shot**), as Java's | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `ConcurrentModificationException`, sync and async, with Java's `acquire()` message, from the binding's owner check and the core's -2 alike (decision 17). | ffi §B5 |
-| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase` carry Java's `onPartitionsLost` default. Registered by the `Subscribe(topics, callback)` and `Subscribe(pattern, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
+| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, on both consumers; on `IAsyncConsumer` also `IAsyncConsumerRebalanceListener` — `Task` methods (M19/P1). Java's `onPartitionsLost` default is an extension method in `ConsumerRebalanceListenerExtensions` / `AsyncConsumerRebalanceListenerExtensions`; a listener replaces it by implementing `I…WithPartitionsLost` (rule 10), and `Subscribe` refuses a public `OnPartitionsLost` without it. Registered by the `Subscribe(topics, callback)` and `Subscribe(pattern, callback)` overloads | Each method reports through `__set_callback_result`; the rebalance waits for the report. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)` (`exception` is `Exception?`, the class of the error's id); passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**); on `IAsyncConsumer` also `IAsyncOffsetCommitCallback` — `Task OnComplete(offsets, exception)`, passed to two more `CommitAsync` overloads (M19/P1) | On `IConsumer` it runs inline on the caller's thread, inside the blocking call that delivers it (`Poll`, `Commit`, `Close`, …); on `IAsyncConsumer`, on the consumer's drain thread (`confluent-kafka-consumer-pump`) (decision 27). `offsets` is `null` on a failed commit (decision 22). An exception it throws, or the async form's faulted or cancelled `Task`, propagates out of the consumer call that delivered it (decision 12, ledger 47). See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | `Callback` (producer, `send(record, Callback)`) | `ICallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; the one exception: for a serializer's `ApiException`, `KafkaProducer` / `AsyncKafkaProducer` run it once inside `Send`, on the caller's thread, with the placeholder, before the failed future is returned, and nothing crosses the ABI (§3); `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, mock helpers) | **stays sync** — a plain **method**, a getter included, with Java's name. Except `beginTransaction()`: the core drains the queued sends first, so it waits, and `IAsyncProducer` makes it a `Task`, as Python's async classes make it `async def` | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
-| a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling, as a C# field: a `const` for a primitive or a string that Java holds as a compile-time constant (`RecordMetadata.UNKNOWN_PARTITION`), a `static readonly` field otherwise (`Uuid.ZERO_UUID`, `Uuid.RESERVED`, `KafkaPrincipal.ANONYMOUS`, the filters' `ANY`, the mock admin clients' `DEFAULT_LOG_DIRS`, the config classes' computed defaults and collections, ledger 386), never a property; an enum member keeps the constant's name (`ResourceType.ANY`); numeric values unchanged. A .NET-only type with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`) the text the binding prints or sends is Java's, from an internal map, and the enum's own `ToString()` is a recorded deviation. The eight config classes (`ProducerConfig`, `ConsumerConfig`, `AdminClientConfig`, `TopicConfig`, `SaslConfigs`, `SslConfigs`, `SecurityConfig`, `LogLevelConfig`) carry only Java's `public static final` fields, generated from `kafka/` (`*.g.cs`, `cargo xtask generate-error-codes`), each with Java's declared type: a Java compile-time constant is a `const`, any other field a `static readonly` field (ledger 386), a `List` an `IReadOnlyList`, a `Set` an `IReadOnlyCollection`. Their Java methods and the three client classes' constructors are not translated (M22/P2) | ledger 285; M22/P2 |
+| a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling, as a C# field: a `const` for a primitive or a string that Java holds as a compile-time constant (`RecordMetadata.UNKNOWN_PARTITION`), a `static readonly` field otherwise (`Uuid.ZERO_UUID`, `Uuid.RESERVED`, `KafkaPrincipal.ANONYMOUS`, the filters' `ANY`, the mock admin clients' `DEFAULT_LOG_DIRS`, the config classes' computed defaults and collections, ledger 386), never a property; an enum member keeps the constant's name (`ResourceType.ANY`); numeric values unchanged. A .NET-only type with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`, `SslClientAuth`) the enum's `ToString()` prints the constant, and Java's text is the static `<Enum>.ToString(value)` of its `<Enum>Methods` class, which the binding also prints and sends. The eight config classes (`ProducerConfig`, `ConsumerConfig`, `AdminClientConfig`, `TopicConfig`, `SaslConfigs`, `SslConfigs`, `SecurityConfig`, `LogLevelConfig`) carry only Java's `public static final` fields, generated from `kafka/` (`*.g.cs`, `cargo xtask generate-error-codes`), each with Java's declared type: a Java compile-time constant is a `const`, any other field a `static readonly` field (ledger 386), a `List` an `IReadOnlyList`, a `Set` an `IReadOnlyCollection`. Their Java methods and the three client classes' constructors are not translated (M22/P2) | ledger 285; M22/P2 |
 | a Java method, getters included (`topic()`, `isDone()`, `getName()`, `hasOffset()`) | a C# **method** with the PascalCase of Java's exact name, `get`, `is`, `has` and `should` kept (`Topic()`, `IsDone()`, `GetName()`, `RecordMetadata.HasOffset()`, `Uuid.GetMostSignificantBits()`), never a property; a member whose .NET name drifted from Java takes Java's (`TopicPartitionInfo.Isr()`, `IMetric.MetricName()` / `MetricValue()`, `ClientQuotaFilterComponent.Match()`). A Java static method is a C# static method: `Serdes.String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, each returning one shared stateless instance. Where a method is named like a type (`UpgradeType UpgradeType()`), an expression inside the class that reaches the type's members qualifies the type (`Admin.UpgradeType.UPGRADE` in `FeatureUpdate`, `Resource.ResourceType.ANY` in `ResourcePattern` and `ResourcePatternFilter`), since C# binds the simple name to the method group there; a type position needs no qualification (`TopicPartition TopicPartition()`) | ledger 365 |
 | a getter and a setter of one name (`timeoutMs()`, `timeoutMs(Integer)`) | two overloads: `TimeoutMs()` reads, `TimeoutMs(int? timeoutMs)` sets and returns what Java's setter returns (the class itself for Java's `this` and for `AbstractOptions`' `T`, since .NET has no `AbstractOptions`; `void` for `RemoveMembersFromConsumerGroupOptions.Reason(string)` and `KafkaPrincipal.TokenAuthenticated(bool)`). An Options class is built by Java's chain, `new CreateTopicsOptions().TimeoutMs(5000).ValidateOnly(true)`; there is no object initializer and no keyword constructor | ledger 366; ffi §C1 (Options) |
 | a setter Java names apart from its getter (`ListGroupsOptions.inGroupStates`, `ListTransactionsOptions.filterStates`) | Java's setter name (`InGroupStates(..)`, `WithProtocolTypes(..)`, `WithTypes(..)`, `FilterStates(..)`, `FilterProducerIds(..)`, `FilterOnDuration(..)`, `FilterOnTransactionalIdPattern(..)`) beside Java's getter (`GroupStates()`, `FilteredStates()`); no setter where Java has none (`ListOffsetsOptions` takes its `IsolationLevel` through Java's constructor) | ledger 367 |
@@ -749,6 +782,7 @@ its C# realization, and where the enforcing rule lives.
 | `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
 | a Java array `T[]` (`PartitionInfo.replicas()`, `Headers.toArray()`) | a C# array of the mapped element type (`Node[]`, `Header[]`), as Java's | ledger 370 (proposed) |
 | a Java primitive parameter (`DescribeFeaturesOptions.nodeId(int)`) | the C# primitive (`int`), never `int?`; an `OptionalInt` getter is `int?` | ledger 181 (amended) |
+| a boxed `Long` / `Integer` / `Short` / `Double` / `Float` / `Boolean` / `UUID` as a serde's type | `long?` / `int?` / `short?` / `double?` / `float?` / `bool?` / `Guid?` | null in, null out, as Java's "nullable" serdes (§3 Serdes) |
 | a Java getter that maps an unset field to a sentinel (`NewTopic.numPartitions()`, `orElse(-1)`) | the same sentinel (`-1`); only `Equals` and `ToString` tell unset from the sentinel, as Java's | ledger 371 (proposed) |
 | `Producer<K,V>` / `Consumer<K,V>` (generic) | **both shipped generic-only** — `Consumer<K,V>` (M6/P1b) and now `Producer<K,V>` (M11/P5): the producer trios + `ProducerRecord` are `<TKey,TValue>`, the non-generic ones removed (bytes = `<byte[],byte[]>` + `Serdes.ByteArray()`); `RecordMetadata` stays non-generic. Serialize above the bytes core, invoke-on-null, synchronous `SerializationException` wrap (§4) | §4 |
 
@@ -776,6 +810,15 @@ each goes when the reason it gives goes:
   future already failed with Java's `IllegalArgumentException` *(deviation: Java fails it only
   after the call, and with the call's error if the call failed; the Result cannot see that)*, and
   `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
+- **Undefined enum values.** A number cast to an enum that names no member (`(ResourceType)99`), which a Java
+  or Python enum cannot hold, is read as the enum's own Java lookup reads that number: `UNKNOWN` for the four
+  ACL enums, `ConfigResourceType`, `ScramMechanism` and `UpgradeType` (`fromCode`, `forId`, `fromType`), and
+  Java's `IllegalArgumentException` with Java's message for `IsolationLevel` (`forId`) and `ElectionType`
+  (`valueOf(byte)`), the whole number in the message, never truncated into a member. Where Java has no lookup
+  that answers (`OpType.forId`'s null, `TransactionState`, `GroupState`, `GroupType`,
+  `GroupMembershipOperation`), the call throws `ArgumentOutOfRangeException`. An instance member reads the
+  value as it is and never throws (`((AclOperation)99).Code()` is `99`). It stays: a C# cast can always make
+  such a value.
 - **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
   `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
   `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
@@ -846,8 +889,10 @@ out of date). The rule:
    the `TimeUnit` that qualifies it are one `TimeSpan`.
 7. .NET's own forms: `ToString`, `Equals` (with `==` and `!=`), `GetHashCode`; `CompareTo`;
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
-   `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`. A
-   member that overrides or implements a `System` member keeps its parameter names. A method may end with an
+   `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.
+   `Enum.GetValues` and `CompareTo` order by value, not by Java's declaration (`ConfigResourceType`…), and
+   `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. A member that overrides
+   or implements a `System` member keeps its parameter names. A method may end with an
    optional `CancellationToken cancellationToken`.
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
    `Map` overload, and an overload taking a `java.util.regex.Pattern` is not translated. A Java abstract
@@ -857,7 +902,10 @@ out of date). The rule:
    `extension(ScramMechanism)` block, so a C# 14 caller writes `ScramMechanism.FromMechanismName(…)` and an
    older one `ScramMechanismMethods.FromMechanismName(…)`. Its instance methods go in an
    `extension(ScramMechanism mechanism)` block or are `this` extension methods: `mechanism.MechanismName()` on
-   every C# version.
+   every C# version. A Java static field of the enum (`SslClientAuth.VALUES`) is a `static readonly` field of the
+   `<Enum>Methods` class, outside the blocks, since a block cannot hold one (CS9282). Java's `toString()` override
+   is a static `ToString(<Enum>)` in the `extension(<Enum>)` block: an instance extension named `ToString` is never
+   called.
 10. A Java interface's `default` method is not declared on the .NET interface, which cannot hold a body on
     netstandard2.0. It is an extension method in a top-level static class named after the interface without
     its `I` plus `Extensions`, beside it (`ConsumerRebalanceListenerExtensions`). An interface
@@ -868,8 +916,15 @@ out of date). The rule:
     `Admin` defaults that only convert their arguments stay members of `IAdmin` and `IAsyncAdmin`, whose
     clients are their only implementers (allowlisted). A Java interface's static method goes in an
     `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`, and on C#
-    14 `IAdmin.Create(…)`. How the extra interface of an overloaded default is named (the serializers'
-    headers overloads) is not decided yet.
+    14 `IAdmin.Create(…)`. An overloaded default gets one interface per overload, named after the parameter the
+    overload adds: `ISerializerWithHeaders<T>` for `serialize(String, Headers, T)`; when two overloads add a parameter
+    of the same name, its type is added too. Java's `close()` is not a rule-10 default: `Closeable` is `IDisposable`
+    (rule 7), which an implementer adds beside the interface, and there is no `I…WithClose`. Because the analyzer does
+    not ship, each client that calls a rule-10 default checks the object it is given once: a public method of the
+    default's name and parameters without the interface that replaces it, or, on the four real clients (the mocks never
+    dispose a serde), a public `Close()` on a serde that is not `IDisposable`, throws `IllegalArgumentException` naming
+    what to implement *(best effort: under trimming or Native
+    AOT an uncalled method can be removed, and then the check passes)*.
 
 A difference is fixed or listed, in `analyzers/`: `java-name-allowlist.txt` (kept on purpose, each group
 under a comment saying why), `java-name-pairs.txt` (a renamed type and the Java type it translates, so its
@@ -895,7 +950,7 @@ where it is needed, in one concise code comment (§4 Comments).
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
-| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`ReadOnlyMemory<byte>? Serialize(topic, T)`, M23/P1) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (`String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, Java's names — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (a `RecordDeserializationException : SerializationException` with Java's fields and accessors, carrying the inner exception: decisions 11 and 22. `Poll` returns the records before the bad one and throws only when there are none, after seeking the failing partition back to the bad record and later partitions to their first record not returned, decision 11. The deserialize runs on the caller's thread, or in the async `Poll`'s continuation, never on the drain thread or inside a native callback). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `ReadOnlyMemory<byte>?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and handling a serializer's throw as Java's `doSend` on `KafkaProducer` / `AsyncKafkaProducer` (§3; the mocks rethrow every serializer exception, as Java's `MockProducer`): an `InvalidCastException` is wrapped in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread), an `ApiException` goes to the callback and a failed future, and any other exception is rethrown unchanged. No serializer callback through the ABI (`CLAUDE.md §11`); the per-record `Callback_t` is the delivery callback, not a serde (ffi §A6). See §3 for the sketch + the deliberate deviations. **Constructor arguments only** (ledger 365): Java's config-only constructors `KafkaProducer(Map)`, `KafkaProducer(Properties)`, `KafkaConsumer(Map)` and `KafkaConsumer(Properties)` are not translated, and nothing is built by reflection: the user builds and sets up each serializer and deserializer and passes it, as Java allows (Java never calls `configure()` on one it is given), and `key.serializer` and its peers are neither checked nor sent (§4 **Config**). Each setting Java fills by reflection (`partitioner.class`, `interceptor.classes`, `metric.reporters`, `config.providers`, the SASL and OAuth handler classes, `ssl.engine.factory.class`) gets, when it is translated, a setter on `ProducerConfig` / `ConsumerConfig` that takes an object the user built, as the Rust core's `ProducerConfig::set_partitioner` does. *(Deviation from Java's public constructors, and from Python's, whose configuration route resolves and configures `key.serializer` and falls back to a bytes serde. Why: a C# constructor cannot be async, and Java calls a possibly blocking `configure()` on the classes it builds by reflection; without reflection, trimming and native AOT stay open. The Rust core makes the same choice.)* **Disposal** (M22/P2): the four real clients dispose each serializer or deserializer they were given that is `IDisposable`, once, key then value, after the destroy (§4 **Close/Dispose**, step 6), and when the core fails to build the client with Java's wrapped "Failed to construct kafka producer" / "… consumer", not for an error it returns bare, such as a configuration value it cannot parse, which Java raises before its constructor's `try` (ledger 447); a throwing `Dispose` is written to one `Trace.TraceWarning` and never rethrown, as Python logs and never raises. An `IAsyncDisposable`-only serde is not disposed. The mocks never dispose them, as Java's and Python's mocks. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) · ✅ M22/P2 (constructor arguments only; disposal) |
+| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`ReadOnlyMemory<byte>? Serialize(topic, T)`, M23/P1) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (Java's pair: `Serializer()` / `Deserializer()`, returned new by each `Serdes` member; `WrapperSerde`, `SerdeFrom`), with the built-in `Serdes` (`String()`, `ByteArray()`, `Integer()`, `Long()`, `Double()`, `UUID()`, `Void()`, Java's names — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span). The headers forms and `Configure` follow §3 Java names rule 10; the client calls the headers forms and never calls `Configure`, as Java never configures a given instance. The typed poll applies a **mandatory `SerializationException` wrap** of any deserializer throw (a `RecordDeserializationException : SerializationException` with Java's fields and accessors, carrying the inner exception: decisions 11 and 22. `Poll` returns the records before the bad one and throws only when there are none, after seeking the failing partition back to the bad record and later partitions to their first record not returned, decision 11. The deserialize runs on the caller's thread, or in the async `Poll`'s continuation, never on the drain thread or inside a native callback). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `ReadOnlyMemory<byte>?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and handling a serializer's throw as Java's `doSend` on `KafkaProducer` / `AsyncKafkaProducer` (§3; the mocks rethrow every serializer exception, as Java's `MockProducer`): an `InvalidCastException` is wrapped in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread), an `ApiException` goes to the callback and a failed future, and any other exception is rethrown unchanged. No serializer callback through the ABI (`CLAUDE.md §11`); the per-record `Callback_t` is the delivery callback, not a serde (ffi §A6). See §3 for the sketch + the deliberate deviations. **Constructor arguments only** (ledger 365): Java's config-only constructors `KafkaProducer(Map)`, `KafkaProducer(Properties)`, `KafkaConsumer(Map)` and `KafkaConsumer(Properties)` are not translated, and nothing is built by reflection: the user builds and sets up each serializer and deserializer and passes it, as Java allows (Java never calls `configure()` on one it is given), and `key.serializer` and its peers are neither checked nor sent (§4 **Config**). Each setting Java fills by reflection (`partitioner.class`, `interceptor.classes`, `metric.reporters`, `config.providers`, the SASL and OAuth handler classes, `ssl.engine.factory.class`) gets, when it is translated, a setter on `ProducerConfig` / `ConsumerConfig` that takes an object the user built, as the Rust core's `ProducerConfig::set_partitioner` does. *(Deviation from Java's public constructors, and from Python's, whose configuration route resolves and configures `key.serializer` and falls back to a bytes serde. Why: a C# constructor cannot be async, and Java calls a possibly blocking `configure()` on the classes it builds by reflection; without reflection, trimming and native AOT stay open. The Rust core makes the same choice.)* **Disposal** (M22/P2): the four real clients dispose each serializer or deserializer they were given that is `IDisposable`, once, key then value, after the destroy (§4 **Close/Dispose**, step 6), and when the core fails to build the client with Java's wrapped "Failed to construct kafka producer" / "… consumer", not for an error it returns bare, such as a configuration value it cannot parse, which Java raises before its constructor's `try` (ledger 447); a throwing `Dispose` is written to one `Trace.TraceWarning` and never rethrown, as Python logs and never raises. An `IAsyncDisposable`-only serde is not disposed. The mocks never dispose them, as Java's and Python's mocks. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) · ✅ M22/P2 (constructor arguments only; disposal) |
 | **Config** | One `IReadOnlyDictionary<string, object?> configs` on each `Kafka*` client constructor: Java's `Map<String, Object>`, with no `Properties` form, as Python merges it. Keys are **Java dotted names** (`bootstrap.servers` required). A value is a C# value of a type Java's `ConfigDef.parseType` accepts for the key's type (`bool`; `int` for INT, `short` for SHORT, `int` or `long` for LONG; any number but `nint` / `nuint` for DOUBLE, `BigInteger` included; an `IList` for LIST; a `System.Type` for CLASS) or the string Java would parse. The binding checks the type against the key's Java `ConfigDef` type (`Internal/ConfigTypes.g.cs`, generated from `kafka/` by `cargo xtask generate-error-codes`) and sends a text the core parses to the value Java's `parseType` gives (integers and `decimal` as digits, a `double` as "G17"; the core rounds); a wrong type, a `null` the key's validator refuses or a `null` key throws `ConfigException` (code −10) with Java's message, before any P/Invoke. Any other `null` leaves the key out, so the core's default applies. The value itself (ranges, valid strings, number text) is the core's to check, and the core's errors are `ConfigException` too; unknown keys reach the core, which logs them as unused. The five own-role serializer keys (`key.serializer`, `value.serializer`, `serializer.encoding`, `key.serializer.encoding`, `value.serializer.encoding`; consumer: the deserializer ones) are neither checked nor sent, as in Python; nothing reads them, since a serializer is a constructor argument only (§4 **Serializers**, ledger 365). *(Deviation from the one law: the type check and the text are Kafka logic, here because the C ABI takes every value as a C string and only the binding sees the object's type, as root `CLAUDE.md`'s Python conventions record for Python (Implementation over the FFI, exception 2); and a `null` the validator accepts is "not set" where Java holds `null` (ledger 272). Goes when: the C ABI takes typed config values.)* | wiring the constructor (M22/P1) |
 | **Error granularity** | One class per Java exception class, with Java's parent and namespace (§2, §3's `KafkaException` hierarchy row, ffi §A5), generated as Python's are; this replaces decision 14's flat `KafkaException` (`dotnet/design/history/M22/P1-error-hierarchy-parity/PLAN.md`). Two stay hand-written: `KafkaException` and **`RecordDeserializationException : SerializationException`** (M19/P1, decision 22), thrown by `Poll` for a key or value that fails to deserialize when no record precedes it (decision 11). **`SerializationException : KafkaException`**, which the built-in serdes throw on malformed input, is generated. **`ConfigException : KafkaException`** (Java's `common.config` class, −10) is generated too: the client constructors throw it for a configuration value the binding refuses, and it is the type of the core's −10 (§4 **Config**). | a user classifies by class, as in Java and Python |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
@@ -1045,13 +1100,10 @@ listener there runs inline, and an async listener's continuation runs wherever i
 completes. The sync consumer takes the sync listener only.
 
 Java's `onPartitionsLost` default (delegate to revoked) cannot live on an interface: C#
-default interface methods need .NET Standard 2.1, and the floor is netstandard2.0. It lives on
-the public abstract `ConsumerRebalanceListenerBase` and `AsyncConsumerRebalanceListenerBase`
-(`definition-of-done.md` §7 types that exist because of a Java behaviour). §3 Java names rule 10
-replaces them: the default becomes an extension method in `ConsumerRebalanceListenerExtensions` and
-`AsyncConsumerRebalanceListenerExtensions`, which `IConsumerRebalanceListenerWithPartitionsLost` and
-`IAsyncConsumerRebalanceListenerWithPartitionsLost` replace; until then CKRDA0013 baselines
-`OnPartitionsLost` on the two interfaces. A listener calls
+default interface methods need .NET Standard 2.1, and the floor is netstandard2.0. Rule 10 puts it in
+`ConsumerRebalanceListenerExtensions` and `AsyncConsumerRebalanceListenerExtensions`;
+`IConsumerRebalanceListenerWithPartitionsLost` and `IAsyncConsumerRebalanceListenerWithPartitionsLost` replace it
+(M23/P5). A listener calls
 back into its own consumer directly, and the consumer routes the call to `ConsumerHandle`
 (ledger 114; the §4 reentrancy row below).
 

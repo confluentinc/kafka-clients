@@ -37,7 +37,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: behaviour.FailEach is null);
+        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: behaviour.FailEach is null);
     }
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record) => _inner.Send(record);

@@ -43,14 +43,14 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_AfterCommit_RoundTripsOffsetMetadataAndEpoch()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 0);
         consumer.Assign(new[] { tp });
 
         consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>
         {
-            [tp] = new OffsetAndMetadata(42, "meta-x", 7),
+            [tp] = new OffsetAndMetadata(42, 7, "meta-x"),
         });
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = consumer.Committed(new[] { tp });
@@ -64,7 +64,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_NullMetadataAndEpoch_RoundTripsAsEmptyMetadataAndNullEpoch()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, 1);
         consumer.Assign(new[] { tp });
@@ -82,7 +82,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_UncommittedPartition_ReturnsEmptyMap()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = consumer.Committed(new[] { new TopicPartition(Topic, 0) });
@@ -93,7 +93,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_EmptyCollection_ReturnsEmptyMap()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Empty(consumer.Committed(Array.Empty<TopicPartition>()));
@@ -102,7 +102,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_OnMock_ThrowsUnsupportedOperationException()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
@@ -118,7 +118,7 @@ public sealed class PublicSyncConsumerQueryTests
     public void OffsetsForTimes_NegativeTimestamp_Accepted_ThenThrowsOnMock()
     {
         // A negative timestamp is a valid sentinel (earliest or latest), so it reaches the mock.
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
@@ -133,7 +133,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_EmptyMap_StillThrowsOnMock()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Throws<UnsupportedOperationException>(() => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long>()));
@@ -142,7 +142,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_ReturnsSetOffsets()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(Topic, 0, 5);
         consumer.UpdateBeginningOffset(Topic, 1, 7);
@@ -158,7 +158,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_UnsetPartition_ThrowsIllegalStateMessage()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
@@ -170,7 +170,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_EmptyCollection_ReturnsEmptyMap()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Empty(consumer.BeginningOffsets(Array.Empty<TopicPartition>()));
@@ -180,7 +180,7 @@ public sealed class PublicSyncConsumerQueryTests
     public void BeginningOffsets_NonAsciiTopic_RoundTripsThroughKeyMarshalling()
     {
         const string nonAscii = "topic-grüße-Ω-🎉";
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(nonAscii, 3, 99);
 
@@ -193,7 +193,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_ReturnsSetOffsets()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset(Topic, 0, 100);
         consumer.UpdateEndOffset(Topic, 2, 250);
@@ -209,7 +209,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_UnsetPartition_ThrowsIllegalStateMessage()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
@@ -221,7 +221,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_AfterThrow_ConsumerReusable()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset(Topic, 0, 11);
 
@@ -234,7 +234,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_AfterUpdatePartitions_ReturnsOwnedCopies()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort);
 
@@ -267,7 +267,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_UnregisteredTopic_ReturnsEmptyList()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Empty(consumer.PartitionsFor("no-such-topic"));
@@ -277,7 +277,7 @@ public sealed class PublicSyncConsumerQueryTests
     public void PartitionsFor_EmptyTopic_ForwardedNotRejected_ReturnsEmptyList()
     {
         // An empty topic reaches the core, as in Java and Python; only null is rejected.
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Empty(consumer.PartitionsFor(string.Empty));
@@ -287,7 +287,7 @@ public sealed class PublicSyncConsumerQueryTests
     public void PartitionsFor_NonAsciiLeaderHost_RoundTripsThroughNulScanHostMarshalling()
     {
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
 
@@ -299,7 +299,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_AfterUpdatePartitions_ReturnsMapKeyedByTopic()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort);
         consumer.UpdatePartitions("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093);
@@ -324,7 +324,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_NoTopics_ReturnsEmptyMap()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Empty(consumer.ListTopics());
@@ -333,7 +333,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_NullCollection_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Committed(null!));
         Assert.Equal("partitions", ex.ParamName);
@@ -342,7 +342,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_NullCollection_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.BeginningOffsets(null!));
         Assert.Equal("partitions", ex.ParamName);
@@ -351,7 +351,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_NullCollection_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.EndOffsets(null!));
         Assert.Equal("partitions", ex.ParamName);
@@ -360,7 +360,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_NullMap_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.OffsetsForTimes(null!));
         Assert.Equal("timestampsToSearch", ex.ParamName);
@@ -369,7 +369,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.PartitionsFor(null!));
         Assert.Equal("topic", ex.ParamName);
@@ -378,7 +378,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_NullElementTopic_ThrowsArgument()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => consumer.Committed(new[] { default(TopicPartition) }));
@@ -389,7 +389,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_NullKeyTopic_ThrowsArgument()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long> { [default] = 1L };
 
@@ -401,7 +401,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_NullCollection_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.Committed(null!));
@@ -411,7 +411,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_NullTopic_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.PartitionsFor(null!));
@@ -421,7 +421,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.Committed(new[] { new TopicPartition(Topic, 0) }));
@@ -430,7 +430,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.OffsetsForTimes(
@@ -440,7 +440,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.BeginningOffsets(new[] { new TopicPartition(Topic, 0) }));
@@ -449,7 +449,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.EndOffsets(new[] { new TopicPartition(Topic, 0) }));
@@ -458,7 +458,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.PartitionsFor(Topic));
@@ -467,7 +467,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.ListTopics());
@@ -476,7 +476,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void QueryFamily_RepeatedCalls_StayReusable()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
         consumer.UpdateBeginningOffset(Topic, 0, 3);

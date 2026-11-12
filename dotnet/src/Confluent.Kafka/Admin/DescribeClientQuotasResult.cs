@@ -37,8 +37,10 @@ public sealed class DescribeClientQuotasResult
     private readonly KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> _future;
     private readonly SafeAdminResultHandle? _native;
 
-    // Internal, unlike Java's public constructor: a recorded deviation.
-    internal DescribeClientQuotasResult(
+    /// <summary>Creates a result over the given future of every matching entity's quotas.</summary>
+    /// <param name="entities">The future of the entity-to-quota map.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="entities"/> is <see langword="default"/>, a future with no source.</exception>
+    public DescribeClientQuotasResult(
         KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities)
     {
         _future = entities != default ? entities : throw new ArgumentNullException(nameof(entities));

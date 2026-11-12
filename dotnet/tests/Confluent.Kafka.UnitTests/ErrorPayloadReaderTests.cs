@@ -506,7 +506,7 @@ public sealed class ErrorPayloadReaderTests
                     e.OffsetOutOfRangePartitions().ToDictionary(entry => entry.Key, entry => entry.Value));
                 Assert.Equal(new[] { tp }, e.Partitions().ToArray());
                 Assert.Equal(
-                    new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(40L, "m-Ω", 7) },
+                    new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(40L, 7, "m-Ω") },
                     e.DivergentOffsets().ToDictionary(entry => entry.Key, entry => entry.Value));
             }
 
@@ -577,7 +577,7 @@ public sealed class ErrorPayloadReaderTests
     {
         TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "none");
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "none");
         consumer.Assign(new[] { tp });
 
         NoOffsetForPartitionException e =
@@ -592,7 +592,7 @@ public sealed class ErrorPayloadReaderTests
     {
         TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         consumer.Assign(new[] { tp });
         consumer.UpdateBeginningOffset(NonAsciiTopic, 0, 5);
         consumer.Seek(tp, 2);

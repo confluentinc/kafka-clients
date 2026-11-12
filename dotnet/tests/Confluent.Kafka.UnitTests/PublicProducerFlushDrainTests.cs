@@ -39,7 +39,7 @@ public sealed class PublicProducerFlushDrainTests
     public async Task Flush_DrainsAccumulatorRecords_TheyHaveReachedTheCoreWhenItReturns()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata>[] sends = Fire(producer);
@@ -57,12 +57,12 @@ public sealed class PublicProducerFlushDrainTests
     {
         // A producer that never sent, and one whose sends all completed: both still reach the core's flush.
         AsyncMockProducer<byte[], byte[]> neverSent =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable neverSentDisposal = TestTimeout.Disposal(neverSent);
         await TestTimeout.Run(() => neverSent.Flush(), s_deadline);
 
         AsyncMockProducer<byte[], byte[]> drained =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable drainedDisposal = TestTimeout.Disposal(drained);
         Task<RecordMetadata>[] sends = Fire(drained);
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
@@ -76,7 +76,7 @@ public sealed class PublicProducerFlushDrainTests
     {
         // A cancelled token throws before anything happens, with records pending too.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata>[] sends = Fire(producer);
@@ -94,7 +94,7 @@ public sealed class PublicProducerFlushDrainTests
     public async Task Flush_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         Task<RecordMetadata>[] sends = Fire(producer);
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
@@ -113,7 +113,7 @@ public sealed class PublicProducerFlushDrainTests
         for (int i = 0; i < SendCount; i++)
         {
             sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(
-                Topic, Encoding.UTF8.GetBytes($"value-{i}"), partition: 0)).Delivery();
+                Topic, value: Encoding.UTF8.GetBytes($"value-{i}"), partition: 0, key: null)).Delivery();
         }
 
         return sends;

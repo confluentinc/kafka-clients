@@ -42,7 +42,7 @@ public sealed class PublicProducerCountedDrainTests
     public async Task Drain_IsCountedAsAUse_CloseDoesNotRefuseIt_AndTheDestroyDoes()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         NativeProducer native = NativeOf(producer);
         using ManualResetEventSlim entered = new ManualResetEventSlim();
         using ManualResetEventSlim release = new ManualResetEventSlim();
@@ -50,7 +50,7 @@ public sealed class PublicProducerCountedDrainTests
         try
         {
             _ = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null),
                 new Parking(entered, release));
             Assert.True(producer.CompleteNext());
             Assert.True(entered.Wait(s_deadline), "the delivery callback never ran in the drain");

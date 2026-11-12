@@ -530,7 +530,7 @@ public sealed class PublicSerializerDisposalTests
         HeldAsyncCallback callback = new HeldAsyncCallback();
         try
         {
-            _ = await producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), callback);
+            _ = await producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 1 }), callback);
             Assert.True(callback.Started.Wait(Deadline), "the failure callback never started");
 
             Task<int> closing = Task.Run(() => CloseBy(producer, how));
@@ -589,13 +589,13 @@ public sealed class PublicSerializerDisposalTests
         try
         {
             AsyncKafkaFuture<RecordMetadata> heldFuture =
-                await producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), held);
+                await producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 1 }), held);
             Assert.True(held.Started.Wait(Deadline), "the held failure callback never started");
 
             // Off the test's thread: a close made before the callback's first await runs inside this Send.
             AsyncKafkaFuture<RecordMetadata> closed = await TestTimeout.Run(
                 () => Task.Run(
-                    () => producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 2 }), closing).AsTask()),
+                    () => producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 2 }), closing).AsTask()),
                 Deadline);
 
             Assert.True(closing.Closed.Wait(Deadline), "the " + how + " from inside a failure callback did not return");
@@ -665,7 +665,7 @@ public sealed class PublicSerializerDisposalTests
         try
         {
             AsyncKafkaFuture<RecordMetadata> future =
-                await producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), held);
+                await producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 1 }), held);
             Assert.True(held.Started.Wait(Deadline), "the failure callback never started");
             if (onAThenApplyDependant)
             {
@@ -844,7 +844,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int Disposals => Volatile.Read(ref _disposals);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => throw new RecordTooLargeException("too large");
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) => throw new RecordTooLargeException("too large");
 
         public void Dispose()
         {
@@ -1028,7 +1028,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int DestroysSeen { get; set; } = -1;
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => data;
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) => data;
 
         public void Dispose()
         {
@@ -1058,7 +1058,7 @@ public sealed class PublicSerializerDisposalTests
 
         internal int Disposals => Volatile.Read(ref _disposals);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) => data;
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) => data;
 
         public ValueTask DisposeAsync()
         {

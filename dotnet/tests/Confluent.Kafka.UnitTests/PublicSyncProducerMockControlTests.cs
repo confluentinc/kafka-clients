@@ -39,11 +39,11 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public async Task CompleteNext_ResolvesPendingSend()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -57,7 +57,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void CompleteNext_NoPending_ReturnsFalse()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // No pending send: false, as Java's MockProducer.completeNext() returns.
@@ -67,11 +67,11 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public async Task ErrorNext_FaultsPendingSend()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
@@ -84,7 +84,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void ErrorNext_NoPending_ReturnsFalse()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Assert.False(producer.ErrorNext(new Common.Errors.CorruptRecordException("nope")));
@@ -93,7 +93,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void HistoryCount_IncrementsPerSend()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Assert.Equal(0, producer.HistoryCount());
@@ -102,7 +102,7 @@ public sealed class PublicSyncProducerMockControlTests
         {
             int captured = i;
             TestTimeout.Run(
-                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0)).Get(),
+                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0, key: null)).Get(),
                 s_deadline);
         }
 
@@ -113,11 +113,11 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void Clear_ResetsHistory()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
             s_deadline);
         Assert.Equal(1, producer.HistoryCount());
 
@@ -128,7 +128,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void Helpers_AfterDispose_ThrowIllegalState()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => producer.CompleteNext());
@@ -142,12 +142,12 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void Flushed_WithAutoComplete_IsTrue_WithOrWithoutBufferedRecords()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Assert.True(producer.Flushed());
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
             s_deadline);
         Assert.True(producer.Flushed());
     }
@@ -156,11 +156,11 @@ public sealed class PublicSyncProducerMockControlTests
     public void Flushed_WithoutAutoComplete_IsFalseWhileASendWaits_AndTrueAfterFlush()
     {
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Common.KafkaFuture<RecordMetadata> pending =
-            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
         Assert.False(producer.Flushed());
 
         TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -171,7 +171,7 @@ public sealed class PublicSyncProducerMockControlTests
     [Fact]
     public void Closed_IsFalseUntilTheProducerCloses()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Assert.False(producer.Closed());

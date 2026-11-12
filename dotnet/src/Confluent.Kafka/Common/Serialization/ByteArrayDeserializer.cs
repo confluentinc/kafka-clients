@@ -1,4 +1,4 @@
-// Copyright 2025 Confluent Inc.
+// Copyright 2026 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,19 +13,12 @@
 // limitations under the License.
 
 using System;
-using Confluent.Kafka.Common.Serialization;
 
-namespace Confluent.Kafka.Internal.Serialization;
+namespace Confluent.Kafka.Common.Serialization;
 
-/// <summary>
-/// The serde behind <see cref="Serdes.ByteArray()"/>: byte arrays unchanged, as Java's <c>ByteArraySerializer</c> and
-/// <c>ByteArrayDeserializer</c>; deserializing copies the span into a new array.
-/// </summary>
-internal sealed class ByteArraySerde : ISerde<byte[]>
+/// <summary>Java's <c>ByteArrayDeserializer</c>: the bytes, copied into a new array.</summary>
+public sealed class ByteArrayDeserializer : IDeserializer<byte[]>
 {
-    // The explicit null: a null array would convert to an empty value, not to null.
-    public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) =>
-        data is null ? (ReadOnlyMemory<byte>?)null : data;
-
+    /// <inheritdoc/>
     public byte[] Deserialize(string topic, ReadOnlySpan<byte> data) => data.ToArray();
 }

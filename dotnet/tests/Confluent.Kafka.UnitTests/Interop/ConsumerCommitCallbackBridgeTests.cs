@@ -358,8 +358,8 @@ public sealed class ConsumerCommitCallbackBridgeTests
     {
         KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1", ["group.protocol"] = "consumer" },
-            Serdes.ByteArray(),
-            Serdes.ByteArray());
+            Serdes.ByteArray().Deserializer(),
+            Serdes.ByteArray().Deserializer());
         RecordingCallback callback = new RecordingCallback();
 
         InvalidGroupIdException refused = Assert.Throws<InvalidGroupIdException>(() => consumer.CommitAsync(Offsets(1), callback));
@@ -564,10 +564,10 @@ public sealed class ConsumerCommitCallbackBridgeTests
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(offset, metadata) };
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static CommitCallbackRegistration? Registration(object consumer) =>
         ((NativeConsumer)consumer.GetType()
@@ -621,16 +621,16 @@ public sealed class ConsumerCommitCallbackBridgeTests
     }
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
-    private sealed class SyncListener : ConsumerRebalanceListenerBase
+    private sealed class SyncListener : IConsumerRebalanceListener
     {
         private readonly Action _onAssigned;
 
         internal SyncListener(Action onAssigned) => _onAssigned = onAssigned;
 
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
     }
 }

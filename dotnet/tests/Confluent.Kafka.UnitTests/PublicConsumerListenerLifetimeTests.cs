@@ -209,9 +209,9 @@ public sealed class PublicConsumerListenerLifetimeTests
         internal static Subject Create(string kind) => kind switch
         {
             "KafkaConsumer" => new Subject(
-                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray()), null, false),
+                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
             "MockConsumer" => new Subject(
-                new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()), null, false),
+                new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
             "AsyncKafkaConsumer" => new Subject(null, Real(), false),
             "AsyncMockConsumer" => new Subject(null, Mock(), false),
             "AsyncKafkaConsumer+async" => new Subject(null, Real(), true),
@@ -291,10 +291,10 @@ public sealed class PublicConsumerListenerLifetimeTests
         }
 
         private static AsyncKafkaConsumer<byte[], byte[]> Real() =>
-            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
         private static AsyncMockConsumer<byte[], byte[]> Mock() =>
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
         private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
         {
@@ -305,7 +305,7 @@ public sealed class PublicConsumerListenerLifetimeTests
     }
 
     /// <summary>A sync and async listener whose assigned method throws a fresh exception, each held weakly.</summary>
-    private sealed class Listener : IConsumerRebalanceListener, IAsyncConsumerRebalanceListener
+    private sealed class Listener : IConsumerRebalanceListenerWithPartitionsLost, IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
         private readonly Func<Exception>? _failure;
 
@@ -322,7 +322,7 @@ public sealed class PublicConsumerListenerLifetimeTests
 
         void IConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Fail();
 
-        void IConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        void IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
@@ -335,7 +335,7 @@ public sealed class PublicConsumerListenerLifetimeTests
             Fail();
         }
 
-        Task IAsyncConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
+        Task IAsyncConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
             Task.CompletedTask;
 
         private void Fail()

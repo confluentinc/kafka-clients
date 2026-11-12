@@ -255,11 +255,11 @@ internal sealed class SoakClient : IDisposable
             // cannot leave a producer running with no consumer.
             logger.Info("producer: using client.id " + pconf["client.id"]);
             var producer = new AsyncKafkaProducer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(pconf), Serdes.ByteArray(), new SoakRecordSerializer(options.PayloadSize));
+                SoakConfig.ClientConfigs(pconf), Serdes.ByteArray().Serializer(), new SoakRecordSerializer(options.PayloadSize));
 
             logger.Info("consumer: using group.id " + (cconf.TryGetValue("group.id", out string? groupId) ? groupId : "<unset>"));
             var consumer = new AsyncKafkaConsumer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(cconf), Serdes.ByteArray(), new SoakRecordDeserializer());
+                SoakConfig.ClientConfigs(cconf), Serdes.ByteArray().Deserializer(), new SoakRecordDeserializer());
 
             var resources = new ProcessResourceSampler();
 
@@ -637,7 +637,7 @@ internal sealed class SoakClient : IDisposable
         {
             txCnt++;
             var record = new SoakRecord(msgId, SoakMetrics.NowMs(), txCnt);
-            var producerRecord = new ProducerRecord<byte[], SoakRecord>(_options.Topic, record);
+            var producerRecord = new ProducerRecord<byte[], SoakRecord>(_options.Topic, value: record);
 
             Interlocked.Increment(ref _outstanding);
             double sentAt = MonotonicSeconds();
@@ -1152,7 +1152,7 @@ internal sealed class SoakClient : IDisposable
         SoakOptions options,
         SoakLogger logger) =>
         CreateTopicAsync(
-            adminConfig, options, logger, config => new AsyncKafkaAdminClient(SoakConfig.ClientConfigs(config)), Task.Delay, Console.Out);
+            adminConfig, options, logger, config => IAsyncAdmin.Create(SoakConfig.ClientConfigs(config)), Task.Delay, Console.Out);
 
     internal static async Task CreateTopicAsync(
         IReadOnlyDictionary<string, string> adminConfig,
