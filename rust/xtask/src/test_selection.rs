@@ -299,8 +299,10 @@ fn changed_files(merge_base: &str) -> anyhow::Result<Vec<String>> {
 /// in a copy of the index, which keeps the index's file stat cache, so the
 /// real index is left as it is.
 fn working_tree(repo: &Path, excluded: &[String]) -> anyhow::Result<String> {
-    // Absolute, because git reads GIT_INDEX_FILE relative to `-C repo`.
-    let repo = &fs::canonicalize(repo).with_context(|| format!("resolving {}", repo.display()))?;
+    // Absolute, because git reads GIT_INDEX_FILE relative to `-C repo`. Not
+    // `fs::canonicalize`: on Windows it returns a verbatim `\\?\C:\...` path,
+    // which git cannot create its index lock under.
+    let repo = &std::path::absolute(repo).with_context(|| format!("resolving {}", repo.display()))?;
     let index = PathBuf::from(git_in(repo, &[], &["rev-parse", "--git-path", "index"])?);
     let index = if index.is_absolute() { index } else { repo.join(index) };
     let mut scratch = index.clone().into_os_string();
