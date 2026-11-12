@@ -1,0 +1,11 @@
+{
+  "base": "ce1ff35b8256ace1e0a115de84b62fbef1c30206",
+  "changed_files": [
+    "M rust/src/admin/mod.rs",
+    "M rust/src/admin/records_to_delete.rs"
+  ],
+  "head": "c52937fe18fd97d434419bb9dc0f2f528ed50b3f",
+  "merge_base": "ce1ff35b8256ace1e0a115de84b62fbef1c30206",
+  "tree": "0fa0993b6122dc3c3c035e184a97d42386fb01cf",
+  "version": 2
+}
