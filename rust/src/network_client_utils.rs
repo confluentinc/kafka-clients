@@ -141,6 +141,15 @@ impl NetworkClientUtils {
                 poll_timeout = waiting_time;
             }
 
+            // Temporary, for the macOS CI hang investigation: the producer Sender's steps (`hang_step`).
+            crate::consumer::internals::hang_step(
+                "await_ready: poll",
+                format_args!(
+                    "node={} timeout={poll_timeout} waited={}",
+                    node.id_string(),
+                    attempt_start_time - start_time
+                ),
+            );
             responses.extend(client.poll(poll_timeout, attempt_start_time).await);
             if let Some(auth_error) = client.authentication_error(node) {
                 // Java rethrows `client.authenticationException(node)` verbatim

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -54,6 +55,8 @@ internal sealed class CompletionThread : IDisposable
     private Action? _teardown;
 
     private int _opaqueReleased;
+
+    private IntPtr _traceHandle;
 
     internal CompletionThread(string name, Func<int> drain)
     {
@@ -101,6 +104,19 @@ internal sealed class CompletionThread : IDisposable
         }
     }
 
+    // Temporary, for the macOS CI hang investigation: from now on the thread's notify, wakes and drains go to the
+    // hang trace under the client's view.
+    internal void TraceFrom(IntPtr handle, string text)
+    {
+        if (!HangTrace.Enabled)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _traceHandle, handle);
+        HangTrace.Write(handle, text);
+    }
+
     internal void ReleaseNotifyOpaque()
     {
         if (Interlocked.Exchange(ref _opaqueReleased, 1) == 0)
@@ -142,6 +158,17 @@ internal sealed class CompletionThread : IDisposable
             _signaled = true;
             Monitor.Pulse(_gate);
         }
+
+        TraceHang("dotnet: notify hook called");
+    }
+
+    private void TraceHang(string text)
+    {
+        IntPtr handle = Volatile.Read(ref _traceHandle);
+        if (handle != IntPtr.Zero)
+        {
+            HangTrace.Write(handle, text);
+        }
     }
 
     private void Run()
@@ -169,10 +196,14 @@ internal sealed class CompletionThread : IDisposable
         }
 
         FinishPosted();
+        TraceHang("dotnet: completion thread ends");
     }
 
     private bool WaitForWork()
     {
+        bool signaled;
+        bool stopping;
+        bool teardown;
         lock (_gate)
         {
             while (!_signaled && !_stopping && _teardown == null)
@@ -180,9 +211,19 @@ internal sealed class CompletionThread : IDisposable
                 Monitor.Wait(_gate);
             }
 
+            signaled = _signaled;
+            stopping = _stopping;
+            teardown = _teardown != null;
             _signaled = false;
-            return !_stopping && _teardown == null;
         }
+
+        TraceHang(string.Format(
+            CultureInfo.InvariantCulture,
+            "dotnet: completion thread woke, signaled={0} stopping={1} teardown={2}",
+            signaled,
+            stopping,
+            teardown));
+        return !stopping && !teardown;
     }
 
     private bool StopOrTeardownRequested()
@@ -200,10 +241,13 @@ internal sealed class CompletionThread : IDisposable
         _draining = true;
         try
         {
-            return _drain();
+            int ran = _drain();
+            TraceHang(string.Format(CultureInfo.InvariantCulture, "dotnet: drain ran {0}", ran));
+            return ran;
         }
         catch (Exception exception)
         {
+            TraceHang("dotnet: drain threw " + exception.GetType().FullName + ": " + exception.Message);
             TraceSwallowed("the callbacks", exception);
             return 0;
         }
