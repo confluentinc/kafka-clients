@@ -105,12 +105,9 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     }
 
     [Fact]
-    public void ListOffsetsResult_PublishesJavasTwoAccessors_AndItsConstructorIsInternal()
+    public void ListOffsetsResult_PublishesJavasTwoAccessors_AndItsPublicConstructor()
     {
-        Assert.Empty(typeof(ListOffsetsResult).GetConstructors());
-        ConstructorInfo only = Assert.Single(
-            typeof(ListOffsetsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
-            candidate => candidate.IsAssembly);
+        ConstructorInfo only = Assert.Single(typeof(ListOffsetsResult).GetConstructors());
         // KafkaFuture<Info>, not Info: Java's is Map<TopicPartition, KafkaFuture<Info>>, so the futures are the value.
         Assert.Equal(
             new[]

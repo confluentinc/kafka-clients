@@ -35,7 +35,7 @@ internal static class TestValues
     internal static RecordMetadata Metadata()
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
-        RecordMetadata metadata = producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 })).Get();
+        RecordMetadata metadata = producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 1 })).Get();
         producer.Close();
         return metadata;
     }
@@ -52,7 +52,7 @@ internal static class TestValues
         using MockProducer<byte[], byte[]> producer =
             new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         CapturingCallback callback = new CapturingCallback();
-        producer.Send(new ProducerRecord<byte[], byte[]>("t", new byte[] { 1 }), callback);
+        producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 1 }), callback);
         Assert.True(producer.ErrorNext(OfClass(code, message)));
         Exception? error = callback.Outcome.Wait(RecordingStreamWriter.DefaultTimeout)
             ? callback.Outcome.Result

@@ -24,12 +24,14 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The <see cref="ConsumerRecord{TKey, TValue}.LeaderEpoch()"/>,
+/// <see cref="ConsumerRecord{TKey, TValue}.DeliveryCount()"/>,
 /// <see cref="ConsumerRecord{TKey, TValue}.SerializedKeySize()"/> and
 /// <see cref="ConsumerRecord{TKey, TValue}.SerializedValueSize()"/> accessors, through both mock consumers.
 /// </summary>
 /// <remarks>
 /// A mock-added record has both serialized sizes -1, whatever its key and value, and no leader epoch, so the sizes
-/// Java reports for a present key or value, and a present epoch, are reachable only against a broker.
+/// Java reports for a present key or value, and a present epoch, are reachable only against a broker. A polled record
+/// never has a delivery count.
 /// </remarks>
 public sealed class PublicConsumerRecordAccessorTests
 {
@@ -87,6 +89,19 @@ public sealed class PublicConsumerRecordAccessorTests
     }
 
     [Fact]
+    public void SyncPoll_DeliveryCount_IsNull()
+    {
+        MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.AddRecord(Topic, Partition, offset: 0, key: new byte[] { 7 }, value: new byte[] { 8 });
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
+
+        Assert.Null(record.DeliveryCount());
+        Assert.Contains(", deliveryCount = null, ", record.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AsyncPoll_Accessors_MockReachableContract()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
@@ -103,6 +118,7 @@ public sealed class PublicConsumerRecordAccessorTests
 
             ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
             Assert.Null(record.LeaderEpoch());
+            Assert.Null(record.DeliveryCount());
             Assert.Equal(-1, record.SerializedKeySize());
             Assert.Equal(-1, record.SerializedValueSize());
         }

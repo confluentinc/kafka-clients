@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 
@@ -61,9 +62,9 @@ namespace Confluent.Kafka.Consumer;
 /// <c>Rebalance</c> throws <see cref="IllegalStateException"/>.
 /// </para>
 /// <para>
-/// Java's <c>onPartitionsLost</c> defaults to <c>onPartitionsRevoked</c>. A C# default interface method needs
-/// .NET Standard 2.1, above this binding's netstandard2.0 floor, so the default lives on
-/// <see cref="ConsumerRebalanceListenerBase"/>.
+/// Java's default <c>onPartitionsLost</c>, which calls <c>onPartitionsRevoked</c>, is
+/// <see cref="ConsumerRebalanceListenerExtensions.OnPartitionsLost(IConsumerRebalanceListener, IReadOnlyCollection{TopicPartition})"/>,
+/// which a listener replaces by implementing <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
 /// </para>
 /// </remarks>
 public interface IConsumerRebalanceListener
@@ -87,15 +88,65 @@ public interface IConsumerRebalanceListener
     /// </summary>
     /// <param name="partitions">The newly added partitions (never null; may be empty).</param>
     void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions);
+}
 
+/// <summary>
+/// A rebalance listener with its own handling of lost partitions: it replaces Java's default
+/// <c>ConsumerRebalanceListener.onPartitionsLost</c>, which calls
+/// <see cref="IConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection{TopicPartition})"/>. On lost
+/// partitions a consumer calls this method for a listener that implements this interface, and
+/// <see cref="IConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection{TopicPartition})"/> for any other.
+/// </summary>
+/// <remarks>
+/// A consumer's <c>Subscribe</c> refuses a listener that declares a public
+/// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c> but does not implement this interface, since
+/// it would never call that method. A public <c>Task</c> one is not refused: it is the method of
+/// <see cref="IAsyncConsumerRebalanceListenerWithPartitionsLost"/>. The check reads the type's metadata, so under
+/// trimming or Native AOT, which can remove a method nothing calls, it is best effort.
+/// </remarks>
+public interface IConsumerRebalanceListenerWithPartitionsLost : IConsumerRebalanceListener
+{
     /// <summary>
-    /// Invoked when the consumer detects that it has lost <paramref name="partitions"/>
-    /// without a clean revocation (Java
-    /// <c>onPartitionsLost(Collection&lt;TopicPartition&gt;)</c>) — for example after being
-    /// fenced by the group coordinator. Java's default delegates to
-    /// <see cref="OnPartitionsRevoked"/>; on this binding's netstandard2.0 floor that
-    /// default lives on <see cref="ConsumerRebalanceListenerBase"/> instead.
+    /// Cleans up resources for partitions that have already been reassigned to other consumers. It is not called during
+    /// normal execution, as the owned partitions are first revoked through
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection{TopicPartition})"/> before they are
+    /// reassigned to other consumers during a rebalance. In exceptional scenarios, when the consumer finds that it no
+    /// longer owns a partition without a normal rebalance having revoked it, this method is called instead: for
+    /// example, when the consumer's session timeout has expired, or when a fatal error has been received indicating the
+    /// consumer is no longer part of the group. The rebalance does not proceed until this returns.
     /// </summary>
-    /// <param name="partitions">The lost partitions (never null; may be empty).</param>
+    /// <param name="partitions">The partitions that were assigned to the consumer and have now been reassigned to other
+    /// consumers: always all the partitions previously assigned to it (never null; may be empty).</param>
     void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions);
+}
+
+/// <summary>Java's default method of <c>ConsumerRebalanceListener</c>, for every <see cref="IConsumerRebalanceListener"/>.</summary>
+public static class ConsumerRebalanceListenerExtensions
+{
+    /// <summary>
+    /// Handles the loss of <paramref name="partitions"/>, Java's <c>ConsumerRebalanceListener.onPartitionsLost</c>:
+    /// <see cref="IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection{TopicPartition})"/>
+    /// when <paramref name="listener"/> implements it, and otherwise
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection{TopicPartition})"/>, as Java's
+    /// default.
+    /// </summary>
+    /// <param name="listener">The listener.</param>
+    /// <param name="partitions">The lost partitions (never null; may be empty).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="listener"/> is null.</exception>
+    public static void OnPartitionsLost(this IConsumerRebalanceListener listener, IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (listener is null)
+        {
+            throw new ArgumentNullException(nameof(listener));
+        }
+
+        if (listener is IConsumerRebalanceListenerWithPartitionsLost withPartitionsLost)
+        {
+            withPartitionsLost.OnPartitionsLost(partitions);
+        }
+        else
+        {
+            listener.OnPartitionsRevoked(partitions);
+        }
+    }
 }

@@ -562,8 +562,8 @@ public sealed class SerializationTests
         using MockProducer<long?, string> producer =
             new MockProducer<long?, string>(Serdes.Long().Serializer(), Serdes.String().Serializer());
 
-        producer.Send(new ProducerRecord<long?, string>(Topic, "keyless")).Get();
-        producer.Send(new ProducerRecord<long?, string>(Topic, "keyed", 7L)).Get();
+        producer.Send(new ProducerRecord<long?, string>(Topic, value: "keyless")).Get();
+        producer.Send(new ProducerRecord<long?, string>(Topic, value: "keyed", key: 7L)).Get();
 
         Assert.Equal(new[] { true, false }, HistoryKeyIsNull(producer));
     }
@@ -575,8 +575,8 @@ public sealed class SerializationTests
             new AsyncMockProducer<long?, string>(Serdes.Long().Serializer(), Serdes.String().Serializer());
         try
         {
-            await (await producer.Send(new ProducerRecord<long?, string>(Topic, "keyless"))).Get();
-            await (await producer.Send(new ProducerRecord<long?, string>(Topic, "keyed", 7L))).Get();
+            await (await producer.Send(new ProducerRecord<long?, string>(Topic, value: "keyless"))).Get();
+            await (await producer.Send(new ProducerRecord<long?, string>(Topic, value: "keyed", key: 7L))).Get();
 
             Assert.Equal(new[] { true, false }, HistoryKeyIsNull(producer));
         }
@@ -593,10 +593,10 @@ public sealed class SerializationTests
         using MockProducer<ReadOnlyMemory<byte>?, string> producer = new MockProducer<ReadOnlyMemory<byte>?, string>(
             Serdes.ByteBuffer().Serializer(), Serdes.String().Serializer());
 
-        producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(Topic, "null key")).Get();
-        producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(Topic, "empty key", ReadOnlyMemory<byte>.Empty)).Get();
+        producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(Topic, value: "null key")).Get();
+        producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(Topic, value: "empty key", key: ReadOnlyMemory<byte>.Empty)).Get();
         producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(
-            Topic, "slice key", new ReadOnlyMemory<byte>(larger, 2, larger.Length - 2))).Get();
+            Topic, value: "slice key", key: new ReadOnlyMemory<byte>(larger, 2, larger.Length - 2))).Get();
 
         Assert.Equal(new[] { true, false, false }, HistoryKeyIsNull(producer));
     }

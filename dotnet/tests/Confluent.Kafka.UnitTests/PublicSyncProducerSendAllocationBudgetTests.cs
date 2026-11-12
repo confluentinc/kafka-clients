@@ -55,7 +55,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
 
         KafkaFuture<RecordMetadata> firstFuture = default;
         TestTimeout.Run(
-            () => firstFuture = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
+            () => firstFuture = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0)),
             s_deadline);
 
         // Mutate the buffers after Send returns and before Get: the core read them during the call, so the record is
@@ -76,7 +76,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
 
         RecordMetadata second = null!;
         TestTimeout.Run(
-            () => second = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)).Get(),
+            () => second = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0)).Get(),
             s_deadline);
         Assert.Equal(1L, second.Offset());
     }
@@ -229,7 +229,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < SendCount; i++)
         {
-            _ = producer.Send(new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value, key, partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], ReadOnlyMemory<byte>?>(Topic, value: value, key: key, partition: 0));
         }
 
         return GC.GetAllocatedBytesForCurrentThread() - before;
@@ -247,7 +247,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             // Same `value` / `key` references across sends — the value buffer is NOT re-allocated per
             // send, so any value-sized allocation here would come from the send path itself. The
             // future is discarded: the measurement is the send itself (its Get is not on this path).
-            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0));
         }
 
         return GC.GetAllocatedBytesForCurrentThread() - before;
@@ -263,7 +263,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < SendCount; i++)
         {
-            futures[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
+            futures[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0));
         }
 
         return GC.GetAllocatedBytesForCurrentThread() - before;
@@ -279,7 +279,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         long before = GC.GetTotalAllocatedBytes(precise: true);
         for (int i = 0; i < SendCount; i++)
         {
-            futures[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
+            futures[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0));
         }
 
         // Each send's metadata is copied out before its future completes, so the last Get returns after those copies.

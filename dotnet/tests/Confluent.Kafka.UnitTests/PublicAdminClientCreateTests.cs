@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -26,7 +27,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Creating an admin client checks its configuration across keys, as Java's <c>KafkaAdminClient</c> does: an explicit
+/// An admin client is created by <c>Create</c>, Java's <c>Admin.create</c>, and has no public constructor. Creating
+/// one checks its configuration across keys, as Java's <c>KafkaAdminClient</c> does: an explicit
 /// <c>default.api.timeout.ms</c> below <c>request.timeout.ms</c>, or neither or both of <c>bootstrap.servers</c> and
 /// <c>bootstrap.controllers</c>, fails creation, and <c>bootstrap.controllers</c> alone builds a client that refuses
 /// the calls the controllers do not serve.
@@ -45,6 +47,51 @@ public sealed class PublicAdminClientCreateTests
 
     private const string UnsupportedEndpointType =
         "This Admin API is not yet supported when communicating directly with the controller quorum.";
+
+    [Fact]
+    public void Create_ReturnsAKafkaAdminClient()
+    {
+        IAdmin admin = IAdmin.Create(Unreachable());
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        Assert.IsType<KafkaAdminClient>(admin);
+    }
+
+    [Fact]
+    public async Task AsyncCreate_ReturnsAnAsyncKafkaAdminClient()
+    {
+        IAsyncAdmin admin = IAsyncAdmin.Create(Unreachable());
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        Assert.IsType<AsyncKafkaAdminClient>(admin);
+    }
+
+    [Fact]
+    public async Task Create_ByTheStaticClassesFullName_ReturnsTheClient()
+    {
+        IAdmin admin = Confluent.Kafka.Admin.Admin.Create(Unreachable());
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        IAsyncAdmin asyncAdmin = Confluent.Kafka.Admin.AsyncAdmin.Create(Unreachable());
+        await using IAsyncDisposable asyncAdminDisposal = TestTimeout.AsyncDisposal(asyncAdmin);
+
+        Assert.IsType<KafkaAdminClient>(admin);
+        Assert.IsType<AsyncKafkaAdminClient>(asyncAdmin);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Create_ANullConf_ThrowsArgumentNullException(bool async)
+    {
+        Assert.Equal("conf", Assert.Throws<ArgumentNullException>(() => Create(async, null!)).ParamName);
+    }
+
+    [Fact]
+    public void Clients_HaveNoPublicConstructor()
+    {
+        Assert.Empty(typeof(KafkaAdminClient).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+        Assert.Empty(typeof(AsyncKafkaAdminClient).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+    }
 
     [Theory]
     [InlineData(false)]
@@ -82,7 +129,7 @@ public sealed class PublicAdminClientCreateTests
     [Fact]
     public void BootstrapControllersAlone_ListTopics_FailsAtOnce()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(ControllersOnly());
+        IAdmin admin = IAdmin.Create(ControllersOnly());
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AssertUnsupportedEndpointType(FutureAssert.Throws<UnsupportedEndpointTypeException>(() => admin.ListTopics().Names().Get(s_deadline)));
@@ -91,12 +138,15 @@ public sealed class PublicAdminClientCreateTests
     [Fact]
     public async Task AsyncBootstrapControllersAlone_ListTopics_FailsAtOnce()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(ControllersOnly());
+        IAsyncAdmin admin = IAsyncAdmin.Create(ControllersOnly());
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AssertUnsupportedEndpointType(await FutureAssert.ThrowsAsync<UnsupportedEndpointTypeException>(
             () => TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline)));
     }
+
+    private static Dictionary<string, object?> Unreachable() =>
+        new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     private static Dictionary<string, object?> ControllersOnly() =>
         new Dictionary<string, object?> { ["bootstrap.controllers"] = "localhost:1" };
@@ -114,7 +164,7 @@ public sealed class PublicAdminClientCreateTests
     }
 
     private static object Create(bool async, IReadOnlyDictionary<string, object?> config) =>
-        async ? new AsyncKafkaAdminClient(config) : new KafkaAdminClient(config);
+        async ? IAsyncAdmin.Create(config) : IAdmin.Create(config);
 
     private static void AssertUnsupportedEndpointType(KafkaException failure)
     {

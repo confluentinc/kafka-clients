@@ -33,23 +33,8 @@ public sealed class KafkaAdminClient : IAdmin
 {
     private readonly NativeAdminClient _native;
 
-    /// <summary>
-    /// Creates an admin client from a configuration map — Java's
-    /// <c>Admin.create(Map)</c>. Keys are the Java dotted names;
-    /// <c>bootstrap.servers</c> is required.
-    /// </summary>
-    /// <param name="configs">
-    /// The admin client configuration, keyed by Java's dotted names: each value of the type Java's
-    /// <c>ConfigDef</c> accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key
-    /// unset, unless the key's validator refuses <c>null</c>.
-    /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
-    /// <exception cref="ConfigException">
-    /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
-    /// <c>null</c>, or the client refuses a value.
-    /// </exception>
-    /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public KafkaAdminClient(IReadOnlyDictionary<string, object?> configs)
+    /// <summary>Creates the client over the given configuration.</summary>
+    internal KafkaAdminClient(IReadOnlyDictionary<string, object?> configs)
     {
         _native = NativeAdminClient.Create(configs, AdminFlavour.Sync);
     }

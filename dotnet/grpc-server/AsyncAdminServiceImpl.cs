@@ -71,7 +71,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         {
             admin = TranslateAdmin.SelectsMock(request.Config)
                 ? AsyncMockAdminClient.Create().NumBrokers(numBrokers).Build()
-                : (IAsyncAdmin)new AsyncKafkaAdminClient(Translate.ConfigsFromProto(request.Config));
+                : IAsyncAdmin.Create(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception ex)
         {

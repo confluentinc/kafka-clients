@@ -298,7 +298,7 @@ internal sealed class AsyncConsumerServiceImpl
             {
                 int? leaderEpoch = request.HasLeaderEpoch ? request.LeaderEpoch : (int?)null;
                 string metadata = request.HasMetadata ? request.Metadata : string.Empty;
-                return c.Seek(partition, new OffsetAndMetadata(request.Offset, metadata, leaderEpoch));
+                return c.Seek(partition, new OffsetAndMetadata(request.Offset, leaderEpoch, metadata));
             }
 
             return c.Seek(partition, request.Offset);

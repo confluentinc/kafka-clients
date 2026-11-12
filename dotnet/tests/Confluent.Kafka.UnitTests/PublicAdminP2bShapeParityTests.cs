@@ -145,7 +145,7 @@ public sealed class PublicAdminP2bShapeParityTests
     }
 
     [Fact]
-    public void DeleteRecordsResult_IsKeyedByTopicPartition_AndItsConstructorIsInternal()
+    public void DeleteRecordsResult_IsKeyedByTopicPartition_AndItsConstructorIsPublic()
     {
         MethodInfo lowWatermarks = Getters.Get(typeof(DeleteRecordsResult), nameof(DeleteRecordsResult.LowWatermarks));
 
@@ -160,15 +160,12 @@ public sealed class PublicAdminP2bShapeParityTests
         // Java's all() is KafkaFuture<Void> — it reports success, not the watermarks.
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        Assert.Empty(typeof(DeleteRecordsResult).GetConstructors());
-        ConstructorInfo only = Assert.Single(
-            typeof(DeleteRecordsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
-            candidate => candidate.IsAssembly);
+        ConstructorInfo only = Assert.Single(typeof(DeleteRecordsResult).GetConstructors());
         Assert.Equal(
             new[] { typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>>) },
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
-        Assert.Throws<ArgumentNullException>(() => new DeleteRecordsResult(null!));
+        Assert.Equal("futures", Assert.Throws<ArgumentNullException>(() => new DeleteRecordsResult(null!)).ParamName);
     }
 
     [Fact]

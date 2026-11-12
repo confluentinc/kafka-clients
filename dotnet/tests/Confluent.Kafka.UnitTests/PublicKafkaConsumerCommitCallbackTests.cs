@@ -468,13 +468,13 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
     }
 
     /// <summary>A listener that does nothing.</summary>
-    private sealed class NoopListener : ConsumerRebalanceListenerBase
+    private sealed class NoopListener : IConsumerRebalanceListener
     {
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
     }

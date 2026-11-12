@@ -65,7 +65,7 @@ public sealed class SerdeHeadersBrokerTests
         using (KafkaProducer<string, string> producer =
             new KafkaProducer<string, string>(ProducerConfigs(), keySerializer, serializer))
         {
-            _ = producer.Send(new ProducerRecord<string, string>(topic, "v", "k", partition: 0)).Get(s_wait);
+            _ = producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0)).Get(s_wait);
         }
 
         HeaderReadingDeserializer keyDeserializer = new HeaderReadingDeserializer(KeyId);
@@ -88,7 +88,7 @@ public sealed class SerdeHeadersBrokerTests
             new AsyncKafkaProducer<string, string>(ProducerConfigs(), keySerializer, serializer))
         {
             AsyncKafkaFuture<RecordMetadata> future =
-                await producer.Send(new ProducerRecord<string, string>(topic, "v", "k", partition: 0));
+                await producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0));
             _ = await future.Get().WaitAsync(s_wait);
         }
 
@@ -224,7 +224,7 @@ public sealed class SerdeHeadersBrokerTests
         string topic = await TopicAsync();
         using KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
             ProducerConfigs(), Serdes.String().Serializer(), new HeaderAddingSerializer());
-        _ = producer.Send(new ProducerRecord<string, string>(topic, "v", "k", partition: 0)).Get(s_wait);
+        _ = producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0)).Get(s_wait);
         return topic;
     }
 

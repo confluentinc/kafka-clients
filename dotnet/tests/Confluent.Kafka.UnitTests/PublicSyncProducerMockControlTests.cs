@@ -43,7 +43,7 @@ public sealed class PublicSyncProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -71,7 +71,7 @@ public sealed class PublicSyncProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
@@ -102,7 +102,7 @@ public sealed class PublicSyncProducerMockControlTests
         {
             int captured = i;
             TestTimeout.Run(
-                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0)).Get(),
+                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0, key: null)).Get(),
                 s_deadline);
         }
 
@@ -117,7 +117,7 @@ public sealed class PublicSyncProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
             s_deadline);
         Assert.Equal(1, producer.HistoryCount());
 
@@ -147,7 +147,7 @@ public sealed class PublicSyncProducerMockControlTests
 
         Assert.True(producer.Flushed());
         TestTimeout.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
             s_deadline);
         Assert.True(producer.Flushed());
     }
@@ -160,7 +160,7 @@ public sealed class PublicSyncProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Common.KafkaFuture<RecordMetadata> pending =
-            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
         Assert.False(producer.Flushed());
 
         TestTimeout.Run(() => producer.Flush(), s_deadline);

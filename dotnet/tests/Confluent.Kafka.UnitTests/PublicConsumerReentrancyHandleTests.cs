@@ -247,7 +247,7 @@ public sealed class PublicConsumerReentrancyHandleTests
             { "SeekToBeginning", h => h.SeekToBeginning(one) },
             { "SeekToEnd", h => h.SeekToEnd(one) },
             { "Seek", h => h.Seek(s_tp0, 5) },
-            { "Seek(OffsetAndMetadata)", h => h.Seek(s_tp0, new OffsetAndMetadata(5, "m", null)) },
+            { "Seek(OffsetAndMetadata)", h => h.Seek(s_tp0, new OffsetAndMetadata(5, null, "m")) },
             { "Position", h => h.Position(s_tp0) },
             { "Position(TimeSpan)", h => h.Position(s_tp0, TimeSpan.FromSeconds(1)) },
             { "Committed", h => h.Committed(one) },
@@ -834,10 +834,6 @@ public sealed class PublicConsumerReentrancyHandleTests
         {
             Fired = true;
             _probe();
-        }
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
         }
     }
 

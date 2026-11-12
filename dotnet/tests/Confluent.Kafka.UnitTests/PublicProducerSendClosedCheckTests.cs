@@ -37,7 +37,7 @@ public sealed class PublicProducerSendClosedCheckTests
     };
 
     private static ProducerRecord<byte[], byte[]> Record() =>
-        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0);
+        new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null);
 
     [Fact]
     public void SyncMockSend_AfterDispose_DoesNotInvokeSerializers()

@@ -75,7 +75,7 @@ public sealed class PublicProducerSerializerFailureTests
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> future = producer.Send(
-            new ProducerRecord<string, string>(Topic, "v", key: "k", partition: 3), callback);
+            new ProducerRecord<string, string>(Topic, value: "v", key: "k", partition: 3), callback);
 
         // The callback ran inside the call, on the caller's thread, as Java's doSend runs it.
         (RecordMetadata metadata, Exception? exception, int threadId) = Assert.Single(callback.Completions);
@@ -96,7 +96,7 @@ public sealed class PublicProducerSerializerFailureTests
         ThrowingSerializer<string> key = new ThrowingSerializer<string>(() => new TopicAuthorizationException("denied"));
         using Producer producer = Producer.Create(flavor, key, Serdes.String().Serializer());
 
-        Task<RecordMetadata> future = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), null);
+        Task<RecordMetadata> future = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), null);
 
         Assert.Same(key.LastThrown, await FutureAssert.ThrowsAsync<TopicAuthorizationException>(() => future));
         Assert.Equal(0, producer.HistoryCount());
@@ -110,7 +110,7 @@ public sealed class PublicProducerSerializerFailureTests
         using Producer producer = Producer.Create(flavor, Serdes.String().Serializer(), value);
         RecordingCallback callback = new RecordingCallback();
 
-        _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback);
+        _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback);
 
         AssertPlaceholder(Assert.Single(callback.Completions).Metadata, partition: RecordMetadata.UNKNOWN_PARTITION);
     }
@@ -126,7 +126,7 @@ public sealed class PublicProducerSerializerFailureTests
 
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
         {
-            _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), new ThrowingCallback(thrown));
+            _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), new ThrowingCallback(thrown));
         });
 
         Assert.Same(thrown, error);
@@ -144,7 +144,7 @@ public sealed class PublicProducerSerializerFailureTests
         GatedAsyncCallback callback = new GatedAsyncCallback(release.Task);
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(
-            new ProducerRecord<string, string>(Topic, "v", key: "k", partition: 1), callback);
+            new ProducerRecord<string, string>(Topic, value: "v", key: "k", partition: 1), callback);
 
         Assert.True(firstStage.IsCompletedSuccessfully);
         AsyncKafkaFuture<RecordMetadata> future = await firstStage;
@@ -173,7 +173,7 @@ public sealed class PublicProducerSerializerFailureTests
         GatedAsyncCallback callback = new GatedAsyncCallback(release.Task);
 
         AsyncKafkaFuture<RecordMetadata> future = await producer.Send(
-            new ProducerRecord<string, string>(Topic, "v", key: "k", partition: 1), callback);
+            new ProducerRecord<string, string>(Topic, value: "v", key: "k", partition: 1), callback);
 
         // Java's flush() returns only after the callbacks of the records it covers.
         Task flush = producer.Flush();
@@ -197,7 +197,7 @@ public sealed class PublicProducerSerializerFailureTests
             flavor, Serdes.String().Serializer(), value);
         NestingAsyncCallback callback = new NestingAsyncCallback(producer);
 
-        _ = await producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback);
+        _ = await producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback);
 
         await TestTimeout.Run(() => callback.Ended, s_deadline);
         await TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -212,7 +212,7 @@ public sealed class PublicProducerSerializerFailureTests
             flavor, Serdes.String().Serializer(), value);
 
         AsyncKafkaFuture<RecordMetadata> future = await producer.Send(
-            new ProducerRecord<string, string>(Topic, "v", key: "k"),
+            new ProducerRecord<string, string>(Topic, value: "v", key: "k"),
             new GatedAsyncCallback(Task.FromException(new InvalidOperationException("callback-faulted"))));
 
         Assert.Same(
@@ -233,7 +233,7 @@ public sealed class PublicProducerSerializerFailureTests
 
         Assert.ThrowsAny<OperationCanceledException>(() =>
         {
-            _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback, canceled.Token);
+            _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback, canceled.Token);
         });
         Assert.Empty(callback.Completions);
     }
@@ -247,7 +247,7 @@ public sealed class PublicProducerSerializerFailureTests
         RecordingCallback callback = new RecordingCallback();
 
         SerializationException error = Assert.Throws<SerializationException>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback); });
+            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback); });
 
         Assert.Equal(
             "Can't convert key of class System.String to class " + typeof(InvalidCastSerializer).FullName
@@ -266,7 +266,7 @@ public sealed class PublicProducerSerializerFailureTests
         using Producer producer = Producer.Create(flavor, Serdes.String().Serializer(), value);
 
         SerializationException error = Assert.Throws<SerializationException>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), null); });
+            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), null); });
 
         Assert.Equal(
             "Can't convert value of class System.String to class " + typeof(InvalidCastSerializer).FullName
@@ -283,7 +283,7 @@ public sealed class PublicProducerSerializerFailureTests
         using Producer producer = Producer.Create(flavor, key, Serdes.String().Serializer());
 
         SerializationException error = Assert.Throws<SerializationException>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v"), null); });
+            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v"), null); });
 
         Assert.Equal(
             "Can't convert key of class null to class " + typeof(InvalidCastSerializer).FullName
@@ -300,7 +300,7 @@ public sealed class PublicProducerSerializerFailureTests
         RecordingCallback callback = new RecordingCallback();
 
         KafkaException error = Assert.Throws<KafkaException>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback); });
+            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback); });
 
         Assert.Same(value.LastThrown, error);
         Assert.Empty(callback.Completions);
@@ -319,7 +319,7 @@ public sealed class PublicProducerSerializerFailureTests
         RecordingCallback callback = new RecordingCallback();
 
         Exception error = Assert.ThrowsAny<Exception>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback); });
+            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback); });
 
         Assert.NotNull(lastThrown());
         Assert.Same(lastThrown(), error);
@@ -338,7 +338,7 @@ public sealed class PublicProducerSerializerFailureTests
         GatedAsyncCallback callback = new GatedAsyncCallback(Task.CompletedTask);
 
         Exception error = Assert.ThrowsAny<Exception>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback); });
+            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback); });
 
         Assert.Same(lastThrown(), error);
         Assert.Equal(0, callback.Calls);
@@ -489,7 +489,7 @@ public sealed class PublicProducerSerializerFailureTests
             {
                 await Task.Yield();
                 _ = await _producer.Send(
-                    new ProducerRecord<string, string>(Topic, "v2", key: "k2"),
+                    new ProducerRecord<string, string>(Topic, value: "v2", key: "k2"),
                     new GatedAsyncCallback(Task.CompletedTask));
                 await _producer.Flush();
                 _ended.TrySetResult(true);

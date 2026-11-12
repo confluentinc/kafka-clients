@@ -31,10 +31,24 @@ public sealed class AsyncDeleteRecordsResult
     private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
-    // Internal, unlike Java's public constructor: a recorded deviation.
-    internal AsyncDeleteRecordsResult(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> lowWatermarks)
+    /// <summary>Creates a result over the given futures, keyed by topic partition.</summary>
+    /// <param name="futures">The future of each partition's deleted records. The map is copied.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    public AsyncDeleteRecordsResult(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> futures)
     {
-        _futures = lowWatermarks ?? throw new ArgumentNullException(nameof(lowWatermarks));
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
+        Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> copy =
+            new Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>>(futures.Count);
+        foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DeletedRecords>> entry in futures)
+        {
+            copy.Add(entry.Key, entry.Value);
+        }
+
+        _futures = copy;
     }
 
     private AsyncDeleteRecordsResult(

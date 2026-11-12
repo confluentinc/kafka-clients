@@ -305,7 +305,7 @@ public sealed class PublicConsumerListenerLifetimeTests
     }
 
     /// <summary>A sync and async listener whose assigned method throws a fresh exception, each held weakly.</summary>
-    private sealed class Listener : IConsumerRebalanceListener, IAsyncConsumerRebalanceListener
+    private sealed class Listener : IConsumerRebalanceListenerWithPartitionsLost, IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
         private readonly Func<Exception>? _failure;
 
@@ -322,7 +322,7 @@ public sealed class PublicConsumerListenerLifetimeTests
 
         void IConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Fail();
 
-        void IConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        void IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
 
@@ -335,7 +335,7 @@ public sealed class PublicConsumerListenerLifetimeTests
             Fail();
         }
 
-        Task IAsyncConsumerRebalanceListener.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
+        Task IAsyncConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) =>
             Task.CompletedTask;
 
         private void Fail()
