@@ -150,9 +150,15 @@ name: build-test-release
 # publish nothing on any other build, so the crate is the only package
 # published without a manual step.
 #
-# Every job records its result and the commit it tested as
-# `ci-result/<job name>` in the workflow's artifacts (the global epilogue
-# below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
+# CI results: every job records its result and the commit it tested as
+# `ci-result/<job name>` in the workflow's artifacts, `running` when it starts
+# (.semaphore/job-start.sh, job-start.ps1), then `passed` or `failed` in its
+# block's epilogue (.semaphore/ci-result.sh on Linux and macOS, ci-result.ps1
+# on Windows). Because each write replaces the previous one, only the latest
+# run of a job counts. The commit is the working tree's HEAD rather than
+# SEMAPHORE_GIT_SHA, so a job that switched branches (see job-start.sh) cannot
+# attest to the commit being tagged. A new block must have the epilogue: a job
+# without it stays recorded as running, which create-release-tag.yml refuses. "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
 # renaming or removing a CI job here also means updating that list.
 agent:
@@ -179,48 +185,15 @@ global_job_config:
       value: Confluent.Kafka
   # Shell-neutral, because the Windows blocks run it too and their shell is PowerShell. Each
   # block's task prologue starts with the rest for its shell: `. .semaphore/job-start.sh` on Linux
-  # and macOS (the "Run on branch" switch, the `running` result of the epilogue's comment below,
+  # and macOS (the "Run on branch" switch, the `running` result of "CI results" in the header,
   # and Python 3.10), `.semaphore/job-start.ps1` on Windows. A new block must start its prologue
   # with one of them.
   prologue:
     commands:
       - checkout
-  # Records the CI results that create-release-tag.yml checks before creating
-  # a release tag. Each job writes `<result> <commit tested> <job id>` to
-  # ci-result/<job name> in the workflow's artifacts: `running` when it starts
-  # (.semaphore/job-start.sh), then `passed` or `failed` when it ends. Because each
-  # write replaces the previous one, only the latest run of a job counts. The
-  # commit is the working tree's HEAD rather than SEMAPHORE_GIT_SHA, so a job
-  # that switched branches (see .semaphore/job-start.sh) cannot attest to the
-  # commit being tagged. Results are
-  # recorded on every build; create-release-tag.yml decides which builds may be
-  # tagged. The job name is reduced to characters that are safe in an artifact
-  # path, and LC_ALL=C ensures that Linux and macOS (BSD tr) map multibyte
-  # characters such as the em dash identically; create-release-tag.yml applies
-  # the same mapping. A failed upload here produces only a warning: if the
-  # final result cannot be recorded, the job stays `running` (on a master or
-  # release branch build job-start.sh guarantees that it was recorded), and
-  # create-release-tag.yml refuses to tag the commit. On Windows these bash
-  # commands fail in PowerShell, which does not change the job's result; the
-  # Windows blocks record theirs in their own epilogue (.semaphore/ci-result.ps1),
-  # which runs before this one.
-  epilogue:
-    on_pass:
-      commands:
-        - |
-          marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
-          result_file=$(mktemp) \
-            && printf 'passed %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
-            && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
-            || echo "Warning: could not record this job's result; the job stays recorded as running, which create-release-tag.yml refuses"
-    on_fail:
-      commands:
-        - |
-          marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
-          result_file=$(mktemp) \
-            && printf 'failed %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
-            && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force \
-            || echo "Warning: could not record this job's result; the job stays recorded as running, which create-release-tag.yml refuses"
+  # No global epilogue: its commands would run in the Windows agents' PowerShell
+  # too, which cannot parse bash. Each block records its jobs' CI results in its
+  # own epilogue (see "CI results" in the header).
 
 blocks:
   - name: "Verify Rust and language bindings (Linux amd64)"
@@ -287,6 +260,13 @@ blocks:
           - ./.semaphore/dependencies.sh
           # What the selection runs and why, at the top of the job's own log.
           - (cd rust && cargo -q xtask show-test-selection)
+      epilogue:
+        on_pass:
+          commands:
+            - .semaphore/ci-result.sh passed
+        on_fail:
+          commands:
+            - .semaphore/ci-result.sh failed
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
           commands:
@@ -398,6 +378,12 @@ blocks:
             # Temporary, with CONFLUENT_KAFKA_DOTNET_HANG_DIR below: uploads the native stacks a .NET test sampled
             # when its TestTimeout bound expired. The folder exists only after such a timeout.
             - 'if [ -d /tmp/confluent-kafka-dotnet-hangs ]; then artifact push job --expire-in 2w /tmp/confluent-kafka-dotnet-hangs || true; fi'
+        on_pass:
+          commands:
+            - .semaphore/ci-result.sh passed
+        on_fail:
+          commands:
+            - .semaphore/ci-result.sh failed
       jobs:
         - name: "verify-rust (macOS arm64)"
           commands:
@@ -540,6 +526,13 @@ blocks:
         commands:
           - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
+      epilogue:
+        on_pass:
+          commands:
+            - .semaphore/ci-result.sh passed
+        on_fail:
+          commands:
+            - .semaphore/ci-result.sh failed
       jobs:
         - name: "doc-check (Linux amd64)"
           commands:

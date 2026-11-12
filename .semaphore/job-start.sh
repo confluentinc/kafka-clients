@@ -50,7 +50,7 @@ if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
   git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD || return 1
 fi
 
-# Replaces this job's previous result with `running` (see the global epilogue of semaphore.yml),
+# Replaces this job's previous result with `running` (see ci-result.sh and "CI results" in semaphore.yml),
 # so that a rerun that is still running, was stopped, or could not upload its result does not
 # leave an earlier `passed` in place. On a build of master or of a release branch
 # <major>.<minor>.x, the only kinds create-release-tag.yml tags, a job that cannot record

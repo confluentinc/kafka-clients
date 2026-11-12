@@ -288,9 +288,9 @@ blocks:
             # Each job in REQUIRED_CI_JOBS must have reported `passed` for
             # exactly this commit, and every job that reported a result must be
             # in the list, so a job added to semaphore.yml cannot be omitted
-            # unintentionally. The job-name mapping matches the global epilogue
-            # in semaphore.yml. A tag on a failing commit would rerun CI and
-            # never be published.
+            # unintentionally. The job-name mapping matches
+            # .semaphore/ci-result.sh. A tag on a failing commit would be
+            # released anyway: the tag build's CI does not gate the release.
             - |
               results_dir=$(mktemp -d) || refuse "could not create a temporary directory"
               artifact pull workflow ci-result --destination "${results_dir}/ci-result" --force >/dev/null \
