@@ -13,7 +13,7 @@ ROOTS = REPO_ROOT=$(REPO_ROOT) RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT)
 VENV = . venv/bin/activate
 
 .PHONY: build build-all check-generated \
-	build-rust build-rust-integration-tests build-rust-all-features \
+	build-rust build-rust-integration-tests build-rust-all-features build-rust-tests-all-features \
 	submodules build-c init-venv init-venv-librdkafka build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
@@ -51,6 +51,8 @@ build-rust-integration-tests:
 	$(MAKE) -C rust build-integration-tests
 build-rust-all-features:
 	$(MAKE) -C rust build-all-features
+build-rust-tests-all-features:
+	$(MAKE) -C rust build-tests-all-features
 
 submodules:
 	git submodule update --init --recursive
@@ -397,11 +399,16 @@ verify-dotnet-macos-docker: test-dotnet-macos-docker
 verify-python-macos-docker: test-python-macos-docker
 	$(MAKE) test-integration-python-native
 
-verify-rust: build-rust-all-features format-check check-generated lint test-rust-all-features
+# The Rust verify jobs compile once, the debug all-features build the tests run
+# (rust/Makefile `build-tests-all-features`), and build nothing in release: no
+# Rust test runs a release artifact, and the C and Python jobs compile the
+# release build. The build comes before `check-generated`, which reads its
+# generated code.
+verify-rust: build-rust-tests-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
 
 # macOS verify-rust; the perf tail uses rust/Makefile's MACOS_P99_LIMIT_MS.
-verify-rust-macos-docker: build-rust-all-features format-check check-generated lint test-rust-all-features
+verify-rust-macos-docker: build-rust-tests-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) -C rust test-integration-perf-macos
 
 # The pre-commit hook's verification. It first selects the tests the changes

@@ -30,7 +30,7 @@ CARGO_TEST_GRPC_C = cargo xtask selected-cargo-test --section c.integration --
 CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc --
 
 .PHONY: build build-integration-tests build-all-features \
-	devel-build devel-build-integration-tests devel-build-all-features \
+	devel-build devel-build-integration-tests devel-build-all-features build-tests-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
@@ -51,6 +51,15 @@ devel-build-integration-tests:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests
 devel-build-all-features:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features
+
+# The one build of the Rust verify jobs: the debug, all-features build of the
+# library, its unit and integration tests and the examples, which
+# `test-all-features` and `test-integration-perf` then reuse. It also writes the
+# generated protocol code under target/debug/build that `check-generated` reads.
+# No RUSTFLAGS: the tests run without them, and different RUSTFLAGS would make
+# cargo compile everything a second time.
+build-tests-all-features:
+	cargo test --all-features --no-run
 
 test: build
 	# --workspace, not the root package alone: `cargo test` from the root only
@@ -100,7 +109,9 @@ test: build
 # without failing `verify`.
 #
 # Part of the root `verify` (through `test`) and of the CI `verify-rust` job.
-test-all-features: build-all-features
+# It builds nothing in release: no test runs a release artifact. The release
+# build is still compiled in CI by the C and Python jobs.
+test-all-features: build-tests-all-features
 	$(CARGO_TEST) --all-features -- --skip __grpc
 	$(CARGO_TEST) -p xtask -p generator
 
@@ -231,8 +242,12 @@ test-integration-grpc-dotnet-native:
 # functional tests they contend for CPU, memory and Docker, and their p99
 # budgets fail for reasons unrelated to the code under test. Expects an
 # otherwise-idle machine.
-test-integration-perf: build-integration-tests
-	$(CARGO_TEST) --features integration-tests --test performance -- --nocapture
+#
+# They run in debug, as the other tests do. `--all-features` matches the build
+# of `build-tests-all-features`, so only the `performance` binary is compiled
+# here; the features add only code these tests do not use.
+test-integration-perf: build-tests-all-features
+	$(CARGO_TEST) --all-features --test performance -- --nocapture
 
 # macOS variant; the perf tail uses MACOS_P99_LIMIT_MS.
 test-integration-perf-macos:
