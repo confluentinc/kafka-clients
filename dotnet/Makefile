@@ -140,9 +140,9 @@ test-integration:
 # invoked here or via the root Makefile.
 #
 # The `dotnet build` compiles the full TFM matrix: the library
-# (netstandard2.0;net8.0;net10.0), the unit-test project (net462;net8.0;net10.0)
+# (net462;netstandard2.0;net8.0;net10.0), the unit-test project (net462;net8.0;net10.0)
 # and the integration-test project (net8.0;net10.0).
-# The net462 leg is BUILD-VERIFIED here (cross-platform via
+# The net462 legs are BUILD-VERIFIED here (cross-platform via
 # Microsoft.NETFramework.ReferenceAssemblies, Decision 2a) but never RUN — net462
 # cannot execute on Linux; test execution is net8.0 + net10.0 only (see
 # test-dotnet).

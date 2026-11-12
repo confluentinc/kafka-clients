@@ -18,7 +18,9 @@ name: Bump version
 #                      form is below the current Python version
 #                      (python/pyproject.toml).
 #   DOTNET_VERSION  -- a version for the Confluent.Kafka NuGet package, in
-#                      semver form (e.g. 4.4.0-beta.1), written to
+#                      semver form (e.g. 4.4.0-beta.1; an -alpha.N, -beta.N
+#                      or -rc.N may be followed by .dev.M for a dev build,
+#                      e.g. 4.4.0-alpha.0.dev.1), written to
 #                      dotnet/Directory.Build.props. Without it the .NET
 #                      version stays as it is; it only moves up. To change
 #                      only the .NET version, give VERSION and

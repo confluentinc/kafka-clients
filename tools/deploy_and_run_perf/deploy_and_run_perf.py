@@ -90,6 +90,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer|rust-consumer|librdkafka-consumer|java-consumer>}"
 REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 
+# Runs a command up to 5 times, 5 seconds apart: for a download, which can fail for a moment.
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 echo "== apt: base packages =="
 # zip is required by the sdkman installer (java path); unzip by the repo extract.
 sudo apt update && sudo apt install -y wget curl git unzip zip build-essential cmake pkg-config \
@@ -103,7 +117,7 @@ install_kafka_cli() {
     echo "== Installing JRE + Apache Kafka $kver (kafka CLI scripts) =="
     sudo apt install -y default-jre
     local tgz="kafka_2.13-${kver}.tgz"
-    curl -fsSL -o "/tmp/$tgz" "https://archive.apache.org/dist/kafka/${kver}/${tgz}"
+    retry curl -fsSL -o "/tmp/$tgz" "https://archive.apache.org/dist/kafka/${kver}/${tgz}"
     sudo rm -rf /opt/kafka && sudo mkdir -p /opt/kafka
     sudo tar -xzf "/tmp/$tgz" -C /opt/kafka --strip-components=1
   fi
@@ -114,8 +128,8 @@ install_kafka_cli() {
 # producer test and the librdkafka-consumer benchmark).
 install_librdkafka() {
   echo "== Confluent clients apt repo + librdkafka-dev =="
-  wget -qO - https://packages.confluent.io/clients/deb/archive.key \
-    | sudo gpg --dearmor --yes -o /usr/share/keyrings/confluent-clients-archive-keyring.gpg
+  retry wget -qO /tmp/confluent-clients-archive.key https://packages.confluent.io/clients/deb/archive.key
+  sudo gpg --dearmor --yes -o /usr/share/keyrings/confluent-clients-archive-keyring.gpg /tmp/confluent-clients-archive.key
   . /etc/os-release
   # The Confluent clients repo serves Ubuntu/Debian codenames but not the very
   # newest Debian (e.g. trixie). Use the host codename if available, else fall
@@ -139,7 +153,13 @@ install_librdkafka() {
 install_java_toolchain() {
   export SDKMAN_DIR="$HOME/.sdkman"
   if [ ! -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]; then
-    curl -s "https://get.sdkman.io?rcupdate=false" | bash
+    retry curl -fsS -o /tmp/sdkman-install.sh "https://get.sdkman.io?rcupdate=false"
+    # The installer downloads SDKMAN, so it is retried too. It does nothing when $SDKMAN_DIR
+    # exists, so each attempt removes what a failed one left.
+    install_sdkman() {
+      rm -rf "$SDKMAN_DIR" && bash /tmp/sdkman-install.sh && [ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]
+    }
+    retry install_sdkman
   fi
   mkdir -p "$SDKMAN_DIR/etc"
   grep -q sdkman_auto_answer "$SDKMAN_DIR/etc/config" 2>/dev/null \

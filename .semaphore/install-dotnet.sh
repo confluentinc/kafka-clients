@@ -42,16 +42,31 @@ set -euo pipefail
 
 DOTNET_ROOT="${HOME}/.dotnet"
 
+# Runs a command up to 5 times, 5 seconds apart: for a download, which can fail for a moment.
+# The installer downloads the SDK and the runtime, so its runs are retried too.
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 # Fetch the official installer to a temp path (never curl | bash — keep the
 # downloaded script inspectable / re-runnable within the job).
 INSTALL_SCRIPT="$(mktemp)"
-curl -fsSL https://dot.net/v1/dotnet-install.sh -o "${INSTALL_SCRIPT}"
+retry curl -fsSL https://dot.net/v1/dotnet-install.sh -o "${INSTALL_SCRIPT}"
 chmod +x "${INSTALL_SCRIPT}"
 
 # 1) SDK 10 (builds all TFMs, runs net10.0).
-"${INSTALL_SCRIPT}" --channel 10.0 --install-dir "${DOTNET_ROOT}"
+retry "${INSTALL_SCRIPT}" --channel 10.0 --install-dir "${DOTNET_ROOT}"
 # 2) .NET 8 base runtime (runs net8.0 tests).
-"${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET_ROOT}"
+retry "${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET_ROOT}"
 
 # This script INSTALLS only -- it deliberately does NOT export DOTNET_ROOT/PATH.
 # Semaphore runs a job's prologue + job `commands:` in ONE persistent shell

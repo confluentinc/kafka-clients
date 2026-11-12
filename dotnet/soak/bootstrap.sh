@@ -76,6 +76,20 @@ validate_config() {
 }
 validate_config
 
+# Runs a command up to 5 times, 5 seconds apart: for a download, which can fail for a moment.
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 # --- system packages --------------------------------------------------------
 # libjemalloc2: SOAK_JEMALLOC=true LD_PRELOADs it to fix the glibc RSS strand a
 # producer stall leaves behind; run.sh fails loudly at startup if it is
@@ -87,7 +101,9 @@ sudo apt-get install -y \
 
 # --- Rust toolchain (build.sh assumes cargo/rustc are on PATH) --------------
 if ! command -v cargo >/dev/null 2>&1; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+    retry sh /tmp/rustup-init.sh -y
+    rm -f /tmp/rustup-init.sh
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -97,8 +113,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # on a box that also runs the Python soak. The SDK carries the matching runtime,
 # so nothing else is needed to run the built client.
 if ! command -v dotnet >/dev/null 2>&1; then
-    curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
-    bash /tmp/dotnet-install.sh --channel "$dotnet_channel" --install-dir "$HOME/.dotnet"
+    retry curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+    retry bash /tmp/dotnet-install.sh --channel "$dotnet_channel" --install-dir "$HOME/.dotnet"
     rm -f /tmp/dotnet-install.sh
 fi
 export DOTNET_ROOT="$HOME/.dotnet"
@@ -109,7 +125,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1
 dotnet --info | head -n 5
 
 # --- OpenTelemetry Collector ------------------------------------------------
-wget -O otel_collector_package.deb "$otel_collector_package_url"
+retry wget -O otel_collector_package.deb "$otel_collector_package_url"
 sudo dpkg -i otel_collector_package.deb
 rm otel_collector_package.deb
 sudo cp "$SOAK_DIR/otel-config.yaml" /etc/otelcol-contrib/config.yaml

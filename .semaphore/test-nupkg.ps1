@@ -62,7 +62,7 @@ $package = $listing[0].FullName
 $packageName = $listing[0].Name
 $version = $Matches[1]
 # The release versions; see check-nupkg.py's VERSION_PATTERN.
-if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$') {
+if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?$') {
     throw "'$version' is not a release version"
 }
 $Header = (Resolve-Path $Header).Path
@@ -194,6 +194,13 @@ Get-ChildItem -Recurse -Directory (Join-Path $unit 'tests'), (Join-Path $unit 'a
 # Where the project looks for the kafka submodule, ..\..\..\kafka from its directory. A junction
 # needs no administrator rights.
 New-Item -ItemType Junction -Path (Join-Path $work 'kafka') -Target (Join-Path $repo 'kafka') | Out-Null
+# The other repository files the tests read, at the same place relative to the submodule: the
+# error hierarchy generator, the Java deprecation list and the library's sources, which a test
+# scans. The project does not build from there, so the package stays its only Confluent.Kafka.
+foreach ($dir in 'rust\xtask\src', 'design\current', 'dotnet\src\Confluent.Kafka') {
+    New-Item -ItemType Directory -Path (Split-Path (Join-Path $work $dir)) -Force | Out-Null
+    New-Item -ItemType Junction -Path (Join-Path $work $dir) -Target (Join-Path $repo $dir) | Out-Null
+}
 Write-NuGetConfig $unit
 $project = Join-Path $unit 'tests\Confluent.Kafka.UnitTests\Confluent.Kafka.UnitTests.csproj'
 $unitProperties = @("-p:ConfluentKafkaPackageVersion=$version", "-p:PlatformTarget=$Platform", "-p:RuntimeIdentifier=$rid")

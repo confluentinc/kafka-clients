@@ -2871,7 +2871,8 @@ fn print_help() {
                     a package's current version is refused (rfc/versioning.md)
                     --dotnet-version SEMVER sets the .NET package's version
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
-                    it only moves up too
+                    it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
+                    by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
   select-tests    Ask an agent which tests the changes from a base branch can affect and write
                   them to ../test-selection.json (or $TEST_SELECTION, relative to the repository
                   root), to commit with the branch; the Makefiles' test recipes run only those
