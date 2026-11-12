@@ -102,7 +102,8 @@ internal static class ManagedDump
     private const int MaxObjectLines = 40;
     private const int MaxObjectLineLength = 400;
     private const int MaxThreadPoolLines = 20;
-    private const int MaxTraceLines = 80;
+    private const int MaxTraceLines = 120;
+    private static readonly Regex s_traceLink = new Regex("\\b(?:sender|handle)=[0-9a-f]+", RegexOptions.CultureInvariant);
     private const string TraceDirectoryVariable = "CONFLUENT_KAFKA_HANG_TRACE_DIR";
     private const long MaxKeptDumpBytes = 1L << 30;
     private static readonly TimeSpan s_budget = TimeSpan.FromMinutes(6);
@@ -343,8 +344,9 @@ internal static class ManagedDump
     }
 
     /// <summary>
-    /// The lines of the Rust hang trace (<c>rust-trace-&lt;pid&gt;.log</c>) of each consumer whose close started and has
-    /// not ended, each line's time as UTC.
+    /// The lines of the hang traces (the core's <c>rust-trace-&lt;pid&gt;.log</c> and the binding's
+    /// <c>dotnet-trace-&lt;pid&gt;.log</c>) of each client whose close started and has not ended, with the lines of the
+    /// keys those lines name (<c>sender=</c>, <c>handle=</c>), in time order, each line's time as UTC.
     /// </summary>
     private static string RustTrace()
     {
@@ -354,47 +356,96 @@ internal static class ManagedDump
             return "  Rust trace: off";
         }
 
-        string file = Path.Combine(directory, $"rust-trace-{Environment.ProcessId}.log");
+        int pid = Environment.ProcessId;
+        string rustFile = Path.Combine(directory, $"rust-trace-{pid}.log");
+        string dotnetFile = Path.Combine(directory, $"dotnet-trace-{pid}.log");
         List<string[]> entries = new List<string[]>();
-        try
+        List<string> notes = new List<string>();
+        foreach (string file in new[] { rustFile, dotnetFile })
         {
-            using FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using StreamReader reader = new StreamReader(stream);
-            string? line;
-            while ((line = reader.ReadLine()) is not null)
+            try
             {
-                string[] fields = line.Split(' ', 4);
-                if (fields.Length == 4)
+                using FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using StreamReader reader = new StreamReader(stream);
+                string? line;
+                while ((line = reader.ReadLine()) is not null)
                 {
-                    entries.Add(fields);
+                    string[] fields = line.Split(' ', 4);
+                    if (fields.Length == 4)
+                    {
+                        entries.Add(fields);
+                    }
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                notes.Add($"{Path.GetFileName(file)} not read: {e.Message}");
+            }
+        }
+
+        // Addresses are reused once a client is destroyed, so each key counts from its latest instance: a close
+        // key from after its last "close: end", a linked key from its last start line.
+        Dictionary<string, int> lastStart = new Dictionary<string, int>(StringComparer.Ordinal);
+        Dictionary<string, int> lastEnd = new Dictionary<string, int>(StringComparer.Ordinal);
+        Dictionary<string, int> lastLinkedStart = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < entries.Count; i++)
+        {
+            string key = entries[i][2];
+            string text = entries[i][3];
+            if (text.StartsWith("close: start", StringComparison.Ordinal))
+            {
+                lastStart[key] = i;
+            }
+            else if (text.StartsWith("close: end", StringComparison.Ordinal))
+            {
+                lastEnd[key] = i;
+            }
+            else if (text.StartsWith("sender: run started", StringComparison.Ordinal)
+                || text.StartsWith("dotnet: close submitted", StringComparison.Ordinal))
+            {
+                lastLinkedStart[key] = i;
+            }
+        }
+
+        Dictionary<string, int> from = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, int> start in lastStart)
+        {
+            int end = lastEnd.TryGetValue(start.Key, out int e) ? e : -1;
+            if (start.Value > end)
+            {
+                from[start.Key] = end + 1;
+            }
+        }
+
+        int unfinished = from.Count;
+        foreach (KeyValuePair<string, int> key in from.ToList())
+        {
+            for (int i = key.Value; i < entries.Count; i++)
+            {
+                if (entries[i][2] != key.Key)
+                {
+                    continue;
+                }
+
+                foreach (Match link in s_traceLink.Matches(entries[i][3]))
+                {
+                    if (!from.ContainsKey(link.Value))
+                    {
+                        from[link.Value] = lastLinkedStart.TryGetValue(link.Value, out int l) ? l : 0;
+                    }
                 }
             }
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-        {
-            return $"  Rust trace: {file} not read: {e.Message}";
-        }
 
-        HashSet<string> started = new HashSet<string>(StringComparer.Ordinal);
-        HashSet<string> ended = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string[] entry in entries)
-        {
-            if (entry[3].StartsWith("close: start", StringComparison.Ordinal))
-            {
-                started.Add(entry[2]);
-            }
-            else if (entry[3].StartsWith("close: end", StringComparison.Ordinal))
-            {
-                ended.Add(entry[2]);
-            }
-        }
-
-        started.ExceptWith(ended);
         List<string> lines = entries
-            .Where(entry => started.Contains(entry[2]))
-            .Select(entry => $"    {Time(entry[0])} {entry[1]} {entry[2]} {entry[3]}")
+            .Select((entry, index) => (entry, index))
+            .Where(item => from.TryGetValue(item.entry[2], out int first) && item.index >= first)
+            .OrderBy(item => long.TryParse(item.entry[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out long ms) ? ms : 0)
+            .Select(item => $"    {Time(item.entry[0])} {item.entry[1]} {item.entry[2]} {item.entry[3]}")
             .ToList();
-        return $"  Rust trace of the {started.Count} consumers whose close has not ended ({entries.Count} lines in {file}):"
+        string read = notes.Count == 0 ? string.Empty : "; " + string.Join("; ", notes);
+        return $"  Hang trace of the {unfinished} clients whose close has not ended ({entries.Count} lines in "
+            + $"{rustFile} and {dotnetFile}{read}):"
             + Environment.NewLine + string.Join(Environment.NewLine, lines.Skip(Math.Max(0, lines.Count - MaxTraceLines)));
     }
 

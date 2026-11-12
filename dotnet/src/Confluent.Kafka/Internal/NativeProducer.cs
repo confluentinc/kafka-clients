@@ -82,6 +82,9 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     private Task _serializersDisposed = Task.CompletedTask;
     private int _closed;
 
+    // Temporary, for the macOS CI hang investigation: the view's address, the key of this producer's hang trace.
+    private readonly IntPtr _traceKey;
+
     private NativeProducer(
         SafeProducerHandle handle,
         string completionThreadName,
@@ -89,6 +92,9 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         SerdeDisposal? serdes)
     {
         _handle = handle;
+#pragma warning disable CKRDA0005 // Temporary hang trace: the address is only printed, never passed to native.
+        _traceKey = handle.DangerousGetHandle();
+#pragma warning restore CKRDA0005
         _maxBlockMs = maxBlockMs;
         _serdes = serdes;
         _completion = new CompletionThread(completionThreadName, DrainOf(handle, _uses));
@@ -1023,7 +1029,11 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
     }
 
-    private void SubmitClose(long? timeoutMs, Action<IntPtr> onClosed) =>
+    private void SubmitClose(long? timeoutMs, Action<IntPtr> onClosed)
+    {
+        TraceClose(timeoutMs is long traced
+            ? "dotnet: close submitted, timeout=" + traced.ToString(CultureInfo.InvariantCulture)
+            : "dotnet: close submitted, untimed");
         SubmitOwned(
             onClosed,
             opaque =>
@@ -1037,6 +1047,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
                     NativeMethods.ProducerCloseCb(_handle, s_voidCompletion, opaque);
                 }
             });
+    }
 
     private void CloseFromCallback(long? timeoutMs)
     {
@@ -1055,14 +1066,27 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         SubmitCloseFromCallback();
     }
 
-    private void SubmitCloseFromCallback() =>
+    private void SubmitCloseFromCallback()
+    {
+        TraceClose("dotnet: close submitted from a callback, timeout=0");
         SubmitOwned(
             new Action<IntPtr>(error =>
             {
+                HangTrace.Write(_traceKey, "dotnet: close completion received, teardown requested");
                 FreeError(error);
                 _completion.RequestTeardown(TearDown);
             }),
             opaque => NativeMethods.ProducerCloseWithTimeoutCb(_handle, 0, s_voidCompletion, opaque));
+    }
+
+    // Temporary, for the macOS CI hang investigation: starts the hang trace of this producer's close.
+    private void TraceClose(string text)
+    {
+        if (HangTrace.Enabled)
+        {
+            _completion.TraceFrom(_traceKey, text);
+        }
+    }
 
     private void CloseAndTearDown(long? timeoutMs)
     {
@@ -1072,6 +1096,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         {
             SubmitClose(timeoutMs, closed.Complete);
             _ = closed.Wait(Timeout.InfiniteTimeSpan, out error);
+            HangTrace.Write(_traceKey, "dotnet: close completion received, teardown starts");
         }
         finally
         {
@@ -1090,6 +1115,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         {
             SubmitClose(timeoutMs, e => closed.SetResult(e));
             error = await closed.Task.ConfigureAwait(false);
+            HangTrace.Write(_traceKey, "dotnet: close completion received, teardown starts");
         }
         finally
         {

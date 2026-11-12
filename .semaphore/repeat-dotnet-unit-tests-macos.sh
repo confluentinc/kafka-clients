@@ -25,9 +25,9 @@ hung() {
   return 1
 }
 
-# The Rust trace of a run that did not hang is not needed; dropping it keeps the uploaded folder small.
+# The traces of a run that did not hang are not needed; dropping them keeps the uploaded folder small.
 drop_traces() {
-  rm -f "$hang_dir"/rust-trace-*.log
+  rm -f "$hang_dir"/rust-trace-*.log "$hang_dir"/dotnet-trace-*.log
 }
 
 stop_hung() {

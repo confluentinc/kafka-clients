@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::sensor::record_or_log;
+use crate::consumer::internals::hang_trace_keyed;
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 
 use crate::ClientResponse;
@@ -898,6 +899,12 @@ impl<C: KafkaClient> Sender<C> {
     /// Translated from `Sender#hasPendingTransactionalRequests`.
     /// Reachable for a purely idempotent producer — see
     /// [`TransactionManager::has_ongoing_transaction`].
+    /// Temporary, for the macOS CI hang investigation: the Sender's key in the
+    /// hang trace, the address of the `running` flag it shares with its producer.
+    fn hang_trace_id(&self) -> usize {
+        Arc::as_ptr(&self.running) as usize
+    }
+
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#hasPendingTransactionalRequests")]
     fn has_pending_transactional_requests(&self) -> bool {
         match &self.transaction_manager {
@@ -914,11 +921,24 @@ impl<C: KafkaClient> Sender<C> {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#run")]
     pub async fn run(&mut self) {
         kafka_debug!(self.log_context, "Starting Kafka producer I/O task.");
+        let trace_id = self.hang_trace_id();
+        hang_trace_keyed("sender", trace_id, format_args!("sender: run started"));
 
         // Main loop, runs until close is called
         while self.running.load(Ordering::Acquire) {
             self.run_once_logging_errors().await;
         }
+        hang_trace_keyed(
+            "sender",
+            trace_id,
+            format_args!(
+                "sender: main loop exited, force_close={} undrained={} in_flight={} txn_pending={}",
+                self.force_close.load(Ordering::Acquire),
+                self.accumulator.has_undrained(),
+                self.client.in_flight_request_count(),
+                self.has_pending_transactional_requests()
+            ),
+        );
 
         kafka_debug!(
             self.log_context,
@@ -934,6 +954,7 @@ impl<C: KafkaClient> Sender<C> {
         {
             self.run_once_logging_errors().await;
         }
+        hang_trace_keyed("sender", trace_id, format_args!("sender: remaining records done"));
 
         // Abort the transaction if any commit or abort didn't go through the
         // transaction manager's queue (`org.apache.kafka.clients.producer.internals.Sender#run`).
@@ -985,9 +1006,12 @@ impl<C: KafkaClient> Sender<C> {
             // reach its own deques, so the Sender aborts its share with the same reason
             // Java's no-argument `abortBatches()` uses. Critic 44 note 2.
             self.abort_in_flight_batches(&RecordAccumulator::producer_closed_forcefully_error());
+            hang_trace_keyed("sender", trace_id, format_args!("sender: forced shutdown aborts done"));
         }
 
+        hang_trace_keyed("sender", trace_id, format_args!("sender: client close starts"));
         self.client.close().await;
+        hang_trace_keyed("sender", trace_id, format_args!("sender: client closed"));
 
         // Java leaks these buffers, and this port declines to.
         //
@@ -1150,6 +1174,16 @@ impl<C: KafkaClient> Sender<C> {
 
         let current_time_ms = self.time.milliseconds();
         let poll_timeout = self.send_producer_data(current_time_ms).await?;
+        if poll_timeout >= 5_000 {
+            hang_trace_keyed(
+                "sender",
+                self.hang_trace_id(),
+                format_args!(
+                    "sender: poll for {poll_timeout} ms, running={}",
+                    self.running.load(Ordering::Acquire)
+                ),
+            );
+        }
         self.poll_and_dispatch(poll_timeout, current_time_ms).await;
         Ok(())
     }

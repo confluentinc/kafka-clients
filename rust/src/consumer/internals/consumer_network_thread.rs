@@ -1261,6 +1261,12 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 /// there, one unbuffered line per event: milliseconds since the epoch, the
 /// thread's name, the consumer's id and the event.
 pub(crate) fn hang_trace(id: usize, event: std::fmt::Arguments<'_>) {
+    hang_trace_keyed("io", id, event);
+}
+
+/// [`hang_trace`] for any client: the line's key is `<kind>=<id in hex>`
+/// (`prod` for a producer, `sender` for its Sender task).
+pub(crate) fn hang_trace_keyed(kind: &str, id: usize, event: std::fmt::Arguments<'_>) {
     use std::io::Write;
     static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
     let file = FILE.get_or_init(|| {
@@ -1281,7 +1287,7 @@ pub(crate) fn hang_trace(id: usize, event: std::fmt::Arguments<'_>) {
             .unwrap_or(0);
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("unnamed").replace(' ', "_");
-        let line = format!("{ms} {name} io={id:x} {event}\n");
+        let line = format!("{ms} {name} {kind}={id:x} {event}\n");
         if let Ok(mut file) = file.lock() {
             let _ = file.write_all(line.as_bytes());
         }
