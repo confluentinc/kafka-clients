@@ -1,18 +1,18 @@
 {
-  "base": "816eb55b4",
+  "base": "fe8f98eb1e85b81d4f0cac8937c5d03d3d82ce07",
   "changed_files": [
-    "M rust/src/consumer/internals/subscription_state.rs"
+    "M rust/src/common/protocol/byte_buffer_accessor.rs"
   ],
-  "head": "09d94a8afa3cbf5b6f1670abf00e8ca03eec87fd",
-  "merge_base": "816eb55b43d898eb436a727bd9b8fed5384006b4",
+  "head": "4a67ce235af41ffaec28870f3579046be92992d4",
+  "merge_base": "fe8f98eb1e85b81d4f0cac8937c5d03d3d82ce07",
   "reasons": {
-    "rust.lib": "The change only adds the unit test test_unsubscribe_does_not_reset_rebalance_listener to the subscription_state tests module and touches no code that other tests or bindings use."
+    "rust.lib": "The change only adds a unit test to the tests module of common::protocol::byte_buffer_accessor and leaves non-test code untouched, so only that module's unit tests are affected."
   },
   "rust": {
     "lib": [
-      "consumer::internals::subscription_state::tests::"
+      "common::protocol::byte_buffer_accessor::"
     ]
   },
-  "tree": "9c76718bf7662b4677f9ac6ed1980ea50beb5d7a",
+  "tree": "2dd2956551150d16534044a69d13dd54a41a3576",
   "version": 2
 }
