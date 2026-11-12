@@ -425,6 +425,14 @@ cbindgen = { version = "0.29", optional = true, features = ["unstable_ir"] }
 lto = "fat"
 codegen-units = 1
 
+# `cargo test` builds every crate, test binary and example with this profile.
+# Line tables only: a panic's backtrace still shows file, line and function, but
+# a debugger cannot show variables or types. Full debug info was ~85% of each
+# test and example binary, and writing it slowed every link. To debug a test,
+# run it with `CARGO_PROFILE_TEST_DEBUG=true`.
+[profile.test]
+debug = "line-tables-only"
+
 [lints.clippy]
 exhaustive_structs = "deny"
 exhaustive_enums = "deny"

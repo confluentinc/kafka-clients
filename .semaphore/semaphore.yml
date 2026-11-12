@@ -25,37 +25,42 @@ name: build-test-release
 #
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
-#   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
-#      suite, including the native-Rust arm of the multilanguage tests.
-#   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python, and
-#      verify-dotnet, each over PLAINTEXT, SSL and SASL_SSL, including the gRPC
-#      multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet). The .NET
-#      gRPC images are built for linux/amd64: Grpc.Tools' linux_arm64 protoc
-#      SIGSEGVs during C# codegen inside an arm64 Linux container, so they need
-#      an amd64 Linux agent (which this block uses anyway).
-#   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
-#      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
-#      for the broker the integration/perf tests need.
-#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest),
+#   1. "Verify Rust and language bindings (Linux amd64)" -- the whole Rust
+#      test suite, including the native-Rust arm of the multilanguage tests,
+#      and verify-c, verify-python and verify-dotnet, each over PLAINTEXT, SSL
+#      and SASL_SSL, including the gRPC multilanguage arm (__grpc_c /
+#      __grpc_python / __grpc_dotnet). The .NET gRPC images are built for
+#      linux/amd64: Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen
+#      inside an arm64 Linux container, so they need an amd64 Linux agent
+#      (which this block uses anyway).
+#   2. "Verify Rust and language bindings (macOS arm64)" -- native Rust unit +
+#      integration + perf on s1-macos-15-arm64-8, and verify-c (ctest),
 #      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
 #      net10.0), each followed by the gRPC multilanguage arm with the gRPC
 #      server running as a native host process (MULTILANG_BACKEND_MODE=native),
-#      which tests the macOS build of each binding. The broker runs in Docker via
-#      Colima. The native .NET server is the net10.0 build; Grpc.Tools has no
-#      macOS arm64 protoc and runs its macosx_x64 one under Rosetta 2, which is
-#      unaffected by the linux_arm64 SIGSEGV in item 2.
-#   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
-#      crate with warnings denied.
-#   6. "Check crate package (Linux amd64)" -- packages the crate and checks its
-#      contents.
-#   7. "Check API compatibility (Linux amd64)" -- compares the Rust API and the
-#      C ABI with the last release tag; a breaking change fails unless the
-#      Cargo.toml version allows it.
-#   8. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
-#      against the RustSec advisory database; a vulnerable dependency fails.
-#   9. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
+#      which tests the macOS build of each binding. dependencies-macos.sh brings
+#      up Docker via Colima for the broker. The native .NET server is the
+#      net10.0 build; Grpc.Tools has no macOS arm64 protoc and runs its
+#      macosx_x64 one under Rosetta 2, which is unaffected by the linux_arm64
+#      SIGSEGV in item 1.
+#   3. "Rust additional checks (Linux amd64)" -- one job each: the rustdoc of
+#      every workspace crate with warnings denied, plus clippy over the default
+#      features (doc-check); format-check, check-generated, the custom lint
+#      rules and clippy over --all-features (lint); the packaged crate's
+#      contents (package-check); the Rust API and the C ABI against the last
+#      release tag, where a breaking change fails unless the Cargo.toml version
+#      allows it (api-compat); rust/Cargo.lock against the RustSec advisory
+#      database, where a vulnerable dependency fails (audit).
+#   4. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
 #      blocks, which run only on a release tag of their package (see the
 #      comments above them).
+#
+# On a pull request build the Linux and macOS verify blocks run only the tests
+# that the committed test-selection.json selects (`make select-tests`, run
+# before pushing), and only while the checkout is the working tree it was made
+# for; every other build, and a pull request without a matching selection, runs
+# every test. The Windows block, whose script does not go through the
+# Makefiles, always runs every .NET unit test.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -122,8 +127,10 @@ name: build-test-release
 #      then pushes one tag per client entered, rust/v<version>,
 #      python/v<version> and dotnet/v<version>.
 #   3. Each tag push runs this pipeline on that tag. CI runs again, and the
-#      release blocks of that client run once every CI job has passed: the
-#      crate is published to crates.io; the wheels and the NuGet package are
+#      release blocks of that client run alongside it, without waiting for it:
+#      CI already passed on the commit before the tag was created, and a flaky
+#      test or an unavailable external resource on the tag build must not block
+#      the release. The crate is published to crates.io; the wheels and the NuGet package are
 #      built, tested and packaged, and recorded in the workflow's artifacts.
 #   4. For the wheels, run the manual "Publish to Test PyPI" promotion
 #      (publish-testpypi.yml) on that tag build once its packaging block has
@@ -145,16 +152,14 @@ name: build-test-release
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
-# renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of "Release: CI passed".
+# renaming or removing a CI job here also means updating that list.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
 
-# A release tag build runs CI (and, for Python and .NET, the wheel and native
-# library builds alongside it),
-# then the release checks, the publish and the post-publish checks one after
-# another, which takes longer than an ordinary build. The limit is explicit so that it does not
+# A release tag build runs CI and, alongside it, the release checks, the
+# publish and the post-publish checks one after another (for Python and .NET,
+# after the wheel and native library builds), which takes longer than an ordinary build. The limit is explicit so that it does not
 # depend on Semaphore's default for a pipeline.
 execution_time_limit:
   hours: 3
@@ -218,61 +223,36 @@ global_job_config:
             || echo "Warning: could not record this job's result; the job stays recorded as running, which create-release-tag.yml refuses"
 
 blocks:
-  - name: "Verify Rust (Linux amd64)"
+  - name: "Verify Rust and language bindings (Linux amd64)"
     # Runs on every new commit, whether created manually or by the translation
-    # agent.
+    # agent. Each job is a separate VM with its own broker, so the jobs run in
+    # parallel and do not contend for Docker resources. See
+    # rust/tests/common/test_context.rs (INTEGRATION_TEST_PROTOCOL /
+    # TestProtocol) for how a cluster's four listeners are selected per run.
     #
-    # The three jobs below each run on a dedicated VM in parallel, following
-    # the same pattern as the "Verify language bindings" block. All three run
-    # the whole native-Rust test suite (unit tests + the functional integration
-    # suite + the `__rust` multilanguage arms); they differ only in which broker
-    # listener the clients connect over:
-    #   - PLAINTEXT: `make verify-rust` — the full suite over the default
-    #     PLAINTEXT listener, plus the protocol-independent checks that run only
-    #     here: format-check, clippy, and the performance tests.
+    # The three Rust jobs run the whole native-Rust test suite (unit tests +
+    # the functional integration suite + the `__rust` multilanguage arms); they
+    # differ only in which broker listener the clients connect over:
+    #   - PLAINTEXT: the suite over the default PLAINTEXT listener, plus the
+    #     performance tests, which run only here.
     #   - SSL / SASL_SSL: the same suite over the broker's SSL listener (:9096)
-    #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret),
-    #     WITHOUT format-check / clippy / perf — those are protocol-independent,
-    #     so running them once in the PLAINTEXT job is enough.
+    #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret).
+    # The protocol-independent checks of `make verify-rust` (format-check,
+    # check-generated, lint) run in the lint and doc-check jobs of "Rust
+    # additional checks (Linux amd64)", in parallel, so no test job waits for
+    # them.
     #
-    # Each job provisions its own broker, so the jobs do not contend for
-    # Docker resources. See rust/tests/common/test_context.rs
-    # (INTEGRATION_TEST_PROTOCOL / TestProtocol) for how a cluster's four
-    # listeners are selected per run.
-    dependencies: []
-    execution_time_limit:
-      minutes: 45
-    task:
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-          - ./.semaphore/dependencies.sh
-      jobs:
-        - name: "Verify Rust (Linux amd64) — plaintext"
-          commands:
-            # The submodule is a shallow clone; `lint-custom` reads the
-            # Kafka tags pinned in xtask and fails without them.
-            - (cd rust && cargo xtask fetch-java-refs)
-            - make verify-rust
-        - name: "Verify Rust (Linux amd64) — ssl"
-          commands:
-            - make test-rust-all-features-ssl
-        - name: "Verify Rust (Linux amd64) — sasl_ssl (plain)"
-          commands:
-            - make test-rust-all-features-sasl-ssl
-
-  - name: "Verify language bindings (Linux amd64)"
-    # `dependencies: []` so this starts alongside "Verify Rust" rather than
-    # after it. Each job builds the Rust library itself; sharing one build via
-    # a workflow artifact was tried and reverted -- the tarball came to 8.9 GiB
-    # (target/debug is ~12x target/release, and ~48% of it is rustc incremental
-    # caches that CI never reuses), so pushing it once and pulling it twice cost
-    # more than the builds it replaced.
-    #
-    # Each binding runs across the three protocols, following the same pattern
-    # as the "Verify Rust" block. The gRPC multilanguage container arm
-    # (__grpc_c / __grpc_python / __grpc_dotnet) connects to the broker over the
-    # CONTAINER listener for the active protocol:
+    # Each binding runs across the same three protocols. Its jobs build the
+    # Rust library themselves, the debug all-features build the Rust tests use
+    # (the root's devel-build-rust-all-features); the Python and .NET perf
+    # stages of the plaintext jobs also build the release library they
+    # measure. Sharing one build via a workflow artifact was tried and
+    # reverted -- the tarball came to 8.9 GiB (target/debug is ~12x
+    # target/release, and ~48% of it is rustc incremental caches that CI never
+    # reuses), so pushing it once and pulling it twice cost more than the
+    # builds it replaced. The gRPC multilanguage container arm (__grpc_c /
+    # __grpc_python / __grpc_dotnet) connects to the broker over the CONTAINER
+    # listener for the active protocol:
     #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
     #     — the full binding gate (ctest / pytest / dotnet test unit tests, the
     #     PLAINTEXT gRPC arm, check-bindings, and the Python and .NET perf
@@ -284,44 +264,73 @@ blocks:
     #     jobs install no host .NET: the gRPC images build inside the .NET SDK
     #     image, and the harness is Rust.
     #
-    # Every job runs under this block's 30-minute limit. verify-dotnet's
-    # plaintext job is the longest: 26 minutes on 2026-09-30 and 20 on
-    # 2026-10-01, against about 11 for verify-c and verify-python. If it starts
-    # timing out, move the .NET jobs to a block of their own with a longer limit
-    # (see the note at the top of this file).
-    #
-    # Each job is a separate VM with its own broker, so the nine jobs do not
-    # contend for Docker resources.
+    # The block's 45 minutes is the Rust jobs' limit; each binding job sets 30
+    # minutes of its own (a job's limit may not exceed its block's, see the
+    # note at the top of this file). verify-dotnet's plaintext job is the
+    # longest binding job: 26 minutes on 2026-09-30 and 20 on 2026-10-01,
+    # against about 11 for verify-c and verify-python. If it starts timing
+    # out, raise its own limit, up to the block's.
     dependencies: []
     execution_time_limit:
-      minutes: 30
+      minutes: 45
     task:
       prologue:
         # Runs before EACH job in this block; every job is a separate VM with
         # its own checkout.
         commands:
           - . .semaphore/job-start.sh
+          # On a pull request, only the tests that the committed
+          # test-selection.json selects, if it was made for exactly this
+          # working tree (`make select-tests`, see
+          # rust/xtask/src/test_selection.rs); otherwise every test runs.
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
+        - name: "Verify Rust (Linux amd64) — plaintext"
+          commands:
+            - make test-rust-all-features
+            - make test-integration-perf-rust
+        - name: "Verify Rust (Linux amd64) — ssl"
+          commands:
+            - make test-rust-all-features-ssl
+        - name: "Verify Rust (Linux amd64) — sasl_ssl (plain)"
+          commands:
+            - make test-rust-all-features-sasl-ssl
         - name: "verify-c (Linux amd64) — plaintext"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make verify-c
         - name: "verify-c (Linux amd64) — ssl"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make test-integration-c-ssl
         - name: "verify-c (Linux amd64) — sasl_ssl (plain)"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make test-integration-c-sasl-ssl
         - name: "verify-python (Linux amd64) — plaintext"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make verify-python
         - name: "verify-python (Linux amd64) — ssl"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make test-integration-python-ssl
         - name: "verify-python (Linux amd64) — sasl_ssl (plain)"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make test-integration-python-sasl-ssl
         - name: "verify-dotnet (Linux amd64) — plaintext"
+          execution_time_limit:
+            minutes: 30
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"
@@ -331,13 +340,39 @@ blocks:
             - dotnet --list-runtimes
             - make verify-dotnet
         - name: "verify-dotnet (Linux amd64) — ssl"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make test-integration-dotnet-ssl
         - name: "verify-dotnet (Linux amd64) — sasl_ssl (plain)"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make test-integration-dotnet-sasl-ssl
 
-  - name: "Verify Rust (macOS arm64)"
+  - name: "Verify Rust and language bindings (macOS arm64)"
+    # verify-rust runs the native Rust unit, integration and perf tests
+    # (`make verify-rust-macos-docker`). verify-c runs the C ctest suite;
+    # verify-python runs pytest test/unit; verify-dotnet runs the .NET unit
+    # tests. Each binding job then runs its binding's gRPC multilanguage arm
+    # (__grpc_c / __grpc_python / __grpc_dotnet) with the gRPC server as a
+    # native host process rather than a container. Containers on macOS run
+    # Linux, so a container would only test the Linux build of the binding.
+    # The broker runs in Docker via Colima. The verify-dotnet job sets
+    # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
+    # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
+    # package with this machine's native library and installs it into a fresh
+    # project (make package-check-dotnet), which needs no Docker.
+    #
+    # The binding jobs use PLAINTEXT only. The SSL and SASL_SSL variants of
+    # their arm run on Linux. The TLS and SASL code paths are in the Rust
+    # client and are covered on macOS by rust/src/integration_tests/ssl_sasl_test.rs
+    # and rust/tests/integration/sasl_ssl_consumer_test.rs in the verify-rust job.
+    #
+    # The block's 45 minutes is the verify-rust job's limit; each binding job
+    # sets 30 minutes of its own (a job's limit may not exceed its block's).
+    # verify-dotnet took 10 minutes on 2026-10-01, before the package check,
+    # which takes about a minute.
     dependencies: []
     execution_time_limit:
       minutes: 45
@@ -351,51 +386,11 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust and language bindings (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
-      epilogue:
-        always:
-          commands:
-            - colima stop || true
-      jobs:
-        - name: "verify-rust (macOS arm64)"
-          commands:
-            # The submodule is a shallow clone; `lint-custom` reads the
-            # Kafka tags pinned in xtask and fails without them.
-            - (cd rust && cargo xtask fetch-java-refs)
-            - make verify-rust-macos-docker
-
-  - name: "Verify language bindings (macOS arm64)"
-    # verify-c runs the C ctest suite; verify-python runs pytest test/unit;
-    # verify-dotnet runs the .NET unit tests. Each job then runs its binding's
-    # gRPC multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet) with the
-    # gRPC server as a native host process rather than a container. Containers
-    # on macOS run Linux, so a container would only test the Linux build of the
-    # binding. The broker runs in Docker via Colima. The verify-dotnet job sets
-    # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
-    # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
-    # package with this machine's native library and installs it into a fresh
-    # project (make package-check-dotnet), which needs no Docker. Like the
-    # others it runs under this block's 30-minute limit; it took 10 minutes on
-    # 2026-10-01, before the package check, which takes about a minute.
-    #
-    # These jobs use PLAINTEXT only. The SSL and SASL_SSL variants of this arm
-    # run on Linux. The TLS and SASL code paths are in the Rust client and are
-    # covered on macOS by rust/src/integration_tests/ssl_sasl_test.rs and
-    # rust/tests/integration/sasl_ssl_consumer_test.rs in "Verify Rust (macOS arm64)".
-    dependencies: []
-    execution_time_limit:
-      minutes: 30
-    task:
-      agent:
-        machine:
-          type: s1-macos-15-arm64-8
-      env_vars:
-        - name: RUST_BACKTRACE
-          value: full
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-          - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:
@@ -404,7 +399,15 @@ blocks:
             # when its TestTimeout bound expired. The folder exists only after such a timeout.
             - 'if [ -d /tmp/confluent-kafka-dotnet-hangs ]; then artifact push job --expire-in 2w /tmp/confluent-kafka-dotnet-hangs || true; fi'
       jobs:
+        - name: "verify-rust (macOS arm64)"
+          commands:
+            # The submodule is a shallow clone; `lint-custom` reads the
+            # Kafka tags pinned in xtask and fails without them.
+            - (cd rust && cargo xtask fetch-java-refs)
+            - make verify-rust-macos-docker
         - name: "verify-c (macOS arm64)"
+          execution_time_limit:
+            minutes: 30
           env_vars:
             # Installs gRPC C++, protobuf and pkg-config for the native C++ server.
             - name: MACOS_INSTALL_GRPC_CPP
@@ -412,9 +415,13 @@ blocks:
           commands:
             - make verify-c-macos-docker
         - name: "verify-python (macOS arm64)"
+          execution_time_limit:
+            minutes: 30
           commands:
             - make verify-python-macos-docker
         - name: "verify-dotnet (macOS arm64)"
+          execution_time_limit:
+            minutes: 30
           env_vars:
             # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc.
             - name: MACOS_ENSURE_ROSETTA
@@ -485,11 +492,47 @@ blocks:
           commands:
             - .\.semaphore\verify-dotnet-windows.ps1 -Platform x86
 
-  - name: "Check Rust docs (Linux amd64)"
-    # Its own block so a documentation failure is attributable at a glance and
-    # does not wait behind the test suite. `make doc-check` runs `cargo doc`
-    # with `-D warnings` over the whole workspace; the doctests already run in
-    # "Verify Rust" as part of `cargo test`.
+  - name: "Rust additional checks (Linux amd64)"
+    # The Rust checks that are not the test suite, one job each on its own VM,
+    # in parallel with each other and with the test jobs, so a failure is
+    # attributable at a glance and no test job waits for them. The block sets
+    # no execution_time_limit, so it has the pipeline's; the jobs that need a
+    # tighter one set their own.
+    #
+    #   - doc-check: `make doc-check` runs `cargo doc` with `-D warnings` over
+    #     the whole workspace (the doctests already run in "Verify Rust and language bindings" as part
+    #     of `cargo test`), then the clippy pass over the default features,
+    #     which the lint job leaves out of its lint (LINT_ARGS) so the two
+    #     clippy passes run in parallel.
+    #   - lint: the protocol-independent checks of `make verify-rust`:
+    #     format-check, check-generated, and `cargo xtask lint` (the custom
+    #     lint rules and the clippy pass over --all-features).
+    #   - package-check: packages `confluent-kafka` as it would be published
+    #     and fails if the `.crate` is missing LICENSE or README.md, contains a
+    #     key or certificate file, or exceeds 3 MiB compressed. It then builds a
+    #     new project that depends on it (`cargo xtask package-check`).
+    #   - api-compat: compares the public surface with the last release tag
+    #     (`cargo xtask api-compat`): the Rust API as crates.io publishes it
+    #     with cargo-semver-checks, the C ABI of the `ffi` shared library with
+    #     libabigail's abidiff. A breaking change fails the job unless the
+    #     version in rust/Cargo.toml allows it over the tag's: a major bump, or
+    #     a minor bump while the major version is 0. So the job stays red after
+    #     a breaking change until the version is bumped (from 0.1.x, to 0.2.0).
+    #     The baseline is the highest release tag, rust/X.Y.Z or (for the
+    #     releases before those tags) vX.Y.Z, not above the Cargo.toml version;
+    #     set API_COMPAT_BASELINE to compare with another tag. `checkout` is a
+    #     shallow clone without tags, hence the fetch.
+    #   - audit: checks rust/Cargo.lock, which covers every crate of the
+    #     workspace and so every Rust crate the library, the C library and the
+    #     wheels link, against the RustSec advisory database (`make audit`,
+    #     cargo-audit). A vulnerable dependency fails the job and with it the
+    #     pipeline; an unmaintained, unsound or yanked crate is only reported.
+    #     cargo-audit fetches the database on each run, so a newly published
+    #     advisory turns the job red without any change in this repository:
+    #     update the dependency, or, when it does not affect this client,
+    #     ignore the advisory by id in rust/.cargo/audit.toml with the reason.
+    #
+    # The job names are the ones create-release-tag.yml requires.
     dependencies: []
     task:
       prologue:
@@ -500,117 +543,42 @@ blocks:
         - name: "doc-check (Linux amd64)"
           commands:
             - make doc-check
-
-  - name: "Check crate package (Linux amd64)"
-    # Packages `confluent-kafka` as it would be published and fails if the
-    # `.crate` is missing LICENSE or README.md, contains a key or certificate
-    # file, or exceeds 3 MiB compressed. It then builds a new project that
-    # depends on it (`cargo xtask package-check`).
-    dependencies: []
-    task:
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-          - ./.semaphore/dependencies.sh
-      jobs:
+            - make clippy-default-features
+        - name: "lint (Linux amd64)"
+          execution_time_limit:
+            minutes: 20
+          commands:
+            # The submodule is a shallow clone; `lint-custom` reads the
+            # Kafka tags pinned in xtask and fails without them.
+            - (cd rust && cargo xtask fetch-java-refs)
+            - make format-check
+            - make check-generated
+            - make lint LINT_ARGS=--without-default-features-clippy
         - name: "package-check (Linux amd64)"
           commands:
             - make package-check
-
-  - name: "Check API compatibility (Linux amd64)"
-    # Compares the public surface with the last release tag
-    # (`cargo xtask api-compat`): the Rust API as crates.io publishes it with
-    # cargo-semver-checks, the C ABI of the `ffi` shared library with
-    # libabigail's abidiff. A breaking change fails the job unless the version
-    # in rust/Cargo.toml allows it over the tag's: a major bump, or a minor
-    # bump while the major version is 0. So the job stays red after a breaking
-    # change until the version is bumped (from 0.1.x, to 0.2.0).
-    #
-    # The baseline is the highest release tag, rust/X.Y.Z or (for the releases
-    # before those tags) vX.Y.Z, not above the Cargo.toml version; set
-    # API_COMPAT_BASELINE to compare with another tag. `checkout` is a shallow
-    # clone without tags, hence the fetch.
-    dependencies: []
-    execution_time_limit:
-      minutes: 40
-    task:
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-          - ./.semaphore/dependencies.sh
-          - sudo apt install -y abigail-tools
-          # The prebuilt release, pinned by version and checksum.
-          - retry curl -sSfL -o /tmp/cargo-semver-checks.tar.gz https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.51.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
-          - echo "cacadafaa5cd27ae6d05a74a103266917ebab4c5e43c898360e177d4fbf06a65  /tmp/cargo-semver-checks.tar.gz" | sha256sum -c -
-          - mkdir -p "$HOME/.cargo/bin" && tar -xzf /tmp/cargo-semver-checks.tar.gz -C "$HOME/.cargo/bin"
-          - export PATH="$HOME/.cargo/bin:$PATH"
-          - git fetch --depth=1 --force origin 'refs/tags/v*:refs/tags/v*' 'refs/tags/rust/*:refs/tags/rust/*'
-      jobs:
         - name: "api-compat (Linux amd64)"
+          execution_time_limit:
+            minutes: 40
           commands:
+            - sudo apt install -y abigail-tools
+            # The prebuilt release, pinned by version and checksum.
+            - retry curl -sSfL -o /tmp/cargo-semver-checks.tar.gz https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.51.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
+            - echo "cacadafaa5cd27ae6d05a74a103266917ebab4c5e43c898360e177d4fbf06a65  /tmp/cargo-semver-checks.tar.gz" | sha256sum -c -
+            - mkdir -p "$HOME/.cargo/bin" && tar -xzf /tmp/cargo-semver-checks.tar.gz -C "$HOME/.cargo/bin"
+            - export PATH="$HOME/.cargo/bin:$PATH"
+            - git fetch --depth=1 --force origin 'refs/tags/v*:refs/tags/v*' 'refs/tags/rust/*:refs/tags/rust/*'
             - make check-api-compat
-
-  - name: "Audit Rust dependencies (Linux amd64)"
-    # Checks rust/Cargo.lock, which covers every crate of the workspace and so
-    # every Rust crate the library, the C library and the wheels link, against
-    # the RustSec advisory database (`make audit`, cargo-audit). A vulnerable
-    # dependency fails the job and with it the pipeline; an unmaintained,
-    # unsound or yanked crate is only reported. cargo-audit fetches the
-    # database on each run, so a newly published advisory turns the job red
-    # without any change in this repository: update the dependency, or, when
-    # it does not affect this client, ignore the advisory by id in
-    # rust/.cargo/audit.toml with the reason.
-    dependencies: []
-    execution_time_limit:
-      minutes: 15
-    task:
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-          - ./.semaphore/dependencies.sh
-          # The prebuilt release, pinned by version and checksum.
-          - retry curl -sSfL -o /tmp/cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
-          - echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/cargo-audit.tgz" | sha256sum -c -
-          - mkdir -p "$HOME/.cargo/bin" && tar -xzf /tmp/cargo-audit.tgz -C "$HOME/.cargo/bin" --strip-components=1 cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit
-          - export PATH="$HOME/.cargo/bin:$PATH"
-      jobs:
         - name: "audit (Linux amd64)"
+          execution_time_limit:
+            minutes: 15
           commands:
+            # The prebuilt release, pinned by version and checksum.
+            - retry curl -sSfL -o /tmp/cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
+            - echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/cargo-audit.tgz" | sha256sum -c -
+            - mkdir -p "$HOME/.cargo/bin" && tar -xzf /tmp/cargo-audit.tgz -C "$HOME/.cargo/bin" --strip-components=1 cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit
+            - export PATH="$HOME/.cargo/bin:$PATH"
             - make audit
-
-  - name: "Release: CI passed"
-    # Passes once every CI block has passed, as "Create release tag" requires
-    # of every CI job before it tags a commit. The release blocks that need CI
-    # depend on it: "Release (Rust): pre-publish package check", "Release
-    # (Python): packaging" and "Release (.NET): packaging". A new CI block must
-    # be added to this list. Semaphore treats a skipped block as passed, so
-    # this block runs on every tag build, which covers every block that
-    # depends on it. It is skipped on branch builds, so it records no CI
-    # result there.
-    dependencies:
-      # In this order, Semaphore draws the gate, and the Rust release row after it, near the
-      # top of the CI column: it places the gate level with the middle block of the list.
-      - "Verify Rust (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Check Rust docs (Linux amd64)"
-      - "Check crate package (Linux amd64)"
-      - "Check API compatibility (Linux amd64)"
-      - "Audit Rust dependencies (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
-      - "Verify language bindings (macOS arm64)"
-      - "Verify language bindings (Windows amd64)"
-    run:
-      when: "tag =~ '.*'"
-    execution_time_limit:
-      minutes: 10
-    task:
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "CI passed"
-          commands:
-            - echo "Every CI block that the release blocks depend on has passed."
 
   # Rust release blocks. They run only on the build of a Rust release tag,
   # rust/v<version> with an optional -alpha.N, -beta.N, -rc.N or -dev.N suffix,
@@ -619,8 +587,8 @@ blocks:
   # without -dev.N. The two patterns must stay identical in all of the blocks
   # that use them, and the first in create-release-tag.yml.
   #
-  # The blocks run one after another: CI, then "Release (Rust): pre-publish
-  # package check", then "Release (Rust): pre-publish smoke test", then
+  # The blocks run one after another, alongside CI: "Release (Rust):
+  # pre-publish package check", then "Release (Rust): pre-publish smoke test", then
   # "Release (Rust): publish to crates.io", each starting only when the block
   # before it has passed. The pre-publish blocks build and test the crate on
   # VMs that hold no secrets, and each records the SHA-256 of the .crate it
@@ -636,8 +604,11 @@ blocks:
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # Waits for every CI block, through "Release: CI passed".
-    dependencies: ["Release: CI passed"]
+    # Starts with the tag build, alongside CI: CI passed on the tagged commit
+    # before "Create release tag" pushed the tag, and waiting for it again would
+    # let a flaky or externally caused failure on the tag build block the
+    # release.
+    dependencies: []
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -766,9 +737,10 @@ blocks:
     #   - the version is not yet on crates.io and is higher than every
     #     published version. The only exception is completing an interrupted
     #     publish of the same version from this workflow (see the job below).
-    # The dependency guarantees that every CI job passed: Semaphore starts this
-    # block only when the smoke test has passed, which starts only after the
-    # package check, which starts only when every CI block has passed.
+    # The dependency guarantees that the crate was packaged and smoke-tested:
+    # Semaphore starts this block only when the smoke test has passed, which
+    # starts only after the package check. CI is not waited for: it passed on
+    # the tagged commit before "Create release tag" pushed the tag.
     dependencies: ["Release (Rust): pre-publish smoke test"]
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
@@ -1114,9 +1086,9 @@ blocks:
   #      (.semaphore/test-wheels.sh) on a VM that never built them, so that
   #      only the library inside each wheel can be loaded, and records the
   #      SHA-256 of each tested wheel.
-  #   3. "Release (Python): packaging" depends on "Release: CI passed" and on
-  #      the three verification blocks, so it starts only when every CI block
-  #      and all of them have passed. It checks the tag and the version, and
+  #   3. "Release (Python): packaging" depends on the three verification
+  #      blocks, so it starts only when all of them have passed; it does not
+  #      wait for the tag build's CI. It checks the tag and the version, and
   #      records the tested wheels as the release, with their checksums. The
   #      tag build ends here; it publishes nothing.
   #   4. The manual "Publish to Test PyPI" promotion of the tag build
@@ -1297,11 +1269,9 @@ blocks:
             - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
 
   - name: "Release (Python): packaging"
-    # Starts only when every wheel was built and tested, and every CI block has
-    # passed ("Release: CI passed"). The checks this block makes are listed in
+    # Starts only when every wheel was built and tested. The checks this block makes are listed in
     # publish-wheels.sh; it loads no token.
     dependencies:
-      - "Release: CI passed"
       - "Release (Python): wheel verification (Linux amd64)"
       - "Release (Python): wheel verification (Linux arm64)"
       - "Release (Python): wheel verification (macOS arm64)"
@@ -1359,9 +1329,9 @@ blocks:
   #      distribution; a self-contained publish runs; and the binding's unit
   #      tests run against the package. It records the SHA-256 of the tested
   #      package.
-  #   4. "Release (.NET): packaging" depends on "Release: CI passed" and on
-  #      the five verification blocks, so it starts only when every CI block
-  #      and all of them have passed. It checks the tag, the version, the
+  #   4. "Release (.NET): packaging" depends on the five verification
+  #      blocks, so it starts only when all of them have passed; it does not
+  #      wait for the tag build's CI. It checks the tag, the version, the
   #      package id and that nuget.org does not have the version yet, and
   #      records the tested package
   #      as the release, nuget/release/<package> with its checksum in
@@ -1735,11 +1705,9 @@ blocks:
             - artifact push workflow "$env:TEMP\tested.sha256" --destination "nuget/tested/$env:NUGET_PLATFORM" --force
 
   - name: "Release (.NET): packaging"
-    # Starts only when the package was tested on every platform, and every CI
-    # block has passed ("Release: CI passed"). The checks this block makes are
+    # Starts only when the package was tested on every platform. The checks this block makes are
     # listed in release-nupkg.sh; it loads no key.
     dependencies:
-      - "Release: CI passed"
       - "Release (.NET): package verification (Linux amd64)"
       - "Release (.NET): package verification (Linux arm64)"
       - "Release (.NET): package verification (macOS arm64)"
