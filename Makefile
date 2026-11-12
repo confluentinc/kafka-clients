@@ -269,8 +269,11 @@ test-integration-dotnet-native: build-grpc-native-dotnet
 test-integration-perf-rust:
 	$(MAKE) -C rust test-integration-perf
 
-test-integration-perf-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-performance)
+# A latency smoke run at a fixed low rate (100 rps, p99 budget), like the Rust
+# perf tests, so it runs on the same debug all-features library as the other
+# binding tests; the throughput benchmarks below stay on release.
+test-integration-perf-python: devel-build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug test-performance)
 
 # Rust, Python and .NET performance suites, one after the other. Recipe lines
 # rather than prerequisites so the order holds under `make -j`, and so the

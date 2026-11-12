@@ -59,8 +59,9 @@ name: build-test-release
 # that the committed test-selection.json selects (`make select-tests`, run
 # before pushing), and only while the checkout is the working tree it was made
 # for; every other build, and a pull request without a matching selection, runs
-# every test. The Windows block, whose script does not go through the
-# Makefiles, always runs every .NET unit test.
+# every test. The Windows block's script, which does not go through the
+# Makefiles, applies the selection's dotnet.solution section to the .NET unit
+# tests through xtask's test-selection binary.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -243,9 +244,9 @@ blocks:
     #
     # Each binding runs across the same three protocols. Its jobs build the
     # Rust library themselves, the debug all-features build the Rust tests use
-    # (the root's devel-build-rust-all-features); the Python and .NET perf
-    # stages of the plaintext jobs also build the release library they
-    # measure. Sharing one build via a workflow artifact was tried and
+    # (the root's devel-build-rust-all-features), which the Python and .NET
+    # perf stages of the plaintext jobs reuse: like the Rust perf tests, they
+    # are latency smoke runs at 100 records/s with a p99 budget. Sharing one build via a workflow artifact was tried and
     # reverted -- the tarball came to 8.9 GiB (target/debug is ~12x
     # target/release, and ~48% of it is rustc incremental caches that CI never
     # reuses), so pushing it once and pulling it twice cost more than the
@@ -463,7 +464,8 @@ blocks:
     # library: each job builds the library of its platform, then runs
     # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
     # net10.0 in a process of that platform
-    # (.semaphore/verify-dotnet-windows.ps1). The broker-backed tests and the
+    # (.semaphore/verify-dotnet-windows.ps1), only those the test selection
+    # selects on a pull request, as in the other blocks. The broker-backed tests and the
     # multilanguage arms run on Linux and macOS only: they need Linux
     # containers, which the Windows agents do not run. The agent's shell is
     # PowerShell, so the block starts with job-start.ps1 and records its result

@@ -365,7 +365,12 @@ consumer-perf-test-dotnet:
 # Docker-less dev box then gets a real, visible `Skipped` instead. The value must
 # be the case-sensitive "True" — the suite-wide Python-compatible convention; =1
 # would silently not enable it.
+#
+# A latency smoke run at a fixed low rate (100 rps, p99 budget), like the Rust
+# perf tests, so it runs on the RUST_PROFILE library (debug by default) as the
+# other binding tests do; the PerfV2 / CLIENT_VERSION=2 benchmarks stay on
+# release.
 test-integration-perf-dotnet:
-	$(MAKE) -C $(RUST_PROJECT_ROOT) build
-	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
-	$(call selected_run,--section dotnet.performance --dotnet -- env PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) {})
+	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(PERF_V3)/PerfV3.csproj
+	$(call selected_run,--section dotnet.performance --dotnet -- env PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(PERF_TESTS) {})
