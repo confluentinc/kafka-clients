@@ -1330,7 +1330,7 @@ blocks:
   # test-nupkg.sh. The version is <Version> in dotnet/Directory.Build.props.
   #
   # The package is Confluent.Kafka.<version>.nupkg: the managed assembly for
-  # netstandard2.0, net8.0 and net10.0, and the native library of each RID
+  # net462, netstandard2.0, net8.0 and net10.0, and the native library of each RID
   # under runtimes/<rid>/native/.
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (.NET): native library (<platform>)" builds the native
