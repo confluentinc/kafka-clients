@@ -38,14 +38,18 @@ command -v cmake >/dev/null 2>&1 && cmake --version || echo "cmake not found"
 command -v rustc >/dev/null 2>&1 && rustc --version || echo "rustc not found"
 
 echo "=== Installing dependencies ==="
+# Each download is retried with `retry`, from .semaphore/job-start.sh, which every job sources
+# before this script. An installer downloads too, so it is retried as well.
 if ! command -v brew >/dev/null 2>&1; then
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  retry curl -fsSL -o /tmp/homebrew-install.sh https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
+  retry env NONINTERACTIVE=1 /bin/bash /tmp/homebrew-install.sh
 fi
 eval "$(/opt/homebrew/bin/brew shellenv)"
-brew install cmake
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
+retry brew install cmake
+retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+retry sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain none
 source "$HOME/.cargo/env"
-git submodule update --init --depth=1 kafka
+retry git submodule update --init --depth=1 kafka
 
 # MACOS_INSTALL_GRPC_CPP=true installs the build dependencies of the native C++
 # gRPC server (make build-grpc-native-c): the grpc++ and protobuf headers and
@@ -53,8 +57,8 @@ git submodule update --init --depth=1 kafka
 # bottles for this agent's macOS version, so no source build is required. Only
 # the job that needs these packages sets this variable.
 if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
-  brew install grpc
-  command -v pkg-config >/dev/null || brew install pkgconf
+  retry brew install grpc
+  command -v pkg-config >/dev/null || retry brew install pkgconf
 fi
 
 # MACOS_ENSURE_ROSETTA=true installs Rosetta 2 if it is missing. Building the
@@ -88,7 +92,7 @@ else
   if colima status &>/dev/null; then
     echo "Colima is already running"
   else
-    command -v colima >/dev/null 2>&1 || brew install colima
+    command -v colima >/dev/null 2>&1 || retry brew install colima
     colima start --cpu 6 --memory 12 --disk 50
   fi
 

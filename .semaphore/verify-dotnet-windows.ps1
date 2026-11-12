@@ -43,7 +43,7 @@ $dotnet = Install-DotNet $Platform
 
 # Some unit tests read the Java sources in the kafka submodule.
 Invoke-Native git @('-C', $repo, 'config', 'core.longpaths', 'true')
-Invoke-Native git @('-C', $repo, 'submodule', 'update', '--init', '--depth=1', 'kafka')
+Invoke-Retry { Invoke-Native git @('-C', $repo, 'submodule', 'update', '--init', '--depth=1', 'kafka') }
 
 Write-Output "== .NET build and unit tests ($Platform)"
 # PlatformTarget makes every assembly, the net462 test host's included, run in this platform's
