@@ -318,3 +318,27 @@ state:
   The confirmation run refuted the DNS hypothesis and found two causes: the wall-clock half is
   fixed in the test (ff621ef3a); what blocks the network threads in container mode is still to be
   identified (see the verdict).
+
+### 4. Rust core: no metadata update on `FETCH_SESSION_TOPIC_ID_ERROR`
+
+- **Scenario** (described; no converted multilanguage scenario exercises it): a fetch response
+  whose top-level error is `FETCH_SESSION_TOPIC_ID_ERROR`, which the fetch session handler does not
+  accept. Found while diagnosing `plaintext_consumer_assign_test::test_async_poll_after_topic_deleted`
+  (Critic 127, item 1); it is not the cause of that test's flake, since it means fewer metadata
+  requests, not more.
+- **Arms**: every arm, since the core decides it (`__rust`, and the bindings over it).
+- **Java 4.4**: `AbstractFetch#handleFetchSuccess`, when `FetchSessionHandler#handleResponse`
+  returns `false`, calls `metadata.requestUpdate(false)` if the response error is
+  `FETCH_SESSION_TOPIC_ID_ERROR`, then returns. `FetchRequestManagerTest#testFetchSessionIdError`
+  asserts it: after that response, `assertEquals(0L, metadata.timeToNextUpdate(time.milliseconds()))`.
+- **Rust**: `rust/src/consumer/internals/abstract_fetch.rs`, `AbstractFetch::handle_fetch_success`:
+  when `handle_response` returns `false`, it only removes the pending fetch request and returns.
+  Its comment says that the FetchRequestManager owns the metadata-update trigger, but no code in
+  `rust/src/consumer/` reads `FetchSessionTopicIdError` outside the tests, so nothing requests the
+  update. The translated unit test `fetch_request_manager::round_trip::test_fetch_session_id_error`
+  (`#[doc(alias)]` `FetchRequestManagerTest#testFetchSessionIdError`) checks the empty fetch and
+  the unchanged position, and drops Java's `timeToNextUpdate` assertion.
+- **Impact**: after a topic-id session error the consumer keeps its stale topic ids until the next
+  periodic or other-triggered metadata refresh, where Java requests a refresh at once.
+- **State**: needs owner. The owner will take it with findings #2 and #3 in a separate core-fix
+  PR; no core change on this branch.
