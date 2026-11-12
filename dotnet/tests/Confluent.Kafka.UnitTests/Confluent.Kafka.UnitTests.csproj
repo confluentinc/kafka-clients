@@ -6,8 +6,8 @@
     a TFM-sentinel smoke test that proves the harness runs and InternalsVisibleTo
     compiles.
 
-    Test TFMs are net462;net8.0;net10.0. net462 satisfies the net462 (via ns2.0) TFM
-    smoke leg (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
+    Test TFMs are net462;net8.0;net10.0. net462 is the TFM smoke leg of the library's
+    net462 assembly (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
     ReferenceAssemblies restores the reference assemblies cross-platform), but its
     RUN is Windows/CI-only. net8.0 runs are CI-only too (only the .NET 10 runtime is
     installed locally), so use `dotnet test -f net10.0` locally.
@@ -36,6 +36,8 @@
        (macOS/Linux) — a build-only package (no runtime asset). Its RUN stays
        Windows/CI-only (PLAN §5.7). -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net462'">
+    <!-- RuntimeInformation (TfmSentinelTests) is built into .NET Framework from 4.7.1 on. -->
+    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
