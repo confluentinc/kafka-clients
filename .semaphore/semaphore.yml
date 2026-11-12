@@ -1375,8 +1375,7 @@ blocks:
   - name: "Release (.NET): native library (Linux amd64)"
     dependencies: []
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1399,8 +1398,7 @@ blocks:
   - name: "Release (.NET): native library (Linux arm64)"
     dependencies: []
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1423,8 +1421,7 @@ blocks:
   - name: "Release (.NET): native library (macOS arm64)"
     dependencies: []
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1453,8 +1450,7 @@ blocks:
   - name: "Release (.NET): native library (Windows amd64)"
     dependencies: []
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1484,8 +1480,7 @@ blocks:
   - name: "Release (.NET): native library (Windows x86)"
     dependencies: []
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1520,8 +1515,7 @@ blocks:
       - "Release (.NET): native library (Windows amd64)"
       - "Release (.NET): native library (Windows x86)"
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1544,16 +1538,14 @@ blocks:
             # The version packed is <Version> in dotnet/Directory.Build.props, which must be the
             # tag's; the packaging block checks it again before anything is released.
             - NUGET_VERSION=$(python3 .semaphore/check-nupkg.py version) && export NUGET_VERSION
-            # Temporary, revert before merging: a build without a tag has no tag version to compare.
-            - if [ -n "${SEMAPHORE_GIT_TAG_NAME:-}" ]; then test "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" = "${NUGET_VERSION}"; fi
+            - test "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" = "${NUGET_VERSION}"
             - sh .semaphore/pack-nupkg.sh /tmp/natives /tmp/package
             - artifact push workflow "/tmp/package/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --destination "nuget/built/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --force
 
   - name: "Release (.NET): package verification (Linux amd64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1587,8 +1579,7 @@ blocks:
   - name: "Release (.NET): package verification (Linux arm64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1622,8 +1613,7 @@ blocks:
   - name: "Release (.NET): package verification (macOS arm64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1657,8 +1647,7 @@ blocks:
   - name: "Release (.NET): package verification (Windows amd64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1700,8 +1689,7 @@ blocks:
   - name: "Release (.NET): package verification (Windows x86)"
     dependencies: ["Release (.NET): pack"]
     run:
-      # Temporary, revert before merging: runs on every build, not only on a dotnet/v<version> tag.
-      when: "true"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
