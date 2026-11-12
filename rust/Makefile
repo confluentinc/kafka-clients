@@ -19,14 +19,24 @@ endif
 # macOS perf p99 budget (ms), used by test-integration-perf-macos.
 MACOS_P99_LIMIT_MS ?= 150
 
+# `cargo test` through the test selection (`cargo xtask selected-cargo-test`):
+# while TEST_SELECTION names a selection file made for the working tree (the
+# root's `select-tests`), only the tests it selects run; otherwise this is
+# plain `cargo test`. `--section` names the part of the file that applies: `rust`
+# for the Rust suites, the binding's own section for its gRPC arm.
+CARGO_TEST = cargo xtask selected-cargo-test --section rust --
+CARGO_TEST_GRPC_PYTHON = cargo xtask selected-cargo-test --section python.grpc --
+CARGO_TEST_GRPC_C = cargo xtask selected-cargo-test --section c.integration --
+CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc --
+
 .PHONY: build build-integration-tests build-all-features \
-	devel-build devel-build-integration-tests devel-build-all-features \
+	devel-build devel-build-integration-tests devel-build-all-features build-tests-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
+	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -42,6 +52,15 @@ devel-build-integration-tests:
 devel-build-all-features:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features
 
+# The one build of the Rust verify jobs: the debug, all-features build of the
+# library, its unit and integration tests and the examples, which
+# `test-all-features` and `test-integration-perf` then reuse. It also writes the
+# generated protocol code under target/debug/build that `check-generated` reads.
+# No RUSTFLAGS: the tests run without them, and different RUSTFLAGS would make
+# cargo compile everything a second time.
+build-tests-all-features:
+	cargo test --all-features --no-run
+
 test: build
 	# --workspace, not the root package alone: `cargo test` from the root only
 	# builds and tests `confluent-kafka-rust`, so `generator` (the wire-protocol
@@ -50,13 +69,13 @@ test: build
 	# unification is not a hazard here: only `consumer-perf` depends on the root
 	# package and it takes default features, so neither `integration-tests` nor
 	# `ffi` is activated by the extra members.
-	cargo test --workspace
+	$(CARGO_TEST) --workspace
 	# And once more with `ffi` on: `src/ffi` is behind `#[cfg(feature = "ffi")]`,
 	# so the C FFI modules' own unit tests (~500 across producer, consumer and
 	# admin) are invisible to the run above. Not `--workspace --features ffi`:
 	# `ffi` is a root-package feature the other members do not declare, so a
 	# second root-only invocation is both simpler and sufficient.
-	cargo test --features ffi
+	$(CARGO_TEST) --features ffi
 
 # The whole Rust test suite, compiled with every feature but running only the
 # native-Rust tests: unit tests, the functional integration suite, and the
@@ -90,9 +109,11 @@ test: build
 # without failing `verify`.
 #
 # Part of the root `verify` (through `test`) and of the CI `verify-rust` job.
-test-all-features: build-all-features
-	cargo test --all-features -- --skip __grpc
-	cargo test -p xtask -p generator
+# It builds nothing in release: no test runs a release artifact. The release
+# build is still compiled in CI by the C and Python jobs.
+test-all-features: build-tests-all-features
+	$(CARGO_TEST) --all-features -- --skip __grpc
+	$(CARGO_TEST) -p xtask -p generator
 
 # Functional integration tests only. The performance tests live in their own
 # `performance` cargo test target (tests/performance/main.rs), so `--test
@@ -100,10 +121,10 @@ test-all-features: build-all-features
 test-integration: build-integration-tests
 	# admin_examples_test runs the example binaries, which `--test` does not build.
 	cargo build --examples
-	cargo test --features integration-tests --test integration
+	$(CARGO_TEST) --features integration-tests --test integration
 	# The integration tests that drive crate internals live in the lib test
 	# binary (src/integration_tests), since those types are not public API.
-	cargo test --features integration-tests --lib -- integration_tests::
+	$(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 
 # ── Protocol-parameterized functional integration runs ───────────────────
 #
@@ -126,16 +147,16 @@ test-integration: build-integration-tests
 # against a newer broker. It combines with INTEGRATION_TEST_PROTOCOL.
 test-integration-plaintext: build-integration-tests
 	cargo build --examples
-	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --lib -- integration_tests::
+	INTEGRATION_TEST_PROTOCOL=plaintext $(CARGO_TEST) --features integration-tests --test integration
+	INTEGRATION_TEST_PROTOCOL=plaintext $(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 test-integration-ssl: build-integration-tests
 	cargo build --examples
-	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --lib -- integration_tests::
+	INTEGRATION_TEST_PROTOCOL=ssl $(CARGO_TEST) --features integration-tests --test integration
+	INTEGRATION_TEST_PROTOCOL=ssl $(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 test-integration-sasl-ssl: build-integration-tests
 	cargo build --examples
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --lib -- integration_tests::
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(CARGO_TEST) --features integration-tests --test integration
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 
 # ── Whole native-Rust test suite, per protocol (no format/lint/perf) ──────
 #
@@ -180,10 +201,10 @@ test-all-features-sasl-ssl:
 # These only run the tests: the binding's gRPC image must already be built,
 # which is what python/'s and c/'s `test-integration` do before calling them.
 test-integration-grpc-python:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+	$(CARGO_TEST_GRPC_PYTHON) --features integration-tests,multilanguage-tests --test integration -- __grpc_python
 
 test-integration-grpc-c:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+	$(CARGO_TEST_GRPC_C) --features integration-tests,multilanguage-tests --test integration -- __grpc_c
 
 # The same arms with each gRPC server run as a native host process instead of a
 # container (MULTILANG_BACKEND_MODE=native; see tests/common/backend_pool.rs).
@@ -191,11 +212,11 @@ test-integration-grpc-c:
 # `build-grpc-native-{python,c}` do before calling these.
 test-integration-grpc-python-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+		$(CARGO_TEST_GRPC_PYTHON) --features integration-tests,multilanguage-tests --test integration -- __grpc_python
 
 test-integration-grpc-c-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+		$(CARGO_TEST_GRPC_C) --features integration-tests,multilanguage-tests --test integration -- __grpc_c
 
 # ── The .NET-backend arms ─────────────────────────────────────────────────
 #
@@ -210,19 +231,23 @@ test-integration-grpc-c-native:
 # sync backend, add `--skip __grpc_dotnet_async`.
 
 test-integration-grpc-dotnet:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+	$(CARGO_TEST_GRPC_DOTNET) --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+		$(CARGO_TEST_GRPC_DOTNET) --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
 # functional tests they contend for CPU, memory and Docker, and their p99
 # budgets fail for reasons unrelated to the code under test. Expects an
 # otherwise-idle machine.
-test-integration-perf: build-integration-tests
-	cargo test --features integration-tests --test performance -- --nocapture
+#
+# They run in debug, as the other tests do. `--all-features` matches the build
+# of `build-tests-all-features`, so only the `performance` binary is compiled
+# here; the features add only code these tests do not use.
+test-integration-perf: build-tests-all-features
+	$(CARGO_TEST) --all-features --test performance -- --nocapture
 
 # macOS variant; the perf tail uses MACOS_P99_LIMIT_MS.
 test-integration-perf-macos:
@@ -245,8 +270,17 @@ format-check:
 check-generated:
 	cargo xtask check-generated
 
+# LINT_ARGS goes to `cargo xtask lint`: CI passes
+# `--without-default-features-clippy` and runs that pass in another job, through
+# `clippy-default-features`.
+LINT_ARGS ?=
 lint:
-	cargo xtask lint
+	cargo xtask lint $(LINT_ARGS)
+
+# The clippy pass over the default features alone; `lint` runs it too unless
+# LINT_ARGS leaves it out.
+clippy-default-features:
+	cargo xtask clippy-default-features
 
 # Build the rustdoc of every workspace crate with warnings denied, so a broken
 # or private intra-doc link fails CI instead of surfacing only when someone

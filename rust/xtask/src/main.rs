@@ -24,6 +24,7 @@ mod java_api;
 mod java_parse;
 mod javadoc;
 mod lint_custom;
+mod test_selection;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -37,7 +38,38 @@ mod admin_gen;
 mod chaos_matrix;
 mod perf_cloud;
 
+/// Removes the variables `cargo run` sets for the package it runs, which `cargo xtask` is.
+///
+/// Every `cargo` the xtask starts would inherit them. A build script that declares
+/// `rerun-if-env-changed` on one of them (`ring` does on `CARGO_MANIFEST_DIR`) then sees it
+/// change each time the build switches between a `cargo` run from the shell, where it is
+/// unset, and one run from here, where it names `xtask/`. The script reruns and everything
+/// above it is compiled again: `make verify-rust` compiled the crate's tests four times.
+/// It runs first in `main`, before the xtask starts a thread.
+fn forget_cargo_run_environment() {
+    let set_by_cargo_run: Vec<_> = env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO_PKG_")
+                || matches!(
+                    &*name,
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_MANIFEST_LINKS"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                )
+        })
+        .collect();
+    for name in set_by_cargo_run {
+        env::remove_var(name);
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    forget_cargo_run_environment();
     let task = env::args().nth(1);
 
     match task.as_deref() {
@@ -58,7 +90,18 @@ fn main() -> anyhow::Result<()> {
         Some("javadoc") => lint_custom::javadoc(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-fill") => lint_custom::doc_fill(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-report") => lint_custom::doc_report()?,
-        Some("lint") => lint(env::args().skip(2).any(|arg| arg == "--keep-going"))?,
+        Some("lint") => {
+            let args: Vec<String> = env::args().skip(2).collect();
+            let unknown: Vec<&String> = args.iter().filter(|arg| !LINT_FLAGS.contains(&arg.as_str())).collect();
+            if !unknown.is_empty() {
+                anyhow::bail!("lint: unknown argument(s) {unknown:?}; it takes {LINT_FLAGS:?}");
+            }
+            lint(
+                args.iter().any(|arg| arg == "--keep-going"),
+                !args.iter().any(|arg| arg == "--without-default-features-clippy"),
+            )?
+        },
+        Some("clippy-default-features") => run_command("cargo", CLIPPY_DEFAULT_FEATURES)?,
 
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -77,6 +120,10 @@ fn main() -> anyhow::Result<()> {
         Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
         Some("perf-cloud") => perf_cloud::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("select-tests") => test_selection::select(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-cargo-test") => test_selection::cargo_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-run") => test_selection::selected_run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("show-test-selection") => test_selection::show()?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
         // .semaphore/semaphore.yml, rely on the exit status of these tasks.
@@ -643,13 +690,36 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The flags `cargo xtask lint` takes.
+const LINT_FLAGS: &[&str] = &["--keep-going", "--without-default-features-clippy"];
+
+/// The clippy pass over the default features (see `lint`). `cargo xtask
+/// clippy-default-features` runs it alone, so CI can run it in a job of its own.
+const CLIPPY_DEFAULT_FEATURES: &[&str] = &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"];
+
+/// The clippy pass over every feature (see `lint`).
+const CLIPPY_ALL_FEATURES: &[&str] = &[
+    "clippy",
+    "--workspace",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings",
+];
+
 /// Runs every lint step. By default it stops at the first failing step; with
 /// `keep_going` (`cargo xtask lint --keep-going`) it runs every step regardless,
 /// reports each failure, and fails at the end if any step failed. The flag changes
 /// only *whether later steps run*, never what a step enforces: it exists so a step
 /// that is known to fail (e.g. a lint-custom finding owned by a later phase) does
 /// not hide the result of the steps after it.
-fn lint(keep_going: bool) -> anyhow::Result<()> {
+///
+/// Without `default_features_clippy` (`--without-default-features-clippy`) the
+/// clippy pass over the default features is left out, for a caller that runs it
+/// elsewhere (`cargo xtask clippy-default-features`): CI runs it in the doc-check
+/// job, off the Rust job's critical path.
+fn lint(keep_going: bool, default_features_clippy: bool) -> anyhow::Result<()> {
     let mut failures: Vec<String> = Vec::new();
     let mut step = |name: &str, result: anyhow::Result<()>| -> anyhow::Result<()> {
         match result {
@@ -690,25 +760,15 @@ fn lint(keep_going: bool) -> anyhow::Result<()> {
     //
     // `--workspace` covers every member (including `generator`), so no
     // per-crate pass is needed.
-    for (name, pass) in [
-        (
-            "clippy (default features)",
-            &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
-        ),
-        (
-            "clippy (--all-features)",
-            &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ][..],
-        ),
+    for (name, pass, run) in [
+        ("clippy (default features)", CLIPPY_DEFAULT_FEATURES, default_features_clippy),
+        ("clippy (--all-features)", CLIPPY_ALL_FEATURES, true),
     ] {
-        step(name, run_command("cargo", pass))?;
+        if run {
+            step(name, run_command("cargo", pass))?;
+        } else {
+            println!("⏭️  Skipping {name}: run it with `cargo xtask clippy-default-features`");
+        }
     }
 
     // Lint the xtask crate itself. `cargo clippy` from the workspace root only
@@ -2581,6 +2641,12 @@ fn module_path_hygiene() -> anyhow::Result<()> {
     crate_roots.sort();
     crate_roots.dedup();
 
+    let mut by_segment: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (segment, name) in &reexports {
+        by_segment.entry(segment.as_str()).or_default().insert(name.as_str());
+    }
+    let crate_roots: BTreeSet<&str> = crate_roots.iter().map(String::as_str).collect();
+
     let mut findings: Vec<String> = Vec::new();
     for root in ["src", "tests", "examples", "consumer-perf/src"] {
         if !PathBuf::from(root).is_dir() {
@@ -2589,36 +2655,13 @@ fn module_path_hygiene() -> anyhow::Result<()> {
         for path in rust_sources(root)? {
             let text = fs::read_to_string(&path)?;
             for (number, line) in text.lines().enumerate() {
-                for (segment, name) in &reexports {
-                    let needle = format!("::{segment}::{name}");
-                    let mut from = 0;
-                    while let Some(at) = line[from..].find(&needle) {
-                        let start = from + at;
-                        let end = start + needle.len();
-                        from = start + 1;
-                        // Reject a longer identifier on either side (`::topic::TopicX`).
-                        if line[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-                            continue;
-                        }
-                        let head: String = line[..start]
-                            .chars()
-                            .rev()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
-                        if !crate_roots.iter().any(|allowed| allowed == root) {
-                            continue;
-                        }
-                        findings.push(format!(
-                            "{}:{} reaches `{name}` through the file module `{segment}` — \
-                             import it from the parent re-export instead (CLAUDE.md §2)",
-                            path.display(),
-                            number + 1
-                        ));
-                    }
+                for (segment, name) in file_module_paths(line, &by_segment, &crate_roots) {
+                    findings.push(format!(
+                        "{}:{} reaches `{name}` through the file module `{segment}` — \
+                         import it from the parent re-export instead (CLAUDE.md §2)",
+                        path.display(),
+                        number + 1
+                    ));
                 }
             }
         }
@@ -2632,6 +2675,55 @@ fn module_path_hygiene() -> anyhow::Result<()> {
         eprintln!("  {finding}");
     }
     Err(anyhow::anyhow!("{} module-path finding(s)", findings.len()))
+}
+
+/// Every `::<segment>::<name>` in `line` whose pair `by_segment` holds and whose path
+/// starts at one of `crate_roots`, in the order they appear.
+///
+/// Both segments are whole identifiers, so each `::` starts at most one candidate pair
+/// (`::topic::TopicX` is the pair `(topic, TopicX)`, never `(topic, Topic)`). The line
+/// is scanned once and each pair is a map lookup, so the cost does not grow with the
+/// number of re-exports.
+fn file_module_paths<'a>(
+    line: &'a str,
+    by_segment: &BTreeMap<&str, BTreeSet<&str>>,
+    crate_roots: &BTreeSet<&str>,
+) -> Vec<(&'a str, &'a str)> {
+    fn identifier(text: &str) -> &str {
+        let end = text.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(text.len());
+        &text[..end]
+    }
+
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = line[from..].find("::") {
+        let start = from + at;
+        from = start + 1;
+        let segment = identifier(&line[start + 2..]);
+        if segment.is_empty() {
+            continue;
+        }
+        let Some(rest) = line[start + 2 + segment.len()..].strip_prefix("::") else {
+            continue;
+        };
+        let name = identifier(rest);
+        if name.is_empty() || !by_segment.get(segment).is_some_and(|names| names.contains(name)) {
+            continue;
+        }
+        let head: String = line[..start]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
+        if crate_roots.contains(root) {
+            found.push((segment, name));
+        }
+    }
+    found
 }
 
 /// The body of every `use` statement in `text`, whitespace-collapsed and with the
@@ -2790,7 +2882,9 @@ fn print_help() {
                   tags give into the docs under the paths; `--write` applies them
   lint            Run doc-hygiene plus clippy lints (warnings are errors);
                   `--keep-going` runs every step even after one fails, then
-                  fails if any did
+                  fails if any did; `--without-default-features-clippy` leaves
+                  out the clippy pass over the default features
+  clippy-default-features  Run only the clippy pass over the default features
 
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -2837,6 +2931,32 @@ fn print_help() {
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
                     by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
+  select-tests    Ask an agent which tests the changes from a base branch can affect and write
+                  them to ../test-selection.json (or $TEST_SELECTION, relative to the repository
+                  root), to commit with the branch; the Makefiles' test recipes run only those
+                  tests while $TEST_SELECTION names the file and the working tree is unchanged
+                    --base REF       compare with REF (default origin/master)
+                    --agent COMMAND  a command taking Claude Code's --model, --restricted,
+                                     --strict-mcp-config, --tools, --allowedTools,
+                                     --disallowedTools and -p (default `claude`)
+                    --model MODEL    the agent's model (default opus)
+                    --timeout SECS   give up when the agent has not answered after SECS
+                                     seconds (default 600)
+                    --reuse          keep the file when it was made at HEAD for the current
+                                     working tree
+  show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
+                  tree and, when it does, list the suites it runs with their entries and reasons
+  selected-cargo-test  `cargo test` restricted to the test selection $TEST_SELECTION names, if any
+                    --section NAME -- <cargo test arguments>; NAME is `rust`, or a filter list
+                                     such as `c.integration` applying to every test unit
+  selected-run    Run a command only when the test selection selects its section
+                    --section NAME [--default ARG]... [--ctest] [--dotnet [--dotnet-filter EXPR]]
+                                     [-C DIR] -- <command>; an argument `{{}}` stands for the
+                                     selected entries (the defaults when the whole suite is
+                                     selected); with --ctest for `-R <regex>` of the programs,
+                                     the entries (`<ctest>` or `<ctest>:<function>`) going to
+                                     them in $C_TEST_FILTER; with --dotnet for a `dotnet test
+                                     --filter` on the names, and-ed with EXPR
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2883,7 +3003,8 @@ Usage:
   cargo xtask javadoc <marker|rust-path|C symbol>
   cargo xtask doc-report
   cargo xtask doc-fill [--write] <path>...
-  cargo xtask lint [--keep-going]
+  cargo xtask lint [--keep-going] [--without-default-features-clippy]
+  cargo xtask clippy-default-features
 
   cargo xtask doc-hygiene
   cargo xtask lint-fix
@@ -2908,6 +3029,37 @@ Usage:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_module_paths_matches_whole_segments_under_a_crate_root() {
+        let mut by_segment: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        by_segment.entry("producer_record").or_default().insert("ProducerRecord");
+        by_segment.entry("error").or_default().insert("Error");
+        let roots: BTreeSet<&str> = ["crate", "super", "producer"].into_iter().collect();
+        let paths = |line| file_module_paths(line, &by_segment, &roots);
+
+        assert_eq!(
+            paths("use crate::producer::producer_record::ProducerRecord;"),
+            vec![("producer_record", "ProducerRecord")]
+        );
+        assert_eq!(
+            paths("let a = super::producer_record::ProducerRecord::new(); producer::producer_record::ProducerRecord"),
+            vec![
+                ("producer_record", "ProducerRecord"),
+                ("producer_record", "ProducerRecord")
+            ]
+        );
+        // The defining `pub use` in the parent's own `mod.rs` is not preceded by `::`.
+        assert!(paths("pub use producer_record::ProducerRecord;").is_empty());
+        // A longer identifier on either side is another name.
+        assert!(paths("use crate::producer::producer_record::ProducerRecordBuilder;").is_empty());
+        assert!(paths("use crate::producer::my_producer_record::ProducerRecord;").is_empty());
+        // A nested type the parent does not re-export.
+        assert!(paths("use crate::producer::producer_record::Nested;").is_empty());
+        // A path outside the crate, such as `std::error::Error`.
+        assert!(paths("impl std::error::Error for X {}").is_empty());
+        assert_eq!(paths("crate::common::error::Error"), vec![("error", "Error")]);
+    }
 
     const MANIFEST: &str = r#"[workspace]
 members = [".", "ffi-macros"]

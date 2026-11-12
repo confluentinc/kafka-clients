@@ -1,0 +1,18 @@
+{
+  "base": "e56311228",
+  "changed_files": [
+    "M rust/tests/integration/plaintext_consumer_poll_test.rs"
+  ],
+  "head": "cd1e08e9b4045301ea130e4647def836a16e116a",
+  "merge_base": "e563112289b6bc81ae08cf4886571a41687c273c",
+  "reasons": {
+    "rust.integration": "Only the plaintext_consumer_poll_test module of the Rust integration tests changed (two new metrics tests and a helper); it uses the native Rust consumer and has no gRPC variants."
+  },
+  "rust": {
+    "integration": [
+      "plaintext_consumer_poll_test::"
+    ]
+  },
+  "tree": "1d6ea64c9ea542d81215323eb7681335fd06bc33",
+  "version": 2
+}
