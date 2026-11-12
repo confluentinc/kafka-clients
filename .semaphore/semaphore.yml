@@ -57,6 +57,13 @@ name: build-test-release
 #      blocks, which run only on a release tag of their package (see the
 #      comments above them).
 #
+# On a pull request build the Linux and macOS verify blocks run only the tests
+# that the committed test-selection.json selects (`make select-tests`, run
+# before pushing), and only while the checkout is the working tree it was made
+# for; every other build, and a pull request without a matching selection, runs
+# every test. The Windows block, whose script does not go through the
+# Makefiles, always runs every .NET unit test.
+#
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
 # pipeline's default limit. Semaphore rejects the whole pipeline when it
@@ -242,7 +249,14 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # On a pull request, only the tests that the committed
+          # test-selection.json selects, if it was made for exactly this
+          # working tree (`make select-tests`, see
+          # rust/xtask/src/test_selection.rs); otherwise every test runs.
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
           commands:
@@ -297,7 +311,11 @@ blocks:
         # its own checkout.
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
           commands:
@@ -347,7 +365,11 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:
@@ -391,7 +413,11 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:
