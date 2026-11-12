@@ -106,7 +106,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context as _};
 
 use self::live::{LiveReport, RunningArm};
-use crate::chaos_matrix::{group_running, now_utc, package_root, signal_group, stop_group};
+use crate::chaos_matrix::{group_running, kill_group, now_utc, package_root, stop_group};
 
 /// The tests that can be named in a run, relative to the repository root.
 const TESTS_FILE: &str = "tools/perf-cloud/tests.txt";
@@ -3750,8 +3750,7 @@ impl ChildGroup {
 impl Drop for ChildGroup {
     fn drop(&mut self) {
         if !self.reaped {
-            signal_group(self.pgid, "KILL");
-            let _ = self.child.wait();
+            kill_group(&mut self.child, self.pgid);
         }
     }
 }
@@ -3762,8 +3761,7 @@ fn reap_group(child: &mut Child, pgid: u32) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(200));
     }
     if group_running(child, pgid)? {
-        signal_group(pgid, "KILL");
-        let _ = child.wait();
+        kill_group(child, pgid);
     }
     Ok(())
 }

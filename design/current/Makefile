@@ -21,7 +21,7 @@ all: d2 update-docs
 d2: $(D2_SVGS)
 
 %.svg: %.d2
-	@which d2 >/dev/null 2>&1 || curl -fsSL https://d2lang.com/install.sh | sh -s --
+	@which d2 >/dev/null 2>&1 || { curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/d2-install.sh https://d2lang.com/install.sh && sh /tmp/d2-install.sh --; }
 	d2 $< $@
 
 # Prompt for `make update-docs`. Kept here rather than in a separate file so
