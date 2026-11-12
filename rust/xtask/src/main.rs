@@ -81,6 +81,7 @@ fn main() -> anyhow::Result<()> {
         Some("select-tests") => test_selection::select(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("selected-cargo-test") => test_selection::cargo_test(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("selected-run") => test_selection::selected_run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("show-test-selection") => test_selection::show()?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
         // .semaphore/semaphore.yml, rely on the exit status of these tasks.
@@ -2850,6 +2851,8 @@ fn print_help() {
                     --model MODEL    the agent's model (default opus)
                     --reuse          keep the file when it was made at HEAD for the current
                                      working tree
+  show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
+                  tree and, when it does, list the suites it runs with their entries and reasons
   selected-cargo-test  `cargo test` restricted to the test selection $TEST_SELECTION names, if any
                     --section NAME -- <cargo test arguments>; NAME is `rust`, or a filter list
                                      such as `c.integration` applying to every test unit

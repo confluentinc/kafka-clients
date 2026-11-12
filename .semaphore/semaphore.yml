@@ -255,6 +255,8 @@ blocks:
           # rust/xtask/src/test_selection.rs); otherwise every test runs.
           - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
           commands:
@@ -312,6 +314,8 @@ blocks:
           # The test selection, as in "Verify Rust (Linux amd64)".
           - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
           commands:
@@ -364,6 +368,8 @@ blocks:
           # The test selection, as in "Verify Rust (Linux amd64)".
           - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:
@@ -410,6 +416,8 @@ blocks:
           # The test selection, as in "Verify Rust (Linux amd64)".
           - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:

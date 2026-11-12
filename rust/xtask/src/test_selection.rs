@@ -601,7 +601,7 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
     fs::write(&path, serde_json::to_string_pretty(&Value::Object(selection.clone()))? + "\n")
         .with_context(|| format!("writing {}", path.display()))?;
     eprintln!("select-tests: wrote {}", path.display());
-    print_summary(&selection);
+    print_summary("select-tests", &selection);
     Ok(())
 }
 
@@ -805,30 +805,56 @@ fn check_dotnet_entries(suite: &str, entries: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_summary(selection: &Map<String, Value>) {
+/// The suites `selection` runs, two lines each: the suite with its entries
+/// (`all` for the whole suite), then the agent's reason for it. Empty when it
+/// selects no suite.
+fn describe(selection: &Map<String, Value>) -> Vec<String> {
+    let reasons = selection.get("reasons").and_then(Value::as_object);
     let mut lines = Vec::new();
     for language in ["rust", "c", "python", "dotnet"] {
         let Some(Value::Object(sections)) = selection.get(language) else {
             continue;
         };
         for (name, entries) in sections {
-            let entries = entries.as_array().map(Vec::len).unwrap_or_default();
-            let what = if entries == 0 {
+            let key = format!("{language}.{name}");
+            let entries: Vec<&str> = entries.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let what = if entries.is_empty() {
                 "all".to_string()
             } else {
-                format!("{entries} entries")
+                entries.join(", ")
             };
-            lines.push(format!("  {language}.{name}: {what}"));
+            lines.push(format!("  {key}: {what}"));
+            let reason = reasons
+                .and_then(|reasons| reasons.get(&key))
+                .and_then(Value::as_str)
+                .unwrap_or("(no reason given)");
+            lines.push(format!("      why: {reason}"));
         }
     }
+    lines
+}
+
+fn print_summary(prefix: &str, selection: &Map<String, Value>) {
+    let lines = describe(selection);
     if lines.is_empty() {
-        eprintln!("select-tests: no test selected");
+        eprintln!("{prefix}: no test selected; only the builds and checks run");
     } else {
-        eprintln!(
-            "select-tests: selected (a suite not listed does not run):\n{}",
-            lines.join("\n")
-        );
+        eprintln!("{prefix}: selected (a suite not listed does not run):\n{}", lines.join("\n"));
     }
+}
+
+/// `show-test-selection`: whether the selection `TEST_SELECTION` names applies
+/// to the working tree and, when it does, the suites it runs and why. CI runs
+/// it first in each job, so the job log opens with what the selection trims.
+pub fn show() -> anyhow::Result<()> {
+    if env::var_os("TEST_SELECTION").is_none() {
+        eprintln!("test-selection: TEST_SELECTION is not set, so every test runs");
+        return Ok(());
+    }
+    if let Some(selection) = load()? {
+        print_summary("test-selection", &selection);
+    }
+    Ok(())
 }
 
 // ── selected-cargo-test ────────────────────────────────────────────────────
@@ -1715,5 +1741,28 @@ add_test(NAME mock_producer COMMAND test_mock_producer)
             "dotnet.solution: \"Confluent.Kafka.UnitTests|x\" is not a namespace or class name"
         );
         assert_eq!(error(json!({"java": {}})), "unknown member \"java\"");
+    }
+
+    #[test]
+    fn test_describe() {
+        let selection = json!({
+            "version": 2,
+            "tree": "t",
+            "rust": {"lib": ["producer::", "consumer::fetch"], "admin": []},
+            "c": {"unit": ["mock_producer:test_a"]},
+            "reasons": {"rust.lib": "the producer changed", "c.unit": "the C producer binding changed"},
+        });
+        assert_eq!(
+            describe(selection.as_object().unwrap()),
+            strings(&[
+                "  rust.admin: all",
+                "      why: (no reason given)",
+                "  rust.lib: producer::, consumer::fetch",
+                "      why: the producer changed",
+                "  c.unit: mock_producer:test_a",
+                "      why: the C producer binding changed",
+            ])
+        );
+        assert!(describe(json!({"version": 2, "tree": "t"}).as_object().unwrap()).is_empty());
     }
 }
