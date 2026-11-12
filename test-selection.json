@@ -1,0 +1,18 @@
+{
+  "base": "fe8f98eb1e85b81d4f0cac8937c5d03d3d82ce07",
+  "changed_files": [
+    "M rust/src/common/protocol/byte_buffer_accessor.rs"
+  ],
+  "head": "4a67ce235af41ffaec28870f3579046be92992d4",
+  "merge_base": "fe8f98eb1e85b81d4f0cac8937c5d03d3d82ce07",
+  "reasons": {
+    "rust.lib": "The change only adds a unit test to the tests module of common::protocol::byte_buffer_accessor and leaves non-test code untouched, so only that module's unit tests are affected."
+  },
+  "rust": {
+    "lib": [
+      "common::protocol::byte_buffer_accessor::"
+    ]
+  },
+  "tree": "2dd2956551150d16534044a69d13dd54a41a3576",
+  "version": 2
+}
