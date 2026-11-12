@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
@@ -58,7 +59,7 @@ public sealed class PublicAdminUndefinedEnumValueTests
     [MemberData(nameof(ElectionTypes))]
     public void ElectLeaders_AnUndefinedElectionType_ThrowsWhatValueOfThrows(string client, int value)
     {
-        string expected = "Value " + value + " must be one of [PREFERRED, UNCLEAN]";
+        string expected = "Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of [PREFERRED, UNCLEAN]";
 
         OnClient(
             client,
@@ -70,7 +71,7 @@ public sealed class PublicAdminUndefinedEnumValueTests
     [MemberData(nameof(IsolationLevels))]
     public void ListOffsets_AnUndefinedIsolationLevel_ThrowsWhatForIdThrows(string client, int value)
     {
-        string expected = "Unknown isolation level " + value;
+        string expected = "Unknown isolation level " + value.ToString(CultureInfo.InvariantCulture);
 
         OnClient(
             client,

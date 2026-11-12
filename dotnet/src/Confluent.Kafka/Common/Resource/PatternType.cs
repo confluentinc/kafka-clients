@@ -67,7 +67,7 @@ public static class PatternTypeMethods
         /// </summary>
         /// <param name="name">The constant name.</param>
         /// <returns>
-        /// The pattern type; <see cref="PatternType.UNKNOWN"/> for <see langword="null"/>, never throws.
+        /// The pattern type, or <see cref="PatternType.UNKNOWN"/>; never throws.
         /// </returns>
         public static PatternType FromString(string name) =>
             name switch

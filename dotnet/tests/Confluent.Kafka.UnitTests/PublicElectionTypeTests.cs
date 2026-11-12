@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Globalization;
 
 using Confluent.Kafka.Common;
 using Xunit;
@@ -55,7 +56,7 @@ public sealed class PublicElectionTypeTests
         {
             var e = Assert.Throws<IllegalArgumentException>(() => ElectionType.ValueOf((byte)value));
 
-            Assert.Equal("Value " + value + " must be one of [PREFERRED, UNCLEAN]", e.Message);
+            Assert.Equal("Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of [PREFERRED, UNCLEAN]", e.Message);
         }
     }
 

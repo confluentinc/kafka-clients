@@ -95,8 +95,7 @@ public static class TransactionStateMethods
         /// </summary>
         /// <param name="name">The text, such as <c>"PrepareAbort"</c>.</param>
         /// <returns>
-        /// The state, or <see cref="TransactionState.UNKNOWN"/> when <paramref name="name"/> is
-        /// <see langword="null"/> or no state has that text.
+        /// The state, or <see cref="TransactionState.UNKNOWN"/> when no state has that text.
         /// </returns>
         public static TransactionState Parse(string name) =>
             name is not null && s_byText.TryGetValue(name, out TransactionState state)

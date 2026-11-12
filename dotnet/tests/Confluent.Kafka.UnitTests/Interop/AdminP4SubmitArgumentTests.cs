@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -104,7 +105,9 @@ public sealed class AdminP4SubmitArgumentTests
         IllegalArgumentException rejected = Assert.Throws<IllegalArgumentException>(
             () => admin.ElectLeaders((ElectionType)value, Array.Empty<TopicPartition>(), options: null));
 
-        Assert.Equal("Value " + value + " must be one of [PREFERRED, UNCLEAN]", rejected.Message);
+        Assert.Equal(
+            "Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of [PREFERRED, UNCLEAN]",
+            rejected.Message);
     }
 
     [Theory]

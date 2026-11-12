@@ -101,7 +101,7 @@ public sealed class PublicIsolationLevelTests
         {
             var e = Assert.Throws<IllegalArgumentException>(() => IsolationLevel.ForId((byte)id));
 
-            Assert.Equal("Unknown isolation level " + id, e.Message);
+            Assert.Equal("Unknown isolation level " + id.ToString(CultureInfo.InvariantCulture), e.Message);
         }
     }
 
