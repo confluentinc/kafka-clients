@@ -1,0 +1,63 @@
+{
+  "base": "57cfce6f7",
+  "changed_files": [
+    "M .semaphore/bump-version.yml",
+    "M .semaphore/check-nupkg.py",
+    "M .semaphore/check-published-wheels.py",
+    "M .semaphore/create-release-tag.yml",
+    "M .semaphore/dependencies-macos.sh",
+    "M .semaphore/dependencies.sh",
+    "M .semaphore/install-dotnet.sh",
+    "M .semaphore/job-start.sh",
+    "M .semaphore/publish-wheels.sh",
+    "M .semaphore/release-nupkg.sh",
+    "M .semaphore/semaphore.yml",
+    "M .semaphore/test-nupkg.ps1",
+    "M .semaphore/test-nupkg.sh",
+    "M .semaphore/verify-dotnet-windows.ps1",
+    "M design/current/Makefile",
+    "M dotnet/Directory.Build.props",
+    "M dotnet/Makefile",
+    "M dotnet/analyzers/java-name-allowlist.txt",
+    "M dotnet/analyzers/java-name-baseline.txt",
+    "M dotnet/soak/bootstrap.sh",
+    "M dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj",
+    "M dotnet/src/Confluent.Kafka/Internal/Interop/Utf8Marshal.cs",
+    "M dotnet/tests/Confluent.Kafka.UnitTests/Confluent.Kafka.UnitTests.csproj",
+    "M dotnet/tests/Confluent.Kafka.UnitTests/Interop/ProducerSubmitHandleRefTests.cs",
+    "M dotnet/tools/PackageSmoke/PackageSmoke.csproj",
+    "M dotnet/tools/PackageSmoke/Program.cs",
+    "M python/soak/bootstrap.sh",
+    "M rust/src/consumer/internals/subscription_state.rs",
+    "M rust/xtask/src/bump_version.rs",
+    "M rust/xtask/src/chaos_matrix.rs",
+    "M rust/xtask/src/main.rs",
+    "M rust/xtask/src/perf_cloud.rs",
+    "M service.yml",
+    "M tools/deploy_and_run_perf/deploy_and_run_perf.py"
+  ],
+  "dotnet": {
+    "grpc": [],
+    "performance": [],
+    "soak": [],
+    "solution": []
+  },
+  "head": "c2aa7ba3806f35e6c760ebf23126921a56a85f64",
+  "merge_base": "57cfce6f7b39dbcd88be489cba441a93b8fe2a80",
+  "reasons": {
+    "dotnet.grpc": "The .NET gRPC server builds against Confluent.Kafka and picks up Directory.Build.props, and both changed.",
+    "dotnet.performance": "The performance projects build against Confluent.Kafka and pick up Directory.Build.props, and both changed.",
+    "dotnet.soak": "SoakClient builds against Confluent.Kafka and picks up Directory.Build.props, and both changed.",
+    "dotnet.solution": "Directory.Build.props and the library's csproj (new net462 target), the unit-test csproj, Utf8Marshal.cs and ProducerSubmitHandleRefTests.cs change.",
+    "rust.lib": "The only Rust core change is a new unit test in the subscription_state test module.",
+    "rust.xtask": "The xtask sources (main.rs, bump_version.rs, chaos_matrix.rs, perf_cloud.rs) change, so the xtask package's tests run."
+  },
+  "rust": {
+    "lib": [
+      "consumer::internals::subscription_state::"
+    ],
+    "xtask": []
+  },
+  "tree": "18ad49b886cafad0a4a4bd3387e26fe27b22c18d",
+  "version": 2
+}
