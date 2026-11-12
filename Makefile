@@ -14,7 +14,7 @@ VENV = . venv/bin/activate
 
 .PHONY: build build-all check-generated \
 	build-rust build-rust-integration-tests build-rust-all-features \
-	submodules build-c init-venv init-venv-librdkafka build-python \
+	submodules build-c build-cpp init-venv init-venv-librdkafka build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c build-grpc-images-dotnet init init-hooks \
@@ -25,7 +25,7 @@ VENV = . venv/bin/activate
 	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet \
 	test-integration-python-native test-integration-c-native test-integration-dotnet-native \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
-	test-c test-python test-dotnet test-rust-all-features \
+	test-c test-cpp test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
 	pack-dotnet package-check-dotnet \
@@ -63,6 +63,14 @@ build-c: submodules build-rust-all-features
 # installs but does not remove it from an existing venv, where it shadows the
 # package (`cannot import name 'IllegalArgumentError' from 'confluent_kafka'`).
 # The librdkafka baseline lives in its own venv (init-venv-librdkafka).
+# The C++ binding (cpp/). Standalone targets while it is scaffolding: not
+# part of build-all, test or verify yet.
+build-cpp: build-rust-all-features
+	$(MAKE) -C cpp $(ROOTS) build
+
+test-cpp: build-cpp
+	$(MAKE) -C cpp $(ROOTS) test
+
 init-venv:
 	[ -d venv ] || python3 -m venv venv
 	@if venv/bin/python -m pip show -q confluent-kafka >/dev/null 2>&1; then \

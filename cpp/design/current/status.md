@@ -1,0 +1,53 @@
+# C++ binding: status
+
+Updated 2026-11-12.
+
+## Done
+
+- Scaffold on branch `esabellico/cpp_bindings_scaffold`: CMake project (`ConfluentKafka::cpp`
+  INTERFACE target, install and package config, version check against `version.hpp`), Makefile
+  (build, test, format, format-check, lint, clean), root `make build-cpp` / `make test-cpp`
+  (standalone; not yet part of `build-all`, `test` or `verify`).
+- `include/confluent/kafka/detail/ffi.hpp`: the single include of the C header, `UniqueHandle`,
+  `ErrorHandle`, `ErrorSlot`.
+- Tests: GoogleTest harness (`confluent_kafka_cpp_unit_test`), `ffi_handle_test`, the
+  `ffi_symbols` check (`tools/check_ffi_symbols.py`: every `kafka_` name in `include/` is declared
+  in the header and none is a `_cb` function), the ABI probe library under `test/probe`.
+- `.clang-format`, `.clang-tidy` with the naming rules of CLAUDE.md §2.
+- `CLAUDE.md` with the rules derived from the kickstart questionnaire answers (Confluence page
+  6364529292).
+
+## Next
+
+1. `detail::check(out_err)` and the error hierarchy: the C++ emitter of
+   `cargo xtask generate-error-codes` (CLAUDE.md §6), the hierarchy, round-trip and message tests.
+2. `KafkaFuture<T>`, the config classes (§7.1), `Duration` and the common value types
+   (`TopicPartition`, `Node`, `Uuid`, `Header` / `Headers`).
+3. The producer family: `Producer<K, V>`, `KafkaProducer`, `MockProducer`, `ProducerRecord`,
+   `RecordMetadata`, `Callback`, the serdes, the completion thread; `KafkaProducerTest` and
+   `MockProducerTest`.
+4. The consumer family, then the admin family.
+5. The API inventory and `abidiff` check (§12.4), `verify-cpp`, the integration tests and the gRPC
+   conformance backend (§11.3), the vcpkg overlay port (§13.3).
+
+## Core and FFI asks
+
+Recorded here, not worked around in the binding (CLAUDE.md §1.6):
+
+- `kafka_consumer_ConsumerRecord__take_key` / `__take_value`: hand out the record's key or value as
+  an owned `kafka_Bytes_t` sharing the fetch batch's buffer, freed with `kafka_Bytes_destroy`
+  (`BytesDeserializer`, §9.3).
+- A log hook in the FFI, so the binding can route the core's log records (§7.5).
+- `when_complete` on `kafka_common_KafkaFuture_t` (§8.4).
+- Config setters for `interceptor.classes`, `metric.reporters` and `partition.assignment.strategy`
+  once the core defines the interfaces (§7.2).
+- The FFI reporting `InvalidGroupIdError` for `group_metadata()` without `group.id`, and a
+  separate "no timeout" value, so the binding's two remaining checks of §8.6 can go.
+
+## Environment notes
+
+- clang-format and clang-tidy are not pinned by the build; the Makefile takes `CLANG_FORMAT` and
+  `CLANG_TIDY`. With LLVM 19's clang-tidy built without its resource directory, pass
+  `CLANG_TIDY_EXTRA_ARGS=--extra-arg=-isystem/usr/lib/gcc/x86_64-linux-gnu/15/include`.
+- The C header's opaque structs use a zero-length array, so the header directory is a SYSTEM
+  include; the project's own headers build with `-Wpedantic -Werror`.

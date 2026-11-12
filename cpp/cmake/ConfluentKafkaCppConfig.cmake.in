@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if("@LINK_TYPE@" STREQUAL "static")
+    find_dependency(Threads)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/ConfluentKafkaCppTargets.cmake")
+check_required_components(ConfluentKafkaCpp)

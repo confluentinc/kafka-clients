@@ -1,0 +1,67 @@
+# cpp/CLAUDE.md §10. Every finding is an error: a lint failure fails the build.
+# The `google-*` group is left out on purpose: its naming rules are Google's,
+# and this binding names everything after Java (snake_case methods,
+# PascalCase types), which `readability-identifier-naming` enforces below.
+# `cert-dcl58-cpp` fires inside libstdc++'s own headers with clang-tidy 19 and
+# GCC 15, so it is off until the two agree. `cppcoreguidelines-pro-type-member-init`
+# does not see a member whose own class default-initializes it, and
+# `readability-redundant-member-init` rejects the `{}` that would satisfy it.
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cert-dcl58-cpp,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-type-member-init,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -modernize-use-trailing-return-type,
+  -readability-magic-numbers,
+  -readability-identifier-length
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/cpp/(include|test)/.*'
+FormatStyle: file
+CheckOptions:
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  # Java enum constants and `static final` constants keep Java's UPPER_CASE.
+  - key: readability-identifier-naming.EnumConstantCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.MethodCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
+  - key: readability-identifier-naming.TemplateParameterCase
+    value: CamelCase
+  - key: readability-identifier-naming.TypeAliasCase
+    value: CamelCase
+  # `value_type`, `iterator`, `size_type` and the other std-protocol aliases.
+  - key: readability-identifier-naming.TypeAliasIgnoredRegexp
+    value: '^(value_type|key_type|mapped_type|iterator|const_iterator|size_type|difference_type|reference|const_reference|pointer|const_pointer|element_type|deleter_type|duration|rep|period)$'
+  - key: readability-identifier-naming.TypedefCase
+    value: CamelCase
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
