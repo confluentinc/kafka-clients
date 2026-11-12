@@ -27,7 +27,7 @@ impl RecordsToDelete {
     /// # Arguments
     ///
     /// - `offset` - The offset before which all records will be deleted. Use `-1` to truncate to
-    ///   the high watermark. Otherwise it must be between 0 and the high watermark.
+    ///   the high watermark.
     #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset(long)")]
     pub fn with_offset(offset: i64) -> Self {
         Self { offset }

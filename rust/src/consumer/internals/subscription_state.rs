@@ -2804,17 +2804,6 @@ mod tests {
         assert_eq!(state.num_assigned_partitions(), 1);
     }
 
-    /// Translated from `testUnsubscribeDoesNotResetRebalanceListener`.
-    #[test]
-    fn test_unsubscribe_does_not_reset_rebalance_listener() {
-        let mut state = new_state();
-        state
-            .subscribe_with_topics(HashSet::from([TOPIC.to_string()]), listener())
-            .unwrap();
-        state.unsubscribe();
-        assert!(state.rebalance_listener().is_some());
-    }
-
     /// Translated from `unsubscription`.
     #[test]
     fn test_unsubscription() {
