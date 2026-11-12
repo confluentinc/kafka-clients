@@ -58,9 +58,9 @@ internal static class Program
         }
 
         // The package's assembly for this application's framework, not another framework's; .NET
-        // Framework runs its .NET Standard 2.0 assembly.
+        // Framework runs its .NET Framework 4.6.2 assembly.
 #if NETFRAMEWORK
-        string? expected = ".NETStandard,Version=v2.0";
+        string? expected = ".NETFramework,Version=v4.6.2";
 #else
         string? expected = AppContext.TargetFrameworkName;
 #endif
