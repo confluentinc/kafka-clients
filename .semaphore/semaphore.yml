@@ -379,8 +379,10 @@ blocks:
     # covered on macOS by rust/src/integration_tests/ssl_sasl_test.rs and
     # rust/tests/integration/sasl_ssl_consumer_test.rs in "Verify Rust (macOS arm64)".
     dependencies: []
+    # Temporary, for the macOS .NET hang investigation: 60 minutes, so verify-dotnet can repeat the unit tests
+    # (repeat-dotnet-unit-tests-macos.sh) and still upload a dump.
     execution_time_limit:
-      minutes: 30
+      minutes: 60
     task:
       agent:
         machine:
@@ -396,8 +398,9 @@ blocks:
         always:
           commands:
             - colima stop || true
-            # Temporary, with CONFLUENT_KAFKA_DOTNET_HANG_DIR below: uploads the native stacks a .NET test sampled
-            # when its TestTimeout bound expired. The folder exists only after such a timeout.
+            # Temporary, with CONFLUENT_KAFKA_DOTNET_HANG_DIR below: uploads the native stacks, the managed dump and
+            # its SOS report that a .NET test wrote when its TestTimeout bound expired. The folder exists only after
+            # such a timeout.
             - 'if [ -d /tmp/confluent-kafka-dotnet-hangs ]; then artifact push job --expire-in 2w /tmp/confluent-kafka-dotnet-hangs || true; fi'
       jobs:
         - name: "verify-c (macOS arm64)"
@@ -425,6 +428,11 @@ blocks:
             # block's epilogue uploads it as a job artifact.
             - name: CONFLUENT_KAFKA_DOTNET_HANG_DIR
               value: /tmp/confluent-kafka-dotnet-hangs
+            # Temporary, with the above: the Rust core appends the consumer and producer close events to
+            # rust-trace-<pid>.log there (consumer_network_thread::hang_trace), and the .NET producer its
+            # close and completion-thread events to dotnet-trace-<pid>.log.
+            - name: CONFLUENT_KAFKA_HANG_TRACE_DIR
+              value: /tmp/confluent-kafka-dotnet-hangs
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"
@@ -432,21 +440,13 @@ blocks:
             - export DOTNET_MULTILEVEL_LOOKUP=0
             - which dotnet
             - dotnet --list-runtimes
-            - make test-dotnet-macos-docker
-            # The release blocks test the release package; this checks, on every build, that the
-            # package can be packed and installed. Set on make's command line for the reason given
-            # below.
-            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make package-check-dotnet
-            - command -v colima >/dev/null 2>&1 || brew install colima
-            - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
-            - 'docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done'
-            - export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
-            - export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
-            - export TESTCONTAINERS_RYUK_DISABLED=false
-            # The agent's mise shell hook can reset DOTNET_ROOT and PATH to mise's .NET 9 between
-            # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
-            # on the make's own command line.
-            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make test-integration-dotnet-native
+            # Temporary, for the macOS .NET hang investigation: installs dotnet-dump for TestTimeout's
+            # ManagedDump, then runs `make test-dotnet-macos-docker` and repeats the unit tests for up to
+            # 40 minutes, stopping at the first hang. The package check and the integration arms are
+            # left out to give the repeats the time. The .NET environment is set on each command line,
+            # as the agent's mise shell hook can reset DOTNET_ROOT and PATH between commands.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && dotnet tool install dotnet-dump --version 10.0.750501 --tool-path "$HOME/.dotnet-tools" && "$HOME/.dotnet-tools/dotnet-dump" --version
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 CONFLUENT_KAFKA_DOTNET_DUMP_TOOL="$HOME/.dotnet-tools/dotnet-dump" && ./.semaphore/repeat-dotnet-unit-tests-macos.sh 2400
 
   - name: "Verify language bindings (Windows amd64)"
     # The .NET client on Windows, whose package carries a win-x64 and a win-x86
