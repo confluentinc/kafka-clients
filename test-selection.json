@@ -1,0 +1,18 @@
+{
+  "base": "57cfce6f7",
+  "changed_files": [
+    "M rust/src/consumer/internals/subscription_state.rs"
+  ],
+  "head": "72621a87a416b8dcabc34297e481ffa0b2f44e28",
+  "merge_base": "57cfce6f7b39dbcd88be489cba441a93b8fe2a80",
+  "reasons": {
+    "rust.lib": "The diff only adds a unit test to the test module of consumer::internals::subscription_state, so only that module's unit tests can be affected."
+  },
+  "rust": {
+    "lib": [
+      "consumer::internals::subscription_state::tests::"
+    ]
+  },
+  "tree": "63c86cc89403c676a265dcd23cfebae9a3d1755e",
+  "version": 2
+}
