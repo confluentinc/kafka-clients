@@ -83,7 +83,7 @@ internal static class ManagedDump
 
         string kept = Compress(dump);
         return $"{Environment.NewLine}Managed dump after {elapsed.Elapsed} (report {written}; {kept}). {Legend}"
-            + $"{Environment.NewLine}{summary}";
+            + $"{Environment.NewLine}{summary}{Environment.NewLine}{RustTrace()}";
 #else
         return string.Empty;
 #endif
@@ -102,6 +102,8 @@ internal static class ManagedDump
     private const int MaxObjectLines = 40;
     private const int MaxObjectLineLength = 400;
     private const int MaxThreadPoolLines = 20;
+    private const int MaxTraceLines = 80;
+    private const string TraceDirectoryVariable = "CONFLUENT_KAFKA_HANG_TRACE_DIR";
     private const long MaxKeptDumpBytes = 1L << 30;
     private static readonly TimeSpan s_budget = TimeSpan.FromMinutes(6);
     private static readonly TimeSpan s_compressReserve = TimeSpan.FromMinutes(1);
@@ -339,6 +341,67 @@ internal static class ManagedDump
             }
         }
     }
+
+    /// <summary>
+    /// The lines of the Rust hang trace (<c>rust-trace-&lt;pid&gt;.log</c>) of each consumer whose close started and has
+    /// not ended, each line's time as UTC.
+    /// </summary>
+    private static string RustTrace()
+    {
+        string? directory = Environment.GetEnvironmentVariable(TraceDirectoryVariable);
+        if (string.IsNullOrEmpty(directory))
+        {
+            return "  Rust trace: off";
+        }
+
+        string file = Path.Combine(directory, $"rust-trace-{Environment.ProcessId}.log");
+        List<string[]> entries = new List<string[]>();
+        try
+        {
+            using FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using StreamReader reader = new StreamReader(stream);
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                string[] fields = line.Split(' ', 4);
+                if (fields.Length == 4)
+                {
+                    entries.Add(fields);
+                }
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return $"  Rust trace: {file} not read: {e.Message}";
+        }
+
+        HashSet<string> started = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<string> ended = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string[] entry in entries)
+        {
+            if (entry[3].StartsWith("close: start", StringComparison.Ordinal))
+            {
+                started.Add(entry[2]);
+            }
+            else if (entry[3].StartsWith("close: end", StringComparison.Ordinal))
+            {
+                ended.Add(entry[2]);
+            }
+        }
+
+        started.ExceptWith(ended);
+        List<string> lines = entries
+            .Where(entry => started.Contains(entry[2]))
+            .Select(entry => $"    {Time(entry[0])} {entry[1]} {entry[2]} {entry[3]}")
+            .ToList();
+        return $"  Rust trace of the {started.Count} consumers whose close has not ended ({entries.Count} lines in {file}):"
+            + Environment.NewLine + string.Join(Environment.NewLine, lines.Skip(Math.Max(0, lines.Count - MaxTraceLines)));
+    }
+
+    private static string Time(string milliseconds) =>
+        long.TryParse(milliseconds, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ms)
+            ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)
+            : milliseconds;
 
     private static TimeSpan Remaining(Stopwatch elapsed, TimeSpan bound)
     {

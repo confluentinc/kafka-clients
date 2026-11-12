@@ -428,6 +428,10 @@ blocks:
             # block's epilogue uploads it as a job artifact.
             - name: CONFLUENT_KAFKA_DOTNET_HANG_DIR
               value: /tmp/confluent-kafka-dotnet-hangs
+            # Temporary, with the above: the Rust core appends the consumer close and background-thread events
+            # to rust-trace-<pid>.log there (consumer_network_thread::hang_trace).
+            - name: CONFLUENT_KAFKA_HANG_TRACE_DIR
+              value: /tmp/confluent-kafka-dotnet-hangs
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"

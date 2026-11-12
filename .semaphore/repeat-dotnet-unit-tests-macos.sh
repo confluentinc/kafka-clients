@@ -25,6 +25,11 @@ hung() {
   return 1
 }
 
+# The Rust trace of a run that did not hang is not needed; dropping it keeps the uploaded folder small.
+drop_traces() {
+  rm -f "$hang_dir"/rust-trace-*.log
+}
+
 stop_hung() {
   echo "=== $1 hung; its files are in $hang_dir ==="
   ls -la "$hang_dir"
@@ -43,6 +48,7 @@ if ! make test-dotnet-macos-docker; then
   echo "=== run 1 failed without a hang ==="
   failed=1
 fi
+drop_traces
 
 run=1
 while [ "$(date +%s)" -lt "$end" ]; do
@@ -56,6 +62,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
       echo "=== run $run failed on $tfm without a hang ==="
       failed=$((failed + 1))
     fi
+    drop_traces
   done
 done
 
