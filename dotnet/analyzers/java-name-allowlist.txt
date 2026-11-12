@@ -226,3 +226,11 @@ overload M:Confluent.Kafka.Common.Serialization.Serdes.SerdeFrom``1
 # Java's Serdes() constructor, the default one of a class used only for its static methods: Serdes is a static class,
 # which has no constructor.
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Serdes()
+
+# Java's listClientMetricsResources, deprecated since 4.1 for removal, so not translated (root CLAUDE.md §3), as
+# in Python. Admin's own declaration is @Deprecated and so is not listed; the overrides in KafkaAdminClient and
+# MockAdminClient carry only @SuppressWarnings, so java-api.txt still lists them.
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
