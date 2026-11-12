@@ -2617,6 +2617,12 @@ fn module_path_hygiene() -> anyhow::Result<()> {
     crate_roots.sort();
     crate_roots.dedup();
 
+    let mut by_segment: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (segment, name) in &reexports {
+        by_segment.entry(segment.as_str()).or_default().insert(name.as_str());
+    }
+    let crate_roots: BTreeSet<&str> = crate_roots.iter().map(String::as_str).collect();
+
     let mut findings: Vec<String> = Vec::new();
     for root in ["src", "tests", "examples", "consumer-perf/src"] {
         if !PathBuf::from(root).is_dir() {
@@ -2625,36 +2631,13 @@ fn module_path_hygiene() -> anyhow::Result<()> {
         for path in rust_sources(root)? {
             let text = fs::read_to_string(&path)?;
             for (number, line) in text.lines().enumerate() {
-                for (segment, name) in &reexports {
-                    let needle = format!("::{segment}::{name}");
-                    let mut from = 0;
-                    while let Some(at) = line[from..].find(&needle) {
-                        let start = from + at;
-                        let end = start + needle.len();
-                        from = start + 1;
-                        // Reject a longer identifier on either side (`::topic::TopicX`).
-                        if line[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-                            continue;
-                        }
-                        let head: String = line[..start]
-                            .chars()
-                            .rev()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
-                        if !crate_roots.iter().any(|allowed| allowed == root) {
-                            continue;
-                        }
-                        findings.push(format!(
-                            "{}:{} reaches `{name}` through the file module `{segment}` — \
-                             import it from the parent re-export instead (CLAUDE.md §2)",
-                            path.display(),
-                            number + 1
-                        ));
-                    }
+                for (segment, name) in file_module_paths(line, &by_segment, &crate_roots) {
+                    findings.push(format!(
+                        "{}:{} reaches `{name}` through the file module `{segment}` — \
+                         import it from the parent re-export instead (CLAUDE.md §2)",
+                        path.display(),
+                        number + 1
+                    ));
                 }
             }
         }
@@ -2668,6 +2651,55 @@ fn module_path_hygiene() -> anyhow::Result<()> {
         eprintln!("  {finding}");
     }
     Err(anyhow::anyhow!("{} module-path finding(s)", findings.len()))
+}
+
+/// Every `::<segment>::<name>` in `line` whose pair `by_segment` holds and whose path
+/// starts at one of `crate_roots`, in the order they appear.
+///
+/// Both segments are whole identifiers, so each `::` starts at most one candidate pair
+/// (`::topic::TopicX` is the pair `(topic, TopicX)`, never `(topic, Topic)`). The line
+/// is scanned once and each pair is a map lookup, so the cost does not grow with the
+/// number of re-exports.
+fn file_module_paths<'a>(
+    line: &'a str,
+    by_segment: &BTreeMap<&str, BTreeSet<&str>>,
+    crate_roots: &BTreeSet<&str>,
+) -> Vec<(&'a str, &'a str)> {
+    fn identifier(text: &str) -> &str {
+        let end = text.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(text.len());
+        &text[..end]
+    }
+
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = line[from..].find("::") {
+        let start = from + at;
+        from = start + 1;
+        let segment = identifier(&line[start + 2..]);
+        if segment.is_empty() {
+            continue;
+        }
+        let Some(rest) = line[start + 2 + segment.len()..].strip_prefix("::") else {
+            continue;
+        };
+        let name = identifier(rest);
+        if name.is_empty() || !by_segment.get(segment).is_some_and(|names| names.contains(name)) {
+            continue;
+        }
+        let head: String = line[..start]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
+        if crate_roots.contains(root) {
+            found.push((segment, name));
+        }
+    }
+    found
 }
 
 /// The body of every `use` statement in `text`, whitespace-collapsed and with the
@@ -2970,6 +3002,37 @@ Usage:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_module_paths_matches_whole_segments_under_a_crate_root() {
+        let mut by_segment: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        by_segment.entry("producer_record").or_default().insert("ProducerRecord");
+        by_segment.entry("error").or_default().insert("Error");
+        let roots: BTreeSet<&str> = ["crate", "super", "producer"].into_iter().collect();
+        let paths = |line| file_module_paths(line, &by_segment, &roots);
+
+        assert_eq!(
+            paths("use crate::producer::producer_record::ProducerRecord;"),
+            vec![("producer_record", "ProducerRecord")]
+        );
+        assert_eq!(
+            paths("let a = super::producer_record::ProducerRecord::new(); producer::producer_record::ProducerRecord"),
+            vec![
+                ("producer_record", "ProducerRecord"),
+                ("producer_record", "ProducerRecord")
+            ]
+        );
+        // The defining `pub use` in the parent's own `mod.rs` is not preceded by `::`.
+        assert!(paths("pub use producer_record::ProducerRecord;").is_empty());
+        // A longer identifier on either side is another name.
+        assert!(paths("use crate::producer::producer_record::ProducerRecordBuilder;").is_empty());
+        assert!(paths("use crate::producer::my_producer_record::ProducerRecord;").is_empty());
+        // A nested type the parent does not re-export.
+        assert!(paths("use crate::producer::producer_record::Nested;").is_empty());
+        // A path outside the crate, such as `std::error::Error`.
+        assert!(paths("impl std::error::Error for X {}").is_empty());
+        assert_eq!(paths("crate::common::error::Error"), vec![("error", "Error")]);
+    }
 
     const MANIFEST: &str = r#"[workspace]
 members = [".", "ffi-macros"]
