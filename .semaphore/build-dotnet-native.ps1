@@ -16,7 +16,7 @@
 #
 # Builds the native library of one Windows platform for the Confluent.Kafka NuGet package: the
 # Windows counterpart of build-dotnet-native.sh, for the "Release (.NET): native library
-# (Windows ...)" blocks of semaphore.yml. verify-dotnet-windows.ps1 builds the library it tests
+# (Windows ...)" blocks of release.yml. verify-dotnet-windows.ps1 builds the library it tests
 # with it too.
 #
 # It installs what it needs: NASM (aws-lc assembles its Windows sources with it, on both
