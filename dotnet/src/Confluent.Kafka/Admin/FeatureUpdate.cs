@@ -135,23 +135,33 @@ public enum UpgradeType : byte
 }
 
 /// <summary>
-/// Java's static <c>UpgradeType.fromCode</c>, which a C# enum cannot carry. Java's
-/// <c>code()</c> needs no counterpart: a cast yields it.
+/// The members Java declares on the <see cref="UpgradeType"/> enum itself, which a C# enum cannot carry. From
+/// C# 14 the static one is called on the enum (<c>UpgradeType.FromCode(…)</c>); older C# calls it on this class.
 /// </summary>
-public static class UpgradeTypes
+public static class UpgradeTypeMethods
 {
-    /// <summary>
-    /// The upgrade type for a code — Java's <c>UpgradeType.fromCode(int)</c>. An unknown code
-    /// gives <see cref="UpgradeType.UNKNOWN"/>; it never throws.
-    /// </summary>
-    /// <param name="code">The code.</param>
-    /// <returns>The upgrade type.</returns>
-    public static UpgradeType FromCode(int code) =>
-        code switch
-        {
-            1 => UpgradeType.UPGRADE,
-            2 => UpgradeType.SAFE_DOWNGRADE,
-            3 => UpgradeType.UNSAFE_DOWNGRADE,
-            _ => UpgradeType.UNKNOWN,
-        };
+    extension(UpgradeType)
+    {
+        /// <summary>
+        /// The upgrade type for a code — Java's <c>UpgradeType.fromCode(int)</c>. An unknown code
+        /// gives <see cref="UpgradeType.UNKNOWN"/>; it never throws.
+        /// </summary>
+        /// <param name="code">The code.</param>
+        /// <returns>The upgrade type.</returns>
+        public static UpgradeType FromCode(int code) =>
+            code switch
+            {
+                1 => UpgradeType.UPGRADE,
+                2 => UpgradeType.SAFE_DOWNGRADE,
+                3 => UpgradeType.UNSAFE_DOWNGRADE,
+                _ => UpgradeType.UNKNOWN,
+            };
+    }
+
+    extension(UpgradeType upgradeType)
+    {
+        /// <summary>The code of this upgrade type — Java's <c>UpgradeType.code()</c>.</summary>
+        /// <returns>The code, which is the member's value.</returns>
+        public byte Code() => (byte)upgradeType;
+    }
 }

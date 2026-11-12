@@ -552,16 +552,6 @@ public sealed class PublicAdminP7Tests
             typeof(KafkaPrincipal).GetMethod(nameof(KafkaPrincipal.TokenAuthenticated), new[] { typeof(bool) })!.ReturnType);
     }
 
-    [Fact]
-    public void ScramMechanism_RoundTripsItsName()
-    {
-        Assert.Equal("SCRAM-SHA-256", ScramMechanism.SCRAM_SHA_256.MechanismName());
-        Assert.Equal("SCRAM-SHA-512", ScramMechanism.SCRAM_SHA_512.MechanismName());
-        Assert.Equal(ScramMechanism.SCRAM_SHA_512, ScramMechanisms.FromMechanismName("SCRAM-SHA-512"));
-        Assert.Equal(ScramMechanism.UNKNOWN, ScramMechanisms.FromMechanismName("SCRAM-SHA-1"));
-        Assert.Equal(ScramMechanism.UNKNOWN, ScramMechanisms.FromType(99));
-    }
-
     private static void AssertTokenNotFound(KafkaException failure)
     {
         Assert.Equal(DelegationTokenNotFoundCode, failure.Code);

@@ -378,7 +378,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="configs">
     /// Resource → the operations to apply to it, in order. ⚠ An
-    /// <see cref="AlterConfigOpType.DELETE"/> whose
+    /// <see cref="OpType.DELETE"/> whose
     /// <see cref="ConfigEntry.Value()"/> is <see langword="null"/> is a <b>real request</b>
     /// and the null reaches the broker as a null; it is not the same as an empty string.
     /// </param>
@@ -398,7 +398,7 @@ public interface IAdmin : IDisposable
     /// <paramref name="configs"/> contains a null resource, a null operation collection, or
     /// a null operation, or a resource name, a config name or a config value containing a NUL
     /// character (see the <see cref="IAdmin"/> remarks). A null
-    /// config value (<see cref="AlterConfigOpType.DELETE"/>'s) is <em>not</em> rejected.
+    /// config value (<see cref="OpType.DELETE"/>'s) is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.IncrementalAlterConfigs"/>
@@ -503,10 +503,11 @@ public interface IAdmin : IDisposable
     /// <c>Optional&lt;Throwable&gt;</c>. See <see cref="ElectLeadersResult"/>; the future
     /// itself fails only when the election could not be run at all.
     /// </returns>
-    /// <exception cref="ArgumentOutOfRangeException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="electionType"/> is not one of <see cref="ElectionType.PREFERRED"/>
     /// / <see cref="ElectionType.UNCLEAN"/> — a value Java's enum parameter cannot
-    /// express, but a C# cast can.
+    /// express, but a C# cast can — read as <see cref="ElectionTypeMethods.ValueOf"/> reads it:
+    /// <c>Value &lt;value&gt; must be one of [PREFERRED, UNCLEAN]</c>.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, or with a
@@ -721,11 +722,13 @@ public interface IAdmin : IDisposable
     /// <see cref="IAdmin"/> remarks). A null spec is not rejected: it reads as
     /// <see cref="OffsetSpec.Latest"/>, as in Java.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
+    /// <exception cref="IllegalArgumentException">
     /// <c>options.IsolationLevel</c> is not one of
     /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/> /
     /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_COMMITTED"/> — a value Java's enum
-    /// parameter cannot express, but a C# cast can.
+    /// parameter cannot express, but a C# cast can — read as
+    /// <see cref="Confluent.Kafka.Common.IsolationLevelMethods.ForId"/> reads it:
+    /// <c>Unknown isolation level &lt;id&gt;</c>.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ListOffsets"/>
@@ -1428,6 +1431,10 @@ public interface IAdmin : IDisposable
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <c>options.FilteredTransactionalIdPattern</c> contains a NUL character (see the <see cref="IAdmin"/> remarks).
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>options.FilteredStates</c> holds a <see cref="TransactionState"/> value no member defines, which Java's
+    /// enum-typed <c>Set</c> cannot express but a C# cast can.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ListTransactions"/>

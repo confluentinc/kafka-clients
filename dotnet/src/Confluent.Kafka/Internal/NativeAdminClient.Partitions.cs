@@ -306,15 +306,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(topicPartitionOffsets));
             }
 
-            if (options is not null
-                && options.IsolationLevel() != IsolationLevel.READ_UNCOMMITTED
-                && options.IsolationLevel() != IsolationLevel.READ_COMMITTED)
+            if (options is not null)
             {
-                throw new ArgumentOutOfRangeException(
-                    "options",
-                    options.IsolationLevel(),
-                    "ListOffsetsOptions.IsolationLevel must be IsolationLevel.READ_UNCOMMITTED or "
-                    + "IsolationLevel.READ_COMMITTED.");
+                _ = IsolationLevelMethods.RequireDefined(options.IsolationLevel());
             }
 
             List<TopicPartition> keys = new List<TopicPartition>(topicPartitionOffsets.Count);

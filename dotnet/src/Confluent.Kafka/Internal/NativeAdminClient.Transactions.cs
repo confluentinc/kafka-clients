@@ -588,6 +588,15 @@ internal sealed partial class NativeAdminClient
         try
         {
             AdminStrings.Validate(options?.FilteredTransactionalIdPattern(), nameof(options));
+            if (options is not null)
+            {
+                RequireDefinedFilter(
+                    options.FilteredStates(),
+                    TransactionMarshal.NameFromState,
+                    nameof(ListTransactionsOptions),
+                    nameof(ListTransactionsOptions.FilteredStates));
+            }
+
             SafeAdminResultHandle result = CallWithOptions(
                 NewListTransactionsOptions(options),
                 s_destroyListTransactionsOptions,

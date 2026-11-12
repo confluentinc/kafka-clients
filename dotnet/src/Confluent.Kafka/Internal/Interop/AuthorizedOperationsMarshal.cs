@@ -40,7 +40,7 @@ internal static class AuthorizedOperationsMarshal
         List<AclOperation> operations = new List<AclOperation>(Math.Max(total, 0));
         for (int index = 0; index < total; index++)
         {
-            operations.Add(FromCode(read(owner, index)));
+            operations.Add(AclEnumCodes.DefinedOrUnknown((AclOperation)read(owner, index)));
         }
 
         return operations;
@@ -63,7 +63,7 @@ internal static class AuthorizedOperationsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             sbyte code = NativeMethods.AclOperationCode(operation, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            operations.Add(FromCode(code));
+            operations.Add(AclEnumCodes.DefinedOrUnknown((AclOperation)code));
         }
 
         return operations;
@@ -90,9 +90,4 @@ internal static class AuthorizedOperationsMarshal
             }
         }
     }
-
-    internal static AclOperation FromCode(int code) =>
-        code >= (int)AclOperation.UNKNOWN && code <= (int)AclOperation.TWO_PHASE_COMMIT
-            ? (AclOperation)code
-            : AclOperation.UNKNOWN;
 }

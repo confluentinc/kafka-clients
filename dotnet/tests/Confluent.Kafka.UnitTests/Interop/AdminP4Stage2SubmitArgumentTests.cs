@@ -175,9 +175,9 @@ public sealed class AdminP4Stage2SubmitArgumentTests
             [new TopicPartition("p4s2-args", 0)] = OffsetSpec.Latest(),
         };
 
-        ArgumentOutOfRangeException isolation = Assert.Throws<ArgumentOutOfRangeException>(() =>
+        IllegalArgumentException isolation = Assert.Throws<IllegalArgumentException>(() =>
             admin.ListOffsets(request, new ListOffsetsOptions((IsolationLevel)7)));
-        Assert.Equal("options", isolation.ParamName);
+        Assert.Equal("Unknown isolation level 7", isolation.Message);
 
         ArgumentException nullTopic = Assert.Throws<ArgumentException>(() =>
             admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [default] = OffsetSpec.Latest() }, null));

@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Common.Acl;
 
 /// <summary>
@@ -74,4 +78,69 @@ public enum AclOperation
 
     /// <summary>TWO_PHASE_COMMIT — Java's <c>TWO_PHASE_COMMIT</c> (code 15).</summary>
     TWO_PHASE_COMMIT = 15,
+}
+
+/// <summary>
+/// The members Java declares on the <see cref="AclOperation"/> enum itself, which a C# enum
+/// cannot carry. From C# 14 the static ones are called on the enum
+/// (<c>AclOperation.FromString(…)</c>); older C# calls them on this class.
+/// </summary>
+public static class AclOperationMethods
+{
+    extension(AclOperation)
+    {
+        /// <summary>
+        /// Parse the given string as an ACL operation — Java's <c>fromString(String)</c>: the string upper-cased
+        /// as Java's <c>toUpperCase(Locale.ROOT)</c> does, matched exactly against the constant names.
+        /// </summary>
+        /// <param name="str">The string to parse.</param>
+        /// <returns>
+        /// The <see cref="AclOperation"/>, or <see cref="AclOperation.UNKNOWN"/> if the string could not be matched.
+        /// </returns>
+        /// <exception cref="ArgumentNullException"><paramref name="str"/> is <see langword="null"/>.</exception>
+        public static AclOperation FromString(string str) =>
+            JavaText.ToUpperRoot(str ?? throw new ArgumentNullException(nameof(str))) switch
+            {
+                nameof(AclOperation.UNKNOWN) => AclOperation.UNKNOWN,
+                nameof(AclOperation.ANY) => AclOperation.ANY,
+                nameof(AclOperation.ALL) => AclOperation.ALL,
+                nameof(AclOperation.READ) => AclOperation.READ,
+                nameof(AclOperation.WRITE) => AclOperation.WRITE,
+                nameof(AclOperation.CREATE) => AclOperation.CREATE,
+                nameof(AclOperation.DELETE) => AclOperation.DELETE,
+                nameof(AclOperation.ALTER) => AclOperation.ALTER,
+                nameof(AclOperation.DESCRIBE) => AclOperation.DESCRIBE,
+                nameof(AclOperation.CLUSTER_ACTION) => AclOperation.CLUSTER_ACTION,
+                nameof(AclOperation.DESCRIBE_CONFIGS) => AclOperation.DESCRIBE_CONFIGS,
+                nameof(AclOperation.ALTER_CONFIGS) => AclOperation.ALTER_CONFIGS,
+                nameof(AclOperation.IDEMPOTENT_WRITE) => AclOperation.IDEMPOTENT_WRITE,
+                nameof(AclOperation.CREATE_TOKENS) => AclOperation.CREATE_TOKENS,
+                nameof(AclOperation.DESCRIBE_TOKENS) => AclOperation.DESCRIBE_TOKENS,
+                nameof(AclOperation.TWO_PHASE_COMMIT) => AclOperation.TWO_PHASE_COMMIT,
+                _ => AclOperation.UNKNOWN,
+            };
+
+        /// <summary>
+        /// Return the <see cref="AclOperation"/> with the provided code or <see cref="AclOperation.UNKNOWN"/> if
+        /// one cannot be found — Java's <c>fromCode(byte)</c>.
+        /// </summary>
+        /// <param name="code">The code.</param>
+        /// <returns>The operation; never throws.</returns>
+        public static AclOperation FromCode(byte code) =>
+            code <= (byte)AclOperation.TWO_PHASE_COMMIT ? (AclOperation)code : AclOperation.UNKNOWN;
+    }
+
+    extension(AclOperation operation)
+    {
+        /// <summary>Return the code of this operation — Java's <c>code()</c>.</summary>
+        /// <returns>
+        /// The code, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((AclOperation)259).Code()</c> is 3.
+        /// </returns>
+        public byte Code() => unchecked((byte)operation);
+
+        /// <summary>Return true if this operation is UNKNOWN — Java's <c>isUnknown()</c>.</summary>
+        /// <returns>Whether this operation is <see cref="AclOperation.UNKNOWN"/>.</returns>
+        public bool IsUnknown() => operation == AclOperation.UNKNOWN;
+    }
 }

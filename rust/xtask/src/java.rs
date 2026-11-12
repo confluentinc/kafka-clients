@@ -124,6 +124,9 @@ pub struct JavaClass {
     /// The access level of each of `fields`: an enum constant, or a field of
     /// an interface, is `public`.
     pub field_visibility: BTreeMap<String, Visibility>,
+    /// The fields of `fields` declared `static`, a field of an interface
+    /// included (it is implicitly `static`); never an enum constant.
+    pub static_fields: BTreeSet<String>,
     /// The enum constants, in declaration order (empty for anything but an
     /// enum): `Enum.compareTo` orders by it.
     pub enum_constants: Vec<String>,
@@ -1037,6 +1040,7 @@ pub(crate) fn push_classes(package: &[String], source: &str, is_test: bool, out:
             overloads: class.overloads,
             fields: class.fields,
             field_visibility: class.field_visibility,
+            static_fields: class.static_fields,
             enum_constants: class.enum_constants,
             deprecated: class.deprecated,
             is_test,
@@ -1189,6 +1193,7 @@ struct Scanned {
     overloads: Vec<Overload>,
     fields: BTreeMap<String, bool>,
     field_visibility: BTreeMap<String, Visibility>,
+    static_fields: BTreeSet<String>,
     enum_constants: Vec<String>,
     deprecated: bool,
     kind: JavaKind,
@@ -1215,6 +1220,10 @@ impl Scanned {
     /// The members Java declares implicitly: an enum's `values()`,
     /// `valueOf(String)`, `name()` and `ordinal()`, and the default
     /// constructor of a class declaring none, as accessible as its class.
+    ///
+    /// An enum member is added unless the enum declares an overload of the
+    /// same name and parameter types: `ElectionType` declares
+    /// `valueOf(byte)` and still has the built-in `valueOf(String)`.
     fn add_implicit_members(&mut self) {
         let class = self.path.last().cloned().unwrap_or_default();
         let mut implicit = Vec::new();
@@ -1231,7 +1240,10 @@ impl Scanned {
             implicit.push((class, &[][..], self.visibility));
         }
         for (name, params, visibility) in implicit {
-            if !self.overloads.iter().any(|o| o.name == name) {
+            let declared = self.overloads.iter().any(|o| {
+                o.name == name && (!self.is_enum || o.params.iter().map(String::as_str).eq(params.iter().copied()))
+            });
+            if !declared {
                 let is_static = self.is_enum && matches!(name.as_str(), "values" | "valueOf");
                 self.overloads.push(Overload {
                     name,
@@ -1341,6 +1353,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                         overloads: Vec::new(),
                         fields: BTreeMap::new(),
                         field_visibility: BTreeMap::new(),
+                        static_fields: BTreeSet::new(),
                         enum_constants: Vec::new(),
                         deprecated: dep,
                         kind: match keyword.as_str() {
@@ -1502,6 +1515,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                     out[idx]
                         .field_visibility
                         .insert(name.clone(), visibility.take().unwrap_or(implicit));
+                    if std::mem::take(&mut is_static) || out[idx].is_interface {
+                        out[idx].static_fields.insert(name.clone());
+                    }
                 }
             },
             _ => {},
@@ -2008,6 +2024,46 @@ mod tests {
     }
 
     #[test]
+    fn adds_implicit_enum_members_beside_other_overloads() {
+        let src = r#"
+            package x;
+            public enum Election {
+                A, B;
+                public static Election valueOf(byte value) { return A; }
+            }
+            enum Bare { A }
+        "#;
+        let statics = |class: &JavaClass| {
+            class
+                .overloads
+                .iter()
+                .map(|o| (format!("{}({})", o.name, o.params.join(",")), o.is_static))
+                .collect::<Vec<_>>()
+        };
+        // A declared `valueOf(byte)` keeps the built-in `valueOf(String)`.
+        assert_eq!(
+            statics(&class_of(src, &["Election"])),
+            [
+                ("valueOf(byte)".to_string(), true),
+                ("values()".to_string(), true),
+                ("valueOf(String)".to_string(), true),
+                ("name()".to_string(), false),
+                ("ordinal()".to_string(), false),
+            ]
+        );
+        // An enum declaring none gets all four.
+        assert_eq!(
+            statics(&class_of(src, &["Bare"])),
+            [
+                ("values()".to_string(), true),
+                ("valueOf(String)".to_string(), true),
+                ("name()".to_string(), false),
+                ("ordinal()".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
     fn scans_visibilities() {
         let src = r#"
             package x;
@@ -2238,6 +2294,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            static_fields: BTreeSet::new(),
             enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
@@ -2272,6 +2329,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            static_fields: BTreeSet::new(),
             enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,

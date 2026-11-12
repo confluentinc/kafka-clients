@@ -218,22 +218,22 @@ public sealed class PublicAdminConfigsShapeParityTests
     {
         ConstructorInfo only = Assert.Single(typeof(AlterConfigOp).GetConstructors());
         Assert.Equal(
-            new[] { typeof(ConfigEntry), typeof(AlterConfigOpType) },
+            new[] { typeof(ConfigEntry), typeof(OpType) },
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
         Assert.Equal(
             typeof(ConfigEntry), Getters.Get(typeof(AlterConfigOp), nameof(AlterConfigOp.ConfigEntry)).ReturnType);
         Assert.Equal(
-            typeof(AlterConfigOpType), Getters.Get(typeof(AlterConfigOp), nameof(AlterConfigOp.OpType)).ReturnType);
+            typeof(OpType), Getters.Get(typeof(AlterConfigOp), nameof(AlterConfigOp.OpType)).ReturnType);
 
         ConfigEntry entry = new ConfigEntry("k", "v");
-        AlterConfigOp op = new AlterConfigOp(entry, AlterConfigOpType.SET);
+        AlterConfigOp op = new AlterConfigOp(entry, OpType.SET);
 
-        Assert.Equal(new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET), op);
+        Assert.Equal(new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET), op);
         Assert.Equal(
-            new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET).GetHashCode(), op.GetHashCode());
-        Assert.NotEqual(new AlterConfigOp(entry, AlterConfigOpType.DELETE), op);
-        Assert.NotEqual(new AlterConfigOp(new ConfigEntry("k", "other"), AlterConfigOpType.SET), op);
+            new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET).GetHashCode(), op.GetHashCode());
+        Assert.NotEqual(new AlterConfigOp(entry, OpType.DELETE), op);
+        Assert.NotEqual(new AlterConfigOp(new ConfigEntry("k", "other"), OpType.SET), op);
 
         Assert.StartsWith("AlterConfigOp{opType=SET, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
 
@@ -254,23 +254,23 @@ public sealed class PublicAdminConfigsShapeParityTests
     }
 
     [Theory]
-    [InlineData(AlterConfigOpType.SET, 0)]
-    [InlineData(AlterConfigOpType.DELETE, 1)]
-    [InlineData(AlterConfigOpType.APPEND, 2)]
-    [InlineData(AlterConfigOpType.SUBTRACT, 3)]
-    public void AlterConfigOpType_CarriesJavasWireIds(AlterConfigOpType opType, int id)
+    [InlineData(OpType.SET, 0)]
+    [InlineData(OpType.DELETE, 1)]
+    [InlineData(OpType.APPEND, 2)]
+    [InlineData(OpType.SUBTRACT, 3)]
+    public void OpType_CarriesJavasWireIds(OpType opType, int id)
     {
         Assert.Equal(id, (int)opType);
-        Assert.Equal(opType, (AlterConfigOpType)id);
+        Assert.Equal(opType, (OpType)id);
     }
 
     [Fact]
-    public void AlterConfigOpType_IsFlattened_WithExactlyJavasFourMembers()
+    public void OpType_IsFlattened_WithExactlyJavasFourMembers()
     {
-        Assert.Null(typeof(AlterConfigOpType).DeclaringType);
+        Assert.Null(typeof(OpType).DeclaringType);
         Assert.Equal(
             new[] { "APPEND", "DELETE", "SET", "SUBTRACT" },
-            Enum.GetNames(typeof(AlterConfigOpType)).OrderBy(name => name, StringComparer.Ordinal));
+            Enum.GetNames(typeof(OpType)).OrderBy(name => name, StringComparer.Ordinal));
 
         // AlterConfigOp has a member named OpType, so a nested type of that name would be CS0102: the enum is flattened.
         Assert.NotNull(typeof(AlterConfigOp).GetMethod("OpType", Type.EmptyTypes));
@@ -282,23 +282,23 @@ public sealed class PublicAdminConfigsShapeParityTests
     [InlineData(-1)]
     public void AlterConfigOp_RejectsAnUndefinedOpType(int code)
     {
-        AlterConfigOpType undefined = (AlterConfigOpType)code;
+        OpType undefined = (OpType)code;
 
         ArgumentOutOfRangeException thrown = Assert.Throws<ArgumentOutOfRangeException>(
             () => new AlterConfigOp(new ConfigEntry("k", "v"), undefined));
 
         Assert.Equal("operationType", thrown.ParamName);
-        Assert.StartsWith("operationType must be a defined AlterConfigOpType member.", thrown.Message, StringComparison.Ordinal);
+        Assert.StartsWith("operationType must be a defined OpType member.", thrown.Message, StringComparison.Ordinal);
         Assert.Equal(undefined, thrown.ActualValue);
     }
 
     [Fact]
     public void AlterConfigOp_AcceptsEveryDefinedOpType()
     {
-        AlterConfigOpType[] members = (AlterConfigOpType[])Enum.GetValues(typeof(AlterConfigOpType));
+        OpType[] members = (OpType[])Enum.GetValues(typeof(OpType));
         Assert.Equal(4, members.Length);
 
-        foreach (AlterConfigOpType member in members)
+        foreach (OpType member in members)
         {
             Assert.Equal(member, new AlterConfigOp(new ConfigEntry("k", "v"), member).OpType());
         }
@@ -424,13 +424,13 @@ public sealed class PublicAdminConfigsShapeParityTests
             [ConfigResourceType.GROUP] = "GROUP",
         };
 
-    private static readonly Dictionary<AlterConfigOpType, string> s_javaOpTypes =
-        new Dictionary<AlterConfigOpType, string>
+    private static readonly Dictionary<OpType, string> s_javaOpTypes =
+        new Dictionary<OpType, string>
         {
-            [AlterConfigOpType.SET] = "SET",
-            [AlterConfigOpType.DELETE] = "DELETE",
-            [AlterConfigOpType.APPEND] = "APPEND",
-            [AlterConfigOpType.SUBTRACT] = "SUBTRACT",
+            [OpType.SET] = "SET",
+            [OpType.DELETE] = "DELETE",
+            [OpType.APPEND] = "APPEND",
+            [OpType.SUBTRACT] = "SUBTRACT",
         };
 
     private static readonly Dictionary<ConfigEntry.ConfigSource, string> s_javaSources =
@@ -478,10 +478,10 @@ public sealed class PublicAdminConfigsShapeParityTests
     [Fact]
     public void AlterConfigOp_ToString_PrintsJavasOpTypeConstantName_ForEveryMember()
     {
-        AlterConfigOpType[] members = (AlterConfigOpType[])Enum.GetValues(typeof(AlterConfigOpType));
+        OpType[] members = (OpType[])Enum.GetValues(typeof(OpType));
         Assert.Equal(s_javaOpTypes.Count, members.Length);
 
-        foreach (AlterConfigOpType member in members)
+        foreach (OpType member in members)
         {
             Assert.True(s_javaOpTypes.TryGetValue(member, out string? java), member.ToString());
             Assert.Equal(

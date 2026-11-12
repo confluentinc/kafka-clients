@@ -259,7 +259,7 @@ public sealed class ClassicGroupDescription
             _protocol ?? "null",
             _protocolData,
             string.Join(",", _members.Select(static member => member.ToString())),
-            GroupMarshal.NameFromClassicState(_state) ?? "Unknown",
+            GroupMarshal.NameFromClassicState(_state) ?? ClassicGroupStateMethods.ToString(ClassicGroupState.UNKNOWN),
             _coordinator is null ? "null" : _coordinator.ToString(),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]");
 
