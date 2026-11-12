@@ -52,9 +52,13 @@ import zipfile
 PACKAGE_ID = "Confluent.Kafka"
 PROPS = "dotnet/Directory.Build.props"
 
-# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N. The
-# dotnet/v<version> tag pattern of semaphore.yml is this pattern after its prefix.
-VERSION_PATTERN = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?"
+# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N, an
+# -alpha.N, -beta.N or -rc.N then optionally by .dev.M, a dev build. NuGet puts a dev build after
+# the version it extends (4.4.0-alpha.1 < 4.4.0-alpha.1.dev.1 < 4.4.0-alpha.2), so the dev builds
+# that lead up to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M. The dotnet/v<version> tag pattern of
+# semaphore.yml is this pattern after its prefix.
+VERSION_PATTERN = (r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+                   r"(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?")
 # The package id is shared with confluent-kafka-dotnet, whose versions are 2.x: this client's
 # versions start at 4, the Apache Kafka line, so that none can be taken for one of those.
 MIN_MAJOR = 4
@@ -63,7 +67,10 @@ MIN_MAJOR = 4
 # as the nuspec's dependency groups name them, with the dependencies of each, and as the
 # assembly's TargetFrameworkAttribute names them.
 TARGET_FRAMEWORKS = {
-    "netstandard2.0": (".NETStandard2.0", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0"},
+    "net462": (".NETFramework4.6.2", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0",
+                                      "System.ValueTuple": "4.5.0"},
+               ".NETFramework,Version=v4.6.2"),
+    "netstandard2.0":(".NETStandard2.0", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0"},
                        ".NETStandard,Version=v2.0"),
     "net8.0": ("net8.0", {}, ".NETCoreApp,Version=v8.0"),
     "net10.0": ("net10.0", {}, ".NETCoreApp,Version=v10.0"),
@@ -114,7 +121,7 @@ def fail(message):
 def release_version_problem(version):
     """Why `version` is not a release version of the package, or None."""
     if not re.fullmatch(VERSION_PATTERN, version):
-        return f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|rc).N"
+        return f"'{version}' is not X.Y.Z, X.Y.Z-(alpha|beta|dev|rc).N or X.Y.Z-(alpha|beta|rc).N.dev.M"
     if int(version.split(".")[0]) < MIN_MAJOR:
         return (f"'{version}' is below {MIN_MAJOR}.0.0; the versions of {PACKAGE_ID} below {MIN_MAJOR} are "
                 "confluent-kafka-dotnet's")
