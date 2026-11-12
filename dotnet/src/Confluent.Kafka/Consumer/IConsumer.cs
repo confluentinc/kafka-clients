@@ -111,8 +111,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <paramref name="callback"/> is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
-    /// <c>OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call, but
-    /// does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
+    /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
+    /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
@@ -190,8 +190,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// message of Java's <c>KafkaConsumer</c> on a <see cref="KafkaConsumer{TKey, TValue}"/> and of Java's
     /// <c>MockConsumer</c> on a <see cref="MockConsumer{TKey, TValue}"/>.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
-    /// <c>OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call, but
-    /// does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
+    /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
+    /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.

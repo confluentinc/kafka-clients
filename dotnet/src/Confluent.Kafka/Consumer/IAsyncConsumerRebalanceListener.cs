@@ -61,9 +61,10 @@ public interface IAsyncConsumerRebalanceListener
 /// </summary>
 /// <remarks>
 /// A consumer's <c>Subscribe</c> refuses a listener that declares a public
-/// <c>OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c> but does not implement this interface, since it
-/// would never call that method. The check reads the type's metadata, so under trimming or Native AOT, which can remove
-/// a method nothing calls, it is best effort.
+/// <c>Task OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c> but does not implement this interface, since
+/// it would never call that method. A public <c>void</c> one is not refused: it is the method of
+/// <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>. The check reads the type's metadata, so under trimming or
+/// Native AOT, which can remove a method nothing calls, it is best effort.
 /// </remarks>
 public interface IAsyncConsumerRebalanceListenerWithPartitionsLost : IAsyncConsumerRebalanceListener
 {

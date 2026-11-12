@@ -1526,8 +1526,12 @@ public static class Admin
     {
         /// <summary>Create a new Admin with the given configuration.</summary>
         /// <remarks>
-        /// From code in a <c>Confluent.Kafka.*</c> namespace, write <c>IAdmin.Create</c> (C# 14) or the full name
-        /// <c>Confluent.Kafka.Admin.Admin.Create</c>: there <c>Admin</c> names the namespace.
+        /// C# looks a simple name up in each enclosing namespace before the <c>using</c> directives at the top of the
+        /// file, so an enclosing namespace with a member named <c>Admin</c> hides this class and <c>Admin.Create</c>
+        /// fails with CS0234: a namespace <c>MyApp.Admin</c> for code in <c>MyApp.Services</c>, and
+        /// <c>Confluent.Kafka.Admin</c> for code in the other <c>Confluent.Kafka.*</c> namespaces. There, write
+        /// <c>IAdmin.Create</c> (C# 14), the full name <c>global::Confluent.Kafka.Admin.Admin.Create</c>, or put the
+        /// <c>using</c> inside the namespace block.
         /// </remarks>
         /// <param name="conf">
         /// The admin client configuration, keyed by Java's dotted names (<c>bootstrap.servers</c> or
