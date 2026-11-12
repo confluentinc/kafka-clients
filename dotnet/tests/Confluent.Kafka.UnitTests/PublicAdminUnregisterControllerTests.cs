@@ -155,9 +155,9 @@ public sealed class PublicAdminUnregisterControllerTests
     [Fact]
     public async Task RealClient_TimeoutMaxWait_FailsAllWithTheTimeoutCode_OnBothFlavours()
     {
-        KafkaAdminClient sync = new KafkaAdminClient(Unreachable());
+        IAdmin sync = IAdmin.Create(Unreachable());
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(Unreachable());
+        IAsyncAdmin async = IAsyncAdmin.Create(Unreachable());
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         UnregisterControllerResult syncResult =
@@ -181,8 +181,8 @@ public sealed class PublicAdminUnregisterControllerTests
     {
         MockAdminClient mock = MockAdminClient.Create().Build();
         AsyncMockAdminClient asyncMock = AsyncMockAdminClient.Create().Build();
-        KafkaAdminClient real = new KafkaAdminClient(Unreachable());
-        AsyncKafkaAdminClient asyncReal = new AsyncKafkaAdminClient(Unreachable());
+        IAdmin real = IAdmin.Create(Unreachable());
+        IAsyncAdmin asyncReal = IAsyncAdmin.Create(Unreachable());
         TestTimeout.Run(mock.Dispose, s_deadline);
         TestTimeout.Run(asyncMock.Dispose, s_deadline);
         TestTimeout.Run(real.Dispose, s_deadline);

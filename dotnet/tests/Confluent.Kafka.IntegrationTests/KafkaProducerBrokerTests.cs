@@ -349,7 +349,7 @@ public sealed class KafkaProducerBrokerTests
 
     private static ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> MemoryRecord(
         string topic, ReadOnlyMemory<byte>? key, ReadOnlyMemory<byte>? value) =>
-        new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(topic, value, key, partition: 0);
+        new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(topic, value: value, key: key, partition: 0);
 
     private static void AssertHeaders((string Key, byte[]? Value)[] expected, (string Key, byte[]? Value)[] actual)
     {
@@ -365,11 +365,11 @@ public sealed class KafkaProducerBrokerTests
 
     private static ProducerRecord<byte[], byte[]> HeadersRecord(string topic, Header[] headers) =>
         new ProducerRecord<byte[], byte[]>(
-            topic, Encoding.UTF8.GetBytes("v"), Encoding.UTF8.GetBytes("k"), partition: 0, headers: headers);
+            topic, value: Encoding.UTF8.GetBytes("v"), key: Encoding.UTF8.GetBytes("k"), partition: 0, headers: headers);
 
     private static ProducerRecord<byte[], byte[]> SizedRecord(string topic) =>
         new ProducerRecord<byte[], byte[]>(
-            topic, Encoding.UTF8.GetBytes("hello"), Encoding.UTF8.GetBytes("abc"), partition: 0, timestamp: s_timestamp);
+            topic, value: Encoding.UTF8.GetBytes("hello"), key: Encoding.UTF8.GetBytes("abc"), partition: 0, timestamp: s_timestamp);
 
     private static ProducerRecord<byte[], byte[]> TombstoneRecord(string topic) =>
         new ProducerRecord<byte[], byte[]>(topic, value: null, key: null, partition: 0, timestamp: s_timestamp);
@@ -384,7 +384,7 @@ public sealed class KafkaProducerBrokerTests
     }
 
     private static ProducerRecord<byte[], byte[]> Record(string topic, int partition, string value) =>
-        new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes(value), key: null, partition: partition);
+        new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes(value), key: null, partition: partition);
 
     private async Task<string> TopicAsync()
     {

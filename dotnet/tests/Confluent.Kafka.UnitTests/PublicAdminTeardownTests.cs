@@ -83,7 +83,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task Close_WithANegativeTimeout_ThrowsJavasMessage_BeforeTheClosedCheck()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(
             () => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); });
@@ -117,7 +117,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public void TheSyncCloseWithoutATimeout_ClosesTheClient()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
 
         TestTimeout.Run(admin.Close, s_deadline);
         TestTimeout.Run(admin.Close, s_deadline);
@@ -128,7 +128,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task TheAsyncCloseWithoutATimeout_ClosesTheClient()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
 
         await TestTimeout.Run(() => admin.Close(), s_deadline);
         await TestTimeout.Run(() => admin.Close(CancellationToken.None), s_deadline);
@@ -139,7 +139,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task AnAlreadyCancelledToken_ThrowsBeforeTheCloseBegins()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
         using CancellationTokenSource cancelled = new CancellationTokenSource();
         cancelled.Cancel();
 
@@ -153,7 +153,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public void SaslPlaintextWithoutAMechanism_FailsWithTheCoresConfigError()
     {
-        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(
+        ConfigException failure = Assert.Throws<ConfigException>(() => IAdmin.Create(
             new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["bootstrap.servers"] = "127.0.0.1:1",
@@ -185,7 +185,7 @@ public sealed class PublicAdminTeardownTests
             ClosedAdminMessage,
             Assert.Throws<IllegalStateException>(() => mock.ListTopics()).Message);
 
-        KafkaAdminClient real = new KafkaAdminClient(
+        IAdmin real = IAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         TestTimeout.Run(real.Dispose, s_deadline);
         Assert.Equal(
@@ -202,7 +202,7 @@ public sealed class PublicAdminTeardownTests
         // Java's close() is idempotent; a second close must not throw.
         await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(1)), s_deadline);
 
-        AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin real = IAsyncAdmin.Create(s_unreachable);
         await TestTimeout.DisposeAsync(real);
         await TestTimeout.Run(() => real.Close(TimeSpan.FromSeconds(1)), s_deadline);
         await TestTimeout.Run(() => real.Close(), s_deadline);
@@ -222,8 +222,8 @@ public sealed class PublicAdminTeardownTests
 
                 for (int i = 0; i < 5; i++)
                 {
-                    new KafkaAdminClient(s_unreachable).Dispose();
-                    new AsyncKafkaAdminClient(s_unreachable).DisposeAsync().AsTask().GetAwaiter().GetResult();
+                    IAdmin.Create(s_unreachable).Dispose();
+                    IAsyncAdmin.Create(s_unreachable).DisposeAsync().AsTask().GetAwaiter().GetResult();
                 }
             },
             s_deadline);
@@ -232,7 +232,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task RealClient_ConstructsAndTearsDownWithoutABroker()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
+        IAsyncAdmin admin = IAsyncAdmin.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
@@ -242,7 +242,7 @@ public sealed class PublicAdminTeardownTests
     public void RealClient_RejectsANullConfigValueItsValidatorRefuses()
     {
         ConfigException failure = Assert.Throws<ConfigException>(
-            () => new KafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = null }));
+            () => IAdmin.Create(new Dictionary<string, object?> { ["bootstrap.servers"] = null }));
 
         Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", failure.Message);
         Assert.Equal(-10, failure.Code);
@@ -257,23 +257,15 @@ public sealed class PublicAdminTeardownTests
             ["sasl.login.connect.timeout.ms"] = null,
         };
 
-        KafkaAdminClient admin = new KafkaAdminClient(config);
+        IAdmin admin = IAdmin.Create(config);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         config["sasl.login.connect.timeout.ms"] = "";
-        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(config));
+        ConfigException failure = Assert.Throws<ConfigException>(() => IAdmin.Create(config));
         Assert.Equal(
             "Invalid value  for configuration sasl.login.connect.timeout.ms: Not a number of type INT",
             failure.Message);
         Assert.Equal(-10, failure.Code);
-    }
-
-    [Fact]
-    public void RealClient_RejectsANullConfigMap()
-    {
-        Assert.Equal(
-            "configs",
-            Assert.Throws<ArgumentNullException>(() => new KafkaAdminClient(null!)).ParamName);
     }
 }

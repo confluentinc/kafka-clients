@@ -55,7 +55,7 @@ public sealed class PublicProducerSendHeadersTests
         CallLog serializer = new CallLog(calls);
         KafkaProducer<string, string> producer = new KafkaProducer<string, string>(Unreachable(), serializer, serializer);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "value", "key");
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "value", key: "key");
 
         record.Headers().Add(new Header("test", Bytes("header2")));
         TestTimeout.Run(() => _ = producer.Send(record), s_deadline);
@@ -73,7 +73,7 @@ public sealed class PublicProducerSendHeadersTests
         AsyncKafkaProducer<string, string> producer =
             new AsyncKafkaProducer<string, string>(Unreachable(), serializer, serializer);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "value", "key");
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "value", key: "key");
         record.Headers().Add(new Header("test", Bytes("header2")));
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(record);
@@ -150,7 +150,7 @@ public sealed class PublicProducerSendHeadersTests
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", Bytes("v"));
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"));
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(() => metadata = producer.Send(record).Get(), s_deadline);
@@ -166,7 +166,7 @@ public sealed class PublicProducerSendHeadersTests
         AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
-        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", Bytes("v"));
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"));
 
         RecordMetadata metadata = await TestTimeout.Run(() => producer.Send(record).Delivery(), s_deadline);
 
@@ -207,7 +207,7 @@ public sealed class PublicProducerSendHeadersTests
     }
 
     private static ProducerRecord<string, string> Record() =>
-        new ProducerRecord<string, string>(Topic, "value", "key", headers: new[] { new Header("h", Bytes("1")) });
+        new ProducerRecord<string, string>(Topic, value: "value", key: "key", headers: new[] { new Header("h", Bytes("1")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>

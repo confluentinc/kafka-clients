@@ -30,7 +30,7 @@ public sealed class PublicConsumerOffsetValueTypeTests
     [Fact]
     public void OffsetAndMetadata_StoresFields_WithPresentLeaderEpoch()
     {
-        OffsetAndMetadata value = new OffsetAndMetadata(42, "meta", 3);
+        OffsetAndMetadata value = new OffsetAndMetadata(42, 3, "meta");
 
         Assert.Equal(42, value.Offset());
         Assert.Equal("meta", value.Metadata());
@@ -41,7 +41,7 @@ public sealed class PublicConsumerOffsetValueTypeTests
     [Fact]
     public void OffsetAndMetadata_AbsentLeaderEpoch_IsNull()
     {
-        OffsetAndMetadata value = new OffsetAndMetadata(7, string.Empty, null);
+        OffsetAndMetadata value = new OffsetAndMetadata(7, null, string.Empty);
 
         Assert.Equal(7, value.Offset());
         Assert.Equal(string.Empty, value.Metadata());
@@ -53,10 +53,10 @@ public sealed class PublicConsumerOffsetValueTypeTests
     {
         Assert.Equal(
             "OffsetAndMetadata{offset=42, leaderEpoch=3, metadata='meta'}",
-            new OffsetAndMetadata(42, "meta", 3).ToString());
+            new OffsetAndMetadata(42, 3, "meta").ToString());
         Assert.Equal(
             "OffsetAndMetadata{offset=7, leaderEpoch=null, metadata=''}",
-            new OffsetAndMetadata(7, string.Empty, null).ToString());
+            new OffsetAndMetadata(7, null, string.Empty).ToString());
     }
 
     [Theory]
@@ -64,12 +64,12 @@ public sealed class PublicConsumerOffsetValueTypeTests
     [InlineData(int.MinValue)]
     public void G5_3_NegativeLeaderEpoch_IsAbsent(int epoch)
     {
-        OffsetAndMetadata value = new OffsetAndMetadata(5, "m", epoch);
+        OffsetAndMetadata value = new OffsetAndMetadata(5, epoch, "m");
 
         Assert.Null(value.LeaderEpoch());
         Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=null, metadata='m'}", value.ToString());
 
-        OffsetAndMetadata zero = new OffsetAndMetadata(5, "m", 0);
+        OffsetAndMetadata zero = new OffsetAndMetadata(5, 0, "m");
         Assert.Equal(0, zero.LeaderEpoch());
         Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=0, metadata='m'}", zero.ToString());
     }
@@ -77,26 +77,26 @@ public sealed class PublicConsumerOffsetValueTypeTests
     [Fact]
     public void G5_2_OffsetAndMetadata_HasValueEquality()
     {
-        OffsetAndMetadata absent = new OffsetAndMetadata(5, "m", null);
-        OffsetAndMetadata negative = new OffsetAndMetadata(5, "m", -1);
+        OffsetAndMetadata absent = new OffsetAndMetadata(5, null, "m");
+        OffsetAndMetadata negative = new OffsetAndMetadata(5, -1, "m");
 
         Assert.True(absent.Equals(negative));
         Assert.True(absent.Equals((object)negative));
         Assert.True(negative.Equals(absent));
         Assert.Equal(absent.GetHashCode(), negative.GetHashCode());
 
-        OffsetAndMetadata nullMetadata = new OffsetAndMetadata(5, null, 3);
-        OffsetAndMetadata emptyMetadata = new OffsetAndMetadata(5, string.Empty, 3);
+        OffsetAndMetadata nullMetadata = new OffsetAndMetadata(5, 3, null);
+        OffsetAndMetadata emptyMetadata = new OffsetAndMetadata(5, 3, string.Empty);
         Assert.True(nullMetadata.Equals(emptyMetadata));
         Assert.Equal(nullMetadata.GetHashCode(), emptyMetadata.GetHashCode());
 
-        OffsetAndMetadata baseline = new OffsetAndMetadata(5, "m", 3);
-        Assert.True(baseline.Equals(new OffsetAndMetadata(5, "m", 3)));
-        Assert.Equal(baseline.GetHashCode(), new OffsetAndMetadata(5, "m", 3).GetHashCode());
-        Assert.False(baseline.Equals(new OffsetAndMetadata(6, "m", 3)));
-        Assert.False(baseline.Equals(new OffsetAndMetadata(5, "M", 3)));
-        Assert.False(baseline.Equals(new OffsetAndMetadata(5, "m", 4)));
-        Assert.False(baseline.Equals(new OffsetAndMetadata(5, "m", null)));
+        OffsetAndMetadata baseline = new OffsetAndMetadata(5, 3, "m");
+        Assert.True(baseline.Equals(new OffsetAndMetadata(5, 3, "m")));
+        Assert.Equal(baseline.GetHashCode(), new OffsetAndMetadata(5, 3, "m").GetHashCode());
+        Assert.False(baseline.Equals(new OffsetAndMetadata(6, 3, "m")));
+        Assert.False(baseline.Equals(new OffsetAndMetadata(5, 3, "M")));
+        Assert.False(baseline.Equals(new OffsetAndMetadata(5, 4, "m")));
+        Assert.False(baseline.Equals(new OffsetAndMetadata(5, null, "m")));
         Assert.False(baseline.Equals(null));
         Assert.False(baseline.Equals((object?)null));
         Assert.False(baseline.Equals("OffsetAndMetadata"));

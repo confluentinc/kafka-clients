@@ -96,8 +96,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
         _keySerializer = NativeProducer.RequireSerializer(keySerializer, "key.serializer");
         _valueSerializer = NativeProducer.RequireSerializer(valueSerializer, "value.serializer");
-        SerdeGuard.Check(_keySerializer, SerdeGuard.Producer, disposes: true);
-        SerdeGuard.Check(_valueSerializer, SerdeGuard.Producer, disposes: true);
+        SerdeGuard.Check(_keySerializer, DefaultMethodGuard.Producer, disposes: true);
+        SerdeGuard.Check(_valueSerializer, DefaultMethodGuard.Producer, disposes: true);
         _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
         _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
         _native = NativeProducer.Create(configs, serdes: new SerdeDisposal(keySerializer, valueSerializer));

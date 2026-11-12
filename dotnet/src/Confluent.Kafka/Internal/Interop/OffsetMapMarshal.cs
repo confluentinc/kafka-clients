@@ -102,6 +102,6 @@ internal static class OffsetMapMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         int epoch = NativeMethods.OffsetAndMetadataLeaderEpoch(offsetAndMetadata, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        return new OffsetAndMetadata(offset, metadata, OffsetMapMarshalShared.ReadLeaderEpoch(epoch >= 0, epoch));
+        return new OffsetAndMetadata(offset, OffsetMapMarshalShared.ReadLeaderEpoch(epoch >= 0, epoch), metadata);
     }
 }

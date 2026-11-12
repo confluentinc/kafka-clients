@@ -79,7 +79,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
                 [requested] = new OffsetAndMetadata(10),
-                [new TopicPartition("p5-acgo", 1)] = new OffsetAndMetadata(11, "m", 4),
+                [new TopicPartition("p5-acgo", 1)] = new OffsetAndMetadata(11, 4, "m"),
             });
 
         foreach (TopicPartition partition in new[] { requested, new TopicPartition("p5-unknown", 7) })

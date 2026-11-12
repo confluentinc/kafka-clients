@@ -51,7 +51,7 @@ public sealed class PublicConsumerCommitCallbackTests
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
-                [first] = new OffsetAndMetadata(42, "meta-x", 7),
+                [first] = new OffsetAndMetadata(42, 7, "meta-x"),
                 [second] = new OffsetAndMetadata(9),
             },
             callback);
@@ -201,7 +201,7 @@ public sealed class PublicConsumerCommitCallbackTests
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
-                [partition] = new OffsetAndMetadata(31, "no-callback-meta", 2),
+                [partition] = new OffsetAndMetadata(31, 2, "no-callback-meta"),
             });
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed = consumer.Committed(new[] { partition });

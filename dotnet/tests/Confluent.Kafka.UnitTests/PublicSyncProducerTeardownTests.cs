@@ -61,7 +61,7 @@ public sealed class PublicSyncProducerTeardownTests
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
-            () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+            () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
             s_deadline);
         Assert.Equal(0L, metadata.Offset());
 
@@ -110,7 +110,7 @@ public sealed class PublicSyncProducerTeardownTests
 
         // Every operation throws IllegalStateException after teardown; the type only, as for the consumer.
         Assert.Throws<IllegalStateException>(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)));
         Assert.Throws<IllegalStateException>(() => producer.Flush());
         Assert.Throws<IllegalStateException>(() => producer.PartitionsFor(Topic));
 
@@ -139,7 +139,7 @@ public sealed class PublicSyncProducerTeardownTests
             Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
         KafkaFuture<RecordMetadata> future =
-            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
@@ -159,7 +159,7 @@ public sealed class PublicSyncProducerTeardownTests
             Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         RecordingCallback callback = new RecordingCallback();
         KafkaFuture<RecordMetadata> future =
-            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback);
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback);
 
         TestTimeout.Run(producer.Close, s_deadline);
         TestTimeout.Run(producer.Dispose, s_deadline);
@@ -177,7 +177,7 @@ public sealed class PublicSyncProducerTeardownTests
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
             Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
         KafkaFuture<RecordMetadata> future =
-            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
         Task<bool> timedOut = Task.Run(() =>
         {
             try

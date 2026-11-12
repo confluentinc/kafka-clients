@@ -42,7 +42,7 @@ internal static class TopicProvisioning
             config[kv.Key] = kv.Value;
         }
 
-        using var admin = new KafkaAdminClient(config);
+        using var admin = IAdmin.Create(config);
 
         Console.WriteLine($">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...");
         DeleteTopicsResult deleteResult = admin.DeleteTopics(

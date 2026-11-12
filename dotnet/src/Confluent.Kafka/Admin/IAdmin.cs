@@ -1515,3 +1515,38 @@ public interface IAdmin : IDisposable
     /// </remarks>
     void Close();
 }
+
+/// <summary>
+/// The static method Java declares on the <see cref="IAdmin"/> interface, which an interface cannot carry on
+/// netstandard2.0. From C# 14 it is called on the interface (<c>IAdmin.Create(…)</c>); older C# calls it on this class.
+/// </summary>
+public static class Admin
+{
+    extension(IAdmin)
+    {
+        /// <summary>Create a new Admin with the given configuration.</summary>
+        /// <remarks>
+        /// C# looks a simple name up in each enclosing namespace before the <c>using</c> directives at the top of the
+        /// file, so an enclosing namespace with a member named <c>Admin</c> hides this class and <c>Admin.Create</c>
+        /// fails with CS0234: a namespace <c>MyApp.Admin</c> for code in <c>MyApp.Services</c>, and
+        /// <c>Confluent.Kafka.Admin</c> for code in the other <c>Confluent.Kafka.*</c> namespaces. There, write
+        /// <c>IAdmin.Create</c> (C# 14), the full name <c>global::Confluent.Kafka.Admin.Admin.Create</c>, or put the
+        /// <c>using</c> inside the namespace block.
+        /// </remarks>
+        /// <param name="conf">
+        /// The admin client configuration, keyed by Java's dotted names (<c>bootstrap.servers</c> or
+        /// <c>bootstrap.controllers</c> is required): each value of the type Java's <c>ConfigDef</c> accepts for its
+        /// key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the key's validator
+        /// refuses <c>null</c>.
+        /// </param>
+        /// <returns>The new KafkaAdminClient.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="conf"/> is null.</exception>
+        /// <exception cref="ConfigException">
+        /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+        /// <c>null</c>, or the client refuses a value.
+        /// </exception>
+        /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+        public static IAdmin Create(IReadOnlyDictionary<string, object?> conf) =>
+            new KafkaAdminClient(conf ?? throw new ArgumentNullException(nameof(conf)));
+    }
+}

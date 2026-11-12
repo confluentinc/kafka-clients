@@ -424,7 +424,7 @@ public sealed class SerdeConfigureTests
         KafkaProducer<string, string> producer = new KafkaProducer<string, string>(ProducerConfigs(), key, value);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        TestTimeout.Run(() => _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", "k")), s_deadline);
+        TestTimeout.Run(() => _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")), s_deadline);
         TestTimeout.Run(() => producer.Close(TimeSpan.Zero), s_deadline);
 
         Assert.Empty(log);
@@ -440,7 +440,7 @@ public sealed class SerdeConfigureTests
         AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(ProducerConfigs(), key, value);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
-        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(new ProducerRecord<string, string>(Topic, "v", "k"));
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));
         await FutureAssert.ThrowsAsync<Common.Errors.TimeoutException>(
             () => TestTimeout.Run(() => firstStage.Delivery(), s_deadline));
         await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), s_deadline);

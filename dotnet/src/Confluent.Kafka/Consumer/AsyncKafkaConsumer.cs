@@ -101,8 +101,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
 
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        SerdeGuard.Check(_keyDeserializer, SerdeGuard.Consumer, disposes: true);
-        SerdeGuard.Check(_valueDeserializer, SerdeGuard.Consumer, disposes: true);
+        SerdeGuard.Check(_keyDeserializer, DefaultMethodGuard.Consumer, disposes: true);
+        SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: true);
         _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
         _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.Create(configs, serdes: new SerdeDisposal(keyDeserializer, valueDeserializer));

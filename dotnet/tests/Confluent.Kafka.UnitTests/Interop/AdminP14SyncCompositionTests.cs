@@ -1260,7 +1260,7 @@ public sealed class AdminP14SyncCompositionTests
         "per-key-independence",
         "erasure-identity",
         "constructor-null-guard",
-        "constructor-by-reference");
+        "constructor-copies");
 
     [Theory]
     [MemberData(nameof(CreateAclsRows))]
@@ -1408,8 +1408,8 @@ public sealed class AdminP14SyncCompositionTests
                     break;
                 }
 
-            case "constructor-by-reference":
-                await AlterClientQuotasByReference(flavour);
+            case "constructor-copies":
+                await AlterClientQuotasCopies(flavour);
                 break;
 
             default:
@@ -1421,7 +1421,7 @@ public sealed class AdminP14SyncCompositionTests
         }
     }
 
-    private static async Task AlterClientQuotasByReference(string flavour)
+    private static async Task AlterClientQuotasCopies(string flavour)
     {
         ClientQuotaEntity[] entities = Entities();
         AdminFlavour adminFlavour = FlavourOf(flavour);
@@ -1433,30 +1433,30 @@ public sealed class AdminP14SyncCompositionTests
             Dictionary<ClientQuotaEntity, KafkaFuture> map =
                 new Dictionary<ClientQuotaEntity, KafkaFuture> { [entities[0]] = new KafkaFuture(impls[entities[0]]) };
             AlterClientQuotasResult result = new AlterClientQuotasResult(map);
-            Assert.Same(map, result.Values());
+            Assert.NotSame(map, result.Values());
 
             impls[entities[0]].Complete(null);
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
 
             map.Add(entities[1], new KafkaFuture(impls[entities[1]]));
             impls[entities[1]].CompleteWithError(failure);
-            Assert.Same(map, result.Values());
-            Assert.Same(failure, await FutureProbe.Of(result.All()).Outcome());
+            Assert.Single(result.Values());
+            AssertReturned(await FutureProbe.Of(result.All()).Outcome());
             return;
         }
 
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> asyncMap =
             new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [entities[0]] = new AsyncKafkaFuture(impls[entities[0]]) };
         AsyncAlterClientQuotasResult asyncResult = new AsyncAlterClientQuotasResult(asyncMap);
-        Assert.Same(asyncMap, asyncResult.Values());
+        Assert.NotSame(asyncMap, asyncResult.Values());
 
         impls[entities[0]].Complete(null);
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
 
         asyncMap.Add(entities[1], new AsyncKafkaFuture(impls[entities[1]]));
         impls[entities[1]].CompleteWithError(failure);
-        Assert.Same(asyncMap, asyncResult.Values());
-        Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
+        Assert.Single(asyncResult.Values());
+        AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
     }
 
     // Omitted: every row that needs a pending or a populated Result (no result root can be built in a unit test: the
@@ -1477,7 +1477,7 @@ public sealed class AdminP14SyncCompositionTests
         "per-key-independence",
         "erasure-identity",
         "constructor-null-guard",
-        "constructor-by-reference");
+        "constructor-copies");
 
     // Omitted: one-fails / two-fail / all-fail (one future, so they collapse into the fails row); unknown-key, null-key
     // and per-key independence (no keys); memoization (no projection or aggregate: DelegationToken() is the operation's
@@ -1578,8 +1578,8 @@ public sealed class AdminP14SyncCompositionTests
                     break;
                 }
 
-            case "constructor-by-reference":
-                await AlterUserScramCredentialsByReference(flavour);
+            case "constructor-copies":
+                await AlterUserScramCredentialsCopies(flavour);
                 break;
 
             default:
@@ -1588,7 +1588,7 @@ public sealed class AdminP14SyncCompositionTests
         }
     }
 
-    private static async Task AlterUserScramCredentialsByReference(string flavour)
+    private static async Task AlterUserScramCredentialsCopies(string flavour)
     {
         AdminFlavour adminFlavour = FlavourOf(flavour);
         Dictionary<string, KafkaFutureImpl<object?>> impls = Impls<string, object?>(s_users, StringComparer.Ordinal);
@@ -1598,15 +1598,15 @@ public sealed class AdminP14SyncCompositionTests
             Dictionary<string, KafkaFuture> map =
                 new Dictionary<string, KafkaFuture>(StringComparer.Ordinal) { [s_users[0]] = new KafkaFuture(impls[s_users[0]]) };
             AlterUserScramCredentialsResult result = new AlterUserScramCredentialsResult(map);
-            Assert.Same(map, result.Values());
+            Assert.NotSame(map, result.Values());
 
             impls[s_users[0]].Complete(null);
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
 
             map.Add(s_users[1], new KafkaFuture(impls[s_users[1]]));
             impls[s_users[1]].CompleteWithError(failure);
-            Assert.Equal(2, result.Values().Count);
-            Assert.Same(failure, await FutureProbe.Of(result.All()).Outcome());
+            Assert.Single(result.Values());
+            AssertReturned(await FutureProbe.Of(result.All()).Outcome());
             return;
         }
 
@@ -1615,15 +1615,15 @@ public sealed class AdminP14SyncCompositionTests
             [s_users[0]] = new AsyncKafkaFuture(impls[s_users[0]]),
         };
         AsyncAlterUserScramCredentialsResult asyncResult = new AsyncAlterUserScramCredentialsResult(asyncMap);
-        Assert.Same(asyncMap, asyncResult.Values());
+        Assert.NotSame(asyncMap, asyncResult.Values());
 
         impls[s_users[0]].Complete(null);
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
 
         asyncMap.Add(s_users[1], new AsyncKafkaFuture(impls[s_users[1]]));
         impls[s_users[1]].CompleteWithError(failure);
-        Assert.Equal(2, asyncResult.Values().Count);
-        Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
+        Assert.Single(asyncResult.Values());
+        AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
     }
 
     [Theory]

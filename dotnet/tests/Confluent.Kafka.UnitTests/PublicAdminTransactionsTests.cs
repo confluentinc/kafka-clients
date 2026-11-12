@@ -271,9 +271,9 @@ public sealed class PublicAdminTransactionsTests
     [Fact]
     public async Task RealClient_ATimeout_FailsEveryFutureWithTheTimeoutCode_OnBothFlavours()
     {
-        KafkaAdminClient sync = new KafkaAdminClient(Unreachable());
+        IAdmin sync = IAdmin.Create(Unreachable());
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(Unreachable());
+        IAsyncAdmin async = IAsyncAdmin.Create(Unreachable());
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         DescribeProducersResult producers =
@@ -302,9 +302,9 @@ public sealed class PublicAdminTransactionsTests
     [Fact]
     public async Task RealClient_FenceAndTerminate_ATimeout_FailsEveryFutureWithTheTimeoutCode_OnBothFlavours()
     {
-        KafkaAdminClient sync = new KafkaAdminClient(Unreachable());
+        IAdmin sync = IAdmin.Create(Unreachable());
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(Unreachable());
+        IAsyncAdmin async = IAsyncAdmin.Create(Unreachable());
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         FenceProducersResult fence = sync.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(10));
@@ -337,8 +337,8 @@ public sealed class PublicAdminTransactionsTests
     {
         MockAdminClient mock = MockAdminClient.Create().Build();
         AsyncMockAdminClient asyncMock = AsyncMockAdminClient.Create().Build();
-        KafkaAdminClient real = new KafkaAdminClient(Unreachable());
-        AsyncKafkaAdminClient asyncReal = new AsyncKafkaAdminClient(Unreachable());
+        IAdmin real = IAdmin.Create(Unreachable());
+        IAsyncAdmin asyncReal = IAsyncAdmin.Create(Unreachable());
         TestTimeout.Run(mock.Dispose, s_deadline);
         TestTimeout.Run(asyncMock.Dispose, s_deadline);
         TestTimeout.Run(real.Dispose, s_deadline);
