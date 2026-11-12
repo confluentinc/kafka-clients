@@ -108,7 +108,8 @@ test: build
 # only, so without it a stale generator or xtask test (Critic 115 R1) stays red
 # without failing `verify`.
 #
-# Part of the root `verify` (through `test`) and of the CI `verify-rust` job.
+# Part of the root `verify` (through `test`) and `verify-rust`, and the CI
+# PLAINTEXT Rust job.
 # It builds nothing in release: no test runs a release artifact. The release
 # build is still compiled in CI by the C and Python jobs.
 test-all-features: build-tests-all-features

@@ -149,7 +149,8 @@ test-rust:
 	$(MAKE) -C rust test
 
 # Every feature compiled, only the native-Rust tests run (see rust/Makefile).
-# Part of `verify` (through `test`) and of the CI `verify-rust` job.
+# Part of `verify` (through `test`) and `verify-rust`; the CI PLAINTEXT Rust job
+# runs it alone, the checks of `verify-rust` running in their own CI job.
 test-rust-all-features:
 	$(MAKE) -C rust test-all-features
 
