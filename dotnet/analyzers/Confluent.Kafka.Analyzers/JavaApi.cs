@@ -81,10 +81,10 @@ internal sealed class JavaApi
                         JavaMember.Parse(JavaMemberKind.Method, fields[1], fields[2] == "static", fields[3], fields[2] == "default"));
                     break;
                 case "field":
-                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Field, fields[1], fields[2]));
+                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Field, fields[1], fields[3], fields[2] == "static"));
                     break;
                 case "constant":
-                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Constant, fields[1], fields[2]));
+                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Constant, fields[1], fields[2], true));
                     break;
             }
         }
@@ -268,8 +268,8 @@ internal sealed class JavaMember
         ? DeclaringType + "#" + Name + "(" + string.Join(",", ParameterTypes) + ")"
         : DeclaringType + "#" + Name;
 
-    internal static JavaMember Named(JavaMemberKind kind, string declaringType, string name) =>
-        new JavaMember(kind, declaringType, name, true, false, Array.Empty<string>(), Array.Empty<string>());
+    internal static JavaMember Named(JavaMemberKind kind, string declaringType, string name, bool isStatic) =>
+        new JavaMember(kind, declaringType, name, isStatic, false, Array.Empty<string>(), Array.Empty<string>());
 
     /// <summary>Parses a signature as the list writes it: <c>name(Type a, Type b)</c>.</summary>
     internal static JavaMember Parse(JavaMemberKind kind, string declaringType, bool isStatic, string signature, bool isDefault = false)

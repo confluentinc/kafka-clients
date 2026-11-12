@@ -436,9 +436,9 @@ internal sealed partial class NativeAdminClient
         entries.Add(entry);
         IntPtr opType = op.OpType() switch
         {
-            AlterConfigOpType.DELETE => NativeMethods.AlterConfigOpTypeDelete(ref outErr),
-            AlterConfigOpType.APPEND => NativeMethods.AlterConfigOpTypeAppend(ref outErr),
-            AlterConfigOpType.SUBTRACT => NativeMethods.AlterConfigOpTypeSubtract(ref outErr),
+            OpType.DELETE => NativeMethods.AlterConfigOpTypeDelete(ref outErr),
+            OpType.APPEND => NativeMethods.AlterConfigOpTypeAppend(ref outErr),
+            OpType.SUBTRACT => NativeMethods.AlterConfigOpTypeSubtract(ref outErr),
             _ => NativeMethods.AlterConfigOpTypeSet(ref outErr),
         };
         KafkaException.ThrowIfFfiFailed(ref outErr);

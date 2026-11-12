@@ -83,7 +83,7 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.common.Node\tNode(int id, String host)\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\tid()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
-                + "field\torg.apache.kafka.common.Node\tNO_ID\n"));
+                + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
 
     [Fact]
     public Task APropertyWhereJavaHasAMethod_IsReportedOnce() =>
@@ -1179,6 +1179,299 @@ public sealed class JavaNameAnalyzerTests
             Name(1, "unmatched E:Confluent.Kafka.Admin.ScramMechanismMethods.Changed: Java has no events"),
             Name(2, "unmatched F:Confluent.Kafka.Admin.ScramMechanismMethods.Limit: Java's ScramMechanism has no field or constant of "
                 + "this name"));
+
+    private const string ElectionType =
+        "type\torg.apache.kafka.common.ElectionType\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.ElectionType\tPREFERRED\n"
+        + "constant\torg.apache.kafka.common.ElectionType\tUNCLEAN\n"
+        + "method\torg.apache.kafka.common.ElectionType\tinstance\tname()\n"
+        + "method\torg.apache.kafka.common.ElectionType\tinstance\tordinal()\n"
+        + "method\torg.apache.kafka.common.ElectionType\tstatic\tvalueOf(String ?)\n"
+        + "method\torg.apache.kafka.common.ElectionType\tstatic\tvalueOf(byte value)\n"
+        + "method\torg.apache.kafka.common.ElectionType\tstatic\tvalues()\n";
+
+    [Fact]
+    public Task AJavaEnumsValueOfOfOtherParameters_IsRequired_WhereItsBuiltInValueOfIsNot() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:ElectionType|}
+                {
+                    PREFERRED,
+                    UNCLEAN,
+                }
+            }
+            """,
+            Files(ElectionType),
+            Name(0, "missing T:Confluent.Kafka.Common.ElectionType org.apache.kafka.common.ElectionType#valueOf(byte): has no "
+                + "counterpart of Java's org.apache.kafka.common.ElectionType#valueOf(byte)"));
+
+    [Fact]
+    public Task AJavaEnumsValueOfOfOtherParameters_InAnExtensionBlock_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum ElectionType
+                {
+                    PREFERRED,
+                    UNCLEAN,
+                }
+
+                public static class ElectionTypeMethods
+                {
+                    extension(ElectionType)
+                    {
+                        public static ElectionType ValueOf(byte value) => default;
+                    }
+                }
+            }
+            """,
+            Files(ElectionType));
+
+    private const string SslClientAuth =
+        "type\torg.apache.kafka.common.config.SslClientAuth\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.config.SslClientAuth\tNONE\n"
+        + "constant\torg.apache.kafka.common.config.SslClientAuth\tREQUIRED\n"
+        + "field\torg.apache.kafka.common.config.SslClientAuth\tstatic\tVALUES\n";
+
+    [Fact]
+    public Task AJavaEnumsField_IsAStaticReadonlyFieldOfItsMethodsClass() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum SslClientAuth
+                {
+                    NONE,
+                    REQUIRED,
+                }
+
+                public static class SslClientAuthMethods
+                {
+                    public static readonly IReadOnlyList<SslClientAuth> VALUES = new[] { SslClientAuth.NONE, SslClientAuth.REQUIRED };
+                }
+            }
+            """,
+            Files(SslClientAuth));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("public static IReadOnlyList<SslClientAuth> VALUES => null;")]
+    [InlineData("public static IReadOnlyList<SslClientAuth> VALUES = null;")]
+    [InlineData("internal static readonly IReadOnlyList<SslClientAuth> VALUES = null;")]
+    public Task AJavaEnumsField_AbsentOrNotAStaticReadonlyFieldOfItsMethodsClass_IsReported(string member) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum {|#0:SslClientAuth|}
+                {
+                    NONE,
+                    REQUIRED,
+                }
+
+                public static class SslClientAuthMethods
+                {
+                    {{member}}
+                }
+            }
+            """,
+            Files(SslClientAuth),
+            Name(0, "missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#VALUES: has no "
+                + "counterpart of Java's org.apache.kafka.common.config.SslClientAuth#VALUES"));
+
+    private const string SecurityProtocol =
+        "type\torg.apache.kafka.common.security.auth.SecurityProtocol\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.security.auth.SecurityProtocol\tPLAINTEXT\n"
+        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tid\n"
+        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic\tVALUES\n";
+
+    [Fact]
+    public Task AJavaEnumsInstanceField_AsAStaticReadonlyFieldOfItsMethodsClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Security.Auth
+            {
+                public enum {|#0:SecurityProtocol|}
+                {
+                    PLAINTEXT,
+                }
+
+                public static class SecurityProtocolMethods
+                {
+                    public static readonly short id = 0;
+
+                    public static readonly IReadOnlyList<SecurityProtocol> VALUES = new[] { SecurityProtocol.PLAINTEXT };
+                }
+            }
+            """,
+            Files(SecurityProtocol),
+            Name(0, "missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol "
+                + "org.apache.kafka.common.security.auth.SecurityProtocol#id: has no counterpart of Java's "
+                + "org.apache.kafka.common.security.auth.SecurityProtocol#id"));
+
+    [Fact]
+    public Task AJavaEnumsConstant_OnItsMethodsClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum {|#0:SslClientAuth|}
+                {
+                    NONE,
+                }
+
+                public static class SslClientAuthMethods
+                {
+                    public static readonly SslClientAuth REQUIRED = SslClientAuth.NONE;
+
+                    public static readonly IReadOnlyList<SslClientAuth> VALUES = new[] { SslClientAuth.NONE };
+                }
+            }
+            """,
+            Files(SslClientAuth),
+            Name(0, "missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#REQUIRED: has no "
+                + "counterpart of Java's org.apache.kafka.common.config.SslClientAuth#REQUIRED"));
+
+    private const string GroupState =
+        "type\torg.apache.kafka.common.GroupState\tenum\t-\n"
+        + "constant\torg.apache.kafka.common.GroupState\tSTABLE\n"
+        + "method\torg.apache.kafka.common.GroupState\tinstance\tname()\n"
+        + "method\torg.apache.kafka.common.GroupState\tinstance\tordinal()\n"
+        + "method\torg.apache.kafka.common.GroupState\tinstance\ttoString()\n"
+        + "method\torg.apache.kafka.common.GroupState\tstatic\tvalueOf(String ?)\n"
+        + "method\torg.apache.kafka.common.GroupState\tstatic\tvalues()\n";
+
+    [Fact]
+    public Task AJavaEnumsToString_IsAStaticToStringOfTheEnumInAnExtensionBlock() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum GroupState
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static string ToString(GroupState state) => "Stable";
+                    }
+                }
+            }
+            """,
+            Files(GroupState));
+
+    [Theory]
+    [InlineData("extension(GroupState state) { public string {|#0:ToString|}() => \"Stable\"; }")]
+    [InlineData("public static string {|#0:ToString|}(this GroupState state) => \"Stable\";")]
+    [InlineData("public static string {|#0:ToString|}(GroupState state) => \"Stable\";")]
+    public Task AJavaEnumsToString_AsAnExtensionToStringOrAStaticOutsideABlock_IsReported(string member) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            namespace Confluent.Kafka.Common
+            {
+                public enum GroupState
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    {{member}}
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "static M:Confluent.Kafka.Common.GroupStateMethods.ToString(Confluent.Kafka.Common.GroupState): Java's "
+                + "GroupState.toString() is a static ToString(GroupState) in an extension(GroupState) block: C# never calls an "
+                + "extension ToString() over Enum.ToString()"));
+
+    [Theory]
+    [InlineData("int state", "System.Int32")]
+    [InlineData("System.DayOfWeek state", "System.DayOfWeek")]
+    public Task AJavaEnumsToString_AsAStaticToStringOfAnotherType_IsReported(string parameter, string docType) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static string {|#1:ToString|}({{parameter}}) => "Stable";
+                    }
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"),
+            Name(1, "overload M:Confluent.Kafka.Common.GroupStateMethods.ToString(" + docType + "): Java's GroupState.toString has no "
+                + "overload with 1 parameter(s)"));
+
+    [Fact]
+    public Task AJavaEnumsToString_AsAStaticToStringNotReturningAString_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static int {|#1:ToString|}(GroupState state) => 0;
+                    }
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"),
+            Name(1, "overload M:Confluent.Kafka.Common.GroupStateMethods.ToString(Confluent.Kafka.Common.GroupState): Java's "
+                + "GroupState.toString has no overload with 1 parameter(s)"));
+
+    [Fact]
+    public Task AJavaEnumsToString_WithNoForm_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"));
 
     [Fact]
     public Task AJavaAbstractClassesConstructors_AreProtected_AndATypeNothingDerivesFromHasNone() =>

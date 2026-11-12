@@ -211,7 +211,7 @@ public sealed class PublicAdminListGroupsTests
                     {
                         new AlterConfigOp(
                             new ConfigEntry("consumer.session.timeout.ms", "45000"),
-                            AlterConfigOpType.SET),
+                            OpType.SET),
                     })).All().Get(),
             s_deadline);
 }

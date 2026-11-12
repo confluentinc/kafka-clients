@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Common.Resource;
 
 /// <summary>
@@ -47,4 +51,61 @@ public enum ResourceType
 
     /// <summary>A user — Java's <c>USER</c> (code 7).</summary>
     USER = 7,
+}
+
+/// <summary>
+/// The members Java declares on the <see cref="ResourceType"/> enum itself, which a C# enum
+/// cannot carry. From C# 14 the static ones are called on the enum
+/// (<c>ResourceType.FromString(…)</c>); older C# calls them on this class.
+/// </summary>
+public static class ResourceTypeMethods
+{
+    extension(ResourceType)
+    {
+        /// <summary>
+        /// Parse the given string as an ACL resource type — Java's <c>fromString(String)</c>: the string upper-cased
+        /// as Java's <c>toUpperCase(Locale.ROOT)</c> does, matched exactly against the constant names.
+        /// </summary>
+        /// <param name="str">The string to parse.</param>
+        /// <returns>
+        /// The <see cref="ResourceType"/>, or <see cref="ResourceType.UNKNOWN"/> if the string could not be matched.
+        /// </returns>
+        /// <exception cref="ArgumentNullException"><paramref name="str"/> is <see langword="null"/>.</exception>
+        public static ResourceType FromString(string str) =>
+            JavaText.ToUpperRoot(str ?? throw new ArgumentNullException(nameof(str))) switch
+            {
+                nameof(ResourceType.UNKNOWN) => ResourceType.UNKNOWN,
+                nameof(ResourceType.ANY) => ResourceType.ANY,
+                nameof(ResourceType.TOPIC) => ResourceType.TOPIC,
+                nameof(ResourceType.GROUP) => ResourceType.GROUP,
+                nameof(ResourceType.CLUSTER) => ResourceType.CLUSTER,
+                nameof(ResourceType.TRANSACTIONAL_ID) => ResourceType.TRANSACTIONAL_ID,
+                nameof(ResourceType.DELEGATION_TOKEN) => ResourceType.DELEGATION_TOKEN,
+                nameof(ResourceType.USER) => ResourceType.USER,
+                _ => ResourceType.UNKNOWN,
+            };
+
+        /// <summary>
+        /// Return the <see cref="ResourceType"/> with the provided code or <see cref="ResourceType.UNKNOWN"/> if
+        /// one cannot be found — Java's <c>fromCode(byte)</c>.
+        /// </summary>
+        /// <param name="code">The code.</param>
+        /// <returns>The resource type; never throws.</returns>
+        public static ResourceType FromCode(byte code) =>
+            code <= (byte)ResourceType.USER ? (ResourceType)code : ResourceType.UNKNOWN;
+    }
+
+    extension(ResourceType resourceType)
+    {
+        /// <summary>Return the code of this resource — Java's <c>code()</c>.</summary>
+        /// <returns>
+        /// The code, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((ResourceType)259).Code()</c> is 3.
+        /// </returns>
+        public byte Code() => unchecked((byte)resourceType);
+
+        /// <summary>Return whether this resource type is UNKNOWN — Java's <c>isUnknown()</c>.</summary>
+        /// <returns>Whether this resource type is <see cref="ResourceType.UNKNOWN"/>.</returns>
+        public bool IsUnknown() => resourceType == ResourceType.UNKNOWN;
+    }
 }

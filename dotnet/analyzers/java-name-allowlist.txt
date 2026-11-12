@@ -99,22 +99,24 @@ unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.Collections.Ge
 unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
 unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.TimeSpan)
 
-# N1: a Java enum's toString() override; a C# enum cannot override ToString() (ledger 285).
-missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#toString()
-missing T:Confluent.Kafka.Common.ClassicGroupState org.apache.kafka.common.ClassicGroupState#toString()
-missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString()
-missing T:Confluent.Kafka.Common.GroupType org.apache.kafka.common.GroupType#toString()
-missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#toString()
-missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#toString()
-
-# N2: a Java enum's fields: the integer one is the enum's value, the others are reached through Java's
-# methods (Python's enum rule).
+# N2: a Java enum's fields: the integer one is the enum's value, the others are reached through Java's methods or
+# ToString() (Python's enum rule, ledger 373): TimestampType#name's text is TimestampType.ToString(t), and
+# SecurityProtocol#name and GroupProtocol#name are the constant's name, which ToString() prints.
 missing T:Confluent.Kafka.Common.ElectionType org.apache.kafka.common.ElectionType#value
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#id
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#name
+missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#id
+missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#name
+missing T:Confluent.Kafka.Consumer.GroupProtocol org.apache.kafka.clients.consumer.GroupProtocol#name
 
 # T4: Java's ConfigResource.Type; a bare `Type` would clash with System.Type (M15/P3 D16). See the pairs.
 unmatched T:Confluent.Kafka.Common.Config.ConfigResourceType
+
+# T8: Java's ClientQuotaFilterComponent.match() is an Optional<String> that can itself be null, three states (the name
+# matched exactly, the default name, any specified name) that a string? cannot hold; MatchType() tells them apart. A
+# .NET-only deviation recorded in dotnet/CLAUDE.md §3's idiom map.
+unmatched M:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.MatchType
+unmatched T:Confluent.Kafka.Common.Quota.ClientQuotaMatchType
 
 # The async forms of a callback-taking overload: Python's async callbacks (ledgers 47 and 48).
 overload M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.CommitAsync(Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)

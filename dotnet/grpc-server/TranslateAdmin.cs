@@ -41,17 +41,6 @@ internal static class TranslateAdmin
 {
     private const int LocalIllegalArgumentCode = -3;
 
-    private static readonly Dictionary<string, TransactionState> s_transactionStatesByName =
-        BuildTransactionStateTable();
-
-    // Case-insensitive, unlike s_transactionStatesByName: GroupState.parse lower-cases its input,
-    // TransactionState.parse does not.
-    private static readonly Dictionary<string, GroupState> s_groupStatesByName =
-        BuildNameTable<GroupState>(GroupStateName);
-
-    private static readonly Dictionary<string, GroupType> s_groupTypesByName =
-        BuildNameTable<GroupType>(GroupTypeName);
-
     internal static bool SelectsMock(IReadOnlyDictionary<string, string> config)
     {
         foreach (string value in config.Values)
@@ -359,7 +348,7 @@ internal static class TranslateAdmin
             {
                 ops.Add(new AlterConfigOp(
                     new ConfigEntry(op.Name, op.HasValue ? op.Value : null),
-                    (AlterConfigOpType)op.OpType));
+                    (OpType)op.OpType));
             }
 
             map[new ConfigResource((ConfigResourceType)proto.Resource.ResourceType, proto.Resource.Name)] = ops;
@@ -681,7 +670,7 @@ internal static class TranslateAdmin
         Proto.TransactionDescription proto = new Proto.TransactionDescription
         {
             CoordinatorId = description.CoordinatorId(),
-            State = TransactionStateName(description.State()),
+            State = TransactionState.ToString(description.State()),
             ProducerId = description.ProducerId(),
             ProducerEpoch = description.ProducerEpoch(),
             TransactionTimeoutMs = description.TransactionTimeoutMs(),
@@ -704,21 +693,11 @@ internal static class TranslateAdmin
         {
             TransactionalId = listing.TransactionalId(),
             ProducerId = listing.ProducerId(),
-            State = TransactionStateName(listing.State()),
+            State = TransactionState.ToString(listing.State()),
         };
 
-    internal static List<TransactionState> TransactionStates(IEnumerable<string> names)
-    {
-        List<TransactionState> states = new List<TransactionState>();
-        foreach (string name in names)
-        {
-            states.Add(s_transactionStatesByName.TryGetValue(name, out TransactionState state)
-                ? state
-                : TransactionState.UNKNOWN);
-        }
-
-        return states;
-    }
+    internal static List<TransactionState> TransactionStates(IEnumerable<string> names) =>
+        ParseNames(names, static name => TransactionState.Parse(name));
 
     internal static AbortTransactionSpec? AbortSpec(Proto.AbortTransactionRequest request, out string? invalid)
     {
@@ -754,10 +733,10 @@ internal static class TranslateAdmin
     }
 
     internal static List<GroupState> GroupStates(IEnumerable<string> names) =>
-        ParseNames(names, s_groupStatesByName, GroupState.UNKNOWN);
+        ParseNames(names, static name => GroupState.Parse(name));
 
     internal static List<GroupType> GroupTypes(IEnumerable<string> names) =>
-        ParseNames(names, s_groupTypesByName, GroupType.UNKNOWN);
+        ParseNames(names, static name => GroupType.Parse(name));
 
     internal static Proto.GroupListing GroupListingToProto(GroupListing listing)
     {
@@ -769,12 +748,12 @@ internal static class TranslateAdmin
         };
         if (listing.Type() is { } type)
         {
-            proto.GroupType = GroupTypeName(type);
+            proto.GroupType = GroupType.ToString(type);
         }
 
         if (listing.GroupState() is { } groupState)
         {
-            proto.GroupState = GroupStateName(groupState);
+            proto.GroupState = GroupState.ToString(groupState);
         }
 
         return proto;
@@ -836,8 +815,8 @@ internal static class TranslateAdmin
             GroupId = description.GroupId(),
             IsSimpleConsumerGroup = description.IsSimpleConsumerGroup(),
             PartitionAssignor = description.PartitionAssignor(),
-            GroupType = GroupTypeName(description.Type()),
-            GroupState = GroupStateName(description.GroupState()),
+            GroupType = GroupType.ToString(description.Type()),
+            GroupState = GroupState.ToString(description.GroupState()),
         };
         foreach (MemberDescription member in description.Members())
         {
@@ -879,7 +858,7 @@ internal static class TranslateAdmin
             Protocol = description.Protocol()!,
             ProtocolData = description.ProtocolData(),
             IsSimpleConsumerGroup = description.IsSimpleConsumerGroup(),
-            State = ClassicGroupStateName(description.State()),
+            State = ClassicGroupState.ToString(description.State()),
         };
         foreach (MemberDescription member in description.Members())
         {
@@ -1275,99 +1254,20 @@ internal static class TranslateAdmin
             }
 
             map[pair.Key] = new FeatureUpdate(
-                (short)pair.Value.MaxVersionLevel, UpgradeTypes.FromCode(pair.Value.UpgradeType));
+                (short)pair.Value.MaxVersionLevel, UpgradeType.FromCode(pair.Value.UpgradeType));
         }
 
         invalid = null;
         return map;
     }
 
-    // Java's toString() of these four enums is a display name, not the constant name Enum.ToString()
-    // prints; the wire carries Java's toString().
-    internal static string TransactionStateName(TransactionState state) =>
-        state switch
-        {
-            TransactionState.ONGOING => "Ongoing",
-            TransactionState.PREPARE_ABORT => "PrepareAbort",
-            TransactionState.PREPARE_COMMIT => "PrepareCommit",
-            TransactionState.COMPLETE_ABORT => "CompleteAbort",
-            TransactionState.COMPLETE_COMMIT => "CompleteCommit",
-            TransactionState.EMPTY => "Empty",
-            TransactionState.PREPARE_EPOCH_FENCE => "PrepareEpochFence",
-            TransactionState.UNKNOWN => "Unknown",
-            _ => state.ToString(),
-        };
-
-    internal static string GroupStateName(GroupState state) =>
-        state switch
-        {
-            GroupState.UNKNOWN => "Unknown",
-            GroupState.PREPARING_REBALANCE => "PreparingRebalance",
-            GroupState.COMPLETING_REBALANCE => "CompletingRebalance",
-            GroupState.STABLE => "Stable",
-            GroupState.DEAD => "Dead",
-            GroupState.EMPTY => "Empty",
-            GroupState.ASSIGNING => "Assigning",
-            GroupState.RECONCILING => "Reconciling",
-            GroupState.NOT_READY => "NotReady",
-            _ => state.ToString(),
-        };
-
-    internal static string GroupTypeName(GroupType type) =>
-        type switch
-        {
-            GroupType.UNKNOWN => "Unknown",
-            GroupType.CONSUMER => "Consumer",
-            GroupType.CLASSIC => "Classic",
-            GroupType.SHARE => "Share",
-            GroupType.STREAMS => "Streams",
-            _ => type.ToString(),
-        };
-
-    internal static string ClassicGroupStateName(ClassicGroupState state) =>
-        state switch
-        {
-            ClassicGroupState.UNKNOWN => "Unknown",
-            ClassicGroupState.PREPARING_REBALANCE => "PreparingRebalance",
-            ClassicGroupState.COMPLETING_REBALANCE => "CompletingRebalance",
-            ClassicGroupState.STABLE => "Stable",
-            ClassicGroupState.DEAD => "Dead",
-            ClassicGroupState.EMPTY => "Empty",
-            _ => state.ToString(),
-        };
-
-    private static Dictionary<string, TransactionState> BuildTransactionStateTable()
-    {
-        Dictionary<string, TransactionState> table =
-            new Dictionary<string, TransactionState>(StringComparer.Ordinal);
-        foreach (TransactionState state in (TransactionState[])Enum.GetValues(typeof(TransactionState)))
-        {
-            table[TransactionStateName(state)] = state;
-        }
-
-        return table;
-    }
-
-    private static Dictionary<string, TEnum> BuildNameTable<TEnum>(Func<TEnum, string> name)
-        where TEnum : struct, Enum
-    {
-        Dictionary<string, TEnum> table = new Dictionary<string, TEnum>(StringComparer.OrdinalIgnoreCase);
-        foreach (TEnum value in (TEnum[])Enum.GetValues(typeof(TEnum)))
-        {
-            table[name(value)] = value;
-        }
-
-        return table;
-    }
-
-    private static List<TEnum> ParseNames<TEnum>(
-        IEnumerable<string> names, Dictionary<string, TEnum> table, TEnum fallback)
+    private static List<TEnum> ParseNames<TEnum>(IEnumerable<string> names, Func<string, TEnum> parse)
         where TEnum : struct, Enum
     {
         List<TEnum> values = new List<TEnum>();
         foreach (string name in names)
         {
-            values.Add(table.TryGetValue(name, out TEnum value) ? value : fallback);
+            values.Add(parse(name));
         }
 
         return values;

@@ -191,7 +191,7 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Admin.MockAdminClient.DEFAULT_LOG_DIRS",
         "Confluent.Kafka.Common.Acl.AccessControlEntryFilter.ANY",
         "Confluent.Kafka.Common.Acl.AclBindingFilter.ANY",
-        "Confluent.Kafka.Common.Config.SslClientAuths.VALUES",
+        "Confluent.Kafka.Common.Config.SslClientAuthMethods.VALUES",
         "Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.INSTANCE",
         "Confluent.Kafka.Common.Errors.DisconnectException.INSTANCE",
         "Confluent.Kafka.Common.Quota.ClientQuotaEntity.CLIENT_ID",

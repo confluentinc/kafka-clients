@@ -88,7 +88,7 @@ public sealed class PublicAdminStringTests
                 admin.IncrementalAlterConfigs(new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
                     [new ConfigResource(ConfigResourceType.TOPIC, bad)] =
-                        new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
+                        new[] { new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET) },
                 })),
             ["alterReplicaLogDirs:topic"] = ("replicaAssignment", (admin, bad) =>
                 admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>
@@ -434,7 +434,7 @@ public sealed class PublicAdminStringTests
         new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
         {
             [new ConfigResource(ConfigResourceType.TOPIC, topic)] =
-                new[] { new AlterConfigOp(new ConfigEntry(configName, configValue), AlterConfigOpType.SET) },
+                new[] { new AlterConfigOp(new ConfigEntry(configName, configValue), OpType.SET) },
         };
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(string topic, string metadata) =>

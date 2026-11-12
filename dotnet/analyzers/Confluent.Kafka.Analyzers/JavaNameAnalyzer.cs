@@ -46,8 +46,9 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
     /// <summary>The renamed types, one <c>.NET type name</c> and Java type per line.</summary>
     public const string PairsFile = "java-name-pairs.txt";
 
+    // The members every Java enum has, by signature: a valueOf of other parameters is the enum's own.
     private static readonly HashSet<string> s_enumBuiltIns =
-        new HashSet<string>(StringComparer.Ordinal) { "name", "ordinal", "values", "valueOf" };
+        new HashSet<string>(StringComparer.Ordinal) { "name()", "ordinal()", "values()", "valueOf(String)" };
 
     private static readonly DiagnosticDescriptor s_nameRule = new DiagnosticDescriptor(
         DiagnosticIds.JavaName,
@@ -414,7 +415,9 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 .SelectMany(link => link.Members)
                 .Where(m => m.Kind != JavaMemberKind.Constructor || m.DeclaringType == java.Marker)
                 .Where(m => m.Kind != JavaMemberKind.Method || !m.IsStatic || m.DeclaringType == java.Marker)
-                .Where(m => type.TypeKind != TypeKind.Enum || m.Kind != JavaMemberKind.Method || !s_enumBuiltIns.Contains(m.Name))
+                .Where(m => type.TypeKind != TypeKind.Enum
+                    || m.Kind != JavaMemberKind.Method
+                    || !s_enumBuiltIns.Contains(m.Name + "(" + string.Join(",", m.ParameterTypes) + ")"))
                 .ToList();
             Dictionary<string, string> javaMethods = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (JavaMember method in visible.Where(m => m.Kind == JavaMemberKind.Method))
@@ -431,7 +434,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             foreach (JavaMember field in required.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant))
             {
-                if (!netChain.Any(t => t.GetMembers(field.Name).Any(m => m.DeclaredAccessibility == Accessibility.Public)))
+                // A Java enum's static field is a static readonly field of its Methods class, as an extension block holds none.
+                bool onCompanion = type.TypeKind == TypeKind.Enum
+                    && field.Kind == JavaMemberKind.Field
+                    && field.IsStatic
+                    && companions.Any(c => c.GetMembers(field.Name)
+                        .Any(m => m is IFieldSymbol { IsStatic: true, IsReadOnly: true, DeclaredAccessibility: Accessibility.Public }));
+                if (!onCompanion && !netChain.Any(t => t.GetMembers(field.Name).Any(m => m.DeclaredAccessibility == Accessibility.Public)))
                 {
                     findings.Add(Missing(typeId, field.Marker, typeLocation));
                 }
@@ -628,7 +637,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         }
 
         // Where a matched .NET method sits: a Java interface's default method in its Extensions class with an interface
-        // to replace it, never on the interface; a Java enum's static method in an extension block for the enum.
+        // to replace it, never on the interface; a Java enum's static method, and its toString() override as a static
+        // ToString of the enum, in an extension block for the enum.
         private static void CheckPlace(
             INamedTypeSymbol type,
             List<INamedTypeSymbol> companions,
@@ -676,6 +686,16 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                         + "the enum",
                     LocationOf(net.Method)));
             }
+            else if (type.TypeKind == TypeKind.Enum
+                && javaOverload.Member is { Name: "toString", IsStatic: false, ParameterTypes.Length: 0 }
+                && !(inBlock && net.Method.IsStatic))
+            {
+                findings.Add(new Finding(
+                    "static " + DocId(net.Method),
+                    "Java's " + javaName + "() is a static ToString(" + type.Name + ") in an extension(" + type.Name + ") block: C# "
+                        + "never calls an extension ToString() over Enum.ToString()",
+                    LocationOf(net.Method)));
+            }
         }
 
         // A companion's members: its own, and those of its C# 14 extension blocks for the type.
@@ -694,7 +714,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         // One NetOverload per signature: a method declared on an interface and on the class implementing it is one
         // overload. Overloads taking an async form of a callback come last, so a Java overload pairs with the sync form.
         // A companion's extension method stands for an instance method of the type, its receiver not compared; a member
-        // of an extension block keeps its own static or instance form.
+        // of an extension block keeps its own static or instance form, except an enum's static ToString(<Enum>), which
+        // stands for Java's toString() override.
         private static List<NetOverload> Overloads(INamedTypeSymbol type, List<INamedTypeSymbol> companions, IEnumerable<IMethodSymbol> methods)
         {
             List<NetOverload> overloads = new List<NetOverload>();
@@ -705,10 +726,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     inBlock ? method.ContainingType.ContainingType : method.ContainingType,
                     SymbolEqualityComparer.Default);
                 bool declaredHere = inCompanion || SymbolEqualityComparer.Default.Equals(method.ContainingType, type);
-                bool onReceiver = inCompanion
-                    && !inBlock
-                    && method.IsExtensionMethod
-                    && IsReceiver(method.Parameters[0].Type, type);
+                bool onReceiver = (inCompanion
+                        && !inBlock
+                        && method.IsExtensionMethod
+                        && IsReceiver(method.Parameters[0].Type, type))
+                    || IsEnumToString(type, method, inCompanion);
                 IEnumerable<IParameterSymbol> parameters = onReceiver ? method.Parameters.Skip(1) : method.Parameters;
                 NetOverload overload = new NetOverload(
                     method,
@@ -729,6 +751,17 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             return overloads.OrderBy(o => o.AsyncParameters).ToList();
         }
+
+        // Whether a method of an enum's companion is a static string ToString of the enum, the form of Java's toString().
+        private static bool IsEnumToString(INamedTypeSymbol type, IMethodSymbol method, bool inCompanion) =>
+            inCompanion
+            && type.TypeKind == TypeKind.Enum
+            && method.Name == "ToString"
+            && method.IsStatic
+            && !method.IsExtensionMethod
+            && method.ReturnType.SpecialType == SpecialType.System_String
+            && method.Parameters.Length == 1
+            && IsReceiver(method.Parameters[0].Type, type);
 
         // A method that overrides or implements a .NET built-in member keeps that member's parameter names.
         private static bool NamedByBase(INamedTypeSymbol type, IMethodSymbol method)

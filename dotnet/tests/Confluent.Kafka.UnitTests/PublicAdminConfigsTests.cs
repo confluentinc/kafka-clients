@@ -77,7 +77,7 @@ public sealed class PublicAdminConfigsTests
                 {
                     [resource] = new[]
                     {
-                        new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET),
+                        new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), OpType.SET),
                     },
                 }).All().Get(),
             s_deadline);
@@ -109,7 +109,7 @@ public sealed class PublicAdminConfigsTests
                 {
                     [resource] = new[]
                     {
-                        new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.DELETE),
+                        new AlterConfigOp(new ConfigEntry("retention.ms", null), OpType.DELETE),
                     },
                 }).All().Get(),
             s_deadline);
@@ -133,8 +133,8 @@ public sealed class PublicAdminConfigsTests
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
-                [present] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.SET) },
-                [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.SET) },
+                [present] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), OpType.SET) },
+                [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), OpType.SET) },
             });
 
         await TestTimeout.Run(() => result.Values()[present].Get(), s_deadline);
@@ -162,7 +162,7 @@ public sealed class PublicAdminConfigsTests
                     [subscription] = new[]
                     {
                         new AlterConfigOp(
-                            new ConfigEntry("interval.ms", "60000"), AlterConfigOpType.SET),
+                            new ConfigEntry("interval.ms", "60000"), OpType.SET),
                     },
                 }).All().Get(),
             s_deadline);
@@ -194,7 +194,7 @@ public sealed class PublicAdminConfigsTests
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [noOps] = Array.Empty<AlterConfigOp>(),
-                [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
+                [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET) },
             });
 
         await TestTimeout.Run(() => result.Values()[noOps].Get(), s_deadline);
@@ -252,7 +252,7 @@ public sealed class PublicAdminConfigsTests
         AsyncAlterConfigsResult withOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
-                [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
+                [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET) },
             });
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values()[absent].Get()), s_deadline);
@@ -320,7 +320,7 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("configs", nullOp.ParamName);
 
         // AlterConfigOp itself rejects a null entry, so the submit path never sees one.
-        Assert.Throws<ArgumentNullException>(() => new AlterConfigOp(null!, AlterConfigOpType.SET));
+        Assert.Throws<ArgumentNullException>(() => new AlterConfigOp(null!, OpType.SET));
     }
 
     [Fact]
@@ -351,7 +351,7 @@ public sealed class PublicAdminConfigsTests
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
-                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
+                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), OpType.SET) },
                 }).All().Get(),
             s_deadline);
 
@@ -374,7 +374,7 @@ public sealed class PublicAdminConfigsTests
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
-                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("x", "y"), AlterConfigOpType.SET) },
+                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("x", "y"), OpType.SET) },
                 }).All().Get(),
             s_deadline);
 

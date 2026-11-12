@@ -38,7 +38,10 @@ public sealed class PublicNamespaceLayoutTests
     private const string ClientsSegment = "clients.";
     private const string JdkPrefix = "java.";
 
-    private static readonly Type[] s_exported = typeof(KafkaException).Assembly.GetExportedTypes();
+    // A C# 14 extension block compiles to public nested types the compiler names and marks specialname
+    // (<G>$…, <M>$…); no caller names them, so they have no row.
+    private static readonly Type[] s_exported =
+        typeof(KafkaException).Assembly.GetExportedTypes().Where(type => !type.IsSpecialName).ToArray();
 
     // The JDK exception classes, the only public types in the root namespace, as Python keeps them at
     // confluent_kafka.
@@ -66,7 +69,6 @@ public sealed class PublicNamespaceLayoutTests
         ("AlterClientQuotasOptions", "org.apache.kafka.clients.admin.AlterClientQuotasOptions"),
         ("AlterClientQuotasResult", "org.apache.kafka.clients.admin.AlterClientQuotasResult"),
         ("AlterConfigOp", "org.apache.kafka.clients.admin.AlterConfigOp"),
-        ("AlterConfigOpType", "org.apache.kafka.clients.admin.AlterConfigOp.OpType"),
         ("AlterConfigsOptions", "org.apache.kafka.clients.admin.AlterConfigsOptions"),
         ("AlterConfigsResult", "org.apache.kafka.clients.admin.AlterConfigsResult"),
         ("AlterConsumerGroupOffsetsOptions", "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions"),
@@ -230,6 +232,8 @@ public sealed class PublicNamespaceLayoutTests
         ("OffsetSpec+LatestTieredSpec", "org.apache.kafka.clients.admin.OffsetSpec.LatestTieredSpec"),
         ("OffsetSpec+MaxTimestampSpec", "org.apache.kafka.clients.admin.OffsetSpec.MaxTimestampSpec"),
         ("OffsetSpec+TimestampSpec", "org.apache.kafka.clients.admin.OffsetSpec.TimestampSpec"),
+        ("OpType", "org.apache.kafka.clients.admin.AlterConfigOp.OpType"),
+        ("OpTypeMethods", "=OpType"),
         ("PartitionReassignment", "org.apache.kafka.clients.admin.PartitionReassignment"),
         ("ProducerState", "org.apache.kafka.clients.admin.ProducerState"),
         ("RecordsToDelete", "org.apache.kafka.clients.admin.RecordsToDelete"),
@@ -240,7 +244,7 @@ public sealed class PublicNamespaceLayoutTests
         ("ReplicaInfo", "org.apache.kafka.clients.admin.ReplicaInfo"),
         ("ScramCredentialInfo", "org.apache.kafka.clients.admin.ScramCredentialInfo"),
         ("ScramMechanism", "org.apache.kafka.clients.admin.ScramMechanism"),
-        ("ScramMechanisms", "=ScramMechanism"),
+        ("ScramMechanismMethods", "=ScramMechanism"),
         ("SupportedVersionRange", "org.apache.kafka.clients.admin.SupportedVersionRange"),
         ("TerminateTransactionOptions", "org.apache.kafka.clients.admin.TerminateTransactionOptions"),
         ("TerminateTransactionResult", "org.apache.kafka.clients.admin.TerminateTransactionResult"),
@@ -249,12 +253,13 @@ public sealed class PublicNamespaceLayoutTests
         ("TransactionDescription", "org.apache.kafka.clients.admin.TransactionDescription"),
         ("TransactionListing", "org.apache.kafka.clients.admin.TransactionListing"),
         ("TransactionState", "org.apache.kafka.clients.admin.TransactionState"),
+        ("TransactionStateMethods", "=TransactionState"),
         ("UnregisterControllerOptions", "org.apache.kafka.clients.admin.UnregisterControllerOptions"),
         ("UnregisterControllerResult", "org.apache.kafka.clients.admin.UnregisterControllerResult"),
         ("UpdateFeaturesOptions", "org.apache.kafka.clients.admin.UpdateFeaturesOptions"),
         ("UpdateFeaturesResult", "org.apache.kafka.clients.admin.UpdateFeaturesResult"),
         ("UpgradeType", "org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType"),
-        ("UpgradeTypes", "=UpgradeType"),
+        ("UpgradeTypeMethods", "=UpgradeType"),
         ("UserScramCredentialAlteration", "org.apache.kafka.clients.admin.UserScramCredentialAlteration"),
         ("UserScramCredentialDeletion", "org.apache.kafka.clients.admin.UserScramCredentialDeletion"),
         ("UserScramCredentialUpsertion", "org.apache.kafka.clients.admin.UserScramCredentialUpsertion"),
@@ -262,12 +267,16 @@ public sealed class PublicNamespaceLayoutTests
         ("AsyncKafkaFuture", "=KafkaFuture"),
         ("AsyncKafkaFuture`1", "=KafkaFuture`1"),
         ("ClassicGroupState", "org.apache.kafka.common.ClassicGroupState"),
+        ("ClassicGroupStateMethods", "=ClassicGroupState"),
         ("ElectionType", "org.apache.kafka.common.ElectionType"),
+        ("ElectionTypeMethods", "=ElectionType"),
         ("GroupState", "org.apache.kafka.common.GroupState"),
-        ("GroupStateExtensions", "=GroupState"),
+        ("GroupStateMethods", "=GroupState"),
         ("GroupType", "org.apache.kafka.common.GroupType"),
+        ("GroupTypeMethods", "=GroupType"),
         ("IMetric", "org.apache.kafka.common.Metric"),
         ("IsolationLevel", "org.apache.kafka.common.IsolationLevel"),
+        ("IsolationLevelMethods", "=IsolationLevel"),
         ("KafkaFuture", "org.apache.kafka.common.KafkaFuture"),
         ("KafkaFuture+BaseFunction`2", "org.apache.kafka.common.KafkaFuture.BaseFunction"),
         ("KafkaFuture+BiConsumer`2", "org.apache.kafka.common.KafkaFuture.BiConsumer"),
@@ -287,14 +296,17 @@ public sealed class PublicNamespaceLayoutTests
         ("AclBinding", "org.apache.kafka.common.acl.AclBinding"),
         ("AclBindingFilter", "org.apache.kafka.common.acl.AclBindingFilter"),
         ("AclOperation", "org.apache.kafka.common.acl.AclOperation"),
+        ("AclOperationMethods", "=AclOperation"),
         ("AclPermissionType", "org.apache.kafka.common.acl.AclPermissionType"),
+        ("AclPermissionTypeMethods", "=AclPermissionType"),
         ("ConfigResource", "org.apache.kafka.common.config.ConfigResource"),
         ("ConfigResourceType", "org.apache.kafka.common.config.ConfigResource.Type"),
+        ("ConfigResourceTypeMethods", "=ConfigResourceType"),
         ("LogLevelConfig", "org.apache.kafka.common.config.LogLevelConfig"),
         ("SaslConfigs", "org.apache.kafka.common.config.SaslConfigs"),
         ("SecurityConfig", "org.apache.kafka.common.config.SecurityConfig"),
         ("SslClientAuth", "org.apache.kafka.common.config.SslClientAuth"),
-        ("SslClientAuths", "=SslClientAuth"),
+        ("SslClientAuthMethods", "=SslClientAuth"),
         ("SslConfigs", "org.apache.kafka.common.config.SslConfigs"),
         ("TopicConfig", "org.apache.kafka.common.config.TopicConfig"),
         ("RecordDeserializationException+DeserializationExceptionOrigin", "org.apache.kafka.common.errors.RecordDeserializationException.DeserializationExceptionOrigin"),
@@ -308,13 +320,16 @@ public sealed class PublicNamespaceLayoutTests
         ("ClientQuotaFilterComponent", "org.apache.kafka.common.quota.ClientQuotaFilterComponent"),
         ("ClientQuotaMatchType", "=ClientQuotaFilterComponent"),
         ("TimestampType", "org.apache.kafka.common.record.TimestampType"),
+        ("TimestampTypeMethods", "=TimestampType"),
         ("PatternType", "org.apache.kafka.common.resource.PatternType"),
+        ("PatternTypeMethods", "=PatternType"),
         ("ResourcePattern", "org.apache.kafka.common.resource.ResourcePattern"),
         ("ResourcePatternFilter", "org.apache.kafka.common.resource.ResourcePatternFilter"),
         ("ResourceType", "org.apache.kafka.common.resource.ResourceType"),
+        ("ResourceTypeMethods", "=ResourceType"),
         ("KafkaPrincipal", "org.apache.kafka.common.security.auth.KafkaPrincipal"),
         ("SecurityProtocol", "org.apache.kafka.common.security.auth.SecurityProtocol"),
-        ("SecurityProtocols", "=SecurityProtocol"),
+        ("SecurityProtocolMethods", "=SecurityProtocol"),
         ("DelegationToken", "org.apache.kafka.common.security.token.delegation.DelegationToken"),
         ("TokenInformation", "org.apache.kafka.common.security.token.delegation.TokenInformation"),
         ("BooleanDeserializer", "org.apache.kafka.common.serialization.BooleanDeserializer"),
@@ -375,7 +390,7 @@ public sealed class PublicNamespaceLayoutTests
         ("ConsumerRecords`2", "org.apache.kafka.clients.consumer.ConsumerRecords"),
         ("GroupMembershipOperation", "org.apache.kafka.clients.consumer.CloseOptions.GroupMembershipOperation"),
         ("GroupProtocol", "org.apache.kafka.clients.consumer.GroupProtocol"),
-        ("GroupProtocols", "=GroupProtocol"),
+        ("GroupProtocolMethods", "=GroupProtocol"),
         ("IAsyncConsumerRebalanceListener", "=IConsumerRebalanceListener"),
         ("IAsyncConsumer`2", "=IConsumer`2"),
         ("IAsyncOffsetCommitCallback", "=IOffsetCommitCallback"),
@@ -403,7 +418,7 @@ public sealed class PublicNamespaceLayoutTests
 
     private static IReadOnlyCollection<string> JavaNestedTypesKeptTopLevel { get; } = new[]
     {
-        "GroupMembershipOperation", "ConfigResourceType", "AlterConfigOpType", "UpgradeType",
+        "GroupMembershipOperation", "ConfigResourceType", "OpType", "UpgradeType",
     };
 
     public static TheoryData<string, string> AllRows => ToTheoryData(JavaCounterparts);
