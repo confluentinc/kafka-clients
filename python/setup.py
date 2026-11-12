@@ -21,8 +21,10 @@ import sys
 # The Rust workspace, whose target/ holds the FFI header and the library.
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust'))
 include_dir = os.path.join(project_root, 'target', 'include')
+# Defaults to the debug build the tests use (`make devel-build-rust-all-features`);
+# the wheel builds and python/Makefile set CONFLUENT_KAFKA_LIB_DIR.
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
-                         os.path.join(project_root, 'target', 'release'))
+                         os.path.join(project_root, 'target', 'debug'))
 
 sources = ['_confluentkafka.c']
 include_dirs = [include_dir]
