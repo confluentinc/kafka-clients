@@ -2835,7 +2835,8 @@ fn print_help() {
                     a package's current version is refused (rfc/versioning.md)
                     --dotnet-version SEMVER sets the .NET package's version
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
-                    it only moves up too
+                    it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
+                    by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust

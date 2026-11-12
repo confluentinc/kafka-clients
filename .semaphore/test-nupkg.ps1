@@ -62,7 +62,7 @@ $package = $listing[0].FullName
 $packageName = $listing[0].Name
 $version = $Matches[1]
 # The release versions; see check-nupkg.py's VERSION_PATTERN.
-if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$') {
+if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?$') {
     throw "'$version' is not a release version"
 }
 $Header = (Resolve-Path $Header).Path

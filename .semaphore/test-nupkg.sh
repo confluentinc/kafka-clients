@@ -156,7 +156,7 @@ if [ "$mode" = full ] && [ ! -d kafka/clients/src/main/java ]; then
 fi
 python3 - "$VERSION" <<'PYTHON' || die "'$VERSION' is not a release version"
 import re, sys
-sys.exit(re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?", sys.argv[1]) is None)
+sys.exit(re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?", sys.argv[1]) is None)
 PYTHON
 
 if [ -x "$HOME/.dotnet/dotnet" ]; then

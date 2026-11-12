@@ -88,7 +88,7 @@ semaphore:
           description: A PEP 440 version in normal form for the Python packages instead of VERSION's, e.g. "4.4.0" or "4.4.0.post1". Required whenever VERSION's PEP 440 form is below the current Python version (python/pyproject.toml), since Python versions only move up; ignored if not set.
         - name: DOTNET_VERSION
           required: false
-          description: A version for the Confluent.Kafka NuGet package in semver form, X.Y.Z or X.Y.Z-alpha.N, -beta.N, -dev.N, -rc.N (e.g. "4.4.0-beta.1"), written to dotnet/Directory.Build.props. It must not be below the current one. Without it the .NET version is left as it is.
+          description: A version for the Confluent.Kafka NuGet package in semver form, X.Y.Z or X.Y.Z-alpha.N, -beta.N, -dev.N, -rc.N (e.g. "4.4.0-beta.1"), where an -alpha.N, -beta.N or -rc.N may be followed by .dev.M for a dev build (e.g. "4.4.0-alpha.0.dev.1"), written to dotnet/Directory.Build.props. It must not be below the current one. Without it the .NET version is left as it is.
         - name: BASE_BRANCH
           required: true
           default_value: master

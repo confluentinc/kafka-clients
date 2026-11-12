@@ -18,10 +18,13 @@ name: create-release-tag
 #     the tag build's artifacts, from which it is uploaded to nuget.org by
 #     hand.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python,
-#     4.4.0-dev.1 for dotnet) is tagged like any other. A rust dev version is
-#     tested and packaged, never published; a python dev version is released
-#     like any other, through the two manual promotions, and a dotnet dev
-#     version like any other dotnet version.
+#     4.4.0-dev.1 or 4.4.0-alpha.0.dev.1 for dotnet) is tagged like any other.
+#     A rust dev version is tested and packaged, never published; a python dev
+#     version is released like any other, through the two manual promotions,
+#     and a dotnet dev version like any other dotnet version. NuGet puts a
+#     dotnet dev build after the version it extends (4.4.0-alpha.1 <
+#     4.4.0-alpha.1.dev.1 < 4.4.0-alpha.2), so the dev builds that lead up to
+#     4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
@@ -35,7 +38,8 @@ name: create-release-tag
 #     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
 #     optionally by .devN), or <Version> in dotnet/Directory.Build.props
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N,
-#     -dev.N or -rc.N);
+#     -dev.N or -rc.N, an -alpha.N, -beta.N or -rc.N then optionally by
+#     .dev.M);
 #   - on a release branch <major>.<minor>.x, only rust is entered, and its
 #     version is of that <major>.<minor>, the only one its publish block
 #     accepts from the branch; the python and dotnet release blocks accept
@@ -115,9 +119,9 @@ blocks:
                   dotnet)
                     version_param=DOTNET_VERSION
                     version=${DOTNET_VERSION:-}
-                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
-                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N'
-                    dev_pattern='-dev\.[0-9]+$'
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N, an -alpha.N, -beta.N or -rc.N then optionally by .dev.M'
+                    dev_pattern='[-.]dev\.[0-9]+$'
                     manifest=dotnet/Directory.Build.props
                     manifest_key=Version
                     ;;

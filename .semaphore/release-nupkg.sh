@@ -60,12 +60,12 @@ sha256_of() {
 # another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see .semaphore/job-start.sh) did not test the
 # tagged commit.
 release_version() {
-    local release_tag_pattern='^dotnet/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
+    local release_tag_pattern='^dotnet/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?$'
     if [ "${SEMAPHORE_GIT_REF_TYPE:-}" != "tag" ]; then
         refuse "only a release tag build records a release (ref type '${SEMAPHORE_GIT_REF_TYPE:-}'); push a tag dotnet/v<version> for the master commit to release"
     fi
     if ! [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]]; then
-        refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a .NET release tag (dotnet/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N)"
+        refuse "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a .NET release tag (dotnet/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N, an -alpha.N, -beta.N or -rc.N then optionally by .dev.M)"
     fi
     if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
         refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_TAG_NAME}"

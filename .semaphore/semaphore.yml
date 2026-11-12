@@ -97,7 +97,11 @@ name: build-test-release
 #     librdkafka-based client.
 #   - dotnet/v<version> releases the Confluent.Kafka NuGet package. The
 #     version is <Version> in dotnet/Directory.Build.props, and may carry an
-#     -alpha.N, -beta.N, -rc.N or -dev.N suffix. The tag build builds and
+#     -alpha.N, -beta.N, -rc.N or -dev.N suffix; an -alpha.N, -beta.N or
+#     -rc.N one may be followed by .dev.M, a dev build. NuGet puts a dev
+#     build after the version it extends (4.4.0-alpha.1 <
+#     4.4.0-alpha.1.dev.1 < 4.4.0-alpha.2), so the dev builds that lead up
+#     to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M. The tag build builds and
 #     tests the package and records it in the workflow's artifacts, but
 #     publishes nothing: it is uploaded to nuget.org by hand. The id is shared
 #     with confluent-kafka-dotnet, the librdkafka-based client, whose versions
@@ -1323,11 +1327,13 @@ blocks:
   # .NET release blocks. They run only on the build of a .NET release tag,
   # dotnet/v<version> where <version> is <major>.<minor>.<patch> with an
   # optional -alpha.N, -beta.N, -dev.N or -rc.N suffix (NuGet's SemVer 2.0),
-  # and are skipped on every other build. The pattern must stay identical in
+  # an -alpha.N, -beta.N or -rc.N one optionally followed by .dev.M, and are
+  # skipped on every other build. The pattern must stay identical in
   # all of the blocks that use it, and in the scripts that check it: release-nupkg.sh
   # (release_version) and create-release-tag.yml for the tag, and, for the
-  # version without its dotnet/v prefix, check-nupkg.py (VERSION_PATTERN) and
-  # test-nupkg.sh. The version is <Version> in dotnet/Directory.Build.props.
+  # version without its dotnet/v prefix, check-nupkg.py (VERSION_PATTERN),
+  # test-nupkg.sh and test-nupkg.ps1, and the .NET version of cargo xtask
+  # bump-version. The version is <Version> in dotnet/Directory.Build.props.
   #
   # The package is Confluent.Kafka.<version>.nupkg: the managed assembly for
   # net462, netstandard2.0, net8.0 and net10.0, and the native library of each RID
@@ -1375,7 +1381,7 @@ blocks:
   - name: "Release (.NET): native library (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1398,7 +1404,7 @@ blocks:
   - name: "Release (.NET): native library (Linux arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1421,7 +1427,7 @@ blocks:
   - name: "Release (.NET): native library (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1450,7 +1456,7 @@ blocks:
   - name: "Release (.NET): native library (Windows amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1480,7 +1486,7 @@ blocks:
   - name: "Release (.NET): native library (Windows x86)"
     dependencies: []
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1515,7 +1521,7 @@ blocks:
       - "Release (.NET): native library (Windows amd64)"
       - "Release (.NET): native library (Windows x86)"
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1545,7 +1551,7 @@ blocks:
   - name: "Release (.NET): package verification (Linux amd64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1579,7 +1585,7 @@ blocks:
   - name: "Release (.NET): package verification (Linux arm64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1613,7 +1619,7 @@ blocks:
   - name: "Release (.NET): package verification (macOS arm64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1647,7 +1653,7 @@ blocks:
   - name: "Release (.NET): package verification (Windows amd64)"
     dependencies: ["Release (.NET): pack"]
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1689,7 +1695,7 @@ blocks:
   - name: "Release (.NET): package verification (Windows x86)"
     dependencies: ["Release (.NET): pack"]
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1740,7 +1746,7 @@ blocks:
       - "Release (.NET): package verification (Windows amd64)"
       - "Release (.NET): package verification (Windows x86)"
     run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((alpha|beta|rc)\\.(0|[1-9][0-9]*)(\\.dev\\.(0|[1-9][0-9]*))?|dev\\.(0|[1-9][0-9]*)))?$'"
     execution_time_limit:
       minutes: 20
     task:
