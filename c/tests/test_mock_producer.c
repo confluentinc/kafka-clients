@@ -20,6 +20,7 @@
 #include <time.h>
 #include <pthread.h>
 #include "unity.h"
+#include "test_filter.h"
 #include "test_support.h"
 
 /* Runs `call`, a fallible call whose `out_err` argument is `&err`, with `err`

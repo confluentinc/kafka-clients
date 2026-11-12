@@ -1,0 +1,18 @@
+{
+  "base": "816eb55b4",
+  "changed_files": [
+    "M rust/src/consumer/internals/subscription_state.rs"
+  ],
+  "head": "09d94a8afa3cbf5b6f1670abf00e8ca03eec87fd",
+  "merge_base": "816eb55b43d898eb436a727bd9b8fed5384006b4",
+  "reasons": {
+    "rust.lib": "The change only adds the unit test test_unsubscribe_does_not_reset_rebalance_listener to the subscription_state tests module and touches no code that other tests or bindings use."
+  },
+  "rust": {
+    "lib": [
+      "consumer::internals::subscription_state::tests::"
+    ]
+  },
+  "tree": "9c76718bf7662b4677f9ac6ed1980ea50beb5d7a",
+  "version": 2
+}

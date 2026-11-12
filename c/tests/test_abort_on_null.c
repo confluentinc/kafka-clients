@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "unity.h"
+#include "test_filter.h"
 
 void setUp(void) {}
 void tearDown(void) {}
