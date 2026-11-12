@@ -85,7 +85,9 @@ pub(crate) use consumer_membership_manager::ConsumerMembershipManager;
 pub(crate) use consumer_metadata::ConsumerMetadata;
 pub(crate) use consumer_network_thread::ConsumerNetworkThread;
 // Temporary, for the macOS CI hang investigation.
-pub(crate) use consumer_network_thread::hang_trace_keyed;
+pub(crate) use consumer_network_thread::{
+    HANG_TRACE_SENDER, hang_step, hang_step_forget, hang_step_of, hang_trace_enabled, hang_trace_keyed,
+};
 pub(crate) use consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 pub(crate) use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 pub(crate) use consumer_utils::ConsumerUtils;

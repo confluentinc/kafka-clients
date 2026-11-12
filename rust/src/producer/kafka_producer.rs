@@ -3174,10 +3174,37 @@ where
         if timeout_ms > 0 {
             // Try to close gracefully: close accumulator, set running=false, wake sender.
             self.initiate_close();
-            trace(format_args!("close: core initiate_close done, sender woken"));
+            let sender_id = Arc::as_ptr(&self.running) as usize;
+            let sender_step = || match crate::consumer::internals::hang_step_of(sender_id) {
+                Some((iteration, step, ago)) => format!("sender at iteration {iteration}: {step} for {ago} ms"),
+                None => "sender step unknown".to_owned(),
+            };
+            trace(format_args!("close: core initiate_close done, sender woken, {}", sender_step()));
 
-            // Await the sender task with the remaining timeout.
-            sender_still_alive = !self.await_sender_handle(timeout).await;
+            // Await the sender task with the remaining timeout. With the hang trace on, in
+            // 5 s slices that each log the Sender's current step; the total wait is the same.
+            let started = std::time::Instant::now();
+            loop {
+                let left = timeout.saturating_sub(started.elapsed());
+                let slice = if crate::consumer::internals::hang_trace_enabled() {
+                    left.min(Duration::from_secs(5))
+                } else {
+                    left
+                };
+                if self.await_sender_handle(slice).await {
+                    sender_still_alive = false;
+                    break;
+                }
+                if slice >= left {
+                    sender_still_alive = true;
+                    break;
+                }
+                trace(format_args!(
+                    "close: core still waiting for the sender after {} ms, {}",
+                    started.elapsed().as_millis(),
+                    sender_step()
+                ));
+            }
             trace(format_args!("close: core sender joined={}", !sender_still_alive));
         }
 

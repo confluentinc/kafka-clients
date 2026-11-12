@@ -1268,8 +1268,20 @@ pub(crate) fn hang_trace(id: usize, event: std::fmt::Arguments<'_>) {
 /// (`prod` for a producer, `sender` for its Sender task).
 pub(crate) fn hang_trace_keyed(kind: &str, id: usize, event: std::fmt::Arguments<'_>) {
     use std::io::Write;
+    if let Some(file) = hang_trace_file() {
+        let ms = hang_trace_now_ms();
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed").replace(' ', "_");
+        let line = format!("{ms} {name} {kind}={id:x} {event}\n");
+        if let Ok(mut file) = file.lock() {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+fn hang_trace_file() -> Option<&'static std::sync::Mutex<std::fs::File>> {
     static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
-    let file = FILE.get_or_init(|| {
+    FILE.get_or_init(|| {
         let dir = std::env::var_os("CONFLUENT_KAFKA_HANG_TRACE_DIR")?;
         std::fs::create_dir_all(&dir).ok()?;
         let path = std::path::Path::new(&dir).join(format!("rust-trace-{}.log", std::process::id()));
@@ -1279,18 +1291,72 @@ pub(crate) fn hang_trace_keyed(kind: &str, id: usize, event: std::fmt::Arguments
             .open(path)
             .ok()
             .map(std::sync::Mutex::new)
-    });
-    if let Some(file) = file {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
-        let thread = std::thread::current();
-        let name = thread.name().unwrap_or("unnamed").replace(' ', "_");
-        let line = format!("{ms} {name} {kind}={id:x} {event}\n");
-        if let Ok(mut file) = file.lock() {
-            let _ = file.write_all(line.as_bytes());
-        }
+    })
+    .as_ref()
+}
+
+fn hang_trace_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+/// Whether the hang trace is on (`CONFLUENT_KAFKA_HANG_TRACE_DIR` names a folder).
+pub(crate) fn hang_trace_enabled() -> bool {
+    hang_trace_file().is_some()
+}
+
+tokio::task_local! {
+    /// Temporary, for the macOS CI hang investigation: the key and iteration of
+    /// the producer Sender whose `run_once` is running, set around it so that
+    /// [`hang_step`] in the shared network code records the Sender's steps only.
+    pub(crate) static HANG_TRACE_SENDER: (usize, u64);
+}
+
+/// The iterations of each Sender whose steps are written to the trace; every
+/// later step is only recorded, for [`hang_step_of`].
+const HANG_TRACE_LOGGED_ITERATIONS: u64 = 3;
+
+/// Each Sender's last step: its iteration, the step and when it was recorded.
+type HangSteps = std::sync::Mutex<std::collections::HashMap<usize, (u64, &'static str, u128)>>;
+
+fn hang_steps() -> &'static HangSteps {
+    static STEPS: std::sync::OnceLock<HangSteps> = std::sync::OnceLock::new();
+    STEPS.get_or_init(Default::default)
+}
+
+/// Records `step` as the current step of the Sender whose `run_once` is
+/// running, and writes it with `detail` during its first iterations. Does
+/// nothing outside a Sender or with the trace off.
+pub(crate) fn hang_step(step: &'static str, detail: std::fmt::Arguments<'_>) {
+    if !hang_trace_enabled() {
+        return;
+    }
+    let Ok((id, iteration)) = HANG_TRACE_SENDER.try_with(|current| *current) else {
+        return;
+    };
+    if let Ok(mut steps) = hang_steps().lock() {
+        steps.insert(id, (iteration, step, hang_trace_now_ms()));
+    }
+    if iteration < HANG_TRACE_LOGGED_ITERATIONS {
+        hang_trace_keyed("sender", id, format_args!("sender: iteration {iteration}: {step} {detail}"));
+    }
+}
+
+/// The Sender's last recorded step: its iteration, the step and how many
+/// milliseconds ago it was recorded.
+pub(crate) fn hang_step_of(id: usize) -> Option<(u64, &'static str, u128)> {
+    let steps = hang_steps().lock().ok()?;
+    steps
+        .get(&id)
+        .map(|&(iteration, step, at)| (iteration, step, hang_trace_now_ms().saturating_sub(at)))
+}
+
+/// Forgets a Sender that ended.
+pub(crate) fn hang_step_forget(id: usize) {
+    if let Ok(mut steps) = hang_steps().lock() {
+        steps.remove(&id);
     }
 }
 

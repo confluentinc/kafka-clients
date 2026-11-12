@@ -298,6 +298,13 @@ blocks:
         commands:
           - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
+      epilogue:
+        always:
+          commands:
+            # Temporary, for the macOS .NET hang investigation: uploads the hang traces the Linux .NET job
+            # writes (CONFLUENT_KAFKA_HANG_TRACE_DIR below), passing or not, to compare with macOS. Only that
+            # job creates the folder.
+            - 'if [ -d /tmp/confluent-kafka-hang-traces ]; then artifact push job --expire-in 2w /tmp/confluent-kafka-hang-traces || true; fi'
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
           commands:
@@ -318,6 +325,11 @@ blocks:
           commands:
             - make test-integration-python-sasl-ssl
         - name: "verify-dotnet (Linux amd64) — plaintext"
+          env_vars:
+            # Temporary, for the macOS .NET hang investigation: the core and the .NET producer write their
+            # hang traces here on Linux too, so the Sender's stop delay after a close can be compared.
+            - name: CONFLUENT_KAFKA_HANG_TRACE_DIR
+              value: /tmp/confluent-kafka-hang-traces
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"
@@ -428,9 +440,9 @@ blocks:
             # block's epilogue uploads it as a job artifact.
             - name: CONFLUENT_KAFKA_DOTNET_HANG_DIR
               value: /tmp/confluent-kafka-dotnet-hangs
-            # Temporary, with the above: the Rust core appends the consumer and producer close events to
-            # rust-trace-<pid>.log there (consumer_network_thread::hang_trace), and the .NET producer its
-            # close and completion-thread events to dotnet-trace-<pid>.log.
+            # Temporary, with the above: the Rust core appends the consumer and producer close events and
+            # the producer Sender's steps to rust-trace-<pid>.log there (consumer_network_thread::hang_trace),
+            # and the .NET producer its close and completion-thread events to dotnet-trace-<pid>.log.
             - name: CONFLUENT_KAFKA_HANG_TRACE_DIR
               value: /tmp/confluent-kafka-dotnet-hangs
           commands:

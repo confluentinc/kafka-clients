@@ -46,7 +46,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::sensor::record_or_log;
-use crate::consumer::internals::hang_trace_keyed;
+use crate::consumer::internals::{
+    HANG_TRACE_SENDER, hang_step, hang_step_forget, hang_trace_enabled, hang_trace_keyed,
+};
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 
 use crate::ClientResponse;
@@ -640,7 +642,9 @@ impl<C: KafkaClient> Sender<C> {
     /// the injected `time` either way.
     async fn sleep_ms(duration_ms: i64) {
         if duration_ms > 0 {
+            hang_step("sleep starts", format_args!("ms={duration_ms}"));
             tokio::time::sleep(std::time::Duration::from_millis(duration_ms as u64)).await;
+            hang_step("sleep done", format_args!(""));
         }
     }
 
@@ -923,10 +927,11 @@ impl<C: KafkaClient> Sender<C> {
         kafka_debug!(self.log_context, "Starting Kafka producer I/O task.");
         let trace_id = self.hang_trace_id();
         hang_trace_keyed("sender", trace_id, format_args!("sender: run started"));
+        let mut iteration = 0;
 
         // Main loop, runs until close is called
         while self.running.load(Ordering::Acquire) {
-            self.run_once_logging_errors().await;
+            self.run_once_traced(trace_id, &mut iteration).await;
         }
         hang_trace_keyed(
             "sender",
@@ -952,7 +957,7 @@ impl<C: KafkaClient> Sender<C> {
             && ((self.accumulator.has_undrained() || self.client.in_flight_request_count() > 0)
                 || self.has_pending_transactional_requests())
         {
-            self.run_once_logging_errors().await;
+            self.run_once_traced(trace_id, &mut iteration).await;
         }
         hang_trace_keyed("sender", trace_id, format_args!("sender: remaining records done"));
 
@@ -974,7 +979,7 @@ impl<C: KafkaClient> Sender<C> {
                     self.force_close.store(true, Ordering::Release);
                 }
             }
-            self.run_once_logging_errors().await;
+            self.run_once_traced(trace_id, &mut iteration).await;
         }
 
         if self.force_close.load(Ordering::Acquire) {
@@ -1012,6 +1017,7 @@ impl<C: KafkaClient> Sender<C> {
         hang_trace_keyed("sender", trace_id, format_args!("sender: client close starts"));
         self.client.close().await;
         hang_trace_keyed("sender", trace_id, format_args!("sender: client closed"));
+        hang_step_forget(trace_id);
 
         // Java leaks these buffers, and this port declines to.
         //
@@ -1061,6 +1067,26 @@ impl<C: KafkaClient> Sender<C> {
     /// `AssertUnwindSafe` is required because `&mut Sender` is not `UnwindSafe`.
     /// The state a caught unwind leaves behind is exactly what Java's thread is
     /// left holding after its own catch, so this does not widen the exposure.
+    /// Temporary, for the macOS CI hang investigation: [`Self::run_once_logging_errors`]
+    /// with this Sender's key and iteration set, so that [`hang_step`] records its steps.
+    async fn run_once_traced(&mut self, trace_id: usize, iteration: &mut u64) {
+        if hang_trace_enabled() {
+            HANG_TRACE_SENDER
+                .scope((trace_id, *iteration), async {
+                    hang_step(
+                        "run_once starts",
+                        format_args!("running={}", self.running.load(Ordering::Acquire)),
+                    );
+                    self.run_once_logging_errors().await;
+                    hang_step("run_once done", format_args!(""));
+                })
+                .await;
+        } else {
+            self.run_once_logging_errors().await;
+        }
+        *iteration += 1;
+    }
+
     async fn run_once_logging_errors(&mut self) {
         use futures_util::FutureExt;
 
@@ -1142,7 +1168,10 @@ impl<C: KafkaClient> Sender<C> {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#runOnce")]
     pub(crate) async fn run_once(&mut self) -> Result<(), Error> {
         if self.transaction_manager.is_some() {
-            match self.run_transaction_phase().await {
+            hang_step("run_transaction_phase starts", format_args!(""));
+            let phase = self.run_transaction_phase().await;
+            hang_step("run_transaction_phase done", format_args!("ok={}", phase.is_ok()));
+            match phase {
                 // `org.apache.kafka.clients.producer.internals.Sender#runOnce`'s three early returns — it
                 // returns without producing.
                 Ok(true) => return Ok(()),
@@ -1173,7 +1202,9 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         let current_time_ms = self.time.milliseconds();
+        hang_step("send_producer_data starts", format_args!(""));
         let poll_timeout = self.send_producer_data(current_time_ms).await?;
+        hang_step("send_producer_data done", format_args!("poll_timeout={poll_timeout}"));
         if poll_timeout >= 5_000 {
             hang_trace_keyed(
                 "sender",
@@ -1184,7 +1215,9 @@ impl<C: KafkaClient> Sender<C> {
                 ),
             );
         }
+        hang_step("poll_and_dispatch starts", format_args!("timeout={poll_timeout}"));
         self.poll_and_dispatch(poll_timeout, current_time_ms).await;
+        hang_step("poll_and_dispatch done", format_args!(""));
         Ok(())
     }
 
@@ -1512,7 +1545,10 @@ impl<C: KafkaClient> Sender<C> {
 
         // `if (maybeSendAndPollTransactionalRequest()) return;` in
         // `org.apache.kafka.clients.producer.internals.Sender#runOnce`.
-        if self.maybe_send_and_poll_transactional_request().await? {
+        hang_step("txn: maybe_send_and_poll_transactional_request starts", format_args!(""));
+        let sent = self.maybe_send_and_poll_transactional_request().await;
+        hang_step("txn: maybe_send_and_poll_transactional_request done", format_args!("{sent:?}"));
+        if sent? {
             return Ok(true);
         }
         Ok(false)
@@ -1730,7 +1766,10 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         // `if (!awaitNodeReady(targetNode, coordinatorType))`.
-        match self.await_node_ready(&target_node, coordinator_type).await {
+        hang_step("txn: await_node_ready starts", format_args!("node={}", target_node.id_string()));
+        let node_ready = self.await_node_ready(&target_node, coordinator_type).await;
+        hang_step("txn: await_node_ready done", format_args!("{node_ready:?}"));
+        match node_ready {
             Ok(true) => {},
             Ok(false) => {
                 kafka_trace!(
@@ -1827,6 +1866,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Translated from `Sender#maybeFindCoordinatorAndRetry`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeFindCoordinatorAndRetry")]
     async fn maybe_find_coordinator_and_retry(&mut self, next_request_handler: TxnRequestHandler) -> Result<(), Error> {
+        hang_step("txn: maybe_find_coordinator_and_retry", format_args!(""));
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
         };

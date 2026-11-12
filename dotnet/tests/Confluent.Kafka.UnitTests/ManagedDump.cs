@@ -102,7 +102,7 @@ internal static class ManagedDump
     private const int MaxObjectLines = 40;
     private const int MaxObjectLineLength = 400;
     private const int MaxThreadPoolLines = 20;
-    private const int MaxTraceLines = 120;
+    private const int MaxTraceLines = 200;
     private static readonly Regex s_traceLink = new Regex("\\b(?:sender|handle)=[0-9a-f]+", RegexOptions.CultureInvariant);
     private const string TraceDirectoryVariable = "CONFLUENT_KAFKA_HANG_TRACE_DIR";
     private const long MaxKeptDumpBytes = 1L << 30;
