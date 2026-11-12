@@ -90,7 +90,18 @@ fn main() -> anyhow::Result<()> {
         Some("javadoc") => lint_custom::javadoc(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-fill") => lint_custom::doc_fill(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-report") => lint_custom::doc_report()?,
-        Some("lint") => lint(env::args().skip(2).any(|arg| arg == "--keep-going"))?,
+        Some("lint") => {
+            let args: Vec<String> = env::args().skip(2).collect();
+            let unknown: Vec<&String> = args.iter().filter(|arg| !LINT_FLAGS.contains(&arg.as_str())).collect();
+            if !unknown.is_empty() {
+                anyhow::bail!("lint: unknown argument(s) {unknown:?}; it takes {LINT_FLAGS:?}");
+            }
+            lint(
+                args.iter().any(|arg| arg == "--keep-going"),
+                !args.iter().any(|arg| arg == "--without-default-features-clippy"),
+            )?
+        },
+        Some("clippy-default-features") => run_command("cargo", CLIPPY_DEFAULT_FEATURES)?,
 
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -679,13 +690,36 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The flags `cargo xtask lint` takes.
+const LINT_FLAGS: &[&str] = &["--keep-going", "--without-default-features-clippy"];
+
+/// The clippy pass over the default features (see `lint`). `cargo xtask
+/// clippy-default-features` runs it alone, so CI can run it in a job of its own.
+const CLIPPY_DEFAULT_FEATURES: &[&str] = &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"];
+
+/// The clippy pass over every feature (see `lint`).
+const CLIPPY_ALL_FEATURES: &[&str] = &[
+    "clippy",
+    "--workspace",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings",
+];
+
 /// Runs every lint step. By default it stops at the first failing step; with
 /// `keep_going` (`cargo xtask lint --keep-going`) it runs every step regardless,
 /// reports each failure, and fails at the end if any step failed. The flag changes
 /// only *whether later steps run*, never what a step enforces: it exists so a step
 /// that is known to fail (e.g. a lint-custom finding owned by a later phase) does
 /// not hide the result of the steps after it.
-fn lint(keep_going: bool) -> anyhow::Result<()> {
+///
+/// Without `default_features_clippy` (`--without-default-features-clippy`) the
+/// clippy pass over the default features is left out, for a caller that runs it
+/// elsewhere (`cargo xtask clippy-default-features`): CI runs it in the doc-check
+/// job, off the Rust job's critical path.
+fn lint(keep_going: bool, default_features_clippy: bool) -> anyhow::Result<()> {
     let mut failures: Vec<String> = Vec::new();
     let mut step = |name: &str, result: anyhow::Result<()>| -> anyhow::Result<()> {
         match result {
@@ -726,25 +760,15 @@ fn lint(keep_going: bool) -> anyhow::Result<()> {
     //
     // `--workspace` covers every member (including `generator`), so no
     // per-crate pass is needed.
-    for (name, pass) in [
-        (
-            "clippy (default features)",
-            &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
-        ),
-        (
-            "clippy (--all-features)",
-            &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ][..],
-        ),
+    for (name, pass, run) in [
+        ("clippy (default features)", CLIPPY_DEFAULT_FEATURES, default_features_clippy),
+        ("clippy (--all-features)", CLIPPY_ALL_FEATURES, true),
     ] {
-        step(name, run_command("cargo", pass))?;
+        if run {
+            step(name, run_command("cargo", pass))?;
+        } else {
+            println!("⏭️  Skipping {name}: run it with `cargo xtask clippy-default-features`");
+        }
     }
 
     // Lint the xtask crate itself. `cargo clippy` from the workspace root only
@@ -2858,7 +2882,9 @@ fn print_help() {
                   tags give into the docs under the paths; `--write` applies them
   lint            Run doc-hygiene plus clippy lints (warnings are errors);
                   `--keep-going` runs every step even after one fails, then
-                  fails if any did
+                  fails if any did; `--without-default-features-clippy` leaves
+                  out the clippy pass over the default features
+  clippy-default-features  Run only the clippy pass over the default features
 
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -2977,7 +3003,8 @@ Usage:
   cargo xtask javadoc <marker|rust-path|C symbol>
   cargo xtask doc-report
   cargo xtask doc-fill [--write] <path>...
-  cargo xtask lint [--keep-going]
+  cargo xtask lint [--keep-going] [--without-default-features-clippy]
+  cargo xtask clippy-default-features
 
   cargo xtask doc-hygiene
   cargo xtask lint-fix

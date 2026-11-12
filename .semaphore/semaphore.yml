@@ -45,7 +45,7 @@ name: build-test-release
 #      macOS arm64 protoc and runs its macosx_x64 one under Rosetta 2, which is
 #      unaffected by the linux_arm64 SIGSEGV in item 2.
 #   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
-#      crate with warnings denied.
+#      crate with warnings denied, and runs clippy over the default features.
 #   6. "Check crate package (Linux amd64)" -- packages the crate and checks its
 #      contents.
 #   7. "Check API compatibility (Linux amd64)" -- compares the Rust API and the
@@ -236,7 +236,9 @@ blocks:
     # listener the clients connect over:
     #   - PLAINTEXT: `make verify-rust` — the full suite over the default
     #     PLAINTEXT listener, plus the protocol-independent checks that run only
-    #     here: format-check, clippy, and the performance tests.
+    #     here: format-check, clippy (the --all-features pass; the
+    #     default-features one runs in "Check Rust docs"), and the performance
+    #     tests.
     #   - SSL / SASL_SSL: the same suite over the broker's SSL listener (:9096)
     #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret),
     #     WITHOUT format-check / clippy / perf — those are protocol-independent,
@@ -267,7 +269,9 @@ blocks:
             # The submodule is a shallow clone; `lint-custom` reads the
             # Kafka tags pinned in xtask and fails without them.
             - (cd rust && cargo xtask fetch-java-refs)
-            - make verify-rust
+            # The clippy pass over the default features runs in "Check Rust
+            # docs" instead, in parallel; this job runs the --all-features one.
+            - make verify-rust LINT_ARGS=--without-default-features-clippy
         - name: "Verify Rust (Linux amd64) — ssl"
           commands:
             - make test-rust-all-features-ssl
@@ -515,7 +519,9 @@ blocks:
     # Its own block so a documentation failure is attributable at a glance and
     # does not wait behind the test suite. `make doc-check` runs `cargo doc`
     # with `-D warnings` over the whole workspace; the doctests already run in
-    # "Verify Rust" as part of `cargo test`.
+    # "Verify Rust" as part of `cargo test`. It also runs the clippy pass over
+    # the default features, which the Linux plaintext "Verify Rust" job leaves
+    # out of its lint (LINT_ARGS) so the pass is off that job's critical path.
     dependencies: []
     task:
       prologue:
@@ -526,6 +532,7 @@ blocks:
         - name: "doc-check (Linux amd64)"
           commands:
             - make doc-check
+            - make clippy-default-features
 
   - name: "Check crate package (Linux amd64)"
     # Packages `confluent-kafka` as it would be published and fails if the

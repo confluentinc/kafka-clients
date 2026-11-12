@@ -36,7 +36,7 @@ CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc -
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
+	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -270,8 +270,17 @@ format-check:
 check-generated:
 	cargo xtask check-generated
 
+# LINT_ARGS goes to `cargo xtask lint`: CI passes
+# `--without-default-features-clippy` and runs that pass in another job, through
+# `clippy-default-features`.
+LINT_ARGS ?=
 lint:
-	cargo xtask lint
+	cargo xtask lint $(LINT_ARGS)
+
+# The clippy pass over the default features alone; `lint` runs it too unless
+# LINT_ARGS leaves it out.
+clippy-default-features:
+	cargo xtask clippy-default-features
 
 # Build the rustdoc of every workspace crate with warnings denied, so a broken
 # or private intra-doc link fails CI instead of surfacing only when someone

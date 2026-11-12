@@ -38,7 +38,7 @@ VENV = . venv/bin/activate
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
-	verify-commit verify-commit-checks format-check lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer \
+	verify-commit verify-commit-checks format-check lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer \
 	select-tests clean-test-selection clean
 
 build: init-hooks build-all
@@ -444,6 +444,9 @@ check-generated:
 
 lint:
 	$(MAKE) -C rust lint
+
+clippy-default-features:
+	$(MAKE) -C rust clippy-default-features
 
 doc-check:
 	$(MAKE) -C rust doc-check
