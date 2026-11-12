@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 #
-# The start of every Windows job of semaphore.yml, the first command of each Windows block's task
+# The start of every Windows job of semaphore.yml and release.yml, the first command of each Windows block's task
 # prologue: what .semaphore/job-start.sh does for the Linux and macOS jobs, in PowerShell, the
 # shell of the Windows agents. Python is not set up: no Windows job uses it.
 
