@@ -13,7 +13,7 @@ ROOTS = REPO_ROOT=$(REPO_ROOT) RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT)
 VENV = . venv/bin/activate
 
 .PHONY: build build-all check-generated \
-	build-rust build-rust-integration-tests build-rust-all-features \
+	build-rust build-rust-integration-tests build-rust-all-features build-rust-tests-all-features \
 	submodules build-c init-venv init-venv-librdkafka build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
@@ -38,7 +38,8 @@ VENV = . venv/bin/activate
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
-	verify-sandbox format-check lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
+	verify-commit verify-commit-checks format-check lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer \
+	select-tests clean-test-selection clean
 
 build: init-hooks build-all
 
@@ -50,12 +51,16 @@ build-rust-integration-tests:
 	$(MAKE) -C rust build-integration-tests
 build-rust-all-features:
 	$(MAKE) -C rust build-all-features
+build-rust-tests-all-features:
+	$(MAKE) -C rust build-tests-all-features
 
 submodules:
 	git submodule update --init --recursive
 
+# The release C build, for packaging and the C benchmark. The tests use
+# devel-build-c.
 build-c: submodules build-rust-all-features
-	$(MAKE) -C c $(ROOTS) build
+	$(MAKE) -C c $(ROOTS) RUST_PROFILE=release build
 
 # The second line is a one-time migration: master's `[dev]` extras once
 # installed the PyPI confluent-kafka (librdkafka) into venv/, and it shares the
@@ -81,10 +86,16 @@ init-venv-librdkafka:
 	[ -d $(LIBRDKAFKA_VENV) ] || python3 -m venv $(LIBRDKAFKA_VENV)
 	$(LIBRDKAFKA_PYTHON) -m pip install -q -r python/test/performance/requirements-librdkafka.txt
 
+# The release Python build, for packaging and the Python benchmarks. The tests
+# use devel-build-python.
 build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
-devel-build: devel-build-rust devel-build-c devel-build-python
+# The debug builds the binding tests use. They link the debug all-features
+# library of devel-build-rust-all-features, the library unit the Rust tests
+# (build-rust-tests-all-features) already build, so after the Rust tests it is a
+# no-op (see rust/Makefile `devel-build-all-features`).
+devel-build: devel-build-c devel-build-python
 
 devel-build-rust:
 	$(MAKE) -C rust devel-build
@@ -93,44 +104,44 @@ devel-build-rust-integration-tests:
 devel-build-rust-all-features:
 	$(MAKE) -C rust devel-build-all-features
 
-devel-build-c: submodules devel-build-rust
-	$(MAKE) -C c $(ROOTS) devel-build
+devel-build-c: submodules devel-build-rust-all-features
+	$(MAKE) -C c $(ROOTS) RUST_PROFILE=debug devel-build
 
-devel-build-python: init-venv devel-build-rust
+devel-build-python: init-venv devel-build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug build)
 
 # Build the per-language gRPC server Docker images used by the
 # multilanguage integration test harness. See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
-# Depends on `build` so libconfluent_kafka.{a,so} are present under
-# rust/target/release/, and confluent_kafka.h (the C image) and
+# Depends on devel-build-rust-all-features so the debug libconfluent_kafka.{a,so}
+# are present under rust/target/debug/, and confluent_kafka.h (the C image) and
 # confluent_kafka_bindings.h (the Python images) under rust/target/include/.
-build-grpc-images: build
+build-grpc-images: devel-build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
 	$(MAKE) -C c $(ROOTS) grpc-image
 	$(MAKE) -C dotnet $(ROOTS) grpc-image grpc-image-async
 
 # Just the two Python gRPC images (sync + asyncio). The Python image installs
-# the built binding, hence `build-python`.
-build-grpc-images-python: build-rust-all-features build-python
+# the built binding, hence `devel-build-python`.
+build-grpc-images-python: devel-build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
 
-# Just the C gRPC image. Needs only the Rust release artifacts (see
-# c/Makefile's `grpc-image`), not the host-side `build-c`.
-build-grpc-images-c: build-rust-all-features
+# Just the C gRPC image. Needs only the debug Rust artifacts (see
+# c/Makefile's `grpc-image`), not the host-side `devel-build-c`.
+build-grpc-images-c: devel-build-rust-all-features
 	$(MAKE) -C c $(ROOTS) grpc-image
 
 # The two .NET gRPC images (sync + async), for the .NET-only multilanguage run
-# below. Mirrors build-grpc-images-python (also two images). Needs only the Rust
-# release artifacts: dotnet/Dockerfile.grpc / Dockerfile.grpc.async copy
-# rust/target/release/libconfluent_kafka.so + rust/target/include/confluent_kafka.h
+# below. Mirrors build-grpc-images-python (also two images). Needs only the debug
+# Rust artifacts: dotnet/Dockerfile.grpc / Dockerfile.grpc.async copy
+# rust/target/debug/libconfluent_kafka.so + rust/target/include/confluent_kafka.h
 # and build the .NET gRPC server inside the container (which brings its own SDK),
 # so unlike build-grpc-images-python this does NOT depend on a host-side
 # binding build. Images are platform-agnostic: CI is amd64-native; local
 # Apple-Silicon dev sets DOCKER_DEFAULT_PLATFORM=linux/amd64 in its environment
 # (Grpc.Tools' linux_arm64 protoc segfaults in an arm64 Linux container), never a
 # Makefile-baked --platform.
-build-grpc-images-dotnet: build-rust-all-features
+build-grpc-images-dotnet: devel-build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) grpc-image grpc-image-async
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
@@ -146,7 +157,8 @@ test-rust:
 	$(MAKE) -C rust test
 
 # Every feature compiled, only the native-Rust tests run (see rust/Makefile).
-# Part of `verify` (through `test`) and of the CI `verify-rust` job.
+# Part of `verify` (through `test`) and `verify-rust`; the CI PLAINTEXT Rust job
+# runs it alone, the checks of `verify-rust` running in their own CI job.
 test-rust-all-features:
 	$(MAKE) -C rust test-all-features
 
@@ -175,10 +187,10 @@ test-rust-all-features-sasl-ssl:
 # binding's `test-integration` builds its gRPC image(s) and runs the matching
 # `__grpc_*` tests of the Rust harness; the prerequisites here build the
 # artifacts those images copy.
-test-integration-python: build-rust-all-features build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) test-integration)
+test-integration-python: devel-build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug test-integration)
 
-test-integration-c: build-rust-all-features
+test-integration-c: devel-build-rust-all-features
 	$(MAKE) -C c $(ROOTS) test-integration
 
 # .NET's container arm, like python's and c's: dotnet/'s `test-integration` builds
@@ -186,7 +198,7 @@ test-integration-c: build-rust-all-features
 # rust/Makefile's test-integration-grpc-dotnet). It self-skips off Linux, with
 # test-integration-dotnet-native below as the fallback the macOS CI verify-dotnet
 # job runs; see dotnet/Makefile.
-test-integration-dotnet: build-rust-all-features
+test-integration-dotnet: devel-build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) test-integration
 
 # The gRPC Python/C/.NET arms above default to the PLAINTEXT CONTAINER listener.
@@ -227,17 +239,17 @@ test-integration-dotnet-sasl-ssl:
 #   c/       the kafka_grpc_server binary
 #   dotnet/  the .NET gRPC server's net10.0 build (Confluent.Kafka.GrpcServer.dll
 #            plus the native library), run with the `dotnet` host
-build-grpc-native-python: build-python
+build-grpc-native-python: devel-build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 
-build-grpc-native-c: build-rust-all-features
+build-grpc-native-c: devel-build-rust-all-features
 	$(MAKE) -C c $(ROOTS) grpc-native
 
-# Builds the .NET gRPC server's net10.0 leg against the host's release
-# libconfluent_kafka (dotnet/'s grpc-native target). Requires the .NET 10
+# Builds the .NET gRPC server's net10.0 leg against the host's debug
+# all-features libconfluent_kafka (dotnet/'s grpc-native target). Requires the .NET 10
 # SDK on PATH, which brings the ASP.NET Core 10 runtime the server runs on. On an
 # Apple-Silicon host Grpc.Tools runs its macosx_x64 protoc under Rosetta 2.
-build-grpc-native-dotnet: build-rust-all-features
+build-grpc-native-dotnet: devel-build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) grpc-native
 
 test-integration-python-native: build-grpc-native-python
@@ -257,8 +269,11 @@ test-integration-dotnet-native: build-grpc-native-dotnet
 test-integration-perf-rust:
 	$(MAKE) -C rust test-integration-perf
 
-test-integration-perf-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-performance)
+# A latency smoke run at a fixed low rate (100 rps, p99 budget), like the Rust
+# perf tests, so it runs on the same debug all-features library as the other
+# binding tests; the throughput benchmarks below stay on release.
+test-integration-perf-python: devel-build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug test-performance)
 
 # Rust, Python and .NET performance suites, one after the other. Recipe lines
 # rather than prerequisites so the order holds under `make -j`, and so the
@@ -275,19 +290,19 @@ producer-perf-test:
 	$(MAKE) -C rust producer-perf-test
 
 producer-perf-test-c: build-c
-	$(MAKE) -C c $(ROOTS) producer-perf-test
+	$(MAKE) -C c $(ROOTS) RUST_PROFILE=release producer-perf-test
 
 # The Python benchmarks also need the librdkafka venv: CLIENT_VERSION=2 runs the
 # librdkafka baseline in it, and the Rust run uses it for its librdkafka-backed
 # helpers (see python/Makefile).
 consumer-perf-test-python: build-python init-venv-librdkafka
-	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) consumer-perf-test)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) consumer-perf-test)
 
 producer-perf-test-python: build-python init-venv-librdkafka
-	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) producer-perf-test)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) producer-perf-test)
 
 transactional-producer-perf-test-python: build-python init-venv-librdkafka
-	@($(VENV) && $(MAKE) -C python $(ROOTS) LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) transactional-producer-perf-test)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) transactional-producer-perf-test)
 
 # Env-driven .NET producer/consumer performance benchmarks (manual; need a
 # reachable broker via BOOTSTRAP_SERVERS). Delegate into dotnet/ — its
@@ -312,16 +327,16 @@ test-integration-perf-dotnet:
 	$(MAKE) -C dotnet $(ROOTS) test-integration-perf-dotnet
 
 # c/'s `test` runs ctest and then the C-backend multilanguage arm.
-test-c: build-c
-	$(MAKE) -C c $(ROOTS) test
+test-c: devel-build-c
+	$(MAKE) -C c $(ROOTS) RUST_PROFILE=debug test
 
 # macOS variant of test-c: C unit tests (ctest) only. On macOS the gRPC
 # multilanguage arm runs natively instead (see verify-c-macos-docker).
-test-c-macos-docker: build-c
-	$(MAKE) -C c $(ROOTS) test-unit
+test-c-macos-docker: devel-build-c
+	$(MAKE) -C c $(ROOTS) RUST_PROFILE=debug test-unit
 
-test-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test)
+test-python: devel-build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug test)
 
 # Delegates to dotnet/'s own `test-dotnet` (native cargo build -> dotnet
 # build matrix -> dotnet format -> the solution's unit and integration tests on
@@ -358,8 +373,8 @@ package-check-dotnet:
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
-test-python-macos-docker: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-unit)
+test-python-macos-docker: devel-build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug test-unit)
 
 verify: build format-check check-generated lint test check-bindings
 
@@ -396,14 +411,30 @@ verify-dotnet-macos-docker: test-dotnet-macos-docker
 verify-python-macos-docker: test-python-macos-docker
 	$(MAKE) test-integration-python-native
 
-verify-rust: build-rust-all-features format-check check-generated lint test-rust-all-features
+# The Rust verify jobs compile once, the debug all-features build the tests run
+# (rust/Makefile `build-tests-all-features`), and build nothing in release: no
+# Rust test runs a release artifact, and the binding jobs reuse the same debug
+# all-features build (devel-build-rust-all-features). The build comes before
+# `check-generated`, which reads its generated code.
+verify-rust: build-rust-tests-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
 
 # macOS verify-rust; the perf tail uses rust/Makefile's MACOS_P99_LIMIT_MS.
-verify-rust-macos-docker: build-rust-all-features format-check check-generated lint test-rust-all-features
+verify-rust-macos-docker: build-rust-tests-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) -C rust test-integration-perf-macos
 
-verify-sandbox: build-rust build-c format-check check-generated lint test-integration test-c
+# The pre-commit hook's verification. It first selects the tests the changes
+# since the last commit can affect into its own .test-selection-commit.json
+# (keeping a selection already made there at HEAD for the same working tree,
+# see Test selection), then verifies with that selection. If the selection
+# fails there is no file, and every test runs.
+verify-commit: export TEST_SELECTION = .test-selection-commit.json
+verify-commit:
+	$(MAKE) select-tests BASE=HEAD SELECT_TESTS_FLAGS=--reuse || \
+		echo "verify-commit: the test selection failed, so every test runs"
+	$(MAKE) verify-commit-checks
+
+verify-commit-checks: devel-build-c format-check check-generated lint test-integration test-c
 
 init-hooks:
 	@git config core.hooksPath .githooks
@@ -425,6 +456,9 @@ check-generated:
 
 lint:
 	$(MAKE) -C rust lint
+
+clippy-default-features:
+	$(MAKE) -C rust clippy-default-features
 
 doc-check:
 	$(MAKE) -C rust doc-check
@@ -450,6 +484,46 @@ bump-version:
 # Needs no build artifacts, so it is cheap to run.
 check-bindings:
 	@($(VENV) && $(MAKE) -C python $(ROOTS) check-static)
+
+# ── Test selection ───────────────────────────────────────────────────────
+#
+# `make select-tests` gives an agent the changes from BASE (committed,
+# uncommitted and untracked) and writes the tests they can affect, per
+# language, to test-selection.json (or $TEST_SELECTION, relative to this
+# directory), together with the working tree it was made for. The agent is
+# told to include a test whenever in doubt. Commit test-selection.json with the
+# branch.
+#
+# A selection applies only where TEST_SELECTION names it: CI sets it to
+# test-selection.json on a pull request build, `verify-commit` to its own
+# .test-selection-commit.json, and it can be set by hand
+# (`TEST_SELECTION=test-selection.json make test`). Then every test recipe
+# (`test`, `verify`, the integration and performance targets, in Rust, C,
+# Python and .NET) runs only the selected tests, and a suite the file leaves out does
+# not run at all, but only while the working tree is the one the file was made
+# for: after any other change, every test runs. Without TEST_SELECTION every
+# test runs. A failed `select-tests` removes the previous file rather than
+# leave it in force.
+#
+# AGENT is any command taking Claude Code's `--model`, `--restricted`,
+# `--strict-mcp-config`, `--tools`, `--allowedTools`, `--disallowedTools` and
+# `-p`: by default a local Claude Code, which reads the working tree, so
+# uncommitted and untracked changes count. The agent only reads files and runs
+# read-only git commands: restricted mode ignores the user's settings files, so
+# only the read-only tools are allowed, and an agent that has not answered after
+# SELECT_TESTS_FLAGS' `--timeout` (600 s by default) is stopped and the selection
+# fails. rust/xtask/src/test_selection.rs describes the file's format.
+AGENT ?= claude
+AGENT_MODEL ?= opus
+BASE ?= origin/master
+# `--reuse` keeps a file made at HEAD that covers every current change.
+SELECT_TESTS_FLAGS ?=
+
+select-tests:
+	cd rust && cargo xtask select-tests --base "$(BASE)" --agent "$(AGENT)" --model "$(AGENT_MODEL)" $(SELECT_TESTS_FLAGS)
+
+clean-test-selection:
+	rm -f "$${TEST_SELECTION:-test-selection.json}"
 
 clean:
 	$(MAKE) -C rust clean

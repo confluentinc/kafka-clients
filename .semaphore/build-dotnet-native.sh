@@ -16,7 +16,7 @@
 #
 #
 # Builds the native library of this machine's RID for the Confluent.Kafka NuGet package, for
-# the "Release (.NET): native library" blocks of semaphore.yml. It is the library the Python
+# the "Release (.NET): native library" blocks of release.yml. It is the library the Python
 # wheels carry, built the same way (.semaphore/build-ffi-library.sh): on Linux in the
 # manylinux_2_28 image that build-wheels.sh uses, so that it needs glibc 2.28 at most; on macOS
 # for macOS 11.0. build-dotnet-native.ps1 builds the Windows libraries. Must be POSIX sh.

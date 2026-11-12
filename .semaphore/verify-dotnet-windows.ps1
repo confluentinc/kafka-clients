@@ -21,6 +21,12 @@
 # platform's process. The broker-backed tests do not run: they need Linux containers, which the
 # Windows agents do not run.
 #
+# On a pull request the unit tests run through the test selection, as in the Linux and macOS jobs:
+# only the tests the committed test-selection.json selects in its dotnet.solution section, if it was
+# made for exactly this working tree (rust/xtask/src/test_selection.rs); otherwise every test runs.
+# The selection tasks run in xtask's test-selection binary, which builds on Windows, where xtask
+# itself does not.
+#
 # Usage: .\.semaphore\verify-dotnet-windows.ps1 -Platform x64|x86
 
 param(
@@ -45,6 +51,22 @@ $dotnet = Install-DotNet $Platform
 Invoke-Native git @('-C', $repo, 'config', 'core.longpaths', 'true')
 Invoke-Retry { Invoke-Native git @('-C', $repo, 'submodule', 'update', '--init', '--depth=1', 'kafka') }
 
+Write-Output "== Test selection ($Platform)"
+if ($env:SEMAPHORE_GIT_PR_NUMBER) {
+    $env:TEST_SELECTION = 'test-selection.json'
+}
+$rust = Join-Path $repo 'rust'
+# The selection tasks run in rust\, as `cargo xtask` does: they find the repository from there.
+Push-Location $rust
+try {
+    Invoke-Retry { Invoke-Native cargo @('build', '--locked', '--package', 'xtask', '--bin', 'test-selection') }
+    $selection = Join-Path $rust 'target\debug\test-selection.exe'
+    # What the selection runs and why, at the top of the tests' output.
+    Invoke-Native $selection @('show-test-selection')
+} finally {
+    Pop-Location
+}
+
 Write-Output "== .NET build and unit tests ($Platform)"
 # PlatformTarget makes every assembly, the net462 test host's included, run in this platform's
 # process; CargoTargetTriple points the library project at the native built above.
@@ -53,15 +75,21 @@ Invoke-Native $dotnet (@('build', (Join-Path $repo 'dotnet\Confluent.Kafka.sln')
 $failed = @()
 foreach ($tfm in 'net462', 'net8.0', 'net10.0') {
     Write-Output "== unit tests, $tfm, $Platform"
+    # `{}` is where selected-run puts the --filter of the selected tests, or nothing when every test
+    # runs; it runs no test when dotnet.solution selects none.
+    Push-Location $rust
     try {
-        Invoke-Native $dotnet (@('test', (Join-Path $repo 'dotnet\tests\Confluent.Kafka.UnitTests\Confluent.Kafka.UnitTests.csproj'), '--no-build', '-f', $tfm,
-                '--blame-hang-timeout', '15m', '--blame-hang-dump-type', 'none') + $properties)
+        Invoke-Native $selection (@('selected-run', '-C', $repo, '--section', 'dotnet.solution', '--dotnet', '--',
+                $dotnet, 'test', (Join-Path $repo 'dotnet\tests\Confluent.Kafka.UnitTests\Confluent.Kafka.UnitTests.csproj'), '--no-build', '-f', $tfm,
+                '--blame-hang-timeout', '15m', '--blame-hang-dump-type', 'none') + $properties + @('{}'))
     } catch {
         Write-Output "$_"
         $failed += $tfm
+    } finally {
+        Pop-Location
     }
 }
 if ($failed) {
     throw "The unit tests failed on $($failed -join ', ') ($Platform)"
 }
-Write-Output "The unit tests passed on net462, net8.0 and net10.0 ($Platform)"
+Write-Output "The selected unit tests passed on net462, net8.0 and net10.0 ($Platform)"

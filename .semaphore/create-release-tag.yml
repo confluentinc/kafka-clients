@@ -4,13 +4,16 @@ name: create-release-tag
 # the commit of this master or release branch build for the release of each
 # client whose version is entered, and pushes the tags, which start those
 # releases:
-# semaphore.yml runs on each tag and, once every CI job passes, that client's
-# release blocks publish it.
+# semaphore.yml runs on each tag and, once its CI has finished, passed or
+# failed, its automatic "Release" promotion starts release.yml, whose blocks
+# for that client publish it: CI passed on this commit before the tag was
+# created, so a flaky test or an unavailable external resource on the tag
+# build cannot block the release.
 #   - RUST_VERSION: the tag is rust/v<RUST_VERSION>, and "Release (Rust):"
 #     publishes ${CRATE} to crates.io.
 #   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
 #     (Python):" builds and tests the ${PYPI_PACKAGE} wheels. The "Publish to
-#     Test PyPI" promotion of the tag build (publish-testpypi.yml) publishes
+#     Test PyPI" promotion of the release pipeline (publish-testpypi.yml) publishes
 #     them to Test PyPI, and its "Publish to PyPI" promotion (publish-pypi.yml)
 #     then publishes them to PyPI.
 #   - DOTNET_VERSION: the tag is dotnet/v<DOTNET_VERSION>, and "Release
@@ -50,9 +53,10 @@ name: create-release-tag
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
-# each tag build, and run only after every CI block of that build has passed,
-# so they also apply to a tag pushed by other means. The checks here avoid
-# creating a tag that could never be published.
+# each tag build, so they also apply to a tag pushed by other means, but not
+# the CI check: a tag pushed by other means is released without CI having
+# passed on its commit. The checks here avoid creating a tag that could never
+# be published.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -72,7 +76,7 @@ global_job_config:
     # updated. The release blocks never run on a branch build, so they are not
     # listed.
     - name: REQUIRED_CI_JOBS
-      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);verify-dotnet (Windows amd64);verify-dotnet (Windows x86);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64)"
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);verify-dotnet (Windows amd64);verify-dotnet (Windows x86);doc-check (Linux amd64);lint (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64)"
 
 blocks:
   - name: "Create release tag"
@@ -89,7 +93,7 @@ blocks:
             # below read for that client (rust, python or dotnet).
             #
             # The version patterns are those of the `run` conditions of each
-            # client's release blocks in semaphore.yml, without the tag prefix.
+            # client's release blocks in release.yml, without the tag prefix.
             - |
               refuse() {
                 echo "Refusing to create the release tags: $*" >&2
@@ -136,7 +140,7 @@ blocks:
             # A pull request build reports the target branch in
             # SEMAPHORE_GIT_BRANCH, so it is excluded by the ref type. The
             # release branch pattern is the one the "Release (Rust): publish to
-            # crates.io" block of semaphore.yml accepts. A build
+            # crates.io" block of release.yml accepts. A build
             # whose jobs were redirected to another branch
             # (SEMAPHORE_GIT_BRANCH_CHECKOUT, see semaphore.yml) did not test
             # the commit checked out here.

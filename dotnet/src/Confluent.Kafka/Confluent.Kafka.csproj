@@ -126,9 +126,10 @@
 
   <!-- Pack="false": the package carries the natives from NativeAssetsDir instead, and a <Content>
        item would otherwise be packed under content/. A pack (NativeAssetsDir set) neither copies
-       nor requires the developer native. -->
+       nor requires the developer native. Always, not PreserveNewest: the copy keeps the source
+       mtime, so a newer native of the other Cargo profile would otherwise survive a build. -->
   <ItemGroup Condition="'$(NativeAssetsDir)' == ''">
-    <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="PreserveNewest" Visible="false" Pack="false" />
+    <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="Always" Visible="false" Pack="false" />
   </ItemGroup>
 
   <!-- CKRDA0013 / CKRDA0014: the Java list and the name lists the analyzer checks this project against. -->
