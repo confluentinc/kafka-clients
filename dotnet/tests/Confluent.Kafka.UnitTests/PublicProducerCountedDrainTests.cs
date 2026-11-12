@@ -50,7 +50,7 @@ public sealed class PublicProducerCountedDrainTests
         try
         {
             _ = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null),
                 new Parking(entered, release));
             Assert.True(producer.CompleteNext());
             Assert.True(entered.Wait(s_deadline), "the delivery callback never ran in the drain");

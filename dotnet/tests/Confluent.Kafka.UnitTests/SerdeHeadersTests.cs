@@ -452,7 +452,7 @@ public sealed class SerdeHeadersTests
             .GetValue(consumer)!;
 
     private static ProducerRecord<string, string> Record() =>
-        new ProducerRecord<string, string>(Topic, "value", "key", headers: new[] { new Header("h", Bytes("1")) });
+        new ProducerRecord<string, string>(Topic, value: "value", key: "key", headers: new[] { new Header("h", Bytes("1")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>

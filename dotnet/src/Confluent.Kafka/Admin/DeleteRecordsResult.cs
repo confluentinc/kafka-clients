@@ -31,11 +31,24 @@ public sealed class DeleteRecordsResult
     private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
-    // Internal, unlike Java's public constructor: a recorded deviation. The dictionary is held by
-    // reference, as Java holds its map.
-    internal DeleteRecordsResult(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> lowWatermarks)
+    /// <summary>Creates a result over the given futures, keyed by topic partition.</summary>
+    /// <param name="futures">The future of each partition's deleted records. The map is copied.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    public DeleteRecordsResult(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> futures)
     {
-        _futures = lowWatermarks ?? throw new ArgumentNullException(nameof(lowWatermarks));
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
+        Dictionary<TopicPartition, KafkaFuture<DeletedRecords>> copy =
+            new Dictionary<TopicPartition, KafkaFuture<DeletedRecords>>(futures.Count);
+        foreach (KeyValuePair<TopicPartition, KafkaFuture<DeletedRecords>> entry in futures)
+        {
+            copy.Add(entry.Key, entry.Value);
+        }
+
+        _futures = copy;
     }
 
     private DeleteRecordsResult(

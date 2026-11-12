@@ -171,7 +171,7 @@ public sealed class PublicConsumerTfmSmokeTests
             consumer.Assign(new[] { tp });
             consumer.Commit(new System.Collections.Generic.Dictionary<TopicPartition, OffsetAndMetadata>
             {
-                [tp] = new OffsetAndMetadata(42, "meta-x", 7),
+                [tp] = new OffsetAndMetadata(42, 7, "meta-x"),
             });
 
             System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =

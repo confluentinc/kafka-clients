@@ -36,11 +36,25 @@ public sealed class AsyncListOffsetsResult
     private readonly IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
-    // Internal, unlike Java's public constructor: a recorded deviation.
-    internal AsyncListOffsetsResult(
+    /// <summary>Creates a result over the given futures, keyed by partition.</summary>
+    /// <param name="futures">The future of each partition's offsets. The map is copied.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    public AsyncListOffsetsResult(
         IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> futures)
     {
-        _futures = futures ?? throw new ArgumentNullException(nameof(futures));
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
+        Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> copy =
+            new Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>(futures.Count);
+        foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> entry in futures)
+        {
+            copy.Add(entry.Key, entry.Value);
+        }
+
+        _futures = copy;
     }
 
     private AsyncListOffsetsResult(

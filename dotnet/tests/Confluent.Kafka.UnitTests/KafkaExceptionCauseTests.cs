@@ -40,7 +40,7 @@ public sealed class KafkaExceptionCauseTests
 
     private static KafkaException CreateWithBadBootstrap() =>
         Assert.Throws<KafkaException>(
-            () => new KafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = BadBootstrap }));
+            () => IAdmin.Create(new Dictionary<string, object?> { ["bootstrap.servers"] = BadBootstrap }));
 
     [Fact]
     public void AdminClientCreate_BadBootstrap_CarriesTheCoreCauseAsInnerException()

@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Admin;
 /// validation.
 /// </para>
 /// <para>
-/// A <see cref="Admin.OpType.DELETE"/> whose entry value is <see langword="null"/> sends a null
+/// A <see cref="Confluent.Kafka.Admin.OpType.DELETE"/> whose entry value is <see langword="null"/> sends a null
 /// value, as in Java.
 /// </para>
 /// </remarks>
@@ -46,7 +46,7 @@ public sealed class AlterConfigOp
     /// <param name="operationType">What to do with it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="configEntry"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="operationType"/> is not a defined <see cref="Admin.OpType"/> member.
+    /// <paramref name="operationType"/> is not a defined <see cref="Confluent.Kafka.Admin.OpType"/> member.
     /// </exception>
     /// <remarks>
     /// The null check is stricter than Java, which stores the reference unchecked. An undefined
@@ -106,10 +106,10 @@ public sealed class AlterConfigOp
 
     private static string ConstantName(OpType opType) => opType switch
     {
-        Admin.OpType.SET => "SET",
-        Admin.OpType.DELETE => "DELETE",
-        Admin.OpType.APPEND => "APPEND",
-        Admin.OpType.SUBTRACT => "SUBTRACT",
+        Confluent.Kafka.Admin.OpType.SET => "SET",
+        Confluent.Kafka.Admin.OpType.DELETE => "DELETE",
+        Confluent.Kafka.Admin.OpType.APPEND => "APPEND",
+        Confluent.Kafka.Admin.OpType.SUBTRACT => "SUBTRACT",
         _ => ((int)opType).ToString(CultureInfo.InvariantCulture),
     };
 }

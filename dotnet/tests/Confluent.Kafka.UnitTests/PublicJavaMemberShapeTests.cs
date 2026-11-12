@@ -80,17 +80,17 @@ public class PublicJavaMemberShapeTests
         Assert.Null(typeof(ConsumerRecords<,>).GetProperty("Count", BindingFlags.Public | BindingFlags.Instance));
 
         ConsumerRecords<byte[], byte[]> records = new ConsumerRecords<byte[], byte[]>(
-            new[]
+            new Dictionary<TopicPartition, IReadOnlyList<ConsumerRecord<byte[], byte[]>>>
             {
-                Record(0),
-                Record(1),
-            });
+                [new TopicPartition("t", 0)] = new[] { Record(0), Record(1) },
+            },
+            new Dictionary<TopicPartition, OffsetAndMetadata>());
         Assert.Equal(2, records.Count());
         Assert.Equal(2, ((IReadOnlyCollection<ConsumerRecord<byte[], byte[]>>)records).Count);
 
         static ConsumerRecord<byte[], byte[]> Record(long offset) => new ConsumerRecord<byte[], byte[]>(
-            "t", 0, offset, 0, TimestampType.CREATE_TIME, new byte[] { 1 }, new byte[] { 2 }, new Headers(),
-            leaderEpoch: null, serializedKeySize: 1, serializedValueSize: 1);
+            "t", 0, offset, 0, TimestampType.CREATE_TIME, 1, 1, new byte[] { 1 }, new byte[] { 2 }, new Headers(),
+            leaderEpoch: null);
     }
 
     [Fact]
@@ -207,6 +207,7 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Common.Uuid.ZERO_UUID",
         "Confluent.Kafka.Consumer.ConsumerRecord`2.NO_TIMESTAMP",
         "Confluent.Kafka.Consumer.ConsumerRecord`2.NULL_SIZE",
+        "Confluent.Kafka.Consumer.ConsumerRecords`2.EMPTY",
         "Confluent.Kafka.Producer.AsyncKafkaProducer`2.NETWORK_THREAD_PREFIX",
         "Confluent.Kafka.Producer.AsyncKafkaProducer`2.PRODUCER_METRIC_GROUP_NAME",
         "Confluent.Kafka.Producer.KafkaProducer`2.NETWORK_THREAD_PREFIX",

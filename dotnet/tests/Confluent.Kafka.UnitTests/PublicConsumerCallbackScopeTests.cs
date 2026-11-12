@@ -325,10 +325,6 @@ public sealed class PublicConsumerCallbackScopeTests
         }
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 
     /// <summary>A commit callback that runs the action it is given.</summary>

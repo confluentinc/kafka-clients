@@ -269,10 +269,6 @@ public sealed class PublicMockConsumerJavaHelpersTests
         }
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 
     private static MockConsumer<byte[], byte[]> Assigned()

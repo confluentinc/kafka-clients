@@ -50,7 +50,7 @@ public sealed class PublicSyncConsumerQueryTests
 
         consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>
         {
-            [tp] = new OffsetAndMetadata(42, "meta-x", 7),
+            [tp] = new OffsetAndMetadata(42, 7, "meta-x"),
         });
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = consumer.Committed(new[] { tp });

@@ -48,7 +48,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         await TestTimeout.Run(
             async () => metadata = await producer.Send(
                 new ProducerRecord<byte[], byte[]>(
-                    Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0),
+                    Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 0),
                 callback).Delivery(),
             s_deadline);
 
@@ -72,7 +72,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         RecordMetadata metadata = default!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 0, key: null),
                 callback).Get(),
             s_deadline);
 
@@ -93,7 +93,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 1),
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 1, key: null),
             callback).Delivery();
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-delivery-error")));
 
