@@ -38,7 +38,38 @@ mod admin_gen;
 mod chaos_matrix;
 mod perf_cloud;
 
+/// Removes the variables `cargo run` sets for the package it runs, which `cargo xtask` is.
+///
+/// Every `cargo` the xtask starts would inherit them. A build script that declares
+/// `rerun-if-env-changed` on one of them (`ring` does on `CARGO_MANIFEST_DIR`) then sees it
+/// change each time the build switches between a `cargo` run from the shell, where it is
+/// unset, and one run from here, where it names `xtask/`. The script reruns and everything
+/// above it is compiled again: `make verify-rust` compiled the crate's tests four times.
+/// It runs first in `main`, before the xtask starts a thread.
+fn forget_cargo_run_environment() {
+    let set_by_cargo_run: Vec<_> = env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO_PKG_")
+                || matches!(
+                    &*name,
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_MANIFEST_LINKS"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                )
+        })
+        .collect();
+    for name in set_by_cargo_run {
+        env::remove_var(name);
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    forget_cargo_run_environment();
     let task = env::args().nth(1);
 
     match task.as_deref() {
