@@ -42,15 +42,15 @@
     "soak": [],
     "solution": []
   },
-  "head": "dada6ccacc01af68dc52bd4b9e991ee74fd4f725",
+  "head": "c2aa7ba3806f35e6c760ebf23126921a56a85f64",
   "merge_base": "57cfce6f7b39dbcd88be489cba441a93b8fe2a80",
   "reasons": {
-    "dotnet.grpc": "The .NET gRPC server builds against Confluent.Kafka.csproj and Directory.Build.props, and both changed.",
-    "dotnet.performance": "The performance tests build against Confluent.Kafka.csproj and Directory.Build.props, and both changed.",
-    "dotnet.soak": "SoakClient.Tests builds against Confluent.Kafka.csproj and Directory.Build.props, and both changed.",
-    "dotnet.solution": "Directory.Build.props, Confluent.Kafka.csproj (new net462 target), Utf8Marshal.cs, the analyzer allowlist and baseline, the unit-test csproj and ProducerSubmitHandleRefTests changed, which affects how every solution test is built and run.",
-    "rust.lib": "A new unit test was added to consumer::internals::subscription_state's test module; the core code itself did not change.",
-    "rust.xtask": "The xtask sources changed: main.rs now clears cargo-run variables, bump_version.rs accepts .dev.M versions, and chaos_matrix.rs and perf_cloud.rs were edited."
+    "dotnet.grpc": "The .NET gRPC server builds against Confluent.Kafka and picks up Directory.Build.props, and both changed.",
+    "dotnet.performance": "The performance projects build against Confluent.Kafka and pick up Directory.Build.props, and both changed.",
+    "dotnet.soak": "SoakClient builds against Confluent.Kafka and picks up Directory.Build.props, and both changed.",
+    "dotnet.solution": "Directory.Build.props and the library's csproj (new net462 target), the unit-test csproj, Utf8Marshal.cs and ProducerSubmitHandleRefTests.cs change.",
+    "rust.lib": "The only Rust core change is a new unit test in the subscription_state test module.",
+    "rust.xtask": "The xtask sources (main.rs, bump_version.rs, chaos_matrix.rs, perf_cloud.rs) change, so the xtask package's tests run."
   },
   "rust": {
     "lib": [
@@ -58,6 +58,6 @@
     ],
     "xtask": []
   },
-  "tree": "086496e405f9f7f46157019e42d82e80f851636b",
+  "tree": "18ad49b886cafad0a4a4bd3387e26fe27b22c18d",
   "version": 2
 }
