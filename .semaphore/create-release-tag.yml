@@ -4,8 +4,10 @@ name: create-release-tag
 # the commit of this master or release branch build for the release of each
 # client whose version is entered, and pushes the tags, which start those
 # releases:
-# semaphore.yml runs on each tag and, once every CI job passes, that client's
-# release blocks publish it.
+# semaphore.yml runs on each tag and that client's release blocks publish it,
+# alongside CI, without waiting for it: CI passed on this commit before the tag
+# was created, so a flaky test or an unavailable external resource on the tag
+# build cannot block the release.
 #   - RUST_VERSION: the tag is rust/v<RUST_VERSION>, and "Release (Rust):"
 #     publishes ${CRATE} to crates.io.
 #   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
@@ -50,9 +52,10 @@ name: create-release-tag
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
-# each tag build, and run only after every CI block of that build has passed,
-# so they also apply to a tag pushed by other means. The checks here avoid
-# creating a tag that could never be published.
+# each tag build, so they also apply to a tag pushed by other means, but not
+# the CI check: a tag pushed by other means is released without CI having
+# passed on its commit. The checks here avoid creating a tag that could never
+# be published.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2

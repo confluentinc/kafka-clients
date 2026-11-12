@@ -127,8 +127,10 @@ name: build-test-release
 #      then pushes one tag per client entered, rust/v<version>,
 #      python/v<version> and dotnet/v<version>.
 #   3. Each tag push runs this pipeline on that tag. CI runs again, and the
-#      release blocks of that client run once every CI job has passed: the
-#      crate is published to crates.io; the wheels and the NuGet package are
+#      release blocks of that client run alongside it, without waiting for it:
+#      CI already passed on the commit before the tag was created, and a flaky
+#      test or an unavailable external resource on the tag build must not block
+#      the release. The crate is published to crates.io; the wheels and the NuGet package are
 #      built, tested and packaged, and recorded in the workflow's artifacts.
 #   4. For the wheels, run the manual "Publish to Test PyPI" promotion
 #      (publish-testpypi.yml) on that tag build once its packaging block has
@@ -150,16 +152,14 @@ name: build-test-release
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
-# renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of "Release: CI passed".
+# renaming or removing a CI job here also means updating that list.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
 
-# A release tag build runs CI (and, for Python and .NET, the wheel and native
-# library builds alongside it),
-# then the release checks, the publish and the post-publish checks one after
-# another, which takes longer than an ordinary build. The limit is explicit so that it does not
+# A release tag build runs CI and, alongside it, the release checks, the
+# publish and the post-publish checks one after another (for Python and .NET,
+# after the wheel and native library builds), which takes longer than an ordinary build. The limit is explicit so that it does not
 # depend on Semaphore's default for a pipeline.
 execution_time_limit:
   hours: 3
@@ -580,35 +580,6 @@ blocks:
             - export PATH="$HOME/.cargo/bin:$PATH"
             - make audit
 
-  - name: "Release: CI passed"
-    # Passes once every CI block has passed, as "Create release tag" requires
-    # of every CI job before it tags a commit. The release blocks that need CI
-    # depend on it: "Release (Rust): pre-publish package check", "Release
-    # (Python): packaging" and "Release (.NET): packaging". A new CI block must
-    # be added to this list. Semaphore treats a skipped block as passed, so
-    # this block runs on every tag build, which covers every block that
-    # depends on it. It is skipped on branch builds, so it records no CI
-    # result there.
-    dependencies:
-      # In this order, Semaphore draws the gate, and the Rust release row after it, near the
-      # top of the CI column: it places the gate level with the middle block of the list.
-      - "Verify Rust and language bindings (Linux amd64)"
-      - "Rust additional checks (Linux amd64)"
-      - "Verify Rust and language bindings (macOS arm64)"
-      - "Verify language bindings (Windows amd64)"
-    run:
-      when: "tag =~ '.*'"
-    execution_time_limit:
-      minutes: 10
-    task:
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "CI passed"
-          commands:
-            - echo "Every CI block that the release blocks depend on has passed."
-
   # Rust release blocks. They run only on the build of a Rust release tag,
   # rust/v<version> with an optional -alpha.N, -beta.N, -rc.N or -dev.N suffix,
   # and are skipped on every other build. A dev tag runs the two pre-publish
@@ -616,8 +587,8 @@ blocks:
   # without -dev.N. The two patterns must stay identical in all of the blocks
   # that use them, and the first in create-release-tag.yml.
   #
-  # The blocks run one after another: CI, then "Release (Rust): pre-publish
-  # package check", then "Release (Rust): pre-publish smoke test", then
+  # The blocks run one after another, alongside CI: "Release (Rust):
+  # pre-publish package check", then "Release (Rust): pre-publish smoke test", then
   # "Release (Rust): publish to crates.io", each starting only when the block
   # before it has passed. The pre-publish blocks build and test the crate on
   # VMs that hold no secrets, and each records the SHA-256 of the .crate it
@@ -633,8 +604,11 @@ blocks:
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # Waits for every CI block, through "Release: CI passed".
-    dependencies: ["Release: CI passed"]
+    # Starts with the tag build, alongside CI: CI passed on the tagged commit
+    # before "Create release tag" pushed the tag, and waiting for it again would
+    # let a flaky or externally caused failure on the tag build block the
+    # release.
+    dependencies: []
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -763,9 +737,10 @@ blocks:
     #   - the version is not yet on crates.io and is higher than every
     #     published version. The only exception is completing an interrupted
     #     publish of the same version from this workflow (see the job below).
-    # The dependency guarantees that every CI job passed: Semaphore starts this
-    # block only when the smoke test has passed, which starts only after the
-    # package check, which starts only when every CI block has passed.
+    # The dependency guarantees that the crate was packaged and smoke-tested:
+    # Semaphore starts this block only when the smoke test has passed, which
+    # starts only after the package check. CI is not waited for: it passed on
+    # the tagged commit before "Create release tag" pushed the tag.
     dependencies: ["Release (Rust): pre-publish smoke test"]
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
@@ -1111,9 +1086,9 @@ blocks:
   #      (.semaphore/test-wheels.sh) on a VM that never built them, so that
   #      only the library inside each wheel can be loaded, and records the
   #      SHA-256 of each tested wheel.
-  #   3. "Release (Python): packaging" depends on "Release: CI passed" and on
-  #      the three verification blocks, so it starts only when every CI block
-  #      and all of them have passed. It checks the tag and the version, and
+  #   3. "Release (Python): packaging" depends on the three verification
+  #      blocks, so it starts only when all of them have passed; it does not
+  #      wait for the tag build's CI. It checks the tag and the version, and
   #      records the tested wheels as the release, with their checksums. The
   #      tag build ends here; it publishes nothing.
   #   4. The manual "Publish to Test PyPI" promotion of the tag build
@@ -1294,11 +1269,9 @@ blocks:
             - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
 
   - name: "Release (Python): packaging"
-    # Starts only when every wheel was built and tested, and every CI block has
-    # passed ("Release: CI passed"). The checks this block makes are listed in
+    # Starts only when every wheel was built and tested. The checks this block makes are listed in
     # publish-wheels.sh; it loads no token.
     dependencies:
-      - "Release: CI passed"
       - "Release (Python): wheel verification (Linux amd64)"
       - "Release (Python): wheel verification (Linux arm64)"
       - "Release (Python): wheel verification (macOS arm64)"
@@ -1356,9 +1329,9 @@ blocks:
   #      distribution; a self-contained publish runs; and the binding's unit
   #      tests run against the package. It records the SHA-256 of the tested
   #      package.
-  #   4. "Release (.NET): packaging" depends on "Release: CI passed" and on
-  #      the five verification blocks, so it starts only when every CI block
-  #      and all of them have passed. It checks the tag, the version, the
+  #   4. "Release (.NET): packaging" depends on the five verification
+  #      blocks, so it starts only when all of them have passed; it does not
+  #      wait for the tag build's CI. It checks the tag, the version, the
   #      package id and that nuget.org does not have the version yet, and
   #      records the tested package
   #      as the release, nuget/release/<package> with its checksum in
@@ -1732,11 +1705,9 @@ blocks:
             - artifact push workflow "$env:TEMP\tested.sha256" --destination "nuget/tested/$env:NUGET_PLATFORM" --force
 
   - name: "Release (.NET): packaging"
-    # Starts only when the package was tested on every platform, and every CI
-    # block has passed ("Release: CI passed"). The checks this block makes are
+    # Starts only when the package was tested on every platform. The checks this block makes are
     # listed in release-nupkg.sh; it loads no key.
     dependencies:
-      - "Release: CI passed"
       - "Release (.NET): package verification (Linux amd64)"
       - "Release (.NET): package verification (Linux arm64)"
       - "Release (.NET): package verification (macOS arm64)"
