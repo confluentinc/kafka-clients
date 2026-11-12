@@ -20,6 +20,22 @@
 # whose shell is PowerShell; the Windows blocks start with .semaphore/job-start.ps1 instead.
 # A step that fails returns non-zero, which fails the job.
 
+# Runs a command up to 5 times, 5 seconds apart: for a download, which can fail for a moment.
+# Defined here, in the job's shell, for the job's commands and for the scripts the job sources
+# (.semaphore/dependencies-macos.sh).
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 # When the Task is triggered manually with a "Run on branch" override, Semaphore exposes the
 # desired branch as SEMAPHORE_GIT_BRANCH_CHECKOUT but `checkout` still lands on the build's
 # original ref. Switch to the requested branch so submodule init + pip install operate against
