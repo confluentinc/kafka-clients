@@ -50,6 +50,7 @@ use std::fs;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _};
 use serde_json::{Map, Value};
@@ -63,10 +64,20 @@ const ROOT_PACKAGE: &str = "confluent-kafka";
 const DEFAULT_BASE: &str = "origin/master";
 const DEFAULT_AGENT: &str = "claude";
 const DEFAULT_MODEL: &str = "opus";
+/// Claude Code's `--tools`: the only built-in tools the agent has. With
+/// `--restricted` the user, project and local settings files are ignored, so
+/// their allow rules and default permission mode do not apply.
+const AGENT_BUILTIN_TOOLS: &str = "Read,Grep,Glob,Bash";
 /// Claude Code's `--allowedTools`: the agent reads the repository and the
 /// history, and changes nothing.
 const AGENT_TOOLS: &str = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),\
                            Bash(git status:*),Bash(git ls-files:*),Bash(ls:*)";
+/// Claude Code's `--disallowedTools`: `git diff`, `git log` and `git show`
+/// write a file with `--output`, which `AGENT_TOOLS` would otherwise allow.
+const AGENT_DENIED_TOOLS: &str = "Bash(git * --output*)";
+/// How long the agent may take by default before `select-tests` gives up, so
+/// a stalled call cannot hang a commit.
+const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 600;
 /// Above this size the changed-file list is left for the agent to read with git.
 const MAX_INLINE_CHANGES: usize = 64 * 1024;
 
@@ -517,11 +528,13 @@ fn unit_key(package: &str, kind: &str, name: &str) -> String {
 
 // ── select-tests ───────────────────────────────────────────────────────────
 
-/// `select-tests [--base <ref>] [--agent <command>] [--model <model>]`.
+/// `select-tests [--base <ref>] [--agent <command>] [--model <model>]
+/// [--timeout <seconds>] [--reuse]`.
 pub fn select(args: &[String]) -> anyhow::Result<()> {
     let mut base = DEFAULT_BASE.to_string();
     let mut agent = DEFAULT_AGENT.to_string();
     let mut model = DEFAULT_MODEL.to_string();
+    let mut timeout = Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECS);
     let mut reuse = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -530,6 +543,13 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
             "--base" => base = value()?,
             "--agent" => agent = value()?,
             "--model" => model = value()?,
+            "--timeout" => {
+                let secs = value()?;
+                let secs: u64 = secs
+                    .parse()
+                    .with_context(|| format!("--timeout: {secs:?} is not a number of seconds"))?;
+                timeout = Duration::from_secs(secs);
+            },
             "--reuse" => reuse = true,
             other => bail!("select-tests: unknown argument {other:?}"),
         }
@@ -581,17 +601,17 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
             agent.join(" "),
             changes.len()
         );
-        let output = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(agent_args)
-            .args(["--model", &model, "--allowedTools", AGENT_TOOLS, "-p", &prompt])
-            .current_dir(REPO_ROOT)
-            .stdin(Stdio::null())
-            .stderr(Stdio::inherit())
-            .output()
-            .with_context(|| format!("running {program}"))?;
-        let answer = String::from_utf8_lossy(&output.stdout);
-        if !output.status.success() {
-            bail!("select-tests: the agent failed ({}):\n{answer}", output.status);
+            .args(["--model", &model])
+            .args(["--restricted", "--strict-mcp-config", "--tools", AGENT_BUILTIN_TOOLS])
+            .args(["--allowedTools", AGENT_TOOLS, "--disallowedTools", AGENT_DENIED_TOOLS])
+            .args(["-p", &prompt])
+            .current_dir(REPO_ROOT);
+        let (status, answer) = run_with_deadline(&mut command, timeout)?;
+        if !status.success() {
+            bail!("select-tests: the agent failed ({status}):\n{answer}");
         }
         let answer_json = extract_json(&answer).with_context(|| format!("the agent's answer:\n{answer}"))?;
         let chosen = validate(&answer_json, &inventory).with_context(|| format!("the agent's answer:\n{answer}"))?;
@@ -647,7 +667,8 @@ Rules:
 - When in doubt, include the test. A change to build files (Cargo.toml, Cargo.lock, build.rs, Makefiles, CMakeLists.txt, \
          pyproject.toml, setup.py, *.csproj, *.sln, Directory.Build.props), the code generator, shared test support, or anything you cannot trace includes every \
          suite it can reach.
-- Leave out a suite no change can affect. A change only to documentation or comments affects no test.
+- Leave out a suite no change can affect. A change only to documentation or comments affects no test, except a Rust \
+         doc comment with a code block, which is a doctest (`rust.doc`).
 - Do not build or run anything: read files and use git.
 
 The change is `git diff {merge_base}` run in the repository root, working-tree changes included, plus the untracked files: \
@@ -691,6 +712,42 @@ fn extract_json(answer: &str) -> anyhow::Result<Value> {
         },
     };
     serde_json::from_str(text).context("the answer's JSON does not parse")
+}
+
+/// Runs `command` with no stdin and its stderr inherited, and returns its exit
+/// status and stdout. Kills it and fails when it has not exited within
+/// `timeout`.
+fn run_with_deadline(command: &mut Command, timeout: Duration) -> anyhow::Result<(std::process::ExitStatus, String)> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("running {program}"))?;
+    // Read stdout on its own thread, so a full pipe cannot stall the child.
+    let mut stdout = child.stdout.take().context("the child's stdout")?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut out).map(|_| out)
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().with_context(|| format!("waiting for {program}"))? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("select-tests: {program} did not answer within {} s", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let out = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("reading {program}'s output"))?
+        .with_context(|| format!("reading {program}'s output"))?;
+    Ok((status, String::from_utf8_lossy(&out).into_owned()))
 }
 
 /// The sections of the agent's answer, checked against the inventory.
@@ -1741,6 +1798,19 @@ add_test(NAME mock_producer COMMAND test_mock_producer)
             "dotnet.solution: \"Confluent.Kafka.UnitTests|x\" is not a namespace or class name"
         );
         assert_eq!(error(json!({"java": {}})), "unknown member \"java\"");
+    }
+
+    #[test]
+    fn test_run_with_deadline() {
+        let (status, out) =
+            run_with_deadline(Command::new("sh").args(["-c", "echo answer"]), Duration::from_secs(10)).unwrap();
+        assert!(status.success());
+        assert_eq!(out, "answer\n");
+
+        let started = Instant::now();
+        let error = run_with_deadline(Command::new("sleep").arg("30"), Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.to_string(), "select-tests: sleep did not answer within 1 s");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

@@ -483,10 +483,14 @@ check-bindings:
 # test runs. A failed `select-tests` removes the previous file rather than
 # leave it in force.
 #
-# AGENT is any command taking Claude Code's `--model`, `--allowedTools` and
+# AGENT is any command taking Claude Code's `--model`, `--restricted`,
+# `--strict-mcp-config`, `--tools`, `--allowedTools`, `--disallowedTools` and
 # `-p`: by default a local Claude Code, which reads the working tree, so
 # uncommitted and untracked changes count. The agent only reads files and runs
-# read-only git commands. rust/xtask/src/test_selection.rs describes the file's format.
+# read-only git commands: restricted mode ignores the user's settings files, so
+# only the read-only tools are allowed, and an agent that has not answered after
+# SELECT_TESTS_FLAGS' `--timeout` (600 s by default) is stopped and the selection
+# fails. rust/xtask/src/test_selection.rs describes the file's format.
 AGENT ?= claude
 AGENT_MODEL ?= opus
 BASE ?= origin/master

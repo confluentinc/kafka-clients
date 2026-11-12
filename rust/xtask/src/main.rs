@@ -2846,9 +2846,12 @@ fn print_help() {
                   root), to commit with the branch; the Makefiles' test recipes run only those
                   tests while $TEST_SELECTION names the file and the working tree is unchanged
                     --base REF       compare with REF (default origin/master)
-                    --agent COMMAND  a command taking Claude Code's --model, --allowedTools and -p
-                                     (default `claude`)
+                    --agent COMMAND  a command taking Claude Code's --model, --restricted,
+                                     --strict-mcp-config, --tools, --allowedTools,
+                                     --disallowedTools and -p (default `claude`)
                     --model MODEL    the agent's model (default opus)
+                    --timeout SECS   give up when the agent has not answered after SECS
+                                     seconds (default 600)
                     --reuse          keep the file when it was made at HEAD for the current
                                      working tree
   show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
