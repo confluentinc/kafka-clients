@@ -71,7 +71,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         {
             admin = TranslateAdmin.SelectsMock(request.Config)
                 ? MockAdminClient.Create().NumBrokers(numBrokers).Build()
-                : (IAdmin)new KafkaAdminClient(Translate.ConfigsFromProto(request.Config));
+                : IAdmin.Create(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception ex)
         {

@@ -74,8 +74,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        SerdeGuard.Check(_keyDeserializer, SerdeGuard.Consumer, disposes: false);
-        SerdeGuard.Check(_valueDeserializer, SerdeGuard.Consumer, disposes: false);
+        SerdeGuard.Check(_keyDeserializer, DefaultMethodGuard.Consumer, disposes: false);
+        SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: false);
         _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
         _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.CreateMock(autoOffsetReset, withPump: false);
@@ -368,7 +368,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </summary>
     /// <remarks>
     /// The buffered records of the lost partitions are cleared; then, while a listener is registered,
-    /// <c>OnPartitionsLost</c> fires with them on the calling thread; then they leave the <see cref="Assignment"/>.
+    /// <see cref="ConsumerRebalanceListenerExtensions.OnPartitionsLost(IConsumerRebalanceListener, IReadOnlyCollection{TopicPartition})"/>
+    /// runs with them on the calling thread; then they leave the <see cref="Assignment"/>.
     /// An exception from the listener is thrown here as the same instance, and the assignment is left unchanged.
     /// </remarks>
     /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>

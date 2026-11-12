@@ -34,11 +34,11 @@ public sealed class FeatureUpdate
     /// <param name="upgradeType">The kind of change.</param>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="maxVersionLevel"/> is <c>0</c> with
-    /// <see cref="Admin.UpgradeType.UPGRADE"/>, or is negative.
+    /// <see cref="Confluent.Kafka.Admin.UpgradeType.UPGRADE"/>, or is negative.
     /// </exception>
     public FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)
     {
-        if (maxVersionLevel == 0 && upgradeType == Admin.UpgradeType.UPGRADE)
+        if (maxVersionLevel == 0 && upgradeType == Confluent.Kafka.Admin.UpgradeType.UPGRADE)
         {
             throw new IllegalArgumentException(
                 string.Format(
@@ -86,7 +86,7 @@ public sealed class FeatureUpdate
     /// <summary>
     /// A diagnostic rendering matching Java's <c>toString()</c>, the upgrade type printed as Java's
     /// constant name: <c>FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}</c>. An
-    /// undefined <see cref="Admin.UpgradeType"/>, which the constructor stores as given, renders as its
+    /// undefined <see cref="Confluent.Kafka.Admin.UpgradeType"/>, which the constructor stores as given, renders as its
     /// number.
     /// </summary>
     /// <returns>The rendering.</returns>
@@ -99,10 +99,10 @@ public sealed class FeatureUpdate
 
     private static string ConstantName(UpgradeType upgradeType) => upgradeType switch
     {
-        Admin.UpgradeType.UNKNOWN => "UNKNOWN",
-        Admin.UpgradeType.UPGRADE => "UPGRADE",
-        Admin.UpgradeType.SAFE_DOWNGRADE => "SAFE_DOWNGRADE",
-        Admin.UpgradeType.UNSAFE_DOWNGRADE => "UNSAFE_DOWNGRADE",
+        Confluent.Kafka.Admin.UpgradeType.UNKNOWN => "UNKNOWN",
+        Confluent.Kafka.Admin.UpgradeType.UPGRADE => "UPGRADE",
+        Confluent.Kafka.Admin.UpgradeType.SAFE_DOWNGRADE => "SAFE_DOWNGRADE",
+        Confluent.Kafka.Admin.UpgradeType.UNSAFE_DOWNGRADE => "UNSAFE_DOWNGRADE",
         _ => ((int)upgradeType).ToString(CultureInfo.InvariantCulture),
     };
 }

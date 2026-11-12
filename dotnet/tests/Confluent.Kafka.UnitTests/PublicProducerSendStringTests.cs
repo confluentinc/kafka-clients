@@ -216,9 +216,9 @@ public sealed class PublicProducerSendStringTests
     private static ProducerRecord<string, string> Record(string topic, string headerKey) =>
         new ProducerRecord<string, string>(
             topic,
-            "value",
-            "key",
-            headers: new[] { new Header("first", Bytes("1")), new Header(headerKey, Bytes("2")) });
+            value: "value",
+            key: "key",
+            headers: new[] { new Header("first", Bytes("1")), new Header(headerKey, Bytes("2")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>

@@ -46,7 +46,7 @@ public sealed class PublicSyncProducerSendTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2)).Get(),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 2)).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic());
@@ -68,7 +68,7 @@ public sealed class PublicSyncProducerSendTests
             RecordMetadata metadata = null!;
             TestTimeout.Run(
                 () => metadata = producer.Send(
-                    new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{captured}"), partition: 0)).Get(),
+                    new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"value-{captured}"), partition: 0, key: null)).Get(),
                 s_deadline);
 
             Assert.Equal(0, metadata.Partition());
@@ -84,7 +84,7 @@ public sealed class PublicSyncProducerSendTests
 
         // Get blocks on a worker thread until CompleteNext resolves it from this thread.
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -103,7 +103,7 @@ public sealed class PublicSyncProducerSendTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
@@ -125,7 +125,7 @@ public sealed class PublicSyncProducerSendTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+                new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
             s_deadline);
 
         Assert.Equal(topic, metadata.Topic());
@@ -162,7 +162,7 @@ public sealed class PublicSyncProducerSendTests
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
         Assert.Throws<IllegalStateException>(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)));
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public sealed class PublicSyncProducerSendTests
         TestTimeout.Teardown(producer, () => producer.Close());
 
         Assert.Throws<IllegalStateException>(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)));
 
         TestTimeout.Dispose(producer);
     }

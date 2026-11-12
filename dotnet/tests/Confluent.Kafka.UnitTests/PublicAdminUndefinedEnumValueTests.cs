@@ -133,7 +133,7 @@ public sealed class PublicAdminUndefinedEnumValueTests
 
             case SyncReal:
                 {
-                    KafkaAdminClient admin = new KafkaAdminClient(Unreachable());
+                    IAdmin admin = IAdmin.Create(Unreachable());
                     using IDisposable adminDisposal = TestTimeout.Disposal(admin);
                     sync(admin);
                     break;
@@ -142,7 +142,7 @@ public sealed class PublicAdminUndefinedEnumValueTests
             default:
                 {
                     Assert.Equal(AsyncReal, client);
-                    AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(Unreachable());
+                    IAsyncAdmin admin = IAsyncAdmin.Create(Unreachable());
                     using IDisposable adminDisposal = TestTimeout.Disposal(admin);
                     async(admin);
                     break;

@@ -62,6 +62,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const string NullListenerMessage = "RebalanceListener cannot be null";
 
+    private const string OnPartitionsLostMethod = "OnPartitionsLost(IReadOnlyCollection<TopicPartition>)";
+
     private const string NullSubscribePatternMessage = "Topic pattern to subscribe to cannot be null";
 
     private const string NullMockPatternMessage = "Topic pattern cannot be null";
@@ -757,14 +759,47 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // listener and never stores the subscribe's own. MockConsumer registers it, as Java's does.
     private bool Unsubscribes(string[] topics) => topics.Length == 0 && !IsMock;
 
-    // Java checks the listener before the topics.
-    private static void RequireListener(object listener)
+    // Java checks the listener before the topics. A listener with a public OnPartitionsLost the consumer would never
+    // call, since its type lacks the interface that replaces Java's default, is refused right after the null check.
+    private static void RequireListener(IConsumerRebalanceListener listener)
+    {
+        RequireNotNull(listener);
+        if (listener is not IConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                listener,
+                OnPartitionsLostMethod,
+                nameof(IConsumerRebalanceListenerWithPartitionsLost),
+                DefaultMethodGuard.Consumer);
+        }
+    }
+
+    private static void RequireListener(IAsyncConsumerRebalanceListener listener)
+    {
+        RequireNotNull(listener);
+        if (listener is not IAsyncConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                listener,
+                OnPartitionsLostMethod,
+                nameof(IAsyncConsumerRebalanceListenerWithPartitionsLost),
+                DefaultMethodGuard.Consumer);
+        }
+    }
+
+    private static void RequireNotNull(object listener)
     {
         if (listener is null)
         {
             throw new IllegalArgumentException(NullListenerMessage);
         }
     }
+
+    private static bool DeclaresOnPartitionsLost(object listener) =>
+        DefaultMethodGuard.Declares(
+            listener,
+            nameof(IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost),
+            typeof(IReadOnlyCollection<TopicPartition>));
 
     // KafkaConsumer refuses a null collection or topic with Java's messages, and the core refuses a blank topic
     // with the same text. Java's KafkaConsumer checks group.id first, so without one the refusal is the core's

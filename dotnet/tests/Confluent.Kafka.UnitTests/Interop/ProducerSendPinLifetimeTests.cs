@@ -419,7 +419,7 @@ public sealed class ProducerSendPinLifetimeTests
     private static ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> MemoryRecord(
         string topic, NativeMemoryManager key, NativeMemoryManager value) =>
         new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-            topic, (ReadOnlyMemory<byte>)value.Memory, (ReadOnlyMemory<byte>)key.Memory, partition: 0);
+            topic, value: (ReadOnlyMemory<byte>)value.Memory, key: (ReadOnlyMemory<byte>)key.Memory, partition: 0);
 
     private static void AssertBytesAt(IntPtr data, int length, IntPtr bytes)
     {
@@ -466,7 +466,7 @@ public sealed class ProducerSendPinLifetimeTests
             // weak reference — the record itself is dropped as soon as Send returns.
             byte[] value = new byte[4096];
             references[i] = new WeakReference(value);
-            sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, partition: 0)).Delivery();
+            sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, partition: 0, key: null)).Delivery();
         }
 
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);

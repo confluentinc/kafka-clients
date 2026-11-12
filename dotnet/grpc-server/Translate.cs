@@ -70,7 +70,7 @@ internal static class Translate
         foreach (Proto.OffsetMapEntry entry in offsets)
         {
             int? leaderEpoch = entry.Offset.HasLeaderEpoch ? entry.Offset.LeaderEpoch : (int?)null;
-            result[Tp(entry.Partition)] = new OffsetAndMetadata(entry.Offset.Offset, entry.Offset.Metadata, leaderEpoch);
+            result[Tp(entry.Partition)] = new OffsetAndMetadata(entry.Offset.Offset, leaderEpoch, entry.Offset.Metadata);
         }
 
         return result;
@@ -88,7 +88,7 @@ internal static class Translate
         {
             int? leaderEpoch = entry.HasLeaderEpoch ? entry.LeaderEpoch : (int?)null;
             string metadata = entry.HasMetadata ? entry.Metadata : string.Empty;
-            result[new TopicPartition(entry.Topic, entry.Partition)] = new OffsetAndMetadata(entry.Offset, metadata, leaderEpoch);
+            result[new TopicPartition(entry.Topic, entry.Partition)] = new OffsetAndMetadata(entry.Offset, leaderEpoch, metadata);
         }
 
         return result;
@@ -372,7 +372,7 @@ internal static class Translate
             }
         }
 
-        return new ProducerRecord<byte[], byte[]>(proto.Topic, value, key, partition, timestamp, headers);
+        return new ProducerRecord<byte[], byte[]>(proto.Topic, value: value, key: key, partition: partition, timestamp: timestamp, headers: headers);
     }
 
     internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata

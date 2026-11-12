@@ -43,7 +43,7 @@ public sealed class PublicConsumerCommitTests
         TopicPartition tp = new TopicPartition(Topic, 0);
         await AssignOf(consumer, new[] { tp });
 
-        OffsetAndMetadata oam = new OffsetAndMetadata(42, "meta-x", 7);
+        OffsetAndMetadata oam = new OffsetAndMetadata(42, 7, "meta-x");
         await CommitOffsetsOf(
             consumer, new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = oam });
 
@@ -170,7 +170,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public void OffsetAndMetadata_AllThreeSet_AreStored()
     {
-        OffsetAndMetadata value = new OffsetAndMetadata(5, "m", 3);
+        OffsetAndMetadata value = new OffsetAndMetadata(5, 3, "m");
 
         Assert.Equal(5, value.Offset());
         Assert.Equal("m", value.Metadata());

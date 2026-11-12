@@ -118,7 +118,7 @@ public sealed class PublicProducerHeadersAllocationTests
         }
 
         return new ProducerRecord<byte[], byte[]>(
-            Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0, headers: headers);
+            Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 0, headers: headers);
     }
 
     private static long MeasureSync(

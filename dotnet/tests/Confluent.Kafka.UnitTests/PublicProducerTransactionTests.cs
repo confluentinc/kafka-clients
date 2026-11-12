@@ -910,7 +910,7 @@ public sealed class PublicProducerTransactionTests
         new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("txn-input", 0)] = new OffsetAndMetadata(42) };
 
     private static ProducerRecord<byte[], byte[]> MockRecord() =>
-        new ProducerRecord<byte[], byte[]>("txn-topic", new byte[] { 1 }, new byte[] { 2 });
+        new ProducerRecord<byte[], byte[]>("txn-topic", value: new byte[] { 1 }, key: new byte[] { 2 });
 
     // Runs a sync operation on either flavor; the async flavor's Task is the outcome.
     private static void Call(object producer, string operation) =>
