@@ -761,10 +761,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // Java checks the listener before the topics. A listener with a public OnPartitionsLost the consumer would never
     // call, since its type lacks the interface that replaces Java's default, is refused right after the null check.
+    // Only a method of the form's return type counts: a Task OnPartitionsLost on a sync listener, or a void one on an
+    // async listener, implements the other form's interface.
     private static void RequireListener(IConsumerRebalanceListener listener)
     {
         RequireNotNull(listener);
-        if (listener is not IConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener))
+        if (listener is not IConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener, typeof(void)))
         {
             throw DefaultMethodGuard.NeverCalled(
                 listener,
@@ -777,7 +779,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private static void RequireListener(IAsyncConsumerRebalanceListener listener)
     {
         RequireNotNull(listener);
-        if (listener is not IAsyncConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener))
+        if (listener is not IAsyncConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener, typeof(Task)))
         {
             throw DefaultMethodGuard.NeverCalled(
                 listener,
@@ -795,9 +797,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    private static bool DeclaresOnPartitionsLost(object listener) =>
-        DefaultMethodGuard.Declares(
+    private static bool DeclaresOnPartitionsLost(object listener, Type returnType) =>
+        DefaultMethodGuard.DeclaresReturning(
             listener,
+            returnType,
             nameof(IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost),
             typeof(IReadOnlyCollection<TopicPartition>));
 

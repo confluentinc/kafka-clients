@@ -42,15 +42,26 @@ internal static class DefaultMethodGuard
                 + client + " would never call it.");
 
     // A public instance method of exactly these parameter types, inherited ones included. Only metadata is read.
+    internal static bool Declares(object instance, string name, params Type[] parameters) =>
+        Finds(instance, returnType: null, name, parameters);
+
+    // The same, of this return type too: a sync and an async interface can share a method's name and parameters, and
+    // a method of the other return type implements the other interface.
+    internal static bool DeclaresReturning(object instance, Type returnType, string name, params Type[] parameters) =>
+        Finds(instance, returnType, name, parameters);
+
     [UnconditionalSuppressMessage(
         "ReflectionAnalysis",
         "IL2075",
         Justification = "A best-effort check: a method the trimmer removed is one nothing could call.")]
-    internal static bool Declares(object instance, string name, params Type[] parameters)
+    private static bool Finds(object instance, Type? returnType, string name, Type[] parameters)
     {
         foreach (MethodInfo method in instance.GetType().GetMethods(PublicInstance))
         {
-            if (method.Name == name && !method.IsGenericMethodDefinition && SameTypes(method.GetParameters(), parameters))
+            if (method.Name == name
+                && !method.IsGenericMethodDefinition
+                && (returnType is null || method.ReturnType == returnType)
+                && SameTypes(method.GetParameters(), parameters))
             {
                 return true;
             }

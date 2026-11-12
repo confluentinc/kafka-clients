@@ -99,6 +99,17 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
         { "AsyncMockConsumer", true, true },
     };
 
+    /// <summary>Each mock, the form it is given a listener of both forms in, and whether that form has its own lost method.</summary>
+    public static TheoryData<string, bool, bool> BothFormsLostCases => new TheoryData<string, bool, bool>
+    {
+        { "MockConsumer", false, false },
+        { "MockConsumer", false, true },
+        { "AsyncMockConsumer", false, false },
+        { "AsyncMockConsumer", false, true },
+        { "AsyncMockConsumer", true, false },
+        { "AsyncMockConsumer", true, true },
+    };
+
     [Fact]
     public void OnPartitionsLost_OnAWithPartitionsLostListener_RunsItsOwnMethod()
     {
@@ -239,6 +250,56 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
             await TestTimeout.Run(
                 () => Subscribe(client, pattern, asyncListener ? new InheritedAsyncWithListener() : new InheritedWithListener()),
                 s_deadline);
+        }
+        finally
+        {
+            await DisposeBounded(client);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Subscribes))]
+    public async Task Subscribe_TakesAListenerOfBothFormsWhoseOnPartitionsLostIsTheOtherForms(
+        string consumer, bool pattern, bool asyncListener)
+    {
+        object client = NewConsumer(consumer);
+        try
+        {
+            object listener = asyncListener ? new SyncLostAsyncListener() : new AsyncLostSyncListener();
+
+            await TestTimeout.Run(
+                () => Subscribe(client, pattern, listener, asyncListener, withNullTarget: false),
+                s_deadline);
+        }
+        finally
+        {
+            await DisposeBounded(client);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BothFormsLostCases))]
+    public async Task LosePartitions_OnAListenerOfBothForms_RunsTheGivenFormsLostMethod_OrItsRevokedMethod(
+        string consumer, bool asyncListener, bool withPartitionsLost)
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TopicPartition tp1 = new TopicPartition(Topic, 1);
+        object client = NewConsumer(consumer);
+        try
+        {
+            IRecording listener = asyncListener == withPartitionsLost
+                ? new AsyncLostSyncListener()
+                : new SyncLostAsyncListener();
+            await TestTimeout.Run(
+                () => Subscribe(client, pattern: false, listener, asyncListener, withNullTarget: false),
+                s_deadline);
+            await TestTimeout.Run(() => Rebalance(client, new[] { tp0, tp1 }), s_deadline);
+
+            await TestTimeout.Run(() => LosePartitions(client, new[] { tp0 }), s_deadline);
+
+            Assert.Equal(new[] { tp0 }, Assert.Single(withPartitionsLost ? listener.Lost : listener.Revoked));
+            Assert.Empty(withPartitionsLost ? listener.Revoked : listener.Lost);
+            Assert.Equal(new[] { tp1 }, Assignment(client).ToArray());
         }
         finally
         {
@@ -542,5 +603,41 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     /// <summary>An async listener whose own lost method is inherited from its base class.</summary>
     private sealed class InheritedAsyncWithListener : AsyncLostRecording, IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
+    }
+
+    /// <summary>A listener of both forms whose public lost method is the async form's, the sync form keeping Java's default.</summary>
+    private sealed class AsyncLostSyncListener
+        : Recording, IConsumerRebalanceListener, IAsyncConsumerRebalanceListenerWithPartitionsLost
+    {
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            Lost.Add(partitions.ToArray());
+            return Task.CompletedTask;
+        }
+
+        Task IAsyncConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            OnPartitionsRevoked(partitions);
+            return Task.CompletedTask;
+        }
+
+        Task IAsyncConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        {
+            OnPartitionsAssigned(partitions);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>A listener of both forms whose public lost method is the sync form's, the async form keeping Java's default.</summary>
+    private sealed class SyncLostAsyncListener
+        : AsyncRecording, IAsyncConsumerRebalanceListener, IConsumerRebalanceListenerWithPartitionsLost
+    {
+        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Lost.Add(partitions.ToArray());
+
+        void IConsumerRebalanceListener.OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
+            Revoked.Add(partitions.ToArray());
+
+        void IConsumerRebalanceListener.OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
+            Assigned.Add(partitions.ToArray());
     }
 }
