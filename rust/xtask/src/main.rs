@@ -24,6 +24,7 @@ mod java_api;
 mod java_parse;
 mod javadoc;
 mod lint_custom;
+mod test_selection;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -77,6 +78,10 @@ fn main() -> anyhow::Result<()> {
         Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
         Some("perf-cloud") => perf_cloud::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("select-tests") => test_selection::select(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-cargo-test") => test_selection::cargo_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-run") => test_selection::selected_run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("show-test-selection") => test_selection::show()?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
         // .semaphore/semaphore.yml, rely on the exit status of these tasks.
@@ -2836,6 +2841,29 @@ fn print_help() {
                     --dotnet-version SEMVER sets the .NET package's version
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too
+  select-tests    Ask an agent which tests the changes from a base branch can affect and write
+                  them to ../test-selection.json (or $TEST_SELECTION, relative to the repository
+                  root), to commit with the branch; the Makefiles' test recipes run only those
+                  tests while $TEST_SELECTION names the file and the working tree is unchanged
+                    --base REF       compare with REF (default origin/master)
+                    --agent COMMAND  a command taking Claude Code's --model, --allowedTools and -p
+                                     (default `claude`)
+                    --model MODEL    the agent's model (default opus)
+                    --reuse          keep the file when it was made at HEAD for the current
+                                     working tree
+  show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
+                  tree and, when it does, list the suites it runs with their entries and reasons
+  selected-cargo-test  `cargo test` restricted to the test selection $TEST_SELECTION names, if any
+                    --section NAME -- <cargo test arguments>; NAME is `rust`, or a filter list
+                                     such as `c.integration` applying to every test unit
+  selected-run    Run a command only when the test selection selects its section
+                    --section NAME [--default ARG]... [--ctest] [--dotnet [--dotnet-filter EXPR]]
+                                     [-C DIR] -- <command>; an argument `{{}}` stands for the
+                                     selected entries (the defaults when the whole suite is
+                                     selected); with --ctest for `-R <regex>` of the programs,
+                                     the entries (`<ctest>` or `<ctest>:<function>`) going to
+                                     them in $C_TEST_FILTER; with --dotnet for a `dotnet test
+                                     --filter` on the names, and-ed with EXPR
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
