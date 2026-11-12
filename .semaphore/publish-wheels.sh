@@ -79,7 +79,7 @@ refuse() {
 simple_index() {
     local body status
     body=$(mktemp) || return 1
-    status=$(curl -sS --retry 3 --retry-delay 5 -o "${body}" -w '%{http_code}' \
+    status=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors -o "${body}" -w '%{http_code}' \
         -H 'Accept: application/vnd.pypi.simple.v1+json' "${PYPI_INDEX}/simple/${PYPI_PACKAGE}/") || { rm -f "${body}"; return 1; }
     case "${status}" in
         200)

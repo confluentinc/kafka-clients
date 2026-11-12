@@ -25,6 +25,7 @@
 #   <uploaded.sha256> holds `<sha256>  <wheel>` for each uploaded wheel.
 
 import hashlib
+import http.client
 import json
 import re
 import sys
@@ -37,7 +38,8 @@ def fetch(url, headers=None):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=120) as response:
                 return response.read()
-        except OSError as error:
+        except (OSError, http.client.HTTPException) as error:
+            # http.client.IncompleteRead, a body cut short, is not an OSError.
             if attempt == 3:
                 raise
             print(f"{url}: {error}; retrying in 10s")
