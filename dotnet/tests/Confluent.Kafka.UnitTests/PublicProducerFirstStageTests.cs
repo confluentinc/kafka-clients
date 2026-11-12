@@ -120,7 +120,7 @@ public sealed class PublicProducerFirstStageTests
         using CancellationTokenSource cts = new CancellationTokenSource();
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(
-            new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v")), callback, cts.Token);
+            new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v")), callback, cts.Token);
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
         Assert.False(future.IsDone(), "the record's future was done before the token fired");
 
@@ -152,7 +152,7 @@ public sealed class PublicProducerFirstStageTests
             CloseTheCore(producer);
 
             ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(
-                new ProducerRecord<byte[], byte[]>("first-stage-closed", Encoding.UTF8.GetBytes("v")), callback);
+                new ProducerRecord<byte[], byte[]>("first-stage-closed", value: Encoding.UTF8.GetBytes("v")), callback);
 
             Assert.True(stage.IsFaulted, "the refusal did not fault the first stage inside the call");
             IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(() => stage.AsTask());
@@ -179,7 +179,7 @@ public sealed class PublicProducerFirstStageTests
         {
             Stopwatch elapsed = Stopwatch.StartNew();
             ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(
-                new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v")), callback);
+                new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v")), callback);
             elapsed.Stop();
 
             Assert.False(stage.IsCompleted, "Send waited for the hand-over");
@@ -270,7 +270,7 @@ public sealed class PublicProducerFirstStageTests
             Serdes.ByteArray().Serializer());
 
     private static ProducerRecord<byte[], byte[]> MockRecord(string prefix) =>
-        new ProducerRecord<byte[], byte[]>(prefix + "-" + Guid.NewGuid().ToString("N"), Encoding.UTF8.GetBytes("v"));
+        new ProducerRecord<byte[], byte[]>(prefix + "-" + Guid.NewGuid().ToString("N"), value: Encoding.UTF8.GetBytes("v"));
 
     private static NativeProducer NativeOf(object producer) =>
         (NativeProducer)producer.GetType()
@@ -295,7 +295,7 @@ public sealed class PublicProducerFirstStageTests
         AsyncKafkaProducer<byte[], byte[]> producer, string topic, ICallback callback, CancellationToken token)
     {
         byte[] value = Encoding.UTF8.GetBytes("value-" + topic);
-        return (producer.Send(new ProducerRecord<byte[], byte[]>(topic, value), callback, token), new WeakReference(value));
+        return (producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value), callback, token), new WeakReference(value));
     }
 
     private static void AssertCollected(WeakReference reference, string message)

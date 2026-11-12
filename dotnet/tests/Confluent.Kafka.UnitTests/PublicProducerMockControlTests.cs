@@ -41,7 +41,7 @@ public sealed class PublicProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery();
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Delivery();
 
         // The send is pending (manual mode) until completeNext resolves it.
         Assert.True(producer.CompleteNext());
@@ -70,7 +70,7 @@ public sealed class PublicProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery();
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Delivery();
 
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("mock-error")));
 
@@ -100,7 +100,7 @@ public sealed class PublicProducerMockControlTests
         for (int i = 0; i < 3; i++)
         {
             await TestTimeout.Run(
-                async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0)).Delivery(),
+                async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"v-{i}"), partition: 0, key: null)).Delivery(),
                 s_deadline);
         }
 
@@ -115,7 +115,7 @@ public sealed class PublicProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         await TestTimeout.Run(
-            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery(),
+            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Delivery(),
             s_deadline);
         Assert.Equal(1, producer.HistoryCount());
 
@@ -145,7 +145,7 @@ public sealed class PublicProducerMockControlTests
 
         Assert.True(producer.Flushed());
         await TestTimeout.Run(
-            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery(),
+            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Delivery(),
             s_deadline);
         Assert.True(producer.Flushed());
     }
@@ -158,7 +158,7 @@ public sealed class PublicProducerMockControlTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Common.AsyncKafkaFuture<RecordMetadata> pending =
-            await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
         Assert.False(producer.Flushed());
 
         await TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -187,7 +187,7 @@ public sealed class PublicProducerMockControlTests
             AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(
                 Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
 
-            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
 
             TestTimeout.Run(
                 () =>

@@ -158,7 +158,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public void ListConfigResources_CancellingOneAll_LeavesTheStoredFutureAndTheOtherAllsPending()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
         try
         {
             ListConfigResourcesResult result = admin.ListConfigResources();
@@ -194,7 +194,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
     [Fact]
     public async Task ListConfigResources_CancellingOneAsyncAll_LeavesTheStoredFutureAndTheOtherAllsPending()
     {
-        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
         try
         {
             AsyncListConfigResourcesResult result = admin.ListConfigResources();

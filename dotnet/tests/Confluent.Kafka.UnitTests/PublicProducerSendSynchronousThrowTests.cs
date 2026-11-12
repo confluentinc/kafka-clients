@@ -151,7 +151,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     }
 
     private static ProducerRecord<byte[], byte[]> Record() =>
-        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0);
+        new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null);
 
     private static SerializedProducerRecord SerializedRecord() =>
         new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x53, 0x59, 0x4E });
@@ -172,7 +172,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         CancellationToken cancellationToken)
     {
         byte[] value = Encoding.UTF8.GetBytes("canceled");
-        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(Topic, value, partition: 0);
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(Topic, value: value, partition: 0, key: null);
         OperationCanceledException error = Assert.Throws<OperationCanceledException>(
             () => { _ = Send(producer, overload, record, callback, cancellationToken); });
         return (error, new WeakReference(value));

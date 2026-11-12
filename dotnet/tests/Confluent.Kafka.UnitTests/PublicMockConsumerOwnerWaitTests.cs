@@ -928,7 +928,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
     }
 
     /// <summary>A listener whose assignment and loss run the given actions.</summary>
-    private sealed class SyncListener : IConsumerRebalanceListener
+    private sealed class SyncListener : IConsumerRebalanceListenerWithPartitionsLost
     {
         private readonly Action _onAssigned;
 
@@ -950,7 +950,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
     }
 
     /// <summary>An async listener whose assignment and loss run the given functions.</summary>
-    private sealed class AsyncListener : IAsyncConsumerRebalanceListener
+    private sealed class AsyncListener : IAsyncConsumerRebalanceListenerWithPartitionsLost
     {
         private readonly Func<Task> _onAssigned;
 

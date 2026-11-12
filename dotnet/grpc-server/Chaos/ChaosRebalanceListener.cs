@@ -26,7 +26,7 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// each callback; on a revoke it commits and, unless <see cref="Closing"/>, reads the commit back, both
 /// calls routed by the binding to the consumer's <see cref="ConsumerHandle"/>. Failures are reported.
 /// </summary>
-internal sealed class ChaosRebalanceListener : IConsumerRebalanceListener
+internal sealed class ChaosRebalanceListener : IConsumerRebalanceListenerWithPartitionsLost
 {
     private readonly Action<Proto.WorkloadEvent> _emit;
     private readonly IConsumer<byte[], byte[]> _consumer;

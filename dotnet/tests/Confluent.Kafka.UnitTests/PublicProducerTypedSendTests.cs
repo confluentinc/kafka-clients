@@ -45,7 +45,7 @@ public sealed class PublicProducerTypedSendTests
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
-            () => metadata = producer.Send(new ProducerRecord<string, long?>(Topic, 42L, "k", partition: 3)).Get(),
+            () => metadata = producer.Send(new ProducerRecord<string, long?>(Topic, value: 42L, key: "k", partition: 3)).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic());
@@ -63,7 +63,7 @@ public sealed class PublicProducerTypedSendTests
 
         RecordMetadata metadata = null!;
         await TestTimeout.Run(
-            async () => metadata = await producer.Send(new ProducerRecord<string, long?>(Topic, 42L, "k", partition: 3)).Delivery(),
+            async () => metadata = await producer.Send(new ProducerRecord<string, long?>(Topic, value: 42L, key: "k", partition: 3)).Delivery(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic());
@@ -83,7 +83,7 @@ public sealed class PublicProducerTypedSendTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(
-                Topic, Encoding.UTF8.GetBytes("v"), Encoding.UTF8.GetBytes("k"), partition: 1)).Get(),
+                Topic, value: Encoding.UTF8.GetBytes("v"), key: Encoding.UTF8.GetBytes("k"), partition: 1)).Get(),
             s_deadline);
 
         Assert.Equal(1, metadata.Partition());

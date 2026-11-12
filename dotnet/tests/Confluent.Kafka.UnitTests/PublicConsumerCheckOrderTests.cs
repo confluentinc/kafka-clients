@@ -837,10 +837,6 @@ public sealed class PublicConsumerCheckOrderTests
         }
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-        }
     }
 
     /// <summary>An asynchronous rebalance listener that does nothing.</summary>
@@ -849,8 +845,6 @@ public sealed class PublicConsumerCheckOrderTests
         public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
 
         public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>A commit callback that does nothing.</summary>

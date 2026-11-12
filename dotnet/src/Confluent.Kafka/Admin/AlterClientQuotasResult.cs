@@ -37,11 +37,23 @@ public sealed class AlterClientQuotasResult
     private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
-    // Internal, unlike Java's public constructor: a recorded deviation. The dictionary is held
-    // by reference, as Java holds its map.
-    internal AlterClientQuotasResult(IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> futures)
+    /// <summary>Creates a result over the given futures, keyed by quota entity.</summary>
+    /// <param name="futures">The future of each entity's alteration. The map is copied.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    public AlterClientQuotasResult(IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> futures)
     {
-        _values = futures ?? throw new ArgumentNullException(nameof(futures));
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
+        Dictionary<ClientQuotaEntity, KafkaFuture> copy = new Dictionary<ClientQuotaEntity, KafkaFuture>(futures.Count);
+        foreach (KeyValuePair<ClientQuotaEntity, KafkaFuture> entry in futures)
+        {
+            copy.Add(entry.Key, entry.Value);
+        }
+
+        _values = copy;
     }
 
     private AlterClientQuotasResult(

@@ -420,11 +420,11 @@ public sealed class PublicHeadersTests
     [Fact]
     public void RecordHeaders_NeverNull()
     {
-        ProducerRecord<string, string> plain = new ProducerRecord<string, string>(Topic, "v");
+        ProducerRecord<string, string> plain = new ProducerRecord<string, string>(Topic, value: "v");
         Assert.True(new Headers().Equals(plain.Headers()));
         Assert.True(
-            new Headers().Equals(new ProducerRecord<string, string>(Topic, "v", key: null, partition: 0, headers: null).Headers()));
-        Assert.NotSame(plain.Headers(), new ProducerRecord<string, string>(Topic, "v").Headers());
+            new Headers().Equals(new ProducerRecord<string, string>(Topic, value: "v", key: null, partition: 0, headers: null).Headers()));
+        Assert.NotSame(plain.Headers(), new ProducerRecord<string, string>(Topic, value: "v").Headers());
 
         IReadOnlyList<ConsumerRecord<byte[], byte[]>> records = PollMockRecords(2);
         Assert.NotNull(records[0].Headers());

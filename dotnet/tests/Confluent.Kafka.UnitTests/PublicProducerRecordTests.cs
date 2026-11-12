@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 
 using Confluent.Kafka.Common.Header;
@@ -24,10 +25,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <see cref="ProducerRecord{TKey, TValue}"/>'s constructor checks (a null topic, a negative timestamp, a negative
-/// partition, a null header, in Java's order and with Java's messages), its getters and headers, and Java's
-/// equality, hash and string form: Java's <c>ProducerRecordTest</c> and Python's <c>test_producer_types.py</c>, as
-/// far as .NET has the constructor forms.
+/// <see cref="ProducerRecord{TKey, TValue}"/>'s six constructors (Java's forms, key before value), their checks (a
+/// null topic, a negative timestamp, a negative partition, a null header, in Java's order and with Java's messages),
+/// its getters and headers, and Java's equality, hash and string form: Java's <c>ProducerRecordTest</c> and Python's
+/// <c>test_producer_types.py</c>.
 /// </summary>
 public sealed class PublicProducerRecordTests
 {
@@ -41,39 +42,148 @@ public sealed class PublicProducerRecordTests
     public void Ctor_NullTopic_ThrowsIllegalArgumentWithJavasMessage()
     {
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<byte[], byte[]>(null!, Encoding.UTF8.GetBytes("v")));
+            () => new ProducerRecord<byte[], byte[]>(null!, value: Encoding.UTF8.GetBytes("v")));
         Assert.Equal(NullTopic, ex.Message);
-    }
-
-    [Fact]
-    public void Ctor_NegativePartition_ThrowsIllegalArgumentWithJavasMessage()
-    {
-        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: -1));
-        Assert.Equal(NegativePartition, ex.Message);
     }
 
     [Fact]
     public void InvalidRecords()
     {
         IllegalArgumentException nullTopic = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<string, int>(null!, 1, "key", partition: 0));
+            () => new ProducerRecord<string, int?>(null!, 0, "key", 1));
         Assert.Equal(NullTopic, nullTopic.Message);
 
         IllegalArgumentException negativeTimestamp = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<string, int>("test", 1, "key", partition: 0, timestamp: -1L));
+            () => new ProducerRecord<string, int?>("test", 0, -1L, "key", 1));
         Assert.Equal(NegativeTimestamp, negativeTimestamp.Message);
 
         IllegalArgumentException negativePartition = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<string, int>("test", 1, "key", partition: -1));
+            () => new ProducerRecord<string, int?>("test", -1, "key", 1));
         Assert.Equal(NegativePartition, negativePartition.Message);
+    }
+
+    [Fact]
+    public void Ctor_TopicPartitionTimestampKeyValueHeaders_KeepsEveryField()
+    {
+        Header header = new Header("h", Bytes("x"));
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", 3, 42L, "k", "v", new[] { header });
+
+        Assert.Equal("t", record.Topic());
+        Assert.Equal(3, record.Partition());
+        Assert.Equal(42L, record.Timestamp());
+        Assert.Equal("k", record.Key());
+        Assert.Equal("v", record.Value());
+        Assert.Equal(new[] { header }, record.Headers().ToArray());
+    }
+
+    [Fact]
+    public void Ctor_TopicPartitionTimestampKeyValue_HasNoHeaders()
+    {
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", 3, 42L, "k", "v");
+
+        Assert.Equal("t", record.Topic());
+        Assert.Equal(3, record.Partition());
+        Assert.Equal(42L, record.Timestamp());
+        Assert.Equal("k", record.Key());
+        Assert.Equal("v", record.Value());
+        Assert.Empty(record.Headers().ToArray());
+    }
+
+    [Fact]
+    public void Ctor_TopicPartitionKeyValueHeaders_HasNoTimestamp()
+    {
+        Header header = new Header("h", Bytes("x"));
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", 3, "k", "v", new[] { header });
+
+        Assert.Equal("t", record.Topic());
+        Assert.Equal(3, record.Partition());
+        Assert.Null(record.Timestamp());
+        Assert.Equal("k", record.Key());
+        Assert.Equal("v", record.Value());
+        Assert.Equal(new[] { header }, record.Headers().ToArray());
+    }
+
+    [Fact]
+    public void Ctor_TopicPartitionKeyValue_HasNoTimestampOrHeaders()
+    {
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", 3, "k", "v");
+
+        Assert.Equal("t", record.Topic());
+        Assert.Equal(3, record.Partition());
+        Assert.Null(record.Timestamp());
+        Assert.Equal("k", record.Key());
+        Assert.Equal("v", record.Value());
+        Assert.Empty(record.Headers().ToArray());
+    }
+
+    [Fact]
+    public void Ctor_TopicKeyValue_TakesTheKeyBeforeTheValue()
+    {
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", "k", "v");
+
+        Assert.Equal("t", record.Topic());
+        Assert.Null(record.Partition());
+        Assert.Null(record.Timestamp());
+        Assert.Equal("k", record.Key());
+        Assert.Equal("v", record.Value());
+        Assert.Empty(record.Headers().ToArray());
+    }
+
+    [Fact]
+    public void Ctor_TopicValue_HasNoKey()
+    {
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", "v");
+
+        Assert.Equal("t", record.Topic());
+        Assert.Null(record.Partition());
+        Assert.Null(record.Timestamp());
+        Assert.Null(record.Key());
+        Assert.Equal("v", record.Value());
+        Assert.Empty(record.Headers().ToArray());
+    }
+
+    [Fact]
+    public void Ctors_AreJavasSixForms_InJavasOrder_WithNoOptionalParameter()
+    {
+        Type type = typeof(ProducerRecord<,>);
+        Type key = type.GetGenericArguments()[0];
+        Type value = type.GetGenericArguments()[1];
+        (Type Type, string Name) topic = (typeof(string), "topic");
+        (Type Type, string Name) partition = (typeof(int?), "partition");
+        (Type Type, string Name) timestamp = (typeof(long?), "timestamp");
+        (Type Type, string Name) keyParameter = (key, "key");
+        (Type Type, string Name) valueParameter = (value, "value");
+        (Type Type, string Name) headers = (typeof(IEnumerable<Header>), "headers");
+        List<(Type Type, string Name)[]> expected = new List<(Type Type, string Name)[]>
+        {
+            new[] { topic, partition, timestamp, keyParameter, valueParameter, headers },
+            new[] { topic, partition, timestamp, keyParameter, valueParameter },
+            new[] { topic, partition, keyParameter, valueParameter, headers },
+            new[] { topic, partition, keyParameter, valueParameter },
+            new[] { topic, keyParameter, valueParameter },
+            new[] { topic, valueParameter },
+        };
+
+        ConstructorInfo[] constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+        Array.Sort(constructors, (left, right) => left.MetadataToken.CompareTo(right.MetadataToken));
+
+        Assert.Equal(expected.Count, constructors.Length);
+        for (int i = 0; i < expected.Count; i++)
+        {
+            ParameterInfo[] parameters = constructors[i].GetParameters();
+            Assert.Equal(
+                expected[i],
+                Array.ConvertAll(parameters, parameter => (parameter.ParameterType, parameter.Name!)));
+            Assert.All(parameters, parameter => Assert.False(parameter.IsOptional, parameter.Name));
+            Assert.All(parameters, parameter => Assert.False(parameter.HasDefaultValue, parameter.Name));
+        }
     }
 
     [Fact]
     public void Ctor_NegativeTimestampAndPartition_ReportsTheTimestamp()
     {
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<string, int>("test", 1, "key", partition: -1, timestamp: -1L));
+            () => new ProducerRecord<string, int>("test", value: 1, key: "key", partition: -1, timestamp: -1L));
         Assert.Equal(NegativeTimestamp, ex.Message);
     }
 
@@ -81,7 +191,7 @@ public sealed class PublicProducerRecordTests
     public void Ctor_NullTopicWithANegativeTimestampAndPartition_ReportsTheTopic()
     {
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<string, int>(null!, 1, "key", partition: -1, timestamp: -1L));
+            () => new ProducerRecord<string, int>(null!, value: 1, key: "key", partition: -1, timestamp: -1L));
         Assert.Equal(NullTopic, ex.Message);
     }
 
@@ -89,7 +199,7 @@ public sealed class PublicProducerRecordTests
     public void Ctor_ZeroTimestampAndPartition_AreAccepted()
     {
         ProducerRecord<string, int> record =
-            new ProducerRecord<string, int>("test", 1, "key", partition: 0, timestamp: 0L);
+            new ProducerRecord<string, int>("test", value: 1, key: "key", partition: 0, timestamp: 0L);
 
         Assert.Equal(0, record.Partition());
         Assert.Equal(0L, record.Timestamp());
@@ -107,11 +217,11 @@ public sealed class PublicProducerRecordTests
             Assert.Equal(
                 "Invalid timestamp: -7. Timestamp should always be non-negative or null.",
                 Assert.Throws<IllegalArgumentException>(
-                    () => new ProducerRecord<string, int>("test", 1, "key", timestamp: -7L)).Message);
+                    () => new ProducerRecord<string, int>("test", value: 1, key: "key", timestamp: -7L, partition: null)).Message);
             Assert.Equal(
                 "Invalid partition: -7. Partition number should always be non-negative or null.",
                 Assert.Throws<IllegalArgumentException>(
-                    () => new ProducerRecord<string, int>("test", 1, "key", partition: -7)).Message);
+                    () => new ProducerRecord<string, int>("test", value: 1, key: "key", partition: -7)).Message);
         }
         finally
         {
@@ -126,7 +236,7 @@ public sealed class PublicProducerRecordTests
         byte[] value = Encoding.UTF8.GetBytes("value");
 
         ProducerRecord<byte[], byte[]> record =
-            new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 3, timestamp: 42L);
+            new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 3, timestamp: 42L);
 
         Assert.Equal(Topic, record.Topic());
         Assert.Equal(3, record.Partition());
@@ -141,7 +251,7 @@ public sealed class PublicProducerRecordTests
     public void Ctor_MinimalTopicAndValue_DefaultsOptionalsToNull()
     {
         ProducerRecord<byte[], byte[]> record =
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"));
 
         Assert.Null(record.Partition());
         Assert.Null(record.Timestamp());
@@ -161,7 +271,7 @@ public sealed class PublicProducerRecordTests
     public void Ctor_EmptyValue_IsPresentButZeroLength()
     {
         // Empty is distinct from absent: non-null, length 0.
-        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(Topic, Array.Empty<byte>());
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(Topic, value: Array.Empty<byte>());
 
         Assert.NotNull(record.Value());
         Assert.Empty(record.Value()!);
@@ -172,7 +282,7 @@ public sealed class PublicProducerRecordTests
     {
         // The record renders its key and value through their own ToString, as Java's does.
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(
-            Topic, "12345", "ab", partition: 1, timestamp: 7L);
+            Topic, value: "12345", key: "ab", partition: 1, timestamp: 7L);
 
         Assert.Equal(
             "ProducerRecord(topic=record-topic, partition=1, headers=RecordHeaders(headers = [], isReadOnly = false), "
@@ -195,7 +305,7 @@ public sealed class PublicProducerRecordTests
     public void ToString_RendersTheHeaders()
     {
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(
-            Topic, "v", "k", headers: new[] { new Header("h", new byte[] { 0x01, 0xff }), new Header("n", null) });
+            Topic, value: "v", key: "k", headers: new[] { new Header("h", new byte[] { 0x01, 0xff }), new Header("n", null) }, partition: null);
 
         Assert.Equal(
             "ProducerRecord(topic=record-topic, partition=null, headers=RecordHeaders(headers = "
@@ -207,24 +317,24 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void EqualsAndHashCode()
     {
-        ProducerRecord<string, int> producerRecord = new ProducerRecord<string, int>("test", 1, "key", partition: 1);
+        ProducerRecord<string, int?> producerRecord = new ProducerRecord<string, int?>("test", 1, "key", 1);
         Assert.Equal(producerRecord, producerRecord);
         Assert.Equal(producerRecord.GetHashCode(), producerRecord.GetHashCode());
 
-        ProducerRecord<string, int> equalRecord = new ProducerRecord<string, int>("test", 1, "key", partition: 1);
+        ProducerRecord<string, int?> equalRecord = new ProducerRecord<string, int?>("test", 1, "key", 1);
         Assert.Equal(producerRecord, equalRecord);
         Assert.Equal(producerRecord.GetHashCode(), equalRecord.GetHashCode());
 
-        ProducerRecord<string, int> topicMisMatch = new ProducerRecord<string, int>("test-1", 1, "key", partition: 1);
+        ProducerRecord<string, int?> topicMisMatch = new ProducerRecord<string, int?>("test-1", 1, "key", 1);
         Assert.NotEqual(producerRecord, topicMisMatch);
 
-        ProducerRecord<string, int> partitionMismatch = new ProducerRecord<string, int>("test", 1, "key", partition: 2);
+        ProducerRecord<string, int?> partitionMismatch = new ProducerRecord<string, int?>("test", 2, "key", 1);
         Assert.NotEqual(producerRecord, partitionMismatch);
 
-        ProducerRecord<string, int> keyMisMatch = new ProducerRecord<string, int>("test", 1, "key-1", partition: 1);
+        ProducerRecord<string, int?> keyMisMatch = new ProducerRecord<string, int?>("test", 1, "key-1", 1);
         Assert.NotEqual(producerRecord, keyMisMatch);
 
-        ProducerRecord<string, int> valueMisMatch = new ProducerRecord<string, int>("test", 2, "key", partition: 1);
+        ProducerRecord<string, int?> valueMisMatch = new ProducerRecord<string, int?>("test", 1, "key", 2);
         Assert.NotEqual(producerRecord, valueMisMatch);
 
         ProducerRecord<string, int?> nullFieldsRecord = new ProducerRecord<string, int?>("topic", null, null, null, null, null);
@@ -236,22 +346,22 @@ public sealed class PublicProducerRecordTests
     public void Equals_ComparesTheHeadersAndTimestamp_AndAByteArrayByReference()
     {
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(
-            "t", "v", "k", timestamp: 5L, headers: new[] { new Header("k", Bytes("v")) });
+            "t", value: "v", key: "k", timestamp: 5L, headers: new[] { new Header("k", Bytes("v")) }, partition: null);
 
         ProducerRecord<string, string> equalHeaders = new ProducerRecord<string, string>(
-            "t", "v", "k", timestamp: 5L, headers: new[] { new Header("k", Bytes("v")) });
+            "t", value: "v", key: "k", timestamp: 5L, headers: new[] { new Header("k", Bytes("v")) }, partition: null);
         Assert.Equal(record, equalHeaders);
         Assert.Equal(record.GetHashCode(), equalHeaders.GetHashCode());
 
-        Assert.NotEqual(record, new ProducerRecord<string, string>("t", "v", "k", timestamp: 5L));
+        Assert.NotEqual(record, new ProducerRecord<string, string>("t", value: "v", key: "k", timestamp: 5L, partition: null));
         Assert.NotEqual(
             record,
-            new ProducerRecord<string, string>("t", "v", "k", timestamp: 6L, headers: new[] { new Header("k", Bytes("v")) }));
+            new ProducerRecord<string, string>("t", value: "v", key: "k", timestamp: 6L, headers: new[] { new Header("k", Bytes("v")) }, partition: null));
         Assert.False(record.Equals(null));
 
         byte[] value = Bytes("v");
-        Assert.Equal(new ProducerRecord<byte[], byte[]>("t", value), new ProducerRecord<byte[], byte[]>("t", value));
-        Assert.NotEqual(new ProducerRecord<byte[], byte[]>("t", value), new ProducerRecord<byte[], byte[]>("t", Bytes("v")));
+        Assert.Equal(new ProducerRecord<byte[], byte[]>("t", value: value), new ProducerRecord<byte[], byte[]>("t", value: value));
+        Assert.NotEqual(new ProducerRecord<byte[], byte[]>("t", value: value), new ProducerRecord<byte[], byte[]>("t", value: Bytes("v")));
     }
 
     [Fact]
@@ -336,18 +446,18 @@ public sealed class PublicProducerRecordTests
     public void Equals_ComparesANonNullableReadOnlyMemoryKeyAndValueByContent()
     {
         ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> record =
-            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", Bytes("v"), Bytes("k"));
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", value: Bytes("v"), key: Bytes("k"));
         ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> sameBytes =
             new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>(
-                "t", new ReadOnlyMemory<byte>(Bytes("xv"), 1, 1), new ReadOnlyMemory<byte>(Bytes("kx"), 0, 1));
+                "t", value: new ReadOnlyMemory<byte>(Bytes("xv"), 1, 1), key: new ReadOnlyMemory<byte>(Bytes("kx"), 0, 1));
         Assert.Equal(record, sameBytes);
         Assert.Equal(record.GetHashCode(), sameBytes.GetHashCode());
 
-        Assert.NotEqual(record, new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", Bytes("v"), Bytes("j")));
-        Assert.NotEqual(record, new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", Bytes("w"), Bytes("k")));
+        Assert.NotEqual(record, new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", value: Bytes("v"), key: Bytes("j")));
+        Assert.NotEqual(record, new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", value: Bytes("w"), key: Bytes("k")));
         Assert.Equal(
-            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", default, default),
-            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", new byte[0], new byte[0]));
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", value: default, key: default),
+            new ProducerRecord<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>("t", value: new byte[0], key: new byte[0]));
     }
 
     [Fact]
@@ -373,11 +483,11 @@ public sealed class PublicProducerRecordTests
     public void Equals_StillComparesAByteArrayKeyByReference()
     {
         byte[] key = Bytes("k");
-        Assert.Equal(new ProducerRecord<byte[], string>("t", "v", key), new ProducerRecord<byte[], string>("t", "v", key));
+        Assert.Equal(new ProducerRecord<byte[], string>("t", value: "v", key: key), new ProducerRecord<byte[], string>("t", value: "v", key: key));
         Assert.Equal(
-            new ProducerRecord<byte[], string>("t", "v", key).GetHashCode(),
-            new ProducerRecord<byte[], string>("t", "v", key).GetHashCode());
-        Assert.NotEqual(new ProducerRecord<byte[], string>("t", "v", key), new ProducerRecord<byte[], string>("t", "v", Bytes("k")));
+            new ProducerRecord<byte[], string>("t", value: "v", key: key).GetHashCode(),
+            new ProducerRecord<byte[], string>("t", value: "v", key: key).GetHashCode());
+        Assert.NotEqual(new ProducerRecord<byte[], string>("t", value: "v", key: key), new ProducerRecord<byte[], string>("t", value: "v", key: Bytes("k")));
     }
 
     [Fact]
@@ -387,18 +497,18 @@ public sealed class PublicProducerRecordTests
         string sameText = new string('k', 3);
         Assert.NotSame(key, sameText);
 
-        Assert.Equal(new ProducerRecord<string, string>("t", "v", key), new ProducerRecord<string, string>("t", "v", sameText));
+        Assert.Equal(new ProducerRecord<string, string>("t", value: "v", key: key), new ProducerRecord<string, string>("t", value: "v", key: sameText));
         Assert.Equal(
-            new ProducerRecord<string, string>("t", "v", key).GetHashCode(),
-            new ProducerRecord<string, string>("t", "v", sameText).GetHashCode());
-        Assert.NotEqual(new ProducerRecord<string, string>("t", "v", key), new ProducerRecord<string, string>("t", "v", "kk"));
-        Assert.NotEqual(new ProducerRecord<string, string>("t", "v", key), new ProducerRecord<string, string>("t", "v", null));
+            new ProducerRecord<string, string>("t", value: "v", key: key).GetHashCode(),
+            new ProducerRecord<string, string>("t", value: "v", key: sameText).GetHashCode());
+        Assert.NotEqual(new ProducerRecord<string, string>("t", value: "v", key: key), new ProducerRecord<string, string>("t", value: "v", key: "kk"));
+        Assert.NotEqual(new ProducerRecord<string, string>("t", value: "v", key: key), new ProducerRecord<string, string>("t", value: "v", key: null));
     }
 
     [Fact]
     public void FormsAndHeaders()
     {
-        ProducerRecord<byte[], byte[]> r = new ProducerRecord<byte[], byte[]>("t", Bytes("v"));
+        ProducerRecord<byte[], byte[]> r = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"));
         Assert.Equal("t", r.Topic());
         Assert.Null(r.Partition());
         Assert.Null(r.Timestamp());
@@ -424,21 +534,21 @@ public sealed class PublicProducerRecordTests
         Assert.Equal(
             "ProducerRecord(topic=t, partition=1, headers=RecordHeaders(headers = [], isReadOnly = false), key=k, "
                 + "value=v, timestamp=null)",
-            new ProducerRecord<string, string>("t", "v", "k", partition: 1).ToString());
+            new ProducerRecord<string, string>("t", value: "v", key: "k", partition: 1).ToString());
 
-        ProducerRecord<byte[], byte[]> nullKey = new ProducerRecord<byte[], byte[]>("t", Bytes("v"), key: null, partition: 0);
+        ProducerRecord<byte[], byte[]> nullKey = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"), key: null, partition: 0);
         Assert.Equal(0, nullKey.Partition());
         Assert.Null(nullKey.Key());
         Assert.Equal(Bytes("v"), nullKey.Value());
-        Assert.Null(new ProducerRecord<byte[], byte[]>("t", Bytes("v"), Bytes("k"), partition: null).Partition());
+        Assert.Null(new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"), key: Bytes("k"), partition: null).Partition());
 
         ProducerRecord<byte[], byte[]> nullTimestamp = new ProducerRecord<byte[], byte[]>(
-            "t", Bytes("v"), Bytes("k"), partition: 0, timestamp: null);
+            "t", value: Bytes("v"), key: Bytes("k"), partition: 0, timestamp: null);
         Assert.Null(nullTimestamp.Timestamp());
         Assert.Equal(new Headers(), nullTimestamp.Headers());
 
         ProducerRecord<byte[], byte[]> emptyHeaders = new ProducerRecord<byte[], byte[]>(
-            "t", Bytes("v"), key: null, partition: null, headers: Array.Empty<Header>());
+            "t", value: Bytes("v"), key: null, partition: null, headers: Array.Empty<Header>());
         Assert.Null(emptyHeaders.Timestamp());
         Assert.Equal(new Headers(), emptyHeaders.Headers());
     }
@@ -449,22 +559,22 @@ public sealed class PublicProducerRecordTests
         Header[] withNull = { new Header("k", null), null! };
 
         ArgumentNullException nullHeader = Assert.Throws<ArgumentNullException>(
-            () => new ProducerRecord<string, string>("t", "v", headers: withNull));
+            () => new ProducerRecord<string, string>("t", value: "v", headers: withNull, key: null, partition: null));
         Assert.Equal("headers", nullHeader.ParamName);
         Assert.Equal("Header cannot be null.", WithoutDotNetSuffix(nullHeader));
 
         IllegalArgumentException nullTopic = Assert.Throws<IllegalArgumentException>(
-            () => new ProducerRecord<string, string>(null!, "v", headers: withNull));
+            () => new ProducerRecord<string, string>(null!, value: "v", headers: withNull, key: null, partition: null));
         Assert.Equal(NullTopic, nullTopic.Message);
 
         Assert.Equal(
             NegativeTimestamp,
             Assert.Throws<IllegalArgumentException>(
-                () => new ProducerRecord<string, string>("t", "v", timestamp: -1L, headers: withNull)).Message);
+                () => new ProducerRecord<string, string>("t", value: "v", timestamp: -1L, headers: withNull, key: null, partition: null)).Message);
         Assert.Equal(
             NegativePartition,
             Assert.Throws<IllegalArgumentException>(
-                () => new ProducerRecord<string, string>("t", "v", partition: -1, headers: withNull)).Message);
+                () => new ProducerRecord<string, string>("t", value: "v", partition: -1, headers: withNull, key: null)).Message);
     }
 
     [Fact]
@@ -474,7 +584,7 @@ public sealed class PublicProducerRecordTests
         Headers source = new Headers(new[] { given });
         source.SetReadOnly();
 
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", "v", "k", headers: source);
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", value: "v", key: "k", headers: source, partition: null);
         Assert.NotSame(source, record.Headers());
         Assert.Equal(source, record.Headers());
         Assert.Same(record.Headers(), record.Headers());
@@ -487,12 +597,12 @@ public sealed class PublicProducerRecordTests
         Assert.Single(source.ToArray());
 
         Headers writable = new Headers(new[] { given });
-        ProducerRecord<string, string> fromHeaders = new ProducerRecord<string, string>("t", "v", headers: writable);
+        ProducerRecord<string, string> fromHeaders = new ProducerRecord<string, string>("t", value: "v", headers: writable, key: null, partition: null);
         writable.Add("later", null);
         Assert.Single(fromHeaders.Headers().ToArray());
 
         List<Header> list = new List<Header> { given };
-        ProducerRecord<string, string> fromList = new ProducerRecord<string, string>("t", "v", headers: list);
+        ProducerRecord<string, string> fromList = new ProducerRecord<string, string>("t", value: "v", headers: list, key: null, partition: null);
         list.Add(new Header("later", null));
         fromList.Headers().Add("own", null);
         Assert.Equal(new[] { "k", "own" }, Keys(fromList.Headers()));
@@ -502,10 +612,10 @@ public sealed class PublicProducerRecordTests
     private static byte[] Bytes(string value) => Encoding.UTF8.GetBytes(value);
 
     private static ProducerRecord<ReadOnlyMemory<byte>?, string> KeyRecord(ReadOnlyMemory<byte>? key) =>
-        new ProducerRecord<ReadOnlyMemory<byte>?, string>("t", "v", key);
+        new ProducerRecord<ReadOnlyMemory<byte>?, string>("t", value: "v", key: key);
 
     private static ProducerRecord<string, ReadOnlyMemory<byte>?> ValueRecord(ReadOnlyMemory<byte>? value) =>
-        new ProducerRecord<string, ReadOnlyMemory<byte>?>("t", value, "k");
+        new ProducerRecord<string, ReadOnlyMemory<byte>?>("t", value: value, key: "k");
 
     private static byte[] LongContent()
     {

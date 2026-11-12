@@ -56,7 +56,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [InlineData(ConfigResourceType.BROKER_LOGGER)]
     public async Task RealClient_DescribeConfigs_SendsTheCall(ConfigResourceType brokerType)
     {
-        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        IAsyncAdmin admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
@@ -74,7 +74,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [InlineData(ConfigResourceType.BROKER_LOGGER)]
     public async Task RealClient_IncrementalAlterConfigs_SendsTheCall(ConfigResourceType brokerType)
     {
-        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        IAsyncAdmin admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
@@ -189,6 +189,6 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         return admin;
     }
 
-    private static AsyncKafkaAdminClient NewUnconnectedClient() =>
-        new AsyncKafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
+    private static IAsyncAdmin NewUnconnectedClient() =>
+        IAsyncAdmin.Create(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 }

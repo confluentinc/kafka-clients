@@ -28,7 +28,7 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// <c>_AsyncChaosRebalanceListener</c>: its revoke awaits <c>Commit</c> and <c>Committed</c>, which the
 /// binding routes to the consumer's <see cref="ConsumerHandle"/> inside the callback, after an await too.
 /// </summary>
-internal sealed class AsyncChaosRebalanceListener : IAsyncConsumerRebalanceListener
+internal sealed class AsyncChaosRebalanceListener : IAsyncConsumerRebalanceListenerWithPartitionsLost
 {
     private readonly Action<Proto.WorkloadEvent> _emit;
     private readonly IAsyncConsumer<byte[], byte[]> _consumer;

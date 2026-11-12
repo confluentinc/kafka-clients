@@ -237,7 +237,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task Send_WithASendExceptionOrFenced_ThrowsBeforeSerializing(bool async)
     {
         ThrowingSerializer<string> serializer = new ThrowingSerializer<string>();
-        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "v");
+        ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "v");
         KafkaException injected = new KafkaException("send");
         KafkaException fenced;
         if (async)
@@ -544,7 +544,7 @@ public sealed class PublicMockProducerTransactionControlTests
     private static Task<T> Within<T>(Task<T> task) => TestTimeout.Run(() => task, BlockingCall.Deadline);
 
     private static ProducerRecord<byte[], byte[]> Record() =>
-        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
+        new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"));
 
     /// <summary>A delivery callback that blocks the producer's completion thread until the test releases it.</summary>
     private sealed class Blocking : ICallback, IDisposable
@@ -873,7 +873,7 @@ public sealed class PublicMockProducerTransactionControlTests
         }
 
         private static ProducerRecord<byte[], byte[]> Record() =>
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
+            new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"));
 
         private Task Run(Action sync, Func<Task> async)
         {

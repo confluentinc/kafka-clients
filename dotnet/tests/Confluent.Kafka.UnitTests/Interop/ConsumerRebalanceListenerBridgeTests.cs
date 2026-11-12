@@ -78,9 +78,9 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     [Fact]
-    public void PartitionsLost_OnListenerBase_DelegatesToRevoked_JavaDefault()
+    public void PartitionsLost_OnAPlainListener_DelegatesToRevoked_JavaDefault()
     {
-        RecordingListenerBase listener = new RecordingListenerBase();
+        DefaultLostRecordingListener listener = new DefaultLostRecordingListener();
 
         Exception? failure = Invoke(
             ListenerRegistration.Root(listener, Reporter()),
@@ -95,7 +95,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     [Fact]
-    public void PartitionsLost_OnDirectInterfaceImplementation_DeliversToLost()
+    public void PartitionsLost_OnAWithPartitionsLostListener_DeliversToLost()
     {
         RecordingListener listener = new RecordingListener();
 
@@ -1203,7 +1203,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     }
 
     /// <summary>Records the partitions each listener method receives.</summary>
-    private sealed class RecordingListener : IConsumerRebalanceListener
+    private sealed class RecordingListener : IConsumerRebalanceListenerWithPartitionsLost
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
 
@@ -1221,8 +1221,8 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             Lost.Add(partitions.ToArray());
     }
 
-    /// <summary>Records the partitions each method receives, with the base's default for lost partitions.</summary>
-    private sealed class RecordingListenerBase : ConsumerRebalanceListenerBase
+    /// <summary>Records the partitions each method receives; a lost partition runs its revoked method, Java's default.</summary>
+    private sealed class DefaultLostRecordingListener : IConsumerRebalanceListener
     {
         internal List<TopicPartition[]> Revoked { get; } = new List<TopicPartition[]>();
 
@@ -1230,10 +1230,10 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         internal List<TopicPartition[]> Lost { get; } = new List<TopicPartition[]>();
 
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) =>
             Revoked.Add(partitions.ToArray());
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) =>
             Assigned.Add(partitions.ToArray());
     }
 
@@ -1249,8 +1249,6 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             Assigned.Add(partitions.ToArray());
             return Task.CompletedTask;
         }
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>A listener whose every method throws the exception it is given.</summary>
@@ -1266,8 +1264,6 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => throw _thrown;
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => throw _thrown;
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => throw _thrown;
     }
 
     /// <summary>A listener whose every method runs the action it is given.</summary>
@@ -1283,8 +1279,6 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => _call();
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _call();
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => _call();
     }
 
     /// <summary>An async listener whose every method runs the function it is given.</summary>
@@ -1300,8 +1294,6 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => _call();
 
         public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _call();
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => _call();
     }
 
     /// <summary>A commit callback that runs the action it is given.</summary>

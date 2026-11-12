@@ -69,8 +69,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
-        SerdeGuard.Check(_keySerializer, SerdeGuard.Producer, disposes: false);
-        SerdeGuard.Check(_valueSerializer, SerdeGuard.Producer, disposes: false);
+        SerdeGuard.Check(_keySerializer, DefaultMethodGuard.Producer, disposes: false);
+        SerdeGuard.Check(_valueSerializer, DefaultMethodGuard.Producer, disposes: false);
         _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
         _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
         _native = NativeProducer.CreateMock(autoComplete, NativeProducer.PumpThreadName);

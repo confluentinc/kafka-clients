@@ -99,8 +99,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        SerdeGuard.Check(_keyDeserializer, SerdeGuard.Consumer, disposes: true);
-        SerdeGuard.Check(_valueDeserializer, SerdeGuard.Consumer, disposes: true);
+        SerdeGuard.Check(_keyDeserializer, DefaultMethodGuard.Consumer, disposes: true);
+        SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: true);
         _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
         _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
         _native = NativeConsumer.Create(
