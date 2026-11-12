@@ -1,6 +1,9 @@
 REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
-PROFILE ?= release
+# The cargo profile directory of the Rust library every target links:
+# $(RUST_PROJECT_ROOT)/target/$(PROFILE). The tests use the debug all-features
+# build; the root's build-python and Python benchmarks pass release.
+PROFILE ?= debug
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 # Native (non-container) gRPC server builds for the multilanguage harness,
@@ -30,6 +33,10 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 # repository root's Makefile activates its venv first) and, except
 # `check-static` and `test-soak`, expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
+# Exported so that every `pip install` below, `.[dev]` included, compiles the
+# extension against that library.
+export CONFLUENT_KAFKA_LIB_DIR = $(RUST_PROJECT_ROOT)/target/$(PROFILE)
+
 .PHONY: init build test test-unit typecheck check-static docs test-soak test-verifiable-clients \
 	test-integration test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
@@ -39,9 +46,7 @@ init:
 	pip install .[dev]
 
 build:
-	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
-	CFLAGS="$(CFLAGS_EXTRA)" \
-	pip install -e .
+	CFLAGS="$(CFLAGS_EXTRA)" pip install -e .
 
 # `typecheck` runs after the dev extras are installed: mypy is one of them, and
 # a fresh venv (CI) has it only from that step. `test/integration` holds the
@@ -116,7 +121,7 @@ test-verifiable-clients:
 # harness against them (the filter also matches `__grpc_python_async`).
 #
 # Cross-arch guard: both Dockerfiles COPY the *host-built*
-# rust/target/release/libconfluent_kafka.so straight into a Linux container.
+# rust/target/$(PROFILE)/libconfluent_kafka.so straight into a Linux container.
 # On a non-Linux host that artifact is Mach-O / absent (no ELF .so), so the
 # image cannot build. Cross-compiling host->Linux is out of scope for a dev-box
 # run, so off Linux this SELF-SKIPS with a loud notice and exits 0. It is NOT
@@ -131,7 +136,7 @@ test-integration:
 		printf 'SKIP Python test-integration: host is %s, not Linux.\n' "$$(uname -s)"; \
 		printf '\n'; \
 		printf 'The Python gRPC-server images COPY the host-built\n'; \
-		printf '  rust/target/release/libconfluent_kafka.so\n'; \
+		printf '  rust/target/$(PROFILE)/libconfluent_kafka.so\n'; \
 		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
@@ -186,10 +191,11 @@ transactional-producer-perf-test: build
 	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/transactional_producer_performance_test.py)
 
 # Python gRPC server image for the multilang test harness. Context is the repo
-# root; requires libconfluent_kafka.so already built in rust/target/release/.
+# root; requires libconfluent_kafka.so already built in rust/target/$(PROFILE)/.
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(PROFILE) \
 		-f $(REPO_ROOT)/python/Dockerfile.grpc \
 		$(REPO_ROOT)
 
@@ -197,6 +203,7 @@ grpc-image:
 grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(PROFILE) \
 		-f $(REPO_ROOT)/python/Dockerfile.grpc.async \
 		$(REPO_ROOT)
 

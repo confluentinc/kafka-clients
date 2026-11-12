@@ -49,8 +49,15 @@ devel-build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
 devel-build-integration-tests:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests
+# The debug library the binding tests link: exactly the library unit that
+# `build-tests-all-features` builds, uplifted to target/debug/, so after the Rust
+# tests this compiles nothing. Three things make it the same unit: the `test`
+# profile (line-tables-only debug info, see Cargo.toml), no RUSTFLAGS, and a test
+# target, `integration`, whose dev-dependencies change the features of shared
+# dependencies (resolver 2), and so the library. A plain `cargo build
+# --all-features` differs in all three and compiles the library a second time.
 devel-build-all-features:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features
+	cargo build --all-features --profile test --lib --test integration
 
 # The one build of the Rust verify jobs: the debug, all-features build of the
 # library, its unit and integration tests and the examples, which
@@ -110,8 +117,8 @@ test: build
 #
 # Part of the root `verify` (through `test`) and `verify-rust`, and the CI
 # PLAINTEXT Rust job.
-# It builds nothing in release: no test runs a release artifact. The release
-# build is still compiled in CI by the C and Python jobs.
+# It builds nothing in release: no test runs a release artifact. The binding
+# test jobs reuse the same debug build (`devel-build-all-features`).
 test-all-features: build-tests-all-features
 	$(CARGO_TEST) --all-features -- --skip __grpc
 	$(CARGO_TEST) -p xtask -p generator
@@ -202,10 +209,10 @@ test-all-features-sasl-ssl:
 # These only run the tests: the binding's gRPC image must already be built,
 # which is what python/'s and c/'s `test-integration` do before calling them.
 test-integration-grpc-python:
-	$(CARGO_TEST_GRPC_PYTHON) --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+	$(CARGO_TEST_GRPC_PYTHON) --all-features --test integration -- __grpc_python
 
 test-integration-grpc-c:
-	$(CARGO_TEST_GRPC_C) --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+	$(CARGO_TEST_GRPC_C) --all-features --test integration -- __grpc_c
 
 # The same arms with each gRPC server run as a native host process instead of a
 # container (MULTILANG_BACKEND_MODE=native; see tests/common/backend_pool.rs).
@@ -213,11 +220,11 @@ test-integration-grpc-c:
 # `build-grpc-native-{python,c}` do before calling these.
 test-integration-grpc-python-native:
 	MULTILANG_BACKEND_MODE=native \
-		$(CARGO_TEST_GRPC_PYTHON) --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+		$(CARGO_TEST_GRPC_PYTHON) --all-features --test integration -- __grpc_python
 
 test-integration-grpc-c-native:
 	MULTILANG_BACKEND_MODE=native \
-		$(CARGO_TEST_GRPC_C) --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+		$(CARGO_TEST_GRPC_C) --all-features --test integration -- __grpc_c
 
 # ── The .NET-backend arms ─────────────────────────────────────────────────
 #
@@ -232,11 +239,11 @@ test-integration-grpc-c-native:
 # sync backend, add `--skip __grpc_dotnet_async`.
 
 test-integration-grpc-dotnet:
-	$(CARGO_TEST_GRPC_DOTNET) --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+	$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
-		$(CARGO_TEST_GRPC_DOTNET) --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+		$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138

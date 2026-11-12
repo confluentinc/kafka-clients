@@ -278,7 +278,10 @@ blocks:
 
   - name: "Verify language bindings (Linux amd64)"
     # `dependencies: []` so this starts alongside "Verify Rust" rather than
-    # after it. Each job builds the Rust library itself; sharing one build via
+    # after it. Each job builds the Rust library itself, the debug all-features
+    # build the Rust tests use (the root's devel-build-rust-all-features); the
+    # Python and .NET perf stages of the plaintext jobs also build the release
+    # library they measure. Sharing one build via
     # a workflow artifact was tried and reverted -- the tarball came to 8.9 GiB
     # (target/debug is ~12x target/release, and ~48% of it is rustc incremental
     # caches that CI never reuses), so pushing it once and pulling it twice cost
