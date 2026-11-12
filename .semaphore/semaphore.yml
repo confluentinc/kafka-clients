@@ -25,8 +25,8 @@ name: build-test-release
 #
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
-#   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
-#      suite, including the native-Rust arm of the multilanguage tests.
+#   1. "Verify Rust (Linux amd64)" -- the whole Rust test suite, including
+#      the native-Rust arm of the multilanguage tests.
 #   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python, and
 #      verify-dotnet, each over PLAINTEXT, SSL and SASL_SSL, including the gRPC
 #      multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet). The .NET
@@ -45,17 +45,26 @@ name: build-test-release
 #      macOS arm64 protoc and runs its macosx_x64 one under Rosetta 2, which is
 #      unaffected by the linux_arm64 SIGSEGV in item 2.
 #   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
-#      crate with warnings denied.
-#   6. "Check crate package (Linux amd64)" -- packages the crate and checks its
+#      crate with warnings denied, and runs clippy over the default features.
+#   6. "Lint Rust (Linux amd64)" -- format-check, check-generated, the custom
+#      lint rules and clippy over --all-features.
+#   7. "Check crate package (Linux amd64)" -- packages the crate and checks its
 #      contents.
-#   7. "Check API compatibility (Linux amd64)" -- compares the Rust API and the
+#   8. "Check API compatibility (Linux amd64)" -- compares the Rust API and the
 #      C ABI with the last release tag; a breaking change fails unless the
 #      Cargo.toml version allows it.
-#   8. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
+#   9. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
 #      against the RustSec advisory database; a vulnerable dependency fails.
-#   9. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
+#  10. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
 #      blocks, which run only on a release tag of their package (see the
 #      comments above them).
+#
+# On a pull request build the Linux and macOS verify blocks run only the tests
+# that the committed test-selection.json selects (`make select-tests`, run
+# before pushing), and only while the checkout is the working tree it was made
+# for; every other build, and a pull request without a matching selection, runs
+# every test. The Windows block, whose script does not go through the
+# Makefiles, always runs every .NET unit test.
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -227,13 +236,14 @@ blocks:
     # the whole native-Rust test suite (unit tests + the functional integration
     # suite + the `__rust` multilanguage arms); they differ only in which broker
     # listener the clients connect over:
-    #   - PLAINTEXT: `make verify-rust` — the full suite over the default
-    #     PLAINTEXT listener, plus the protocol-independent checks that run only
-    #     here: format-check, clippy, and the performance tests.
+    #   - PLAINTEXT: the suite over the default PLAINTEXT listener, plus the
+    #     performance tests, which run only here.
     #   - SSL / SASL_SSL: the same suite over the broker's SSL listener (:9096)
-    #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret),
-    #     WITHOUT format-check / clippy / perf — those are protocol-independent,
-    #     so running them once in the PLAINTEXT job is enough.
+    #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret).
+    #
+    # The protocol-independent checks of `make verify-rust` (format-check,
+    # check-generated, lint) run in "Lint Rust (Linux amd64)" and "Check Rust
+    # docs", in parallel, so no test job waits for them.
     #
     # Each job provisions its own broker, so the jobs do not contend for
     # Docker resources. See rust/tests/common/test_context.rs
@@ -246,14 +256,19 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # On a pull request, only the tests that the committed
+          # test-selection.json selects, if it was made for exactly this
+          # working tree (`make select-tests`, see
+          # rust/xtask/src/test_selection.rs); otherwise every test runs.
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
           commands:
-            # The submodule is a shallow clone; `lint-custom` reads the
-            # Kafka tags pinned in xtask and fails without them.
-            - (cd rust && cargo xtask fetch-java-refs)
-            - make verify-rust
+            - make test-rust-all-features
+            - make test-integration-perf-rust
         - name: "Verify Rust (Linux amd64) — ssl"
           commands:
             - make test-rust-all-features-ssl
@@ -301,7 +316,11 @@ blocks:
         # its own checkout.
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
           commands:
@@ -351,7 +370,11 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:
@@ -395,7 +418,11 @@ blocks:
       prologue:
         commands:
           - . .semaphore/job-start.sh
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
+          # What the selection runs and why, at the top of the job's own log.
+          - (cd rust && cargo -q xtask show-test-selection)
       epilogue:
         always:
           commands:
@@ -489,7 +516,9 @@ blocks:
     # Its own block so a documentation failure is attributable at a glance and
     # does not wait behind the test suite. `make doc-check` runs `cargo doc`
     # with `-D warnings` over the whole workspace; the doctests already run in
-    # "Verify Rust" as part of `cargo test`.
+    # "Verify Rust" as part of `cargo test`. It also runs the clippy pass over
+    # the default features, which "Lint Rust" leaves out of its lint
+    # (LINT_ARGS) so the two clippy passes run in parallel.
     dependencies: []
     task:
       prologue:
@@ -500,6 +529,31 @@ blocks:
         - name: "doc-check (Linux amd64)"
           commands:
             - make doc-check
+            - make clippy-default-features
+
+  - name: "Lint Rust (Linux amd64)"
+    # The protocol-independent checks of `make verify-rust`, in their own
+    # block so they run alongside the test jobs instead of before the tests of
+    # the PLAINTEXT one: format-check, check-generated, and `cargo xtask lint`
+    # (the custom lint rules and the clippy pass over --all-features; the
+    # pass over the default features runs in "Check Rust docs", in parallel).
+    dependencies: []
+    execution_time_limit:
+      minutes: 20
+    task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "lint (Linux amd64)"
+          commands:
+            # The submodule is a shallow clone; `lint-custom` reads the
+            # Kafka tags pinned in xtask and fails without them.
+            - (cd rust && cargo xtask fetch-java-refs)
+            - make format-check
+            - make check-generated
+            - make lint LINT_ARGS=--without-default-features-clippy
 
   - name: "Check crate package (Linux amd64)"
     # Packages `confluent-kafka` as it would be published and fails if the
@@ -593,6 +647,7 @@ blocks:
       - "Verify Rust (Linux amd64)"
       - "Verify Rust (macOS arm64)"
       - "Check Rust docs (Linux amd64)"
+      - "Lint Rust (Linux amd64)"
       - "Check crate package (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
       - "Audit Rust dependencies (Linux amd64)"
