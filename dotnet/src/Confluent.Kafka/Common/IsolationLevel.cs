@@ -75,7 +75,10 @@ public static class IsolationLevelMethods
     extension(IsolationLevel level)
     {
         /// <summary>Return the id of this isolation level — Java's <c>id()</c>.</summary>
-        /// <returns>The id, which is the member's value.</returns>
+        /// <returns>
+        /// The id, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((IsolationLevel)259).Id()</c> is 3.
+        /// </returns>
         public byte Id() => unchecked((byte)level);
     }
 

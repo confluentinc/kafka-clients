@@ -98,7 +98,10 @@ public static class ResourceTypeMethods
     extension(ResourceType resourceType)
     {
         /// <summary>Return the code of this resource — Java's <c>code()</c>.</summary>
-        /// <returns>The code, which is the member's value.</returns>
+        /// <returns>
+        /// The code, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((ResourceType)259).Code()</c> is 3.
+        /// </returns>
         public byte Code() => unchecked((byte)resourceType);
 
         /// <summary>Return whether this resource type is UNKNOWN — Java's <c>isUnknown()</c>.</summary>

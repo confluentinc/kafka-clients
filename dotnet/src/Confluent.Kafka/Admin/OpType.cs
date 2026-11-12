@@ -78,7 +78,10 @@ public static class OpTypeMethods
     extension(OpType opType)
     {
         /// <summary>Return the id of this operation type — Java's <c>id()</c>.</summary>
-        /// <returns>The id, which is the member's value.</returns>
+        /// <returns>
+        /// The id, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((OpType)259).Id()</c> is 3.
+        /// </returns>
         public byte Id() => unchecked((byte)opType);
     }
 }

@@ -84,6 +84,16 @@ public sealed class PublicPatternTypeTests
     public void NoneDereference_test_java_does_not_dereference_there_FromStringOfNullIsUnknown() =>
         Assert.Equal(PatternType.UNKNOWN, PatternType.FromString(null!));
 
+    [Fact]
+    public void EveryMember_RoundTripsThroughItsCodeAndItsName()
+    {
+        foreach (PatternType type in (PatternType[])Enum.GetValues(typeof(PatternType)))
+        {
+            Assert.Equal(type, PatternType.FromCode(type.Code()));
+            Assert.Equal(type, PatternType.FromString(type.ToString()));
+        }
+    }
+
     [Theory]
     [InlineData(5, 5)]
     [InlineData(99, 99)]

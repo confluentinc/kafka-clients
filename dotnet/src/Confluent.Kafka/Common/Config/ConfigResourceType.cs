@@ -87,7 +87,10 @@ public static class ConfigResourceTypeMethods
     extension(ConfigResourceType type)
     {
         /// <summary>Return the id of this type — Java's <c>id()</c>.</summary>
-        /// <returns>The id, which is the member's value.</returns>
+        /// <returns>
+        /// The id, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((ConfigResourceType)259).Id()</c> is 3.
+        /// </returns>
         public byte Id() => unchecked((byte)type);
     }
 }

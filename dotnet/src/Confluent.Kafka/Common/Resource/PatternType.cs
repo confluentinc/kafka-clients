@@ -84,7 +84,10 @@ public static class PatternTypeMethods
     extension(PatternType patternType)
     {
         /// <summary>The code of this resource — Java's <c>code()</c>.</summary>
-        /// <returns>The code, which is the member's value.</returns>
+        /// <returns>
+        /// The code, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((PatternType)259).Code()</c> is 3.
+        /// </returns>
         public byte Code() => unchecked((byte)patternType);
 
         /// <summary>Whether this resource pattern type is UNKNOWN — Java's <c>isUnknown()</c>.</summary>

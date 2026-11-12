@@ -1428,6 +1428,32 @@ public sealed class JavaNameAnalyzerTests
                 + "overload with 1 parameter(s)"));
 
     [Fact]
+    public Task AJavaEnumsToString_AsAStaticToStringNotReturningAString_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public enum {|#0:GroupState|}
+                {
+                    STABLE,
+                }
+
+                public static class GroupStateMethods
+                {
+                    extension(GroupState)
+                    {
+                        public static int {|#1:ToString|}(GroupState state) => 0;
+                    }
+                }
+            }
+            """,
+            Files(GroupState),
+            Name(0, "missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString(): has no counterpart of "
+                + "Java's org.apache.kafka.common.GroupState#toString()"),
+            Name(1, "overload M:Confluent.Kafka.Common.GroupStateMethods.ToString(Confluent.Kafka.Common.GroupState): Java's "
+                + "GroupState.toString has no overload with 1 parameter(s)"));
+
+    [Fact]
     public Task AJavaEnumsToString_WithNoForm_IsReported() =>
         Verifier.VerifyWithFilesAsync(
             """

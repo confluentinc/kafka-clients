@@ -34,7 +34,8 @@ namespace Confluent.Kafka.UnitTests;
 /// Checks where the members Java declares on an enum live: each <c>&lt;Enum&gt;Methods</c> class is a top-level
 /// public static class beside its enum, the old class names are gone, Java's <c>toString()</c> override is a static
 /// <c>ToString</c> of the enum, and Java's static <c>GroupState.groupStatesForType(GroupType)</c> answers Java's four
-/// sets on <see cref="GroupState"/>, in both the C# 14 form and the form older C# calls.
+/// sets on <see cref="GroupState"/>, in both the C# 14 form and the form older C# calls. A <c>Code()</c> or
+/// <c>Id()</c> keeps only the low byte of a value no member has.
 /// </summary>
 public sealed class PublicEnumMethodsTests
 {
@@ -127,6 +128,18 @@ public sealed class PublicEnumMethodsTests
     [InlineData("AlterConfigOpType")]
     public void TheOldName_IsNoTypeOfTheAssembly(string name) =>
         Assert.DoesNotContain(typeof(KafkaException).Assembly.GetTypes(), type => type.Name == name);
+
+    [Fact]
+    public void ACodeOrIdOfAValueOutsideAByte_KeepsOnlyItsLowByte()
+    {
+        Assert.Equal((byte)3, ((AclOperation)259).Code());
+        Assert.Equal((byte)3, ((AclPermissionType)259).Code());
+        Assert.Equal((byte)3, ((ResourceType)259).Code());
+        Assert.Equal((byte)3, ((PatternType)259).Code());
+        Assert.Equal((byte)3, ((ConfigResourceType)259).Id());
+        Assert.Equal((byte)3, ((OpType)259).Id());
+        Assert.Equal((byte)3, ((IsolationLevel)259).Id());
+    }
 
     [Fact]
     public void OpType_IsTheTopLevelEnumBesideAlterConfigOp()

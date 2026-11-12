@@ -752,13 +752,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             return overloads.OrderBy(o => o.AsyncParameters).ToList();
         }
 
-        // Whether a method of an enum's companion is a static ToString of the enum, the form of Java's toString().
+        // Whether a method of an enum's companion is a static string ToString of the enum, the form of Java's toString().
         private static bool IsEnumToString(INamedTypeSymbol type, IMethodSymbol method, bool inCompanion) =>
             inCompanion
             && type.TypeKind == TypeKind.Enum
             && method.Name == "ToString"
             && method.IsStatic
             && !method.IsExtensionMethod
+            && method.ReturnType.SpecialType == SpecialType.System_String
             && method.Parameters.Length == 1
             && IsReceiver(method.Parameters[0].Type, type);
 

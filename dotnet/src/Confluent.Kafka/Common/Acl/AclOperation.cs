@@ -133,7 +133,10 @@ public static class AclOperationMethods
     extension(AclOperation operation)
     {
         /// <summary>Return the code of this operation — Java's <c>code()</c>.</summary>
-        /// <returns>The code, which is the member's value.</returns>
+        /// <returns>
+        /// The code, which is the member's value. Of a value no member has, only the low byte is kept:
+        /// <c>((AclOperation)259).Code()</c> is 3.
+        /// </returns>
         public byte Code() => unchecked((byte)operation);
 
         /// <summary>Return true if this operation is UNKNOWN — Java's <c>isUnknown()</c>.</summary>

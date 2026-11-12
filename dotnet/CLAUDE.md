@@ -888,7 +888,7 @@ out of date). The rule:
    `extension(ScramMechanism)` block, so a C# 14 caller writes `ScramMechanism.FromMechanismName(…)` and an
    older one `ScramMechanismMethods.FromMechanismName(…)`. Its instance methods go in an
    `extension(ScramMechanism mechanism)` block or are `this` extension methods: `mechanism.MechanismName()` on
-   every C# version. A Java field of the enum (`SslClientAuth.VALUES`) is a `static readonly` field of the
+   every C# version. A Java static field of the enum (`SslClientAuth.VALUES`) is a `static readonly` field of the
    `<Enum>Methods` class, outside the blocks, since a block cannot hold one (CS9282). Java's `toString()` override
    is a static `ToString(<Enum>)` in the `extension(<Enum>)` block: an instance extension named `ToString` is never
    called.
