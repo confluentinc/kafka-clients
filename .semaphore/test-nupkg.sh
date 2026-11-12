@@ -257,6 +257,14 @@ if [ "$mode" = full ]; then
     tar -C "$work/unit" -xf "$work/unit.tar"
     # Where the project looks for the kafka submodule, ../../../kafka from its directory.
     ln -s "$(pwd -P)/kafka" "$work/kafka"
+    # The other repository files the tests read, at the same place relative to the submodule:
+    # the error hierarchy generator, the Java deprecation list and the library's sources, which
+    # a test scans. The project does not build from there, so the package stays its only
+    # Confluent.Kafka.
+    mkdir -p "$work/rust/xtask" "$work/design" "$work/dotnet/src"
+    ln -s "$(pwd -P)/rust/xtask/src" "$work/rust/xtask/src"
+    ln -s "$(pwd -P)/design/current" "$work/design/current"
+    ln -s "$(pwd -P)/dotnet/src/Confluent.Kafka" "$work/dotnet/src/Confluent.Kafka"
     write_nuget_config "$work/unit" "$FEED"
     project="$work/unit/tests/Confluent.Kafka.UnitTests/Confluent.Kafka.UnitTests.csproj"
     retry dotnet restore --configfile "$work/unit/nuget.config" "$project" -p:ConfluentKafkaPackageVersion="$VERSION"

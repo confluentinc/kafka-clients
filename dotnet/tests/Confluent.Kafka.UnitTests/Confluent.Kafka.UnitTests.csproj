@@ -44,6 +44,31 @@
     </PackageReference>
   </ItemGroup>
 
+  <!--
+    net462: a binding redirect to each strong-named assembly in the output folder, at the version
+    the folder holds. The .NET Framework test host runs the tests with this project's .dll.config
+    followed by its own configuration, which redirects the assemblies it ships with to its own
+    versions (System.Memory to 4.0.5.0, where this folder holds 4.0.1.2), so loading them fails.
+    The build writes a redirect only for an assembly referenced at two versions, and none is, so
+    it writes no .dll.config. For a name redirected twice the first redirect wins, so these win
+    over the test host's.
+  -->
+  <Target Name="RedirectToCopiedAssemblies" AfterTargets="ResolveAssemblyReferences" BeforeTargets="GenerateBindingRedirects"
+          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework'">
+    <ItemGroup>
+      <_CopiedManagedAssembly Include="@(ReferenceCopyLocalPaths)"
+                              Condition="'%(Extension)' == '.dll' and '%(ReferenceCopyLocalPaths.AssetType)' != 'native' and '%(ReferenceCopyLocalPaths.Culture)' == ''" />
+    </ItemGroup>
+    <GetAssemblyIdentity AssemblyFiles="@(_CopiedManagedAssembly)">
+      <Output TaskParameter="Assemblies" ItemName="_CopiedAssemblyIdentity" />
+    </GetAssemblyIdentity>
+    <ItemGroup>
+      <SuggestedBindingRedirects Include="%(_CopiedAssemblyIdentity.Name), Culture=neutral, PublicKeyToken=%(_CopiedAssemblyIdentity.PublicKeyToken)"
+                                 MaxVersion="%(_CopiedAssemblyIdentity.Version)"
+                                 Condition="'%(_CopiedAssemblyIdentity.PublicKeyToken)' != ''" />
+    </ItemGroup>
+  </Target>
+
   <!-- -p:ConfluentKafkaPackageVersion=<version> tests the Confluent.Kafka package of that version,
        restored from a feed that holds it, instead of the project: the release pipeline runs these
        tests against the package it publishes (.semaphore/test-nupkg.sh). -->
