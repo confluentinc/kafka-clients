@@ -40,7 +40,7 @@ public sealed class PublicAdminP14SyncCloseTests
     [Fact]
     public void Close_WithANegativeTimeout_ThrowsJavasMessageBeforeAnyNativeCall_AndTheClientStaysOpen()
     {
-        IAdmin admin = new KafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
         TimeSpan negative = TimeSpan.FromMilliseconds(-1);
         IllegalArgumentException thrown =
             Assert.IsType<IllegalArgumentException>(BlockingCall.RunWait(() => admin.Close(negative)));
@@ -77,7 +77,7 @@ public sealed class PublicAdminP14SyncCloseTests
     [Fact]
     public void Close_WakesAThreadBlockedInGet_WithTheCoresError()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        IAdmin admin = IAdmin.Create(s_unreachable);
         try
         {
             ListTopicsResult result = admin.ListTopics();
@@ -125,14 +125,14 @@ public sealed class PublicAdminP14SyncCloseTests
         IllegalStateException thrown;
         if (async)
         {
-            IAsyncAdmin admin = new AsyncKafkaAdminClient(s_unreachable);
+            IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
             await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(5)), BlockingCall.Deadline);
             thrown = Assert.Throws<IllegalStateException>(() => admin.ListTopics());
             await TestTimeout.DisposeAsync(admin);
         }
         else
         {
-            IAdmin admin = new KafkaAdminClient(s_unreachable);
+            IAdmin admin = IAdmin.Create(s_unreachable);
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.FromSeconds(5))));
             thrown = Assert.Throws<IllegalStateException>(() => admin.ListTopics());
             TestTimeout.Dispose(admin);
@@ -171,5 +171,5 @@ public sealed class PublicAdminP14SyncCloseTests
     }
 
     private static IAdmin Create(string kind) =>
-        kind == Mock ? MockAdminClient.Create().Build() : new KafkaAdminClient(s_unreachable);
+        kind == Mock ? MockAdminClient.Create().Build() : IAdmin.Create(s_unreachable);
 }

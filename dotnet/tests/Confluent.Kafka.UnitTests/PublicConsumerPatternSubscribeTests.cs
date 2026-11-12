@@ -422,8 +422,6 @@ public sealed class PublicConsumerPatternSubscribeTests
         public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Revoked.Add(partitions.ToArray());
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Assigned.Add(partitions.ToArray());
-
-        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Revoked.Add(partitions.ToArray());
     }
 
     private sealed class RecordingAsyncListener : IAsyncConsumerRebalanceListener, IRecordingListener
@@ -441,12 +439,6 @@ public sealed class PublicConsumerPatternSubscribeTests
         public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
             Assigned.Add(partitions.ToArray());
-            return Task.CompletedTask;
-        }
-
-        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
-        {
-            Revoked.Add(partitions.ToArray());
             return Task.CompletedTask;
         }
     }

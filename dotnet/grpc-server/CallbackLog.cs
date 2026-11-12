@@ -95,10 +95,10 @@ internal sealed class CallbackLog
 
 /// <summary>
 /// An <see cref="IConsumerRebalanceListener"/> that logs each call in a <see cref="CallbackLog"/>, the
-/// C# port of Python's <c>LoggingRebalanceListener</c>. It implements the interface, not
-/// <see cref="ConsumerRebalanceListenerBase"/>, so a lost partition is logged as <c>lost</c>.
+/// C# port of Python's <c>LoggingRebalanceListener</c>. It implements
+/// <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>, so a lost partition is logged as <c>lost</c>.
 /// </summary>
-internal sealed class LoggingRebalanceListener : IConsumerRebalanceListener
+internal sealed class LoggingRebalanceListener : IConsumerRebalanceListenerWithPartitionsLost
 {
     private readonly CallbackLog _log;
     private readonly ulong _consumerId;

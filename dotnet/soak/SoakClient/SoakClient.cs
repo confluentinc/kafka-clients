@@ -637,7 +637,7 @@ internal sealed class SoakClient : IDisposable
         {
             txCnt++;
             var record = new SoakRecord(msgId, SoakMetrics.NowMs(), txCnt);
-            var producerRecord = new ProducerRecord<byte[], SoakRecord>(_options.Topic, record);
+            var producerRecord = new ProducerRecord<byte[], SoakRecord>(_options.Topic, value: record);
 
             Interlocked.Increment(ref _outstanding);
             double sentAt = MonotonicSeconds();
@@ -1152,7 +1152,7 @@ internal sealed class SoakClient : IDisposable
         SoakOptions options,
         SoakLogger logger) =>
         CreateTopicAsync(
-            adminConfig, options, logger, config => new AsyncKafkaAdminClient(SoakConfig.ClientConfigs(config)), Task.Delay, Console.Out);
+            adminConfig, options, logger, config => IAsyncAdmin.Create(SoakConfig.ClientConfigs(config)), Task.Delay, Console.Out);
 
     internal static async Task CreateTopicAsync(
         IReadOnlyDictionary<string, string> adminConfig,

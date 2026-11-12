@@ -195,7 +195,7 @@ public sealed class PublicRecordMetadataTests
 
     private static ProducerRecord<byte[], byte[]> Record() =>
         new ProducerRecord<byte[], byte[]>(
-            Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2, timestamp: 42L);
+            Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 2, timestamp: 42L);
 
     private static RecordMetadata SendOnMockProducer(RecordingCallback callback, bool fail)
     {

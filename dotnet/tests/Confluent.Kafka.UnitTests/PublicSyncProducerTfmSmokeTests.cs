@@ -47,7 +47,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)).Get(),
+                new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), key: Encoding.UTF8.GetBytes("key"), partition: 0)).Get(),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic());
@@ -64,7 +64,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -81,7 +81,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Get());
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("value"), partition: 0, key: null)).Get());
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 

@@ -33,20 +33,18 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
     private readonly int? _leaderEpoch;
 
     /// <summary>
-    /// Initializes an offset to commit (Java's <c>OffsetAndMetadata(long, Optional&lt;Integer&gt;, String)</c>).
+    /// Construct a new OffsetAndMetadata object for committing through <see cref="KafkaConsumer{K, V}"/>.
     /// </summary>
-    /// <param name="offset">The offset to commit (must be non-negative).</param>
-    /// <param name="metadata">
-    /// The commit metadata, or <see langword="null"/> (coerced to the empty string).
-    /// </param>
+    /// <param name="offset">The offset to be committed.</param>
     /// <param name="leaderEpoch">
-    /// The leader epoch, or <see langword="null"/> when absent. A negative value is stored as
-    /// <see langword="null"/>.
+    /// Optional leader epoch of the last consumed record: <see langword="null"/> when absent. A negative epoch is
+    /// absent.
     /// </param>
+    /// <param name="metadata">Non-null metadata. A <see langword="null"/> is stored as the empty string.</param>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="offset"/> is negative, with Java's message <c>"Invalid negative offset"</c>.
+    /// <paramref name="offset"/> is negative, with the message <c>"Invalid negative offset"</c>.
     /// </exception>
-    public OffsetAndMetadata(long offset, string? metadata = null, int? leaderEpoch = null)
+    public OffsetAndMetadata(long offset, int? leaderEpoch, string? metadata)
     {
         if (offset < 0)
         {
@@ -58,6 +56,32 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
         // Java's leaderEpoch() reports a negative epoch as absent; .NET has no raw accessor, so the epoch is
         // normalised once, here, and Equals, GetHashCode and ToString see it as Java's do.
         _leaderEpoch = leaderEpoch < 0 ? null : leaderEpoch;
+    }
+
+    /// <summary>
+    /// Construct a new OffsetAndMetadata object for committing through <see cref="KafkaConsumer{K, V}"/>.
+    /// </summary>
+    /// <param name="offset">The offset to be committed.</param>
+    /// <param name="metadata">Non-null metadata. A <see langword="null"/> is stored as the empty string.</param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="offset"/> is negative, with the message <c>"Invalid negative offset"</c>.
+    /// </exception>
+    public OffsetAndMetadata(long offset, string? metadata)
+        : this(offset, null, metadata)
+    {
+    }
+
+    /// <summary>
+    /// Construct a new OffsetAndMetadata object for committing through <see cref="KafkaConsumer{K, V}"/>. The metadata
+    /// associated with the commit will be empty.
+    /// </summary>
+    /// <param name="offset">The offset to be committed.</param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="offset"/> is negative, with the message <c>"Invalid negative offset"</c>.
+    /// </exception>
+    public OffsetAndMetadata(long offset)
+        : this(offset, string.Empty)
+    {
     }
 
     /// <summary>The committed offset.</summary>

@@ -127,7 +127,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
                 // Fresh key and value arrays per record: the async Send borrows them until the
                 // producer has taken the record.
                 ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(
-                    topic, ChaosEvents.Value(index, msgSize), ChaosEvents.Key(index));
+                    topic, value: ChaosEvents.Value(index, msgSize), key: ChaosEvents.Key(index));
 
                 // Open the record's in-flight window before handing it over; its delivery
                 // callback's event closes it.

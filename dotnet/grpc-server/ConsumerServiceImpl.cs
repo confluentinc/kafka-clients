@@ -278,7 +278,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             {
                 int? leaderEpoch = request.HasLeaderEpoch ? request.LeaderEpoch : (int?)null;
                 string metadata = request.HasMetadata ? request.Metadata : string.Empty;
-                c.Seek(partition, new OffsetAndMetadata(request.Offset, metadata, leaderEpoch));
+                c.Seek(partition, new OffsetAndMetadata(request.Offset, leaderEpoch, metadata));
             }
             else
             {

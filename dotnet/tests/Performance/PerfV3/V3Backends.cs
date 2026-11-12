@@ -103,10 +103,10 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
     }
 
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
-        new PerfSendHandle(s_get, _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)));
+        new PerfSendHandle(s_get, _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value, key: key)));
 
     public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartTicks) =>
-        _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartTicks));
+        _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value, key: key), new V3Delivery(callback, sendStartTicks));
 
     public void Flush(CancellationToken cancellationToken) => _producer.Flush();
 
@@ -135,7 +135,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
     {
         // Send hands the record over synchronously, preserving send order; its first stage is usually complete on
         // return, so the common path builds no state machine.
-        ValueTask<AsyncKafkaFuture<RecordMetadata>> send = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key));
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value, key: key));
         return send.IsCompletedSuccessfully
             ? new ValueTask<Task<PerfRecordMetadata>>(Deliver(send.Result.Get()))
             : AwaitAccepted(send);
@@ -154,7 +154,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
     {
         // The ValueTask is consumed, as it must be, and dropped: the callback reports the delivery.
         ValueTask<AsyncKafkaFuture<RecordMetadata>> send =
-            _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartTicks));
+            _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: value, key: key), new V3Delivery(callback, sendStartTicks));
         if (send.IsCompletedSuccessfully)
         {
             _ = send.Result;

@@ -141,12 +141,9 @@ public sealed class PublicAdminDescribeClientQuotasTests
     }
 
     [Fact]
-    public void Constructor_IsInternalAndRejectsDefault()
+    public void Constructor_IsPublicAndRejectsDefault()
     {
-        Assert.Empty(typeof(DescribeClientQuotasResult).GetConstructors());
-        ConstructorInfo constructor = Assert.Single(
-            typeof(DescribeClientQuotasResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
-            candidate => candidate.IsAssembly);
+        ConstructorInfo constructor = Assert.Single(typeof(DescribeClientQuotasResult).GetConstructors());
         Assert.Equal(
             typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
             Assert.Single(constructor.GetParameters()).ParameterType);

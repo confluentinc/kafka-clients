@@ -69,7 +69,7 @@ public sealed class KafkaConsumerBrokerTests
         {
             for (int i = 0; i < RecordCount; i++)
             {
-                _ = producer.Send(new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v" + i), partition: i % 2));
+                _ = producer.Send(new ProducerRecord<byte[], byte[]>(topic, value: Encoding.UTF8.GetBytes("v" + i), partition: i % 2, key: null));
             }
 
             producer.Flush();
@@ -158,7 +158,7 @@ public sealed class KafkaConsumerBrokerTests
         };
 
     /// <summary>A listener that disposes its consumer on the first revocation that takes a partition away.</summary>
-    private sealed class DisposingListener : ConsumerRebalanceListenerBase
+    private sealed class DisposingListener : IConsumerRebalanceListener
     {
         private readonly AsyncKafkaConsumer<byte[], byte[]> _consumer;
 
@@ -166,7 +166,7 @@ public sealed class KafkaConsumerBrokerTests
 
         internal bool Disposed { get; private set; }
 
-        public override void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
         {
             if (partitions.Count > 0 && !Disposed)
             {
@@ -175,7 +175,7 @@ public sealed class KafkaConsumerBrokerTests
             }
         }
 
-        public override void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
     }

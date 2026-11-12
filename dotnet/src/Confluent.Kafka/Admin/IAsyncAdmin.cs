@@ -1384,3 +1384,31 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <returns>A task that completes when the client is closed.</returns>
     Task Close(CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// The static method Java declares on the <c>Admin</c> interface, for <see cref="IAsyncAdmin"/>, which an interface
+/// cannot carry on netstandard2.0. From C# 14 it is called on the interface (<c>IAsyncAdmin.Create(…)</c>); older C#
+/// calls it on this class.
+/// </summary>
+public static class AsyncAdmin
+{
+    extension(IAsyncAdmin)
+    {
+        /// <summary>Create a new AsyncAdmin with the given configuration.</summary>
+        /// <param name="conf">
+        /// The admin client configuration, keyed by Java's dotted names (<c>bootstrap.servers</c> or
+        /// <c>bootstrap.controllers</c> is required): each value of the type Java's <c>ConfigDef</c> accepts for its
+        /// key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the key's validator
+        /// refuses <c>null</c>.
+        /// </param>
+        /// <returns>The new AsyncKafkaAdminClient.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="conf"/> is null.</exception>
+        /// <exception cref="ConfigException">
+        /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+        /// <c>null</c>, or the client refuses a value.
+        /// </exception>
+        /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+        public static IAsyncAdmin Create(IReadOnlyDictionary<string, object?> conf) =>
+            new AsyncKafkaAdminClient(conf ?? throw new ArgumentNullException(nameof(conf)));
+    }
+}

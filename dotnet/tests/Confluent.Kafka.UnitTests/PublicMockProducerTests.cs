@@ -71,9 +71,9 @@ public sealed class PublicMockProducerTests : IDisposable
     private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_noOffsets =
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
-    private readonly ProducerRecord<string, string> _record1 = new ProducerRecord<string, string>(Topic, "value1", "key1");
+    private readonly ProducerRecord<string, string> _record1 = new ProducerRecord<string, string>(Topic, value: "value1", key: "key1");
 
-    private readonly ProducerRecord<string, string> _record2 = new ProducerRecord<string, string>(Topic, "value2", "key2");
+    private readonly ProducerRecord<string, string> _record2 = new ProducerRecord<string, string>(Topic, value: "value2", key: "key2");
 
     private MockProducer<string, string>? _producer;
 
@@ -750,7 +750,7 @@ public sealed class PublicMockProducerTests : IDisposable
         using MockProducer<object, string> customProducer =
             new MockProducer<object, string>(new IntegerKeySerializer(), Serdes.String().Serializer());
         Assert.Throws<InvalidCastException>(
-            () => customProducer.Send(new ProducerRecord<object, string>(Topic, "value1", "key1")));
+            () => customProducer.Send(new ProducerRecord<object, string>(Topic, value: "value1", key: "key1")));
     }
 
     [Fact]

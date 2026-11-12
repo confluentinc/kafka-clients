@@ -114,7 +114,7 @@ public sealed class AdminP14SyncStarvationTests
     [Fact]
     public void Close_OnAStarvedThreadPool_TheSyncCloseReturnsWithinItsTimeout()
     {
-        KafkaAdminClient sync = new KafkaAdminClient(new Dictionary<string, object?>(StringComparer.Ordinal)
+        IAdmin sync = IAdmin.Create(new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["bootstrap.servers"] = "127.0.0.1:1",
         });

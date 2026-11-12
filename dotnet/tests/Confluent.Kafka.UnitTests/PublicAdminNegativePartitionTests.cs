@@ -75,7 +75,7 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task RealClient_ListPartitionReassignments_ANegativePartition_FailsTheWholeRequest()
     {
-        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        IAsyncAdmin admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncListPartitionReassignmentsResult result =
@@ -90,7 +90,7 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task RealClient_AlterPartitionReassignments_ANegativePartition_FaultsThatKey()
     {
-        AsyncKafkaAdminClient admin = NewUnconnectedClient();
+        IAsyncAdmin admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         TopicPartition negative = new TopicPartition("neg-apr", -1);
 
@@ -113,6 +113,6 @@ public sealed class PublicAdminNegativePartitionTests
         Assert.Equal(InvalidPartitionMessage, allFailure.Message);
     }
 
-    private static AsyncKafkaAdminClient NewUnconnectedClient() =>
-        new AsyncKafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
+    private static IAsyncAdmin NewUnconnectedClient() =>
+        IAsyncAdmin.Create(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 }

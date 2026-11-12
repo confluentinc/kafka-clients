@@ -23,13 +23,14 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Quota;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The public shape of the two admin flavours, the sync <see cref="IAdmin"/> and the async <see cref="IAsyncAdmin"/>,
-/// their four clients and their 45 + 45 <c>*Result</c> types, against each other.
+/// their two <c>Create</c> factories, their four clients and their 45 + 45 <c>*Result</c> types, against each other.
 /// </summary>
 /// <remarks>
 /// The flavours must offer the same RPCs and the same Result members, differing only in the future type at the
@@ -84,6 +85,20 @@ public sealed class PublicAdminP14SurfaceTests
         [typeof(DescribeClassicGroupsResult)] = typeof(IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>>),
         [typeof(AsyncDescribeClassicGroupsResult)] =
             typeof(IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>),
+        [typeof(AlterClientQuotasResult)] = typeof(IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture>),
+        [typeof(AsyncAlterClientQuotasResult)] = typeof(IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture>),
+        [typeof(AlterUserScramCredentialsResult)] = typeof(IReadOnlyDictionary<string, KafkaFuture>),
+        [typeof(AsyncAlterUserScramCredentialsResult)] = typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>),
+        [typeof(DeleteRecordsResult)] = typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>>),
+        [typeof(AsyncDeleteRecordsResult)] = typeof(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>>),
+        [typeof(DescribeClientQuotasResult)] =
+            typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
+        [typeof(AsyncDescribeClientQuotasResult)] =
+            typeof(AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
+        [typeof(ListOffsetsResult)] =
+            typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>),
+        [typeof(AsyncListOffsetsResult)] =
+            typeof(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>),
     };
 
     [Fact]
@@ -260,6 +275,28 @@ public sealed class PublicAdminP14SurfaceTests
                 Assert.Empty(constructors);
             }
         }
+    }
+
+    [Fact]
+    public void Create_ReturnsItsFlavoursInterface_AndNoTypeOfTheOtherFlavour()
+    {
+        MethodInfo sync = Assert.Single(typeof(Confluent.Kafka.Admin.Admin).GetMethods(PublicDeclared));
+        MethodInfo async = Assert.Single(typeof(Confluent.Kafka.Admin.AsyncAdmin).GetMethods(PublicDeclared));
+
+        foreach ((MethodInfo create, Type returned) in new[] { (sync, typeof(IAdmin)), (async, typeof(IAsyncAdmin)) })
+        {
+            Assert.Equal("Create", create.Name);
+            Assert.True(create.IsStatic, $"{create.DeclaringType!.Name}.Create is not static");
+            Assert.Equal(returned, create.ReturnType);
+            ParameterInfo conf = Assert.Single(create.GetParameters());
+            Assert.Equal("conf", conf.Name);
+            Assert.Equal(typeof(IReadOnlyDictionary<string, object>), conf.ParameterType);
+        }
+
+        List<string> offenders = new List<string>();
+        CheckSignature(sync, s_forbiddenOnSync.Concat(new[] { typeof(IAsyncAdmin) }).ToArray(), offenders);
+        CheckSignature(async, s_forbiddenOnAsync.Concat(new[] { typeof(IAdmin) }).ToArray(), offenders);
+        Assert.Empty(offenders);
     }
 
     [Fact]
