@@ -2138,7 +2138,20 @@ impl NetworkThreadCloseHandle {
                         self.trace_id,
                         format_args!("app: await_join spawns the thread join"),
                     );
-                    let join_result = tokio::task::spawn_blocking(move || thread.join()).await;
+                    let trace_id = self.trace_id;
+                    let join_result = tokio::task::spawn_blocking(move || {
+                        crate::consumer::internals::consumer_network_thread::hang_trace(
+                            trace_id,
+                            format_args!("app: join task runs"),
+                        );
+                        let joined = thread.join();
+                        crate::consumer::internals::consumer_network_thread::hang_trace(
+                            trace_id,
+                            format_args!("app: join task returns, ok={}", joined.is_ok()),
+                        );
+                        joined
+                    })
+                    .await;
                     crate::consumer::internals::consumer_network_thread::hang_trace(
                         self.trace_id,
                         format_args!("app: await_join joined, ok={}", join_result.is_ok()),
