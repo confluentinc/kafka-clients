@@ -549,6 +549,15 @@ public sealed class PublicClientConfigTests
             Refusal(client, Configs(client, ("x\0", "y"), ("client.id", new object()))).Message);
     }
 
+    [Theory]
+    [MemberData(nameof(AllClients))]
+    public void APasswordOfAnotherType_IsRefusedWithoutShowingIt(string client)
+    {
+        Assert.Equal(
+            Invalid("ssl.key.password", "[hidden]", "Expected value to be a string, but it was a System.Char[]"),
+            Refusal(client, Configs(client, ("ssl.key.password", "s3cret".ToCharArray()))).Message);
+    }
+
     private static ArgumentException NulRefusal(string client, IReadOnlyDictionary<string, object?> configs)
     {
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => Constructs(client, configs));

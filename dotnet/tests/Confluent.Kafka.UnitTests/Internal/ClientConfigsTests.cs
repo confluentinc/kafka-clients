@@ -47,6 +47,7 @@ public sealed class ClientConfigsTests
     private const string NotAList = "Expected a comma separated list.";
     private const string NotAClass = "Expected a Class instance or class name.";
     private const string KeyMustBeAString = "Key must be a string.";
+    private const string Hidden = "[hidden]";
 
     private static readonly Dictionary<string, string> s_producerKeyOfType = new(StringComparer.Ordinal)
     {
@@ -131,7 +132,7 @@ public sealed class ClientConfigsTests
         [ConfigType.Short] = (1.5, "1.5", NotAShort + "System.Double"),
         [ConfigType.Double] = (new object(), "System.Object", NotADouble + "System.Object"),
         [ConfigType.String] = (new object(), "System.Object", NotAString + "System.Object"),
-        [ConfigType.Password] = (5, "5", NotAString + "System.Int32"),
+        [ConfigType.Password] = (5, Hidden, NotAString + "System.Int32"),
         [ConfigType.Boolean] = (1, "1", NotABoolean),
         [ConfigType.List] = (53, "53", NotAList),
         [ConfigType.Class] = (5, "5", NotAClass),
@@ -311,7 +312,7 @@ public sealed class ClientConfigsTests
     [InlineData("DOUBLE", "object", "System.Object", NotADouble + "System.Object")]
     [InlineData("DOUBLE", "false", "false", NotADouble + "System.Boolean")]
     [InlineData("STRING", "object", "System.Object", NotAString + "System.Object")]
-    [InlineData("PASSWORD", "5", "5", NotAString + "System.Int32")]
+    [InlineData("PASSWORD", "5", Hidden, NotAString + "System.Int32")]
     [InlineData("LIST", "53", "53", NotAList)]
     [InlineData("LIST", "object", "System.Object", NotAList)]
     [InlineData("BOOLEAN", "1", "1", NotABoolean)]
@@ -321,6 +322,23 @@ public sealed class ClientConfigsTests
         string key = s_producerKeyOfType[type];
 
         Assert.Equal(Invalid(key, valueText, message), Refusal(ClientKind.Producer, key, s_values[label]));
+    }
+
+    [Theory]
+    [InlineData("producer")]
+    [InlineData("consumer")]
+    [InlineData("admin")]
+    public void APasswordOfAnotherType_IsRefusedWithoutShowingIt(string client)
+    {
+        Assert.Equal(
+            Invalid("ssl.key.password", Hidden, NotAString + "System.Char[]"),
+            Refusal(Kind(client), "ssl.key.password", "s3cret".ToCharArray()));
+        Assert.Equal(
+            Invalid("sasl.jaas.config", Hidden, NotAString + "System.Byte[]"),
+            Refusal(Kind(client), "sasl.jaas.config", new byte[] { 0x73, 0x33 }));
+        Assert.Equal(
+            Invalid("client.id", "[s, 3]", NotAString + "System.Char[]"),
+            Refusal(Kind(client), "client.id", "s3".ToCharArray()));
     }
 
     [Theory]
