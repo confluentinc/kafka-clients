@@ -56,7 +56,7 @@ PROPS = "dotnet/Directory.Build.props"
 # -alpha.N, -beta.N or -rc.N then optionally by .dev.M, a dev build. NuGet puts a dev build after
 # the version it extends (4.4.0-alpha.1 < 4.4.0-alpha.1.dev.1 < 4.4.0-alpha.2), so the dev builds
 # that lead up to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M. The dotnet/v<version> tag pattern of
-# semaphore.yml is this pattern after its prefix.
+# release.yml is this pattern after its prefix.
 VERSION_PATTERN = (r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
                    r"(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?")
 # The package id is shared with confluent-kafka-dotnet, whose versions are 2.x: this client's
