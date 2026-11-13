@@ -2949,8 +2949,9 @@ fn print_help() {
                                      working tree
   pre-push        The pre-push hook's task, reading the pushed refs on standard input: when HEAD
                   is pushed without a selection made for it in its test-selection/ folder,
-                  select for it, commit the folder and stop the push, to be repeated; it takes
-                  select-tests' options but --reuse
+                  select for it, commit the folder, push that commit with $GIT_PUSH_COMMAND
+                  (or `git push`) and fail the push that ran it; it takes --remote <the
+                  hook's remote> and select-tests' options but --reuse
   show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
                   tree and, when it does, list the suites it runs with their entries and reasons
   selected-cargo-test  `cargo test` restricted to the test selection $TEST_SELECTION names, if any

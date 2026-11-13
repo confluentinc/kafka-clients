@@ -7,9 +7,11 @@
 # When HEAD is pushed and its committed test-selection/ folder holds no
 # selection made for it, the agent selects the tests the changes from BASE can
 # affect, the folder is committed (keeping its four most recent selections),
-# and this push stops: git has already chosen the commits it pushes, so push
-# again to include the new one. With uncommitted changes, or when the
-# selection fails, the push goes on without one, and CI runs every test.
+# and that commit is pushed to the remote refs this push sends HEAD to, with
+# GIT_PUSH_COMMAND (run by sh, followed by the remote and the refspecs) or else
+# `git push`. This push then fails: git has already chosen the commits it
+# pushes. With uncommitted changes, or when the selection fails, the push goes
+# on without one, and CI runs every test.
 set -e
 cd "$(git rev-parse --show-toplevel)"
-exec make -s pre-push-test-selection
+exec make -s pre-push-test-selection PUSH_REMOTE="$1"

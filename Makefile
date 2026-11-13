@@ -530,13 +530,19 @@ select-tests:
 
 # The pre-push hook's task, reading the pushed refs on standard input: when
 # HEAD is pushed and its committed test-selection/ holds no selection made for
-# it, it selects for HEAD, commits test-selection/ (with --no-verify), and
-# stops the push, which git cannot extend with a commit made by its hook: push
-# again. A working tree holding changes HEAD does not, or a failed selection,
-# lets the push go on without one, and CI then runs every test. It builds only
-# xtask's test-selection binary.
+# it, it selects for HEAD, commits test-selection/ (with --no-verify), pushes
+# that commit to PUSH_REMOTE (the remote git gives the hook) at the refs the
+# push sends HEAD to, and fails the push, which git cannot extend with a commit
+# made by its hook. The commit is pushed with GIT_PUSH_COMMAND, run by sh and
+# followed by the remote and the refspecs (`GIT_PUSH_COMMAND=git_push_external`),
+# or else `git push`; a ref the push forces gets a --force-with-lease on the
+# commit git expected there. A working tree holding changes HEAD does not, or a
+# failed selection, lets the push go on without one, and CI then runs every
+# test. It builds only xtask's test-selection binary.
+PUSH_REMOTE ?=
+
 pre-push-test-selection:
-	cd rust && cargo run -q --locked -p xtask --bin test-selection -- pre-push --base "$(BASE)" --agent "$(AGENT)" --model "$(AGENT_MODEL)"
+	cd rust && cargo run -q --locked -p xtask --bin test-selection -- pre-push --remote "$(PUSH_REMOTE)" --base "$(BASE)" --agent "$(AGENT)" --model "$(AGENT_MODEL)"
 
 # Removes the selections of test-selection/ and the .json file TEST_SELECTION
 # names, if any.

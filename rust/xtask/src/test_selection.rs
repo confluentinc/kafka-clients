@@ -28,8 +28,9 @@
 //!
 //! `pre-push`, which the pre-push hook runs, makes sure a pushed HEAD carries
 //! a selection made for it: when its committed folder has none, it selects,
-//! commits the folder, and stops the push, which then has to be repeated to
-//! include that commit.
+//! commits the folder, pushes that commit to the refs git was pushing HEAD to
+//! (with `GIT_PUSH_COMMAND`, run by `sh`, or else `git push`), and fails the
+//! push that ran it, which git cannot extend with a commit made by its hook.
 //!
 //! The file holds one section per suite. A section that is missing runs
 //! nothing, `[]` runs the whole suite, and a list runs only what it names:
@@ -100,6 +101,10 @@ const AGENT_DENIED_TOOLS: &str = "Bash(git * --output*)";
 /// How long the agent may take by default before `select-tests` gives up, so
 /// a stalled call cannot hang a commit.
 const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 600;
+/// How `pre-push` pushes the selection commit it makes when
+/// `GIT_PUSH_COMMAND` is not set; `sh` runs either, followed by the remote and
+/// the refspecs.
+const DEFAULT_PUSH_COMMAND: &str = "git push";
 /// Above this size the changed-file list is left for the agent to read with git.
 const MAX_INLINE_CHANGES: usize = 64 * 1024;
 
@@ -878,7 +883,8 @@ fn select_into(options: &SelectOptions, head: &str, target: &Target) -> anyhow::
 /// every test running in CI, when the working tree holds changes HEAD does not
 /// or the selection fails.
 pub fn pre_push(args: &[String]) -> anyhow::Result<()> {
-    let mut options = select_options("pre-push", args, false)?;
+    let (remote, args) = remote_option(args)?;
+    let mut options = select_options("pre-push", &args, false)?;
     options.reuse = true;
     let mut refs = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut refs).context("reading the pushed refs")?;
@@ -911,12 +917,95 @@ pub fn pre_push(args: &[String]) -> anyhow::Result<()> {
     let made_at = head.get(..COMMIT_ABBREV).unwrap_or(&head);
     let message = format!("Test selection for {made_at}");
     git(&["commit", "--no-verify", "-q", "-m", &message, "--", SELECTION_DIR])?;
-    let commit = git(&["rev-parse", "--short", "HEAD"])?;
-    eprintln!(
-        "pre-push: committed {commit} \"{message}\", which this push does not include, so the push stops; push \
-         again"
-    );
+    let commit = git(&["rev-parse", "HEAD"])?;
+    let short = commit.get(..COMMIT_ABBREV).unwrap_or(&commit);
+    eprintln!("pre-push: committed {short} \"{message}\", which this push does not include");
+    let others = refs
+        .lines()
+        .filter(|line| line.split_whitespace().nth(1) != Some(head.as_str()))
+        .count();
+    if others > 0 {
+        eprintln!("pre-push: this push also updates {others} other ref(s), which stop with it: push them again");
+    }
+    let Some(remote) = remote.filter(|remote| !remote.trim().is_empty()) else {
+        eprintln!("pre-push: the hook was given no remote, so the push stops; push again");
+        std::process::exit(1);
+    };
+    let command = env::var("GIT_PUSH_COMMAND")
+        .ok()
+        .filter(|command| !command.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_PUSH_COMMAND.to_string());
+    let push_args = repush_args(&refs, &head, &commit, |ancestor| {
+        Command::new("git")
+            .arg("-C")
+            .arg(REPO_ROOT)
+            .args(["merge-base", "--is-ancestor", ancestor, &head])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    });
+    eprintln!("pre-push: pushing it: {command} {remote} {}", push_args.join(" "));
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{command} \"$@\""))
+        .arg("sh")
+        .arg(&remote)
+        .args(&push_args)
+        .current_dir(REPO_ROOT)
+        .stdin(Stdio::null())
+        .status()
+        .with_context(|| format!("running {command}"))?;
+    if status.success() {
+        eprintln!(
+            "pre-push: pushed {short} with its test selection; this push of {} stops with an error, as git chose its \
+             commits before the hook ran, and needs no repeating",
+            head.get(..COMMIT_ABBREV).unwrap_or(&head)
+        );
+    } else {
+        eprintln!("pre-push: `{command}` failed ({status}), so the push stops; push again");
+    }
     std::process::exit(1);
+}
+
+/// The hook's `--remote <remote>`, the remote git passes the hook, taken out
+/// of `args`, which keeps the other options.
+fn remote_option(args: &[String]) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    let mut remote = None;
+    let mut rest = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--remote" {
+            remote = Some(args.next().cloned().context("--remote needs a value")?);
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    Ok((remote, rest))
+}
+
+/// The arguments, after the remote, that push `commit` to each remote ref the
+/// hook's standard input `refs` pushes `head` to: `<commit>:<remote ref>`,
+/// preceded by `--force-with-lease=<remote ref>:<remote commit>` when the ref
+/// exists and its commit is not an ancestor of `head` (`is_ancestor`), so a
+/// forced push stays forced but only over the commit git expected.
+fn repush_args(refs: &str, head: &str, commit: &str, is_ancestor: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut leases = Vec::new();
+    let mut refspecs = Vec::new();
+    for line in refs.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [_, local, remote_ref, remote_commit] = fields[..] else {
+            continue;
+        };
+        if local != head {
+            continue;
+        }
+        if !remote_commit.bytes().all(|b| b == b'0') && !is_ancestor(remote_commit) {
+            leases.push(format!("--force-with-lease={remote_ref}:{remote_commit}"));
+        }
+        refspecs.push(format!("{commit}:{remote_ref}"));
+    }
+    leases.into_iter().chain(refspecs).collect()
 }
 
 /// Whether the hook's standard input `refs` pushes the commit `head`.
@@ -1947,6 +2036,52 @@ mod tests {
         assert!(!pushes(&format!("refs/heads/a {other} refs/heads/a {head}\n"), head));
         assert!(!pushes(&format!("(delete) {zero} refs/heads/b {head}\n"), head));
         assert!(!pushes("", head));
+    }
+
+    #[test]
+    fn test_repush_args() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let commit = "fedcba9876543210fedcba9876543210fedcba98";
+        let base = "1111111111111111111111111111111111111111";
+        let rewritten = "2222222222222222222222222222222222222222";
+        let zero = "0000000000000000000000000000000000000000";
+        let is_ancestor = |c: &str| c == base;
+        assert_eq!(
+            repush_args(&format!("refs/heads/b {head} refs/heads/b {base}\n"), head, commit, is_ancestor),
+            strings(&[&format!("{commit}:refs/heads/b")]),
+            "a fast-forward needs no lease"
+        );
+        assert_eq!(
+            repush_args(&format!("refs/heads/b {head} refs/heads/b {zero}\n"), head, commit, is_ancestor),
+            strings(&[&format!("{commit}:refs/heads/b")]),
+            "a new ref needs no lease"
+        );
+        assert_eq!(
+            repush_args(
+                &format!("refs/heads/a {base} refs/heads/a {zero}\nrefs/heads/b {head} refs/heads/c {rewritten}\n"),
+                head,
+                commit,
+                is_ancestor
+            ),
+            strings(&[
+                &format!("--force-with-lease=refs/heads/c:{rewritten}"),
+                &format!("{commit}:refs/heads/c")
+            ]),
+            "only HEAD's refs are pushed, and a forced one keeps its lease"
+        );
+        assert!(repush_args("", head, commit, is_ancestor).is_empty());
+    }
+
+    #[test]
+    fn test_remote_option() {
+        let (remote, rest) = remote_option(&strings(&["--base", "b", "--remote", "origin", "--model", "m"])).unwrap();
+        assert_eq!(remote.as_deref(), Some("origin"));
+        assert_eq!(rest, strings(&["--base", "b", "--model", "m"]));
+        assert_eq!(remote_option(&strings(&["--base", "b"])).unwrap().0, None);
+        assert_eq!(
+            remote_option(&strings(&["--remote"])).unwrap_err().to_string(),
+            "--remote needs a value"
+        );
     }
 
     #[test]
