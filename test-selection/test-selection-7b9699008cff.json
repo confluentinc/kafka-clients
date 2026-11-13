@@ -1,0 +1,29 @@
+{
+  "base": "6d02fd136d9917a3a6adce6cbdb2c39b02ced958",
+  "changed_files": [
+    "M python/confluent_kafka/_args.py"
+  ],
+  "created": 1794584870,
+  "head": "7b9699008cffb491090c97a2a2e0f3303be8e590",
+  "merge_base": "6d02fd136d9917a3a6adce6cbdb2c39b02ced958",
+  "python": {
+    "grpc": [],
+    "integration": [],
+    "performance": [],
+    "soak": [],
+    "typecheck": [],
+    "unit": [],
+    "verifiable_clients": []
+  },
+  "reasons": {
+    "python.grpc": "The Python gRPC arm runs the Rust integration harness against the confluent_kafka binding, which imports the changed module.",
+    "python.integration": "The integration tests load the same confluent_kafka package, and every client in it imports the changed `_args` module.",
+    "python.performance": "The performance tests drive the confluent_kafka clients, which import `_args`.",
+    "python.soak": "python/soak/soakclient.py imports the confluent_kafka clients, which depend on `_args`.",
+    "python.typecheck": "The change gives `reject_str` a module-level `_TEXT_TYPES` tuple for its isinstance check, so mypy --strict over confluent_kafka has to re-check it.",
+    "python.unit": "Nearly every module in confluent_kafka imports `_args`, and `reject_str` guards the collection-of-str parameters that test_args.py, test_string_arguments.py and the admin/consumer unit tests exercise.",
+    "python.verifiable_clients": "The verifiable consumer and producer import confluent_kafka and run the changed argument checks."
+  },
+  "tree": "e363f92ff21cb5c38fcce092ddf15d9d95de4723",
+  "version": 2
+}
