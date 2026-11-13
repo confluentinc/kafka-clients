@@ -19,7 +19,7 @@ using System.Globalization;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// New partitions for one topic in a call to <see cref="IAdmin.CreatePartitions"/> — Java's
+/// New partitions for one topic in a call to <see cref="IAdmin.CreatePartitions(IReadOnlyDictionary{string, NewPartitions}, CreatePartitionsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.NewPartitions</c>.
 /// </summary>
 /// <remarks>

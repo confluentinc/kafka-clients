@@ -251,7 +251,7 @@ public sealed class AdminP6ResultMarshalTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result =
-            AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(ClientQuotaFilter.All(), options: null));
+            AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(ClientQuotaFilter.All(), options: new DescribeClientQuotasOptions()));
 
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));

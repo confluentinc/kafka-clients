@@ -43,6 +43,12 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="IAdmin"/>
 public interface IAsyncAdmin : IAsyncDisposable, IDisposable
 {
+    /// <summary>Creates topics with the default options.</summary>
+    /// <inheritdoc cref="CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics);
+
     /// <summary>
     /// Creates topics — Java's <c>createTopics(Collection&lt;NewTopic&gt;,
     /// CreateTopicsOptions)</c>. Returns <b>immediately</b>, without waiting for the
@@ -52,14 +58,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// The topics to create. A repeated topic name yields one entry, as Java's
     /// map-keyed result does.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per topic. A topic that fails faults only <em>its own</em>
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="newTopics"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="newTopics"/> holds no topic with a
+    /// non-empty name, since nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="newTopics"/> contains a null element, or a topic name, a configuration
     /// name or a configuration value containing a NUL character
@@ -68,7 +76,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// by the <see cref="NewTopic"/> constructor.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null);
+    AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions options);
+
+    /// <summary>Deletes topics with the default options.</summary>
+    /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDeleteTopicsResult DeleteTopics(TopicCollection topics);
 
     /// <summary>
     /// Deletes topics — Java's <c>deleteTopics(TopicCollection, DeleteTopicsOptions)</c>.
@@ -84,47 +98,66 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="AsyncDeleteTopicsResult.TopicIdValues()"/> is non-null. A repeated topic yields
     /// one entry, as Java's map-keyed result does.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per topic. A topic that fails faults only <em>its own</em>
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="topics"/> holds no non-empty name, or no
+    /// id other than <see cref="Uuid.ZERO_UUID"/>, since nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
     /// name containing a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncDeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null);
+    AsyncDeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions options);
 
     /// <summary>
-    /// Deletes topics by name — Java's <c>deleteTopics(Collection&lt;String&gt;)</c> and
-    /// <c>deleteTopics(Collection&lt;String&gt;, DeleteTopicsOptions)</c>. Like Java's, it wraps the names in
-    /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
-    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>.
+    /// Deletes topics by name with the default options: the same as
+    /// <see cref="DeleteTopics(TopicCollection)"/> with the names wrapped in <see cref="TopicCollection.OfTopicNames"/>.
+    /// </summary>
+    /// <inheritdoc cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDeleteTopicsResult DeleteTopics(IReadOnlyCollection<string> topics);
+
+    /// <summary>
+    /// Deletes topics by name with the given options: the same as
+    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions)"/> with the names wrapped in
+    /// <see cref="TopicCollection.OfTopicNames"/>.
     /// </summary>
     /// <param name="topics">The names of the topics to delete.</param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per topic, in <see cref="AsyncDeleteTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
-    /// A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
-    /// overloads and does not compile (CS0121); cast it to the parameter type meant.
+    /// A literal <see langword="null"/> for <paramref name="topics"/> matches two <c>DeleteTopics</c> overloads and
+    /// does not compile (CS0121); cast it to the parameter type meant.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="topics"/> holds no non-empty name, since
+    /// nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> contains a null element, or a name containing a NUL
     /// character.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null);
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions options);
+
+    /// <summary>Describes topics with the default options.</summary>
+    /// <inheritdoc cref="DescribeTopics(TopicCollection, DescribeTopicsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeTopics(TopicCollection, DescribeTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeTopics(TopicCollection, DescribeTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeTopicsResult DescribeTopics(TopicCollection topics);
 
     /// <summary>
     /// Describes topics — Java's
@@ -134,68 +167,96 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="topics">
     /// The topics to describe, identified <b>either</b> by name <b>or</b> by id — see
-    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>. The choice also
+    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions)"/>. The choice also
     /// selects which of
     /// <see cref="AsyncDescribeTopicsResult.AllTopicNames"/> /
     /// <see cref="AsyncDescribeTopicsResult.AllTopicIds"/> returns a future rather than
     /// <see langword="null"/>.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per topic, each carrying that topic's own
     /// <see cref="TopicDescription"/> or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="topics"/> is a collection of names with no
+    /// non-empty name, since nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
     /// name containing a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncDescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null);
+    AsyncDescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions options);
 
     /// <summary>
-    /// Describes topics by name — Java's <c>describeTopics(Collection&lt;String&gt;)</c> and
-    /// <c>describeTopics(Collection&lt;String&gt;, DescribeTopicsOptions)</c>. Like Java's, it wraps the names in
-    /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
-    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
+    /// Describes topics by name with the default options: the same as
+    /// <see cref="DescribeTopics(TopicCollection)"/> with the names wrapped in <see cref="TopicCollection.OfTopicNames"/>.
+    /// </summary>
+    /// <inheritdoc cref="DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeTopicsResult DescribeTopics(IReadOnlyCollection<string> topicNames);
+
+    /// <summary>
+    /// Describes topics by name with the given options: the same as
+    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions)"/> with the names wrapped in
+    /// <see cref="TopicCollection.OfTopicNames"/>.
     /// </summary>
     /// <param name="topicNames">The names of the topics to describe.</param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per topic, in <see cref="AsyncDescribeTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
-    /// A lone literal <see langword="null"/> argument matches both <c>DescribeTopics</c>
-    /// overloads and does not compile (CS0121); cast it to the parameter type meant.
+    /// A literal <see langword="null"/> for <paramref name="topicNames"/> matches two <c>DescribeTopics</c> overloads
+    /// and does not compile (CS0121); cast it to the parameter type meant.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="topicNames"/> holds no non-empty name,
+    /// since nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
     /// character.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeTopicsResult DescribeTopics(
-        IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null);
+        IReadOnlyCollection<string> topicNames, DescribeTopicsOptions options);
+
+    /// <summary>
+    /// Lists the cluster's topics with the default options, which leave out internal topics such as
+    /// <c>__consumer_offsets</c>.
+    /// </summary>
+    /// <inheritdoc cref="ListTopics(ListTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListTopics(ListTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncListTopicsResult ListTopics();
 
     /// <summary>
     /// Lists the cluster's topics — Java's <c>listTopics(ListTopicsOptions)</c>. Returns
     /// <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListTopicsOptions.ShouldListInternal()"/> <see langword="false"/>, so internal
-    /// topics such as <c>__consumer_offsets</c> are excluded.
+    /// The options for the request. By default <see cref="ListTopicsOptions.ShouldListInternal()"/> is
+    /// <see langword="false"/>, so internal topics such as <c>__consumer_offsets</c> are excluded.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// <b>One</b> future over the whole listing: either the call fails, or the whole map succeeds.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncListTopicsResult ListTopics(ListTopicsOptions? options = null);
+    AsyncListTopicsResult ListTopics(ListTopicsOptions options);
+
+    /// <summary>Increases the partition count of the given topics with the default options.</summary>
+    /// <inheritdoc cref="CreatePartitions(IReadOnlyDictionary{string, NewPartitions}, CreatePartitionsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="CreatePartitions(IReadOnlyDictionary{string, NewPartitions}, CreatePartitionsOptions)" path="/returns"/>
+    /// <inheritdoc cref="CreatePartitions(IReadOnlyDictionary{string, NewPartitions}, CreatePartitionsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncCreatePartitionsResult CreatePartitions(IReadOnlyDictionary<string, NewPartitions> newPartitions);
 
     /// <summary>
     /// Increases the partition count of the given topics — Java's
@@ -210,14 +271,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// an <b>empty</b> list are <em>different requests</em>, and the broker treats them
     /// differently — see the null-versus-empty note on <see cref="NewPartitions"/>.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per topic. A topic that fails faults only <em>its own</em>
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="newPartitions"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="newPartitions"/> is empty, since nothing
+    /// is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="newPartitions"/> contains a null topic name or a null entry, or a
     /// topic name containing a NUL character (see the <see cref="IAdmin"/>
@@ -225,7 +288,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncCreatePartitionsResult CreatePartitions(
-        IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null);
+        IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions options);
+
+    /// <summary>Deletes the records before a given offset in each partition, with the default options.</summary>
+    /// <inheritdoc cref="DeleteRecords(IReadOnlyDictionary{TopicPartition, RecordsToDelete}, DeleteRecordsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteRecords(IReadOnlyDictionary{TopicPartition, RecordsToDelete}, DeleteRecordsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteRecords(IReadOnlyDictionary{TopicPartition, RecordsToDelete}, DeleteRecordsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDeleteRecordsResult DeleteRecords(IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete);
 
     /// <summary>
     /// Deletes the records before a given offset in each partition — Java's
@@ -238,8 +307,8 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <c>-1</c> truncates that partition to its high watermark, as Java documents.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// <see cref="DeleteRecordsOptions"/> carries only a timeout, as Java's does.
+    /// The options for the request. <see cref="DeleteRecordsOptions"/> carries only a timeout.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// One future per partition, each carrying that partition's own
@@ -248,6 +317,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="AsyncDeleteRecordsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="recordsToDelete"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="recordsToDelete"/> contains a topic partition with a null topic, or
     /// a null entry, or a topic containing a NUL character (see the
@@ -256,17 +326,25 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
-        DeleteRecordsOptions? options = null);
+        DeleteRecordsOptions options);
+
+    /// <summary>
+    /// Describes the cluster with the default options, which leave out the authorized operations, so
+    /// <see cref="AsyncDescribeClusterResult.AuthorizedOperations"/> yields <see langword="null"/>.
+    /// </summary>
+    /// <inheritdoc cref="DescribeCluster(DescribeClusterOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeCluster(DescribeClusterOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeClusterResult DescribeCluster();
 
     /// <summary>
     /// Describes the cluster — Java's <c>describeCluster(DescribeClusterOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="DescribeClusterOptions.IncludeAuthorizedOperations()"/>
-    /// <see langword="false"/>, so <see cref="AsyncDescribeClusterResult.AuthorizedOperations"/>
-    /// yields <see langword="null"/>.
+    /// The options for the request. By default <see cref="DescribeClusterOptions.IncludeAuthorizedOperations()"/>
+    /// is <see langword="false"/>, so <see cref="AsyncDescribeClusterResult.AuthorizedOperations"/> yields
+    /// <see langword="null"/>.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// ⚠ <b>Four</b> futures — one per cluster attribute — rather than one per key. Two
@@ -274,8 +352,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="AsyncDescribeClusterResult.AuthorizedOperations"/>: see
     /// <see cref="AsyncDescribeClusterResult"/>.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncDescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null);
+    AsyncDescribeClusterResult DescribeCluster(DescribeClusterOptions options);
+
+    /// <summary>Lists the cluster's configuration resources of every supported type, with the default options.</summary>
+    /// <inheritdoc cref="ListConfigResources(IReadOnlyCollection{ConfigResourceType}, ListConfigResourcesOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListConfigResources(IReadOnlyCollection{ConfigResourceType}, ListConfigResourcesOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncListConfigResourcesResult ListConfigResources();
 
     /// <summary>
     /// Lists the cluster's configuration resources — Java's
@@ -283,26 +367,32 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Returns <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="configResourceTypes">
-    /// The resource types to list. ⚠ <see langword="null"/> or an <b>empty</b> collection
-    /// means <b>every supported type</b>, as Java's no-argument <c>listConfigResources()</c>
-    /// delegates with <c>Set.of()</c>, so neither is rejected. Java's parameter is a
-    /// <c>Set</c>, so a repeated type is one entry.
+    /// The resource types to list, a repeated type counting once. ⚠ An <b>empty</b> collection lists
+    /// <b>every supported type</b>.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// ⚠ <b>One</b> future over the whole listing, and a <em>collection</em> rather than
     /// a map: there is no per-resource outcome to report, so either the call fails and the
     /// future faults, or the whole listing succeeds.
     /// </returns>
-    /// <remarks>
-    /// Java's no-argument <c>listConfigResources()</c> is this method with both parameters left out.
-    /// </remarks>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="configResourceTypes"/> or <paramref name="options"/> is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListConfigResourcesResult ListConfigResources(
-        IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
-        ListConfigResourcesOptions? options = null);
+        IReadOnlyCollection<ConfigResourceType> configResourceTypes,
+        ListConfigResourcesOptions options);
+
+    /// <summary>
+    /// Describes the configuration of the given resources with the default options, which leave out synonyms and
+    /// documentation, so <see cref="ConfigEntry.Synonyms()"/> comes back empty and
+    /// <see cref="ConfigEntry.Documentation()"/> <see langword="null"/>.
+    /// </summary>
+    /// <inheritdoc cref="DescribeConfigs(IReadOnlyCollection{ConfigResource}, DescribeConfigsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeConfigs(IReadOnlyCollection{ConfigResource}, DescribeConfigsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeConfigs(IReadOnlyCollection{ConfigResource}, DescribeConfigsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeConfigsResult DescribeConfigs(IReadOnlyCollection<ConfigResource> resources);
 
     /// <summary>
     /// Describes the configuration of the given resources — Java's
@@ -315,11 +405,11 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// map-keyed result does.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="DescribeConfigsOptions.IncludeSynonyms()"/> and
-    /// <see cref="DescribeConfigsOptions.IncludeDocumentation()"/> both
-    /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms()"/> comes back empty and
-    /// <see cref="ConfigEntry.Documentation()"/> <see langword="null"/>.
+    /// The options for the request. By default <see cref="DescribeConfigsOptions.IncludeSynonyms()"/> and
+    /// <see cref="DescribeConfigsOptions.IncludeDocumentation()"/> are both <see langword="false"/>, so
+    /// <see cref="ConfigEntry.Synonyms()"/> comes back empty and <see cref="ConfigEntry.Documentation()"/>
+    /// <see langword="null"/>.
+    /// A null is rejected unless nothing is sent.
     /// </param>
     /// <returns>
     /// One future per resource, each carrying that resource's own <see cref="Config"/>
@@ -327,13 +417,25 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="resources"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="resources"/> is empty, since nothing is
+    /// sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="resources"/> contains a null element, or a resource name containing a NUL
     /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeConfigsResult DescribeConfigs(
-        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null);
+        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions options);
+
+    /// <summary>Incrementally alters the configuration of the given resources with the default options.</summary>
+    /// <inheritdoc cref="IncrementalAlterConfigs(IReadOnlyDictionary{ConfigResource, IReadOnlyCollection{AlterConfigOp}}, AlterConfigsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="IncrementalAlterConfigs(IReadOnlyDictionary{ConfigResource, IReadOnlyCollection{AlterConfigOp}}, AlterConfigsOptions)" path="/returns"/>
+    /// <inheritdoc cref="IncrementalAlterConfigs(IReadOnlyDictionary{ConfigResource, IReadOnlyCollection{AlterConfigOp}}, AlterConfigsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="IncrementalAlterConfigs(IReadOnlyDictionary{ConfigResource, IReadOnlyCollection{AlterConfigOp}}, AlterConfigsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs);
 
     /// <summary>
     /// Incrementally alters the configuration of the given resources — Java's
@@ -347,9 +449,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="ConfigEntry.Value()"/> is <see langword="null"/> is a <b>real request</b>
     /// and the null reaches the broker as a null; it is not the same as an empty string.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per resource, each reporting only whether <em>that</em> resource was
     /// altered — Java's per-resource future is <c>KafkaFuture&lt;Void&gt;</c>.
@@ -359,6 +459,10 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <c>IncrementalAlterConfigsResult</c> in Java.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="configs"/> is empty, since nothing is sent
+    /// then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="configs"/> contains a null resource, a null operation collection, or
     /// a null operation, or a resource name, a config name or a config value containing a NUL
@@ -368,7 +472,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
-        AlterConfigsOptions? options = null);
+        AlterConfigsOptions options);
+
+    /// <summary>Queries the log directories of the given brokers with the default options.</summary>
+    /// <inheritdoc cref="DescribeLogDirs(IReadOnlyCollection{int}, DescribeLogDirsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeLogDirs(IReadOnlyCollection{int}, DescribeLogDirsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeLogDirs(IReadOnlyCollection{int}, DescribeLogDirsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeLogDirsResult DescribeLogDirs(IReadOnlyCollection<int> brokers);
 
     /// <summary>
     /// Queries the log directories of the given brokers — Java's
@@ -380,16 +490,27 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// The broker ids to query. A repeated broker yields one entry, as Java's map-keyed
     /// result does.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per broker, each yielding that broker's log directories keyed by path.
     /// ⚠ A <b>log directory</b> that is offline does not fault anything — the future
     /// succeeds and that directory's <see cref="LogDirDescription.Error()"/> is non-null.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="brokers"/> is empty, since nothing is sent
+    /// then.
+    /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeLogDirsResult DescribeLogDirs(
-        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null);
+        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions options);
+
+    /// <summary>Moves the given replicas to new log directories with the default options.</summary>
+    /// <inheritdoc cref="AlterReplicaLogDirs(IReadOnlyDictionary{TopicPartitionReplica, string}, AlterReplicaLogDirsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterReplicaLogDirs(IReadOnlyDictionary{TopicPartitionReplica, string}, AlterReplicaLogDirsOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterReplicaLogDirs(IReadOnlyDictionary{TopicPartitionReplica, string}, AlterReplicaLogDirsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment);
 
     /// <summary>
     /// Moves the given replicas to new log directories — Java's
@@ -398,12 +519,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// broker; the result carries one future per replica.
     /// </summary>
     /// <param name="replicaAssignment">Replica → the log directory to move it to.</param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future per replica, each reporting only whether <em>that</em> move was
     /// accepted — Java's per-replica future is <c>KafkaFuture&lt;Void&gt;</c>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicaAssignment"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="replicaAssignment"/> is empty, since
+    /// nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory.
     /// Also thrown for a replica whose topic, or a
@@ -413,7 +538,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
-        AlterReplicaLogDirsOptions? options = null);
+        AlterReplicaLogDirsOptions options);
+
+    /// <summary>Queries the log directories of the given replicas with the default options.</summary>
+    /// <inheritdoc cref="DescribeReplicaLogDirs(IReadOnlyCollection{TopicPartitionReplica}, DescribeReplicaLogDirsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeReplicaLogDirs(IReadOnlyCollection{TopicPartitionReplica}, DescribeReplicaLogDirsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeReplicaLogDirs(IReadOnlyCollection{TopicPartitionReplica}, DescribeReplicaLogDirsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeReplicaLogDirsResult DescribeReplicaLogDirs(IReadOnlyCollection<TopicPartitionReplica> replicas);
 
     /// <summary>
     /// Queries the log directories of the given replicas — Java's
@@ -425,9 +556,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// The replicas to query. A repeated replica yields one entry, as Java's map-keyed
     /// result does.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>One future per replica, each carrying where that replica's log lives.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicas"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="replicas"/> is empty, since nothing is
+    /// sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="replicas"/> contains a null element, or a replica whose topic
     /// contains a NUL character (see the <see cref="IAdmin"/> remarks).
@@ -435,7 +570,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
-        DescribeReplicaLogDirsOptions? options = null);
+        DescribeReplicaLogDirsOptions options);
+
+    /// <summary>Elects a leader for the given partitions with the default options.</summary>
+    /// <inheritdoc cref="ElectLeaders(ElectionType, IReadOnlyCollection{TopicPartition}, ElectLeadersOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ElectLeaders(ElectionType, IReadOnlyCollection{TopicPartition}, ElectLeadersOptions)" path="/returns"/>
+    /// <inheritdoc cref="ElectLeaders(ElectionType, IReadOnlyCollection{TopicPartition}, ElectLeadersOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncElectLeadersResult ElectLeaders(ElectionType electionType, IReadOnlyCollection<TopicPartition>? partitions);
 
     /// <summary>
     /// Elects a leader for the given partitions — Java's
@@ -450,15 +591,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// collection are <em>different requests</em>: empty asks for an election over no
     /// partitions. Java's parameter is a <c>Set</c>, so a repeated partition is one entry.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// ⚠ <b>One</b> future over the whole election, and a per-partition failure is a
     /// <b>value in its map</b> rather than a faulted future — Java's
     /// <c>Optional&lt;Throwable&gt;</c>. See <see cref="AsyncElectLeadersResult"/>; the future
     /// itself faults only when the election could not be run at all.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="electionType"/> is not one of <see cref="ElectionType.PREFERRED"/>
     /// / <see cref="ElectionType.UNCLEAN"/> — a value Java's enum parameter cannot
@@ -474,7 +614,17 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     AsyncElectLeadersResult ElectLeaders(
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
-        ElectLeadersOptions? options = null);
+        ElectLeadersOptions options);
+
+    /// <summary>
+    /// Changes or reverts the reassignment of one or more partitions with the default options, which allow a
+    /// change of replication factor.
+    /// </summary>
+    /// <inheritdoc cref="AlterPartitionReassignments(IReadOnlyDictionary{TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterPartitionReassignments(IReadOnlyDictionary{TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterPartitionReassignments(IReadOnlyDictionary{TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments);
 
     /// <summary>
     /// Changes or reverts the reassignment of one or more partitions — Java's
@@ -490,9 +640,9 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// does, and the two travel on separate wires to the broker.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange()"/>
-    /// <see langword="true"/>.
+    /// The options for the request. By default
+    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange()"/> is <see langword="true"/>.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// One future per partition, each reporting only whether <em>that</em>
@@ -501,6 +651,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="reassignments"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="reassignments"/> contains a topic partition with a null topic, or
     /// with a topic containing a NUL character (see the
@@ -509,7 +660,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
-        AlterPartitionReassignmentsOptions? options = null);
+        AlterPartitionReassignmentsOptions options);
+
+    /// <summary>Alters the committed offsets for a consumer group with the default options.</summary>
+    /// <inheritdoc cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
 
     /// <summary>
     /// Alters the committed offsets for a consumer group — Java's
@@ -519,9 +677,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="groupId">The consumer group id.</param>
     /// <param name="offsets">Topic partition → the offset (and metadata) to commit it to.</param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// ⚠ <b>One</b> future over the whole request, and a per-partition failure is a
     /// <b>value in its map</b> rather than a faulted future — Java's
@@ -533,6 +689,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="offsets"/> is null.
     /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="offsets"/> contains a topic partition with a null topic, or a null
     /// <see cref="OffsetAndMetadata"/> value; or <paramref name="groupId"/>, a topic or an
@@ -543,7 +700,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     AsyncAlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        AlterConsumerGroupOffsetsOptions? options = null);
+        AlterConsumerGroupOffsetsOptions options);
+
+    /// <summary>
+    /// Deletes the committed offsets for a set of partitions in a consumer group, with the default options.
+    /// </summary>
+    /// <inheritdoc cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId, IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
     /// Deletes the committed offsets for a set of partitions in a consumer group — Java's
@@ -553,9 +719,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="groupId">The consumer group id.</param>
     /// <param name="partitions">The partitions whose committed offsets should be deleted.</param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// ⚠ <b>One</b> future over the whole request, and a per-partition failure is a
     /// <b>value in its map</b> rather than a faulted future — Java's
@@ -567,6 +731,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="partitions"/> is null.
     /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic; or
     /// <paramref name="groupId"/>, or a topic, contains a NUL character (see the <see cref="IAdmin"/> remarks).
@@ -575,7 +740,19 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     AsyncDeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
         string groupId,
         IReadOnlyCollection<TopicPartition> partitions,
-        DeleteConsumerGroupOffsetsOptions? options = null);
+        DeleteConsumerGroupOffsetsOptions options);
+
+    /// <summary>Lists <b>every</b> ongoing partition reassignment in the cluster with the default options.</summary>
+    /// <inheritdoc cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncListPartitionReassignmentsResult ListPartitionReassignments();
+
+    /// <summary>Lists the ongoing reassignments of the given partitions with the default options.</summary>
+    /// <inheritdoc cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncListPartitionReassignmentsResult ListPartitionReassignments(IReadOnlyCollection<TopicPartition>? partitions);
 
     /// <summary>
     /// Lists the cluster's ongoing partition reassignments — Java's
@@ -590,48 +767,56 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// collection are <em>different requests</em>. Java's parameter is a <c>Set</c>, so a
     /// repeated partition is one entry.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// <b>One</b> future over the whole listing, as Java's. A requested partition with no
     /// ongoing reassignment is absent from the map; that is not an error.
     /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="partitions"/> holds a partition with an
+    /// empty topic or a negative partition number, since nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, or with a
     /// topic containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <remarks>
-    /// <c>ListPartitionReassignments()</c> is Java's zero-argument
-    /// <c>listPartitionReassignments()</c>. A lone literal <see langword="null"/> argument binds
-    /// to <see cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)"/>, not to
-    /// <paramref name="partitions"/>: it still lists every reassignment, with a CS8625 warning.
-    /// </remarks>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListPartitionReassignmentsResult ListPartitionReassignments(
-        IReadOnlyCollection<TopicPartition>? partitions = null,
-        ListPartitionReassignmentsOptions? options = null);
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions options);
 
     /// <summary>
     /// Lists <b>every</b> ongoing partition reassignment in the cluster with the given
     /// options — Java's <c>listPartitionReassignments(ListPartitionReassignmentsOptions)</c>,
     /// which passes <c>Optional.empty()</c> for the partitions.
     /// Exactly
-    /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
+    /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)"/>
     /// with a <see langword="null"/> partition set.
     /// </summary>
-    /// <param name="options">
-    /// Request options. A <see langword="null"/> one is forwarded unchanged and means
-    /// Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future over the whole listing — see
-    /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>.
+    /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)"/>.
     /// </returns>
+    /// <remarks>
+    /// A lone literal <see langword="null"/> argument matches both one-argument <c>ListPartitionReassignments</c>
+    /// overloads and does not compile (CS0121); name the parameter (<c>partitions: null</c>) or cast it to the
+    /// parameter type meant.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options);
+
+    /// <summary>
+    /// Lists offsets for the given partitions with the default options, which read at
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>.
+    /// </summary>
+    /// <inheritdoc cref="ListOffsets(IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ListOffsets(IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListOffsets(IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)" path="/exception[not(contains(., 'options.')) and not(paramref[@name='options'])]"/>
+    AsyncListOffsetsResult ListOffsets(IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets);
 
     /// <summary>
     /// Lists offsets for the given partitions — Java's
@@ -649,9 +834,9 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// on a <see cref="AsyncMockAdminClient"/>, which tells them apart.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListOffsetsOptions.IsolationLevel()"/>
+    /// The options for the request. By default <see cref="ListOffsetsOptions.IsolationLevel()"/> is
     /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// One future per partition, each carrying that partition's own
@@ -659,6 +844,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// partition that fails faults only <em>its own</em> future.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topicPartitionOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicPartitionOffsets"/> contains a topic partition with a null
     /// topic, or a topic containing a NUL character (see the
@@ -676,7 +862,15 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
-        ListOffsetsOptions? options = null);
+        ListOffsetsOptions options);
+
+    /// <summary>
+    /// Lists the groups available in the cluster with the default options, which filter on nothing: groups of every
+    /// state, protocol type and type.
+    /// </summary>
+    /// <inheritdoc cref="ListGroups(ListGroupsOptions)" path="/returns"/>
+    /// <exception cref="IllegalStateException">The client has been closed.</exception>
+    AsyncListGroupsResult ListGroups();
 
     /// <summary>
     /// Lists the groups available in the cluster — Java's
@@ -684,10 +878,10 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// the broker.
     /// </summary>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults. ⚠ Its three filters
-    /// are <b>independent axes</b>, and each one left empty — the default — means "do not
-    /// filter on that axis", never "match nothing"; so the no-options call lists groups of
+    /// The options for the request. ⚠ Its three filters are <b>independent axes</b>, and each one left empty — the
+    /// default — means "do not filter on that axis", never "match nothing"; so the default options list groups of
     /// every state, protocol type and type.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// ⚠ <b>One</b> future carrying <em>two independent</em> collections: the listings
@@ -697,9 +891,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// have their own length, and only <see cref="AsyncListGroupsResult.All"/> turns the first
     /// error into a fault.
     /// </returns>
-    /// <remarks>
-    /// Java's no-argument <c>listGroups()</c> is this method with the options left out.
-    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// A filter holds a <see cref="GroupState"/> / <see cref="GroupType"/> value no member
     /// defines, which Java's enum-typed <c>Set</c> cannot express but a C# cast can.
@@ -708,7 +900,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <c>options.ProtocolTypes</c> holds a protocol type containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncListGroupsResult ListGroups(ListGroupsOptions? options = null);
+    AsyncListGroupsResult ListGroups(ListGroupsOptions options);
+
+    /// <summary>
+    /// Describes some consumer groups in the cluster with the default options, which leave
+    /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
+    /// </summary>
+    /// <inheritdoc cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeConsumerGroupsResult DescribeConsumerGroups(IReadOnlyCollection<string> groupIds);
 
     /// <summary>
     /// Describes some consumer groups in the cluster — Java's
@@ -716,31 +917,39 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries
     /// one future per group id.
     /// </summary>
-    /// <remarks>
-    /// Java's <c>describeConsumerGroups(Collection&lt;String&gt;)</c> is this method with the options left out.
-    /// </remarks>
     /// <param name="groupIds">
     /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
     /// result holds one future per distinct id.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults. Note
+    /// The options for the request. Note
     /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations()"/> defaults to
     /// <see langword="false"/>, which leaves
     /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// One future per group id, each carrying that group's own
     /// <see cref="ConsumerGroupDescription"/> or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
     /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeConsumerGroupsResult DescribeConsumerGroups(
-        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null);
+        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions options);
+
+    /// <summary>
+    /// Describes some classic (non-KIP-848) groups in the cluster with the default options, which leave
+    /// <see cref="ClassicGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
+    /// </summary>
+    /// <inheritdoc cref="DescribeClassicGroups(IReadOnlyCollection{string}, DescribeClassicGroupsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeClassicGroups(IReadOnlyCollection{string}, DescribeClassicGroupsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeClassicGroups(IReadOnlyCollection{string}, DescribeClassicGroupsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeClassicGroupsResult DescribeClassicGroups(IReadOnlyCollection<string> groupIds);
 
     /// <summary>
     /// Describes some classic (non-KIP-848) groups in the cluster — Java's
@@ -748,31 +957,37 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries
     /// one future per group id.
     /// </summary>
-    /// <remarks>
-    /// Java's <c>describeClassicGroups(Collection&lt;String&gt;)</c> is this method with the options left out.
-    /// </remarks>
     /// <param name="groupIds">
     /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
     /// result holds one future per distinct id.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults. Note
+    /// The options for the request. Note
     /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations()"/> defaults to
     /// <see langword="false"/>, which leaves
     /// <see cref="ClassicGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// One future per group id, each carrying that group's own
     /// <see cref="ClassicGroupDescription"/> or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
     /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeClassicGroupsResult DescribeClassicGroups(
-        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null);
+        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions options);
+
+    /// <summary>Lists the committed offsets of a single consumer group with the default options.</summary>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(string groupId);
 
     /// <summary>
     /// Lists the committed offsets of a single consumer group — Java's
@@ -781,26 +996,33 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// one future, keyed by <paramref name="groupId"/>.
     /// </summary>
     /// <remarks>
-    /// Java's <c>listConsumerGroupOffsets(String)</c> is this method with the options left out. Like Java's, it
-    /// delegates to the batched form with a fresh <see cref="ListConsumerGroupOffsetsSpec"/>, so every committed
+    /// It runs the batched
+    /// <see cref="ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions)"/>
+    /// with <paramref name="groupId"/> mapped to a new <see cref="ListConsumerGroupOffsetsSpec"/>, so every committed
     /// partition of the group is returned.
     /// </remarks>
     /// <param name="groupId">The ID of the group whose committed offsets to list.</param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future, keyed by <paramref name="groupId"/>, carrying that group's
     /// committed offsets or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupId"/> contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
-        string groupId, ListConsumerGroupOffsetsOptions? options = null);
+        string groupId, ListConsumerGroupOffsetsOptions options);
+
+    /// <summary>Lists the committed offsets of several consumer groups with the default options.</summary>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions)" path="/returns"/>
+    /// <inheritdoc cref="ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs);
 
     /// <summary>
     /// Lists the committed offsets of several consumer groups — Java's
@@ -808,19 +1030,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// ListConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
     /// for the broker; the result carries one future per group id.
     /// </summary>
-    /// <remarks>
-    /// Java's <c>listConsumerGroupOffsets(Map&lt;String, ListConsumerGroupOffsetsSpec&gt;)</c> is this method with
-    /// the options left out.
-    /// </remarks>
     /// <param name="groupSpecs">
     /// The groups to query, each with the partitions to restrict its result to. A spec
     /// whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions()"/> is
     /// <see langword="null"/> returns every committed partition of that group; an
     /// <b>empty</b> collection returns nothing for it. The two are distinct.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per group id, each carrying that group's committed offsets or its
     /// own failure.
@@ -828,6 +1044,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupSpecs"/> is null.
     /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupSpecs"/> contains a null group id, a null spec, a null
     /// selected topic, or a repeated group id, or a group id or selected topic containing a
@@ -836,7 +1053,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
-        ListConsumerGroupOffsetsOptions? options = null);
+        ListConsumerGroupOffsetsOptions options);
+
+    /// <summary>Deletes consumer groups from the cluster with the default options.</summary>
+    /// <inheritdoc cref="DeleteConsumerGroups(IReadOnlyCollection{string}, DeleteConsumerGroupsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteConsumerGroups(IReadOnlyCollection{string}, DeleteConsumerGroupsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteConsumerGroups(IReadOnlyCollection{string}, DeleteConsumerGroupsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDeleteConsumerGroupsResult DeleteConsumerGroups(IReadOnlyCollection<string> groupIds);
 
     /// <summary>
     /// Deletes consumer groups from the cluster — Java's
@@ -844,21 +1067,20 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Returns <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="groupIds">The consumer group ids to delete. Duplicates collapse.</param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per group id — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>.
     /// See <see cref="AsyncDeleteConsumerGroupsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
     /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteConsumerGroupsResult DeleteConsumerGroups(
-        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null);
+        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions options);
 
     /// <summary>
     /// Removes members from a consumer group by their static member identity — Java's
@@ -894,6 +1116,12 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options);
 
+    /// <summary>Creates ACL bindings on the cluster with the default options.</summary>
+    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/returns"/>
+    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls);
+
     /// <summary>
     /// Creates ACL bindings on the cluster — Java's
     /// <c>createAcls(Collection&lt;AclBinding&gt;, CreateAclsOptions)</c>. Returns
@@ -907,22 +1135,27 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// that differ only in such values are duplicates. A binding with an
     /// <c>UNKNOWN</c> field still constructs, and fails its own future, as in Java.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per binding — Java's
     /// <c>Map&lt;AclBinding, KafkaFuture&lt;Void&gt;&gt;</c>. See
     /// <see cref="AsyncCreateAclsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="acls"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="acls"/> contains a null element, or a binding whose resource name,
     /// principal or host contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null);
+    AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions options);
+
+    /// <summary>Deletes every ACL matching any of the given filters, with the default options.</summary>
+    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDeleteAclsResult DeleteAcls(IEnumerable<AclBindingFilter> filters);
 
     /// <summary>
     /// Deletes every ACL matching any of the given filters — Java's
@@ -937,15 +1170,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Java's <c>fromCode</c> does, so two filters that differ only in such values are
     /// duplicates.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per filter — Java's
     /// <c>Map&lt;AclBindingFilter, KafkaFuture&lt;FilterResults&gt;&gt;</c>. See
     /// <see cref="AsyncDeleteAclsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="filters"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="filters"/> contains a null element, or a filter whose resource name,
     /// principal or host contains a NUL character (see the
@@ -954,7 +1186,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteAclsResult DeleteAcls(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null);
+        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions options);
+
+    /// <summary>Lists every ACL matching the given filter, with the default options.</summary>
+    /// <inheritdoc cref="DescribeAcls(AclBindingFilter, DescribeAclsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeAcls(AclBindingFilter, DescribeAclsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeAcls(AclBindingFilter, DescribeAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeAclsResult DescribeAcls(AclBindingFilter filter);
 
     /// <summary>
     /// Lists every ACL matching the given filter — Java's
@@ -966,22 +1204,30 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see langword="null"/> name, principal or host matches <em>any</em> value, and is
     /// distinct from <c>""</c>, which filters on the literal empty string.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected unless nothing is sent.</param>
     /// <returns>
     /// One future over the whole matching collection — Java's
     /// <c>KafkaFuture&lt;Collection&lt;AclBinding&gt;&gt;</c>. See
     /// <see cref="AsyncDescribeAclsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="options"/> is null. Not thrown when <paramref name="filter"/> is unknown
+    /// (<see cref="AclBindingFilter.IsUnknown()"/>), since nothing is sent then.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// The filter's resource name, principal or host contains a NUL character (see the <see cref="IAdmin"/> remarks). A null component — "any" — is
     /// <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeAclsResult DescribeAcls(
-        AclBindingFilter filter, DescribeAclsOptions? options = null);
+        AclBindingFilter filter, DescribeAclsOptions options);
+
+    /// <summary>Describes the quotas of every entity matching the given filter, with the default options.</summary>
+    /// <inheritdoc cref="DescribeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeClientQuotasResult DescribeClientQuotas(ClientQuotaFilter filter);
 
     /// <summary>
     /// Describes the quotas of every entity matching the given filter — Java's
@@ -992,15 +1238,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// The filter to apply. An empty, non-strict filter is
     /// <see cref="ClientQuotaFilter.All"/> and matches everything.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future over the whole map — Java's
     /// <c>KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;</c>. See
     /// <see cref="AsyncDescribeClientQuotasResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// A component matches exactly but carries no match name, or a component's entity type
     /// or match name contains a NUL character (see the
@@ -1008,7 +1253,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeClientQuotasResult DescribeClientQuotas(
-        ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null);
+        ClientQuotaFilter filter, DescribeClientQuotasOptions options);
+
+    /// <summary>Alters the quotas of the given entities with the default options.</summary>
+    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAlterClientQuotasResult AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries);
 
     /// <summary>
     /// Alters the quotas of the given entities — Java's
@@ -1024,21 +1275,31 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// An alteration whose entity has <b>no</b> entity types is sent as given, as Java does,
     /// and is answered for that entity alone.
     /// </param>
-    /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults.
-    /// </param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per entity — Java's <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;</c>.
     /// See <see cref="AsyncAlterClientQuotasResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="entries"/> contains a null element, or an alteration whose entity has
     /// a type or name, or one of whose ops has a quota name, containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAlterClientQuotasResult AlterClientQuotas(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null);
+        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions options);
+
+    /// <summary>Describes <b>every</b> user's SASL/SCRAM credentials with the default options.</summary>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/returns"/>
+    /// <exception cref="IllegalStateException">The client has been closed.</exception>
+    AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials();
+
+    /// <summary>Describes the given users' SASL/SCRAM credentials with the default options.</summary>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyCollection<string>? users);
 
     /// <summary>
     /// Describes users' SASL/SCRAM credentials — Java's
@@ -1046,23 +1307,29 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Returns <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="users">
-    /// The users to describe, or <see langword="null"/> (or empty) to describe <b>every</b>
-    /// user — Java's no-argument overload. A null element is skipped, as Java skips it,
-    /// so a list of only nulls describes every user
-    /// too.
+    /// The users to describe, or <see langword="null"/> (or empty) to describe <b>every</b> user. A null element is
+    /// skipped, so a list of only nulls describes every user too.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// The three derived accessors Java publishes. See
     /// <see cref="AsyncDescribeUserScramCredentialsResult"/>.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="users"/> contains a user name containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
-        IReadOnlyCollection<string>? users = null,
-        DescribeUserScramCredentialsOptions? options = null);
+        IReadOnlyCollection<string>? users,
+        DescribeUserScramCredentialsOptions options);
+
+    /// <summary>Upserts and deletes users' SASL/SCRAM credentials with the default options.</summary>
+    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations);
 
     /// <summary>
     /// Upserts and deletes users' SASL/SCRAM credentials — Java's
@@ -1074,12 +1341,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// rows reach the broker and collapse to one outcome keyed by that user. An <b>empty
     /// password</b> is likewise not rejected here — Java reports it per-user.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per user — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
     /// <see cref="AsyncAlterUserScramCredentialsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="alterations"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="alterations"/> contains a null element, or an alteration whose user
     /// name contains a NUL character (see the <see cref="IAdmin"/>
@@ -1088,23 +1356,35 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
-        AlterUserScramCredentialsOptions? options = null);
+        AlterUserScramCredentialsOptions options);
+
+    /// <summary>Creates a delegation token with the default options.</summary>
+    /// <inheritdoc cref="CreateDelegationToken(CreateDelegationTokenOptions)" path="/returns"/>
+    /// <exception cref="IllegalStateException">The client has been closed.</exception>
+    AsyncCreateDelegationTokenResult CreateDelegationToken();
 
     /// <summary>
     /// Creates a delegation token — Java's
     /// <c>createDelegationToken(CreateDelegationTokenOptions)</c>. Returns <b>immediately</b>,
     /// without waiting for the broker.
     /// </summary>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future over the issued token. See <see cref="AsyncCreateDelegationTokenResult"/>.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <c>options.Renewers</c> is null or contains a null element, or a renewer's or
     /// <c>options.Owner</c>'s principal type or name contains a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncCreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options = null);
+    AsyncCreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions options);
+
+    /// <summary>Renews a delegation token with the default options.</summary>
+    /// <inheritdoc cref="RenewDelegationToken(byte[], RenewDelegationTokenOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="RenewDelegationToken(byte[], RenewDelegationTokenOptions)" path="/returns"/>
+    /// <inheritdoc cref="RenewDelegationToken(byte[], RenewDelegationTokenOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncRenewDelegationTokenResult RenewDelegationToken(byte[] hmac);
 
     /// <summary>
     /// Renews a delegation token — Java's
@@ -1116,7 +1396,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac()"/>. ⚠ It may contain interior zero
     /// bytes, so it must never be treated as a NUL-terminated string.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future over the new expiry timestamp. See <see cref="AsyncRenewDelegationTokenResult"/>.
     /// </returns>
@@ -1124,9 +1404,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <paramref name="hmac"/> is null, on a real client; a mock fails the future with the core's
     /// <c>DelegationTokenNotFound</c> error instead, as Java's mock does.
     /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncRenewDelegationTokenResult RenewDelegationToken(
-        byte[] hmac, RenewDelegationTokenOptions? options = null);
+        byte[] hmac, RenewDelegationTokenOptions options);
+
+    /// <summary>Expires a delegation token with the default options.</summary>
+    /// <inheritdoc cref="ExpireDelegationToken(byte[], ExpireDelegationTokenOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ExpireDelegationToken(byte[], ExpireDelegationTokenOptions)" path="/returns"/>
+    /// <inheritdoc cref="ExpireDelegationToken(byte[], ExpireDelegationTokenOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncExpireDelegationTokenResult ExpireDelegationToken(byte[] hmac);
 
     /// <summary>
     /// Expires a delegation token — Java's
@@ -1134,9 +1421,9 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="hmac">
-    /// The token's MAC, passed back verbatim — see <see cref="RenewDelegationToken"/>.
+    /// The token's MAC, passed back verbatim — see <see cref="RenewDelegationToken(byte[], RenewDelegationTokenOptions)"/>.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future over the expiry timestamp. See <see cref="AsyncExpireDelegationTokenResult"/>.
     /// </returns>
@@ -1144,9 +1431,15 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <paramref name="hmac"/> is null, on a real client; a mock fails the future with the core's
     /// <c>DelegationTokenNotFound</c> error instead, as Java's mock does.
     /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncExpireDelegationTokenResult ExpireDelegationToken(
-        byte[] hmac, ExpireDelegationTokenOptions? options = null);
+        byte[] hmac, ExpireDelegationTokenOptions options);
+
+    /// <summary>Describes every delegation token the caller may see, with the default options.</summary>
+    /// <inheritdoc cref="DescribeDelegationToken(DescribeDelegationTokenOptions)" path="/returns"/>
+    /// <exception cref="IllegalStateException">The client has been closed.</exception>
+    AsyncDescribeDelegationTokenResult DescribeDelegationToken();
 
     /// <summary>
     /// Describes delegation tokens — Java's
@@ -1154,13 +1447,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults. ⚠ A null
-    /// <c>Owners</c> describes every token the caller may see, while an <b>empty</b> one
-    /// filters by nothing.
+    /// The options for the request. ⚠ A null <c>Owners</c>, the default, describes every token the caller may see,
+    /// while an <b>empty</b> one filters by nothing.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// One future over the token list. See <see cref="AsyncDescribeDelegationTokenResult"/>.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <c>options.Owners</c> contains a null element, or an owner whose principal type or
     /// name contains a NUL character (see the <see cref="IAdmin"/>
@@ -1168,20 +1462,32 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeDelegationTokenResult DescribeDelegationToken(
-        DescribeDelegationTokenOptions? options = null);
+        DescribeDelegationTokenOptions options);
+
+    /// <summary>Describes the cluster's finalized and supported features with the default options.</summary>
+    /// <inheritdoc cref="DescribeFeatures(DescribeFeaturesOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeFeatures(DescribeFeaturesOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeFeaturesResult DescribeFeatures();
 
     /// <summary>
     /// Describes the cluster's finalized and supported features — Java's
     /// <c>describeFeatures(DescribeFeaturesOptions)</c>. Returns <b>immediately</b>, without
     /// waiting for the broker.
     /// </summary>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// The <b>single</b> future Java publishes, over the whole composite. See
     /// <see cref="AsyncDescribeFeaturesResult"/>.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncDescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null);
+    AsyncDescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions options);
+
+    /// <summary>Applies feature updates with the default options.</summary>
+    /// <inheritdoc cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions)" path="/returns"/>
+    /// <inheritdoc cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncUpdateFeaturesResult UpdateFeatures(IReadOnlyDictionary<string, FeatureUpdate> featureUpdates);
 
     /// <summary>
     /// Applies feature updates — Java's
@@ -1189,12 +1495,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="featureUpdates">The update to apply to each feature, keyed by feature name.</param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// One future per feature — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
     /// <see cref="AsyncUpdateFeaturesResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="featureUpdates"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="featureUpdates"/> contains a null name, a null update, a name containing a
     /// NUL character (see the <see cref="IAdmin"/> remarks), or a name its
@@ -1205,7 +1512,14 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncUpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
-        UpdateFeaturesOptions? options = null);
+        UpdateFeaturesOptions options);
+
+    /// <summary>Unregisters a controller with the default options.</summary>
+    /// <inheritdoc cref="UnregisterController(int, UnregisterControllerOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="UnregisterController(int, UnregisterControllerOptions)" path="/returns"/>
+    /// <inheritdoc cref="UnregisterController(int, UnregisterControllerOptions)" path="/remarks"/>
+    /// <inheritdoc cref="UnregisterController(int, UnregisterControllerOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncUnregisterControllerResult UnregisterController(int controllerId);
 
     /// <summary>
     /// Unregisters a controller — Java's
@@ -1213,7 +1527,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Returns <b>immediately</b>, without waiting for the controller.
     /// </summary>
     /// <param name="controllerId">The id of the controller to unregister.</param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>The <b>single</b> future Java publishes. See <see cref="AsyncUnregisterControllerResult"/>.</returns>
     /// <remarks>
     /// The future fails with a <see cref="KafkaException"/> carrying Java's code when the request
@@ -1222,8 +1536,15 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="AsyncMockAdminClient"/> fails it with the UnsupportedVersion code (35) and an
     /// empty message unless it uses a raft controller, as Java's mock does.
     /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncUnregisterControllerResult UnregisterController(int controllerId, UnregisterControllerOptions? options = null);
+    AsyncUnregisterControllerResult UnregisterController(int controllerId, UnregisterControllerOptions options);
+
+    /// <summary>Fences out every active producer using the given transactional ids, with the default options.</summary>
+    /// <inheritdoc cref="FenceProducers(IReadOnlyCollection{string}, FenceProducersOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="FenceProducers(IReadOnlyCollection{string}, FenceProducersOptions)" path="/returns"/>
+    /// <inheritdoc cref="FenceProducers(IReadOnlyCollection{string}, FenceProducersOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncFenceProducersResult FenceProducers(IReadOnlyCollection<string> transactionalIds);
 
     /// <summary>
     /// Fences out every active producer using the given transactional ids — Java's
@@ -1234,9 +1555,10 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// The transactional ids to fence. De-duplicated, because Java keys its result on a map.
     /// An empty collection is a valid request that succeeds with an empty result, as Java's is.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>One future per id, plus the three derived views. See <see cref="AsyncFenceProducersResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
     /// silently, or an id containing a NUL character (see the
@@ -1244,7 +1566,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncFenceProducersResult FenceProducers(
-        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null);
+        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions options);
+
+    /// <summary>Describes the ongoing transactions of the given transactional ids, with the default options.</summary>
+    /// <inheritdoc cref="DescribeTransactions(IReadOnlyCollection{string}, DescribeTransactionsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeTransactions(IReadOnlyCollection{string}, DescribeTransactionsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeTransactions(IReadOnlyCollection{string}, DescribeTransactionsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeTransactionsResult DescribeTransactions(IReadOnlyCollection<string> transactionalIds);
 
     /// <summary>
     /// Describes the ongoing transactions of the given transactional ids — Java's
@@ -1255,9 +1583,10 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// The transactional ids to describe. De-duplicated, because Java keys its result on a map.
     /// An empty collection is a valid request that succeeds with an empty result, as Java's is.
     /// </param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>One future per id. See <see cref="AsyncDescribeTransactionsResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
     /// silently, or an id containing a NUL character (see the
@@ -1265,7 +1594,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeTransactionsResult DescribeTransactions(
-        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null);
+        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions options);
+
+    /// <summary>
+    /// Describes the active producers of the given partitions with the default options, which send the request to
+    /// each partition's leader.
+    /// </summary>
+    /// <inheritdoc cref="DescribeProducers(IReadOnlyCollection{TopicPartition}, DescribeProducersOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeProducers(IReadOnlyCollection{TopicPartition}, DescribeProducersOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeProducers(IReadOnlyCollection{TopicPartition}, DescribeProducersOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncDescribeProducersResult DescribeProducers(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
     /// Describes the active producers of the given partitions — Java's
@@ -1277,11 +1615,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// empty collection is a valid request that succeeds with an empty result, as Java's is.
     /// </param>
     /// <param name="options">
-    /// Request options, or <see langword="null"/> for Java's defaults. <c>BrokerId</c> is
-    /// Java's <c>OptionalInt</c>: unset sends the request to each partition's leader.
+    /// The options for the request. An unset <c>BrokerId</c>, the default, sends the request to each partition's
+    /// leader.
+    /// A null is rejected.
     /// </param>
     /// <returns>One future per partition. See <see cref="AsyncDescribeProducersResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, which the
     /// ABI would skip silently, or with a topic containing a NUL character
@@ -1289,7 +1629,15 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeProducersResult DescribeProducers(
-        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null);
+        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions options);
+
+    /// <summary>
+    /// Lists the cluster's transactions with the default options, which filter on nothing: every state, every
+    /// producer, any duration and any transactional id.
+    /// </summary>
+    /// <inheritdoc cref="ListTransactions(ListTransactionsOptions)" path="/returns"/>
+    /// <exception cref="IllegalStateException">The client has been closed.</exception>
+    AsyncListTransactionsResult ListTransactions();
 
     /// <summary>
     /// Lists the cluster's transactions, fanning out to every broker — Java's
@@ -1297,15 +1645,16 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// waiting for the brokers.
     /// </summary>
     /// <param name="options">
-    /// Request filters, or <see langword="null"/> for Java's defaults (every state, every
-    /// producer, no duration filter, no transactional-id pattern). ⚠ A negative
-    /// <c>options.FilteredDuration</c> is <b>not</b> rejected: it is Java's own "no duration
-    /// filter" default.
+    /// The request's filters; by default every state, every producer, no duration filter and no transactional-id
+    /// pattern. ⚠ A negative <c>options.FilteredDuration</c> is <b>not</b> rejected: it is the default, meaning no
+    /// duration filter.
+    /// A null is rejected.
     /// </param>
     /// <returns>
     /// The three views over one broker-keyed future. ⚠ A broker that fails is not a call
     /// failure — see <see cref="AsyncListTransactionsResult"/>.
     /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <c>options.FilteredTransactionalIdPattern</c> contains a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
@@ -1314,7 +1663,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// enum-typed <c>Set</c> cannot express but a C# cast can.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    AsyncListTransactionsResult ListTransactions(ListTransactionsOptions? options = null);
+    AsyncListTransactionsResult ListTransactions(ListTransactionsOptions options);
+
+    /// <summary>Aborts one hanging transaction on a partition, with the default options.</summary>
+    /// <inheritdoc cref="AbortTransaction(AbortTransactionSpec, AbortTransactionOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AbortTransaction(AbortTransactionSpec, AbortTransactionOptions)" path="/returns"/>
+    /// <inheritdoc cref="AbortTransaction(AbortTransactionSpec, AbortTransactionOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncAbortTransactionResult AbortTransaction(AbortTransactionSpec spec);
 
     /// <summary>
     /// Aborts one hanging transaction on a partition — Java's
@@ -1322,9 +1677,10 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="spec">Which transaction to abort.</param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>The single future Java publishes. See <see cref="AsyncAbortTransactionResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="spec"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="spec"/> carries a topic partition whose topic is null (constructible, as
     /// in Java, or a <c>default(TopicPartition)</c>) — a null topic cannot cross the C ABI —
@@ -1333,7 +1689,13 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAbortTransactionResult AbortTransaction(
-        AbortTransactionSpec spec, AbortTransactionOptions? options = null);
+        AbortTransactionSpec spec, AbortTransactionOptions options);
+
+    /// <summary>Forcefully terminates the ongoing transaction of one transactional id, with the default options.</summary>
+    /// <inheritdoc cref="ForceTerminateTransaction(string, TerminateTransactionOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="ForceTerminateTransaction(string, TerminateTransactionOptions)" path="/returns"/>
+    /// <inheritdoc cref="ForceTerminateTransaction(string, TerminateTransactionOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    AsyncTerminateTransactionResult ForceTerminateTransaction(string transactionalId);
 
     /// <summary>
     /// Forcefully terminates the ongoing transaction of one transactional id — Java's
@@ -1341,19 +1703,20 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <b>immediately</b>, without waiting for the broker.
     /// </summary>
     /// <param name="transactionalId">Whose transaction to terminate.</param>
-    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>
     /// The single future Java publishes — ⚠ as <c>Result()</c>, not <c>All()</c>. See
     /// <see cref="AsyncTerminateTransactionResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalId"/> contains a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncTerminateTransactionResult ForceTerminateTransaction(
-        string transactionalId, TerminateTransactionOptions? options = null);
+        string transactionalId, TerminateTransactionOptions options);
 
     /// <summary>
     /// Closes the client, waiting up to <paramref name="timeout"/> for the background

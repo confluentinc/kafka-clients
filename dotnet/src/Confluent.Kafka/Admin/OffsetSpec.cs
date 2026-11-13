@@ -15,7 +15,7 @@
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Which offset <see cref="IAdmin.ListOffsets"/> should retrieve for a partition — Java's
+/// Which offset <see cref="IAdmin.ListOffsets(System.Collections.Generic.IReadOnlyDictionary{Common.TopicPartition, OffsetSpec}, ListOffsetsOptions)"/> should retrieve for a partition — Java's
 /// <c>org.apache.kafka.clients.admin.OffsetSpec</c>.
 /// </summary>
 /// <remarks>

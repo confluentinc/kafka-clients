@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeCluster"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.DescribeCluster(DescribeClusterOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DescribeClusterOptions</c>.
 /// </summary>
 /// <remarks>

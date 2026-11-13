@@ -21,8 +21,8 @@ namespace Confluent.Kafka.Common;
 /// <summary>
 /// A collection of topics identified either by name or by id — Java's
 /// <c>org.apache.kafka.common.TopicCollection</c>, the argument type of
-/// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
-/// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions?)"/>.
+/// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions)"/> and
+/// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions)"/>.
 /// </summary>
 /// <remarks>
 /// The two nested classes are the only subclasses: the outer constructor is private, as in
@@ -52,8 +52,8 @@ public abstract class TopicCollection
     /// <remarks>
     /// A <see langword="null"/> element is accepted here, as Java's <c>ofTopicNames</c> accepts
     /// one. A recorded deviation:
-    /// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
-    /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions?)"/>
+    /// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions)"/> and
+    /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions)"/>
     /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails only
     /// that key's future with <c>InvalidTopicException</c>.
     /// </remarks>

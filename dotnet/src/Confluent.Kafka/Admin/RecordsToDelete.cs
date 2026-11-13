@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Describes the records to delete from one partition in a call to
-/// <see cref="IAdmin.DeleteRecords"/> — Java's
+/// <see cref="IAdmin.DeleteRecords(System.Collections.Generic.IReadOnlyDictionary{Common.TopicPartition, RecordsToDelete}, DeleteRecordsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.RecordsToDelete</c>.
 /// </summary>
 public sealed class RecordsToDelete : IEquatable<RecordsToDelete>

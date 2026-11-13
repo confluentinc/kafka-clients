@@ -41,8 +41,11 @@ public sealed class PublicAdminP3ShapeParityTests
     [Fact]
     public void IAdmin_TheNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        MethodInfo describeCluster = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeCluster))!;
-        MethodInfo listConfigResources = typeof(IAdmin).GetMethod(nameof(IAdmin.ListConfigResources))!;
+        MethodInfo describeCluster = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DescribeCluster), new[] { typeof(DescribeClusterOptions) })!;
+        MethodInfo listConfigResources = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.ListConfigResources),
+            new[] { typeof(IReadOnlyCollection<ConfigResourceType>), typeof(ListConfigResourcesOptions) })!;
 
         Assert.Equal(typeof(DescribeClusterResult), describeCluster.ReturnType);
         Assert.Equal(typeof(ListConfigResourcesResult), listConfigResources.ReturnType);
@@ -60,10 +63,14 @@ public sealed class PublicAdminP3ShapeParityTests
         {
             foreach (ParameterInfo parameter in rpc.GetParameters())
             {
-                Assert.True(parameter.IsOptional, $"{rpc.Name}.{parameter.Name} must be optional");
-                Assert.Equal(NullableAnnotation.Annotated, NullableFlag(parameter));
+                Assert.False(parameter.IsOptional, $"{rpc.Name}.{parameter.Name} must be required");
             }
+
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(rpc.GetParameters()[rpc.GetParameters().Length - 1]));
+            Assert.Equal(rpc.ReturnType, typeof(IAdmin).GetMethod(rpc.Name, Type.EmptyTypes)!.ReturnType);
         }
+
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(listConfigResources.GetParameters()[0]));
 
         Assert.Empty(
             typeof(IAdmin).GetMethods()

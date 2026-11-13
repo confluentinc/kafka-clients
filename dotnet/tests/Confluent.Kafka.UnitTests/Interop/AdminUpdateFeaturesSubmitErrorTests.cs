@@ -44,7 +44,7 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         try
         {
             IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
-                () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(), options: null));
+                () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(), options: new UpdateFeaturesOptions()));
 
             Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
         }
@@ -70,7 +70,7 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
                     ["metadata.version"] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                     [name] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 },
-                options: null));
+                options: new UpdateFeaturesOptions()));
 
             Assert.Equal("Provided feature can not be empty.", thrown.Message);
         }
@@ -100,7 +100,7 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         try
         {
             ArgumentException thrown =
-                Assert.Throws<ArgumentException>(() => admin.UpdateFeatures(updates, options: null));
+                Assert.Throws<ArgumentException>(() => admin.UpdateFeatures(updates, options: new UpdateFeaturesOptions()));
 
             Assert.Equal("featureUpdates", thrown.ParamName);
             Assert.StartsWith("The feature updates contain the feature 'f' more than once.", thrown.Message);

@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The base of the two SASL/SCRAM credential alterations — Java's abstract
 /// <c>org.apache.kafka.clients.admin.UserScramCredentialAlteration</c>. It is the
-/// element type <see cref="IAdmin.AlterUserScramCredentials"/> accepts.
+/// element type <see cref="IAdmin.AlterUserScramCredentials(System.Collections.Generic.IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)"/> accepts.
 /// </summary>
 /// <remarks>
 /// A closed two-case hierarchy: <see cref="UserScramCredentialUpsertion"/> and

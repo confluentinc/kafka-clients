@@ -22,7 +22,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteConsumerGroups"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DeleteConsumerGroups(IReadOnlyCollection{string}, DeleteConsumerGroupsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DeleteConsumerGroupsResult</c>: one future per group id.
 /// </summary>
 /// <seealso cref="DeleteConsumerGroupsResult"/>

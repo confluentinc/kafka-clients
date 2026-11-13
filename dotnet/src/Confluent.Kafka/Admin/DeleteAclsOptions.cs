@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DeleteAcls"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.DeleteAcls(System.Collections.Generic.IEnumerable{Common.Acl.AclBindingFilter}, DeleteAclsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DeleteAclsOptions</c>.
 /// </summary>
 /// <remarks>

@@ -20,7 +20,7 @@ using Token = Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.CreateDelegationToken"/> — Java's
+/// The result of <see cref="IAdmin.CreateDelegationToken(CreateDelegationTokenOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.CreateDelegationTokenResult</c>: one future over the
 /// issued token.
 /// </summary>

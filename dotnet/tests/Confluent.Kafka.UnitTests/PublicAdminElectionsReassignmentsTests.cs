@@ -243,8 +243,21 @@ public sealed class PublicAdminElectionsReassignmentsTests
             new Dictionary<TopicPartition, NewPartitionReassignment?>());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
-        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(nameof(IAsyncAdmin.ElectLeaders)));
-        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(nameof(IAsyncAdmin.AlterPartitionReassignments)));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(
+            nameof(IAsyncAdmin.ElectLeaders),
+            new[] { typeof(ElectionType), typeof(IReadOnlyCollection<TopicPartition>), typeof(ElectLeadersOptions) }));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(
+            nameof(IAsyncAdmin.ElectLeaders), new[] { typeof(ElectionType), typeof(IReadOnlyCollection<TopicPartition>) }));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(
+            nameof(IAsyncAdmin.AlterPartitionReassignments),
+            new[]
+            {
+                typeof(IReadOnlyDictionary<TopicPartition, NewPartitionReassignment>),
+                typeof(AlterPartitionReassignmentsOptions),
+            }));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(
+            nameof(IAsyncAdmin.AlterPartitionReassignments),
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, NewPartitionReassignment>) }));
     }
 
     private static AsyncElectLeadersResult ElectionOf(IReadOnlyDictionary<TopicPartition, Exception?> outcomes)

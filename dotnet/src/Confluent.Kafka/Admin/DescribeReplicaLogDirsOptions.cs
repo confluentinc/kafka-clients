@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeReplicaLogDirs"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.DescribeReplicaLogDirs(System.Collections.Generic.IReadOnlyCollection{Common.TopicPartitionReplica}, DescribeReplicaLogDirsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions</c>.
 /// </summary>
 /// <remarks>

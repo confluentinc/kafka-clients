@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/> —
+/// The result of <see cref="IAsyncAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions)"/> —
 /// Java's <c>org.apache.kafka.clients.admin.DeleteTopicsResult</c>: one future per topic, keyed
 /// by whichever identifier the request used.
 /// </summary>

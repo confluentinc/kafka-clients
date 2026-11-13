@@ -175,21 +175,121 @@ unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetSendException(System.Exce
 unmatched M:Confluent.Kafka.Producer.MockProducer`2.SetSendOffsetsToTransactionException(System.Exception)
 
 # Java's Admin defaults that only convert their arguments (topic names to a TopicCollection, a group id to a one-group
-# map, the partitions to an Optional, close() to close(Duration)) stay members of the admin interfaces: the clients are
-# their only implementers, and nobody overrides them ("Java default methods in the .NET client", option C). A default
-# Java adds later follows dotnet/CLAUDE.md §3 rule 10.
+# map, the partitions to an Optional, close() to close(Duration)) or only fill in the options (new XxxOptions(); Set.of()
+# or null for the other argument of listConfigResources() and describeUserScramCredentials()) stay members of the admin
+# interfaces: the clients are their only implementers, and nobody overrides them ("Java default methods in the .NET
+# client", option C; "Admin's no-options default methods in .NET", option 1). A default Java adds later follows
+# dotnet/CLAUDE.md §3 rule 10.
+default M:Confluent.Kafka.Admin.IAdmin.AbortTransaction(Confluent.Kafka.Admin.AbortTransactionSpec)
+default M:Confluent.Kafka.Admin.IAdmin.AlterClientQuotas(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Quota.ClientQuotaAlteration})
+default M:Confluent.Kafka.Admin.IAdmin.AlterConsumerGroupOffsets(System.String,System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+default M:Confluent.Kafka.Admin.IAdmin.AlterPartitionReassignments(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Admin.NewPartitionReassignment})
+default M:Confluent.Kafka.Admin.IAdmin.AlterReplicaLogDirs(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartitionReplica,System.String})
+default M:Confluent.Kafka.Admin.IAdmin.AlterUserScramCredentials(System.Collections.Generic.IEnumerable{Confluent.Kafka.Admin.UserScramCredentialAlteration})
 default M:Confluent.Kafka.Admin.IAdmin.Close
+default M:Confluent.Kafka.Admin.IAdmin.CreateAcls(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Acl.AclBinding})
+default M:Confluent.Kafka.Admin.IAdmin.CreateDelegationToken
+default M:Confluent.Kafka.Admin.IAdmin.CreatePartitions(System.Collections.Generic.IReadOnlyDictionary{System.String,Confluent.Kafka.Admin.NewPartitions})
+default M:Confluent.Kafka.Admin.IAdmin.CreateTopics(System.Collections.Generic.IEnumerable{Confluent.Kafka.Admin.NewTopic})
+default M:Confluent.Kafka.Admin.IAdmin.DeleteAcls(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Acl.AclBindingFilter})
+default M:Confluent.Kafka.Admin.IAdmin.DeleteConsumerGroupOffsets(System.String,System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Admin.IAdmin.DeleteConsumerGroups(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAdmin.DeleteRecords(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Admin.RecordsToDelete})
+default M:Confluent.Kafka.Admin.IAdmin.DeleteTopics(Confluent.Kafka.Common.TopicCollection)
+default M:Confluent.Kafka.Admin.IAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String})
 default M:Confluent.Kafka.Admin.IAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.DescribeAcls(Confluent.Kafka.Common.Acl.AclBindingFilter)
+default M:Confluent.Kafka.Admin.IAdmin.DescribeClassicGroups(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeClientQuotas(Confluent.Kafka.Common.Quota.ClientQuotaFilter)
+default M:Confluent.Kafka.Admin.IAdmin.DescribeCluster
+default M:Confluent.Kafka.Admin.IAdmin.DescribeConfigs(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.Config.ConfigResource})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeConsumerGroups(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeDelegationToken
+default M:Confluent.Kafka.Admin.IAdmin.DescribeFeatures
+default M:Confluent.Kafka.Admin.IAdmin.DescribeLogDirs(System.Collections.Generic.IReadOnlyCollection{System.Int32})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeProducers(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeReplicaLogDirs(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartitionReplica})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeTopics(Confluent.Kafka.Common.TopicCollection)
+default M:Confluent.Kafka.Admin.IAdmin.DescribeTopics(System.Collections.Generic.IReadOnlyCollection{System.String})
 default M:Confluent.Kafka.Admin.IAdmin.DescribeTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DescribeTopicsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.DescribeTransactions(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAdmin.DescribeUserScramCredentials
+default M:Confluent.Kafka.Admin.IAdmin.DescribeUserScramCredentials(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAdmin.ElectLeaders(Confluent.Kafka.Common.ElectionType,System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Admin.IAdmin.ExpireDelegationToken(System.Byte[])
+default M:Confluent.Kafka.Admin.IAdmin.FenceProducers(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAdmin.ForceTerminateTransaction(System.String)
+default M:Confluent.Kafka.Admin.IAdmin.IncrementalAlterConfigs(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.Config.ConfigResource,System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Admin.AlterConfigOp}})
+default M:Confluent.Kafka.Admin.IAdmin.ListConfigResources
+default M:Confluent.Kafka.Admin.IAdmin.ListConsumerGroupOffsets(System.Collections.Generic.IReadOnlyDictionary{System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsSpec})
+default M:Confluent.Kafka.Admin.IAdmin.ListConsumerGroupOffsets(System.String)
 default M:Confluent.Kafka.Admin.IAdmin.ListConsumerGroupOffsets(System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.ListGroups
+default M:Confluent.Kafka.Admin.IAdmin.ListOffsets(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Admin.OffsetSpec})
+default M:Confluent.Kafka.Admin.IAdmin.ListPartitionReassignments
 default M:Confluent.Kafka.Admin.IAdmin.ListPartitionReassignments(Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
 default M:Confluent.Kafka.Admin.IAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition},Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAdmin.ListTopics
+default M:Confluent.Kafka.Admin.IAdmin.ListTransactions
+default M:Confluent.Kafka.Admin.IAdmin.RenewDelegationToken(System.Byte[])
+default M:Confluent.Kafka.Admin.IAdmin.UnregisterController(System.Int32)
+default M:Confluent.Kafka.Admin.IAdmin.UpdateFeatures(System.Collections.Generic.IReadOnlyDictionary{System.String,Confluent.Kafka.Admin.FeatureUpdate})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.AbortTransaction(Confluent.Kafka.Admin.AbortTransactionSpec)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.AlterClientQuotas(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Quota.ClientQuotaAlteration})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.AlterConsumerGroupOffsets(System.String,System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.AlterPartitionReassignments(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Admin.NewPartitionReassignment})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.AlterReplicaLogDirs(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartitionReplica,System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.AlterUserScramCredentials(System.Collections.Generic.IEnumerable{Confluent.Kafka.Admin.UserScramCredentialAlteration})
 default M:Confluent.Kafka.Admin.IAsyncAdmin.Close(System.Threading.CancellationToken)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.CreateAcls(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Acl.AclBinding})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.CreateDelegationToken
+default M:Confluent.Kafka.Admin.IAsyncAdmin.CreatePartitions(System.Collections.Generic.IReadOnlyDictionary{System.String,Confluent.Kafka.Admin.NewPartitions})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.CreateTopics(System.Collections.Generic.IEnumerable{Confluent.Kafka.Admin.NewTopic})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteAcls(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Acl.AclBindingFilter})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteConsumerGroupOffsets(System.String,System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteConsumerGroups(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteRecords(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Admin.RecordsToDelete})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteTopics(Confluent.Kafka.Common.TopicCollection)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String})
 default M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeAcls(Confluent.Kafka.Common.Acl.AclBindingFilter)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeClassicGroups(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeClientQuotas(Confluent.Kafka.Common.Quota.ClientQuotaFilter)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeCluster
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeConfigs(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.Config.ConfigResource})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeConsumerGroups(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeDelegationToken
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeFeatures
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeLogDirs(System.Collections.Generic.IReadOnlyCollection{System.Int32})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeProducers(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeReplicaLogDirs(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartitionReplica})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTopics(Confluent.Kafka.Common.TopicCollection)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTopics(System.Collections.Generic.IReadOnlyCollection{System.String})
 default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DescribeTopicsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeTransactions(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeUserScramCredentials
+default M:Confluent.Kafka.Admin.IAsyncAdmin.DescribeUserScramCredentials(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ElectLeaders(Confluent.Kafka.Common.ElectionType,System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ExpireDelegationToken(System.Byte[])
+default M:Confluent.Kafka.Admin.IAsyncAdmin.FenceProducers(System.Collections.Generic.IReadOnlyCollection{System.String})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ForceTerminateTransaction(System.String)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.IncrementalAlterConfigs(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.Config.ConfigResource,System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Admin.AlterConfigOp}})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConfigResources
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConsumerGroupOffsets(System.Collections.Generic.IReadOnlyDictionary{System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsSpec})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConsumerGroupOffsets(System.String)
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListConsumerGroupOffsets(System.String,Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListGroups
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListOffsets(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Admin.OffsetSpec})
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
 default M:Confluent.Kafka.Admin.IAsyncAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition},Confluent.Kafka.Admin.ListPartitionReassignmentsOptions)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListTopics
+default M:Confluent.Kafka.Admin.IAsyncAdmin.ListTransactions
+default M:Confluent.Kafka.Admin.IAsyncAdmin.RenewDelegationToken(System.Byte[])
+default M:Confluent.Kafka.Admin.IAsyncAdmin.UnregisterController(System.Int32)
+default M:Confluent.Kafka.Admin.IAsyncAdmin.UpdateFeatures(System.Collections.Generic.IReadOnlyDictionary{System.String,Confluent.Kafka.Admin.FeatureUpdate})
 
 # Java's deserialize(String, Headers, ByteBuffer): its default on Deserializer and its overrides on the built-in
 # deserializers. .NET passes the bytes as one ReadOnlySpan<byte> form, for byte[] and ByteBuffer alike (ledger 458), so

@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ListConfigResources"/> — Java's
+/// The result of <see cref="IAdmin.ListConfigResources(IReadOnlyCollection{ConfigResourceType}, ListConfigResourcesOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.ListConfigResourcesResult</c>: one future over the whole
 /// listing.
 /// </summary>

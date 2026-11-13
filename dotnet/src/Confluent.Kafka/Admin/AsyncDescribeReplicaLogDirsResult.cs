@@ -20,7 +20,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeReplicaLogDirs"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DescribeReplicaLogDirs(IReadOnlyCollection{TopicPartitionReplica}, DescribeReplicaLogDirsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult</c>: one future per replica.
 /// </summary>
 /// <remarks>

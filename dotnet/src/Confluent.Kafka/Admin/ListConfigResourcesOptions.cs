@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.ListConfigResources"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.ListConfigResources(System.Collections.Generic.IReadOnlyCollection{Common.Config.ConfigResourceType}, ListConfigResourcesOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListConfigResourcesOptions</c>.
 /// </summary>
 /// <remarks>

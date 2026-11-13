@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.RenewDelegationToken"/> — Java's
+/// Options for <see cref="IAdmin.RenewDelegationToken(byte[], RenewDelegationTokenOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.RenewDelegationTokenOptions</c>.
 /// </summary>
 public sealed class RenewDelegationTokenOptions

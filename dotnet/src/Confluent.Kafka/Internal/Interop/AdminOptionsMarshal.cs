@@ -18,8 +18,9 @@ using Confluent.Kafka.Common;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Builds an RPC's C options: <c>&lt;X&gt;Options_new</c>, which carries the core's defaults, then one
-/// <c>set_*</c> call for each setter that ran on the managed options, in the order they last ran.
+/// Builds an RPC's C options: <c>NULL</c> for a null options, which the C entry rejects; otherwise
+/// <c>&lt;X&gt;Options_new</c>, which carries the core's defaults, then one <c>set_*</c> call for each setter that
+/// ran on the managed options, in the order they last ran.
 /// </summary>
 internal static class AdminOptionsMarshal
 {
@@ -33,10 +34,15 @@ internal static class AdminOptionsMarshal
         New create, TOptions? options, OptionSetters? setters, Set<TOptions> set, Destroy destroy)
         where TOptions : class
     {
+        if (options is null)
+        {
+            return IntPtr.Zero;
+        }
+
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = create(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        if (options is null || setters is null)
+        if (setters is null)
         {
             return native;
         }
