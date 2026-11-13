@@ -270,14 +270,14 @@ blocks:
           commands:
             - .semaphore/ci-result.sh failed
       jobs:
-        - name: "Verify Rust (Linux amd64) — plaintext"
+        - name: "verify-rust (Linux amd64) — plaintext"
           commands:
             - make test-rust-all-features
             - make test-integration-perf-rust
-        - name: "Verify Rust (Linux amd64) — ssl"
+        - name: "verify-rust (Linux amd64) — ssl"
           commands:
             - make test-rust-all-features-ssl
-        - name: "Verify Rust (Linux amd64) — sasl_ssl (plain)"
+        - name: "verify-rust (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-rust-all-features-sasl-ssl
         - name: "verify-c (Linux amd64) — plaintext"
