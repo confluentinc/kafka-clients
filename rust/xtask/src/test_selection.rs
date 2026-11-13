@@ -1054,7 +1054,12 @@ fn prompt(base: &str, merge_base: &str, head: &str, changes: &[String], inventor
         .collect();
     let python_suites: String = PYTHON_SUITES
         .iter()
-        .map(|(name, dir)| format!("  - `{name}`: pytest paths or node ids under python/{dir}\n"))
+        .map(|(name, dir)| {
+            format!(
+                "  - `{name}`: pytest paths or node ids under python/{dir}, relative to python/ (`{dir}/<file>.py`, \
+                 `{dir}/<file>.py::<test>`)\n"
+            )
+        })
         .collect();
     let ctest_names = inventory.ctests.keys().cloned().collect::<Vec<_>>().join(", ");
     let dotnet_suites: String = DOTNET_SUITES
@@ -1201,15 +1206,19 @@ fn validate(answer: &Value, inventory: &Inventory) -> anyhow::Result<Map<String,
                 }
             },
             "python" => {
+                let mut suites = Map::new();
                 for (key, entries) in object(value, "python")? {
                     let entries = string_list(entries, &format!("python.{key}"))?;
-                    match key.as_str() {
-                        "typecheck" if entries.is_empty() => {},
+                    let entries = match key.as_str() {
+                        "typecheck" if entries.is_empty() => entries,
                         "typecheck" => bail!("python.typecheck: expected [], got {entries:?}"),
-                        "grpc" => {},
+                        "grpc" => entries,
                         suite => check_python_entries(&inventory.python_dir, suite, &entries)?,
-                    }
+                    };
+                    suites.insert(key.clone(), entries.into_iter().map(Value::String).collect());
                 }
+                checked.insert(name.clone(), Value::Object(suites));
+                continue;
             },
             "dotnet" => {
                 for (key, entries) in object(value, "dotnet")? {
@@ -1233,13 +1242,17 @@ fn object<'a>(value: &'a Value, name: &str) -> anyhow::Result<&'a Map<String, Va
         .with_context(|| format!("{name}: expected an object, got {value}"))
 }
 
-/// Each entry of a pytest suite names a file or directory inside the suite.
-fn check_python_entries(python_dir: &Path, suite: &str, entries: &[String]) -> anyhow::Result<()> {
+/// Each entry of a pytest suite names a file or directory inside the suite,
+/// relative to `python/`, where pytest runs, or to the repository root: the
+/// entries, relative to `python/`.
+fn check_python_entries(python_dir: &Path, suite: &str, entries: &[String]) -> anyhow::Result<Vec<String>> {
     let Some((_, dir)) = PYTHON_SUITES.iter().find(|(name, _)| *name == suite) else {
         bail!("python: unknown suite {suite:?}");
     };
+    let mut relative = Vec::new();
     for entry in entries {
-        let path = Path::new(entry.split("::").next().unwrap_or(entry));
+        let in_python = entry.strip_prefix("python/").unwrap_or(entry);
+        let path = Path::new(in_python.split("::").next().unwrap_or(in_python));
         let inside = path.starts_with(dir) && path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
         if !inside {
             bail!("python.{suite}: {entry:?} is not under python/{dir}");
@@ -1247,8 +1260,9 @@ fn check_python_entries(python_dir: &Path, suite: &str, entries: &[String]) -> a
         if !python_dir.join(path).exists() {
             bail!("python.{suite}: python/{} does not exist", path.display());
         }
+        relative.push(in_python.to_string());
     }
-    Ok(())
+    Ok(relative)
 }
 
 /// Each entry of a `dotnet test` suite is a name prefix inside the suite's
@@ -2332,6 +2346,17 @@ add_test(NAME mock_producer COMMAND test_mock_producer)
         assert_eq!(
             error(json!({"c": {"unit": ["mock_producer:test_b"]}})),
             "c.unit: ctest \"mock_producer\" has no test \"test_b\""
+        );
+        let from_root =
+            json!({"python": {"unit": ["python/test/unit", "test/unit/conftest.py"], "grpc": ["python/x"]}});
+        assert_eq!(
+            Value::Object(validate(&from_root, &inventory).unwrap()),
+            json!({"python": {"unit": ["test/unit", "test/unit/conftest.py"], "grpc": ["python/x"]}}),
+            "an entry from the repository root is kept relative to python/; a gRPC filter is not a path"
+        );
+        assert_eq!(
+            error(json!({"python": {"unit": ["python/test/static"]}})),
+            "python.unit: \"python/test/static\" is not under python/test/unit"
         );
         assert_eq!(
             error(json!({"python": {"unit": ["test/static"]}})),
