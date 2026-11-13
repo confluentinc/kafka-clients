@@ -343,10 +343,8 @@ internal sealed partial class NativeAdminClient
                 IntPtr future;
                 using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(groupId))
                 {
-                    IntPtr outErr = IntPtr.Zero;
-                    future = s_listConsumerGroupOffsetsPartitionsToOffsetAndMetadataWithGroupId(
-                        result.DangerousGetHandle(), pinned.Pointer, ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    future = CallAccessor(
+                        result, s_listConsumerGroupOffsetsPartitionsToOffsetAndMetadataWithGroupId, pinned.Pointer);
                 }
 
                 futures[groupId] = NativeFutureSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>.Start(
