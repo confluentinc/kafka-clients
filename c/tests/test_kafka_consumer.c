@@ -26,6 +26,7 @@
 #include <string.h>
 #include <time.h>
 #include "unity.h"
+#include "test_filter.h"
 #include "test_support.h"
 
 void setUp(void) {}

@@ -44,7 +44,7 @@ public sealed class PublicProducerControlOperationsTests
     [InlineData(AsyncFlavor)]
     public async Task ControlOperations_DoNotWaitForASendInProgress(string flavor)
     {
-        const int maxBlockMs = 2000;
+        const int maxBlockMs = 5000;
         string topic = Topic("control-operations");
         ProbeCallback callback = new ProbeCallback((_, _) => { });
         if (flavor == SyncFlavor)
