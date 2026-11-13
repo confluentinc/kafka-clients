@@ -1,0 +1,20 @@
+{
+  "base": "685cf528109d292f0e588748f3c2f9bd8fc14f79",
+  "changed_files": [
+    "M dotnet/src/Confluent.Kafka/Internal/JavaFloat.cs"
+  ],
+  "created": 1794585014,
+  "dotnet": {
+    "solution": [
+      "Confluent.Kafka.UnitTests.SerializationTests",
+      "Confluent.Kafka.UnitTests.SerdesTests"
+    ]
+  },
+  "head": "54b47fd855441414d90b87b470de3195eab25d2e",
+  "merge_base": "685cf528109d292f0e588748f3c2f9bd8fc14f79",
+  "reasons": {
+    "dotnet.solution": "The renamed private struct in JavaFloat is used only by FloatSerializer and FloatDeserializer, and only SerializationTests and SerdesTests run those float serdes."
+  },
+  "tree": "d82921dfc75ae050750bd886a912b36215a0a5a0",
+  "version": 2
+}
