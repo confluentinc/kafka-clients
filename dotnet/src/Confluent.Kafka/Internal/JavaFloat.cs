@@ -23,13 +23,13 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 internal static class JavaFloat
 {
-    internal static int FloatToRawIntBits(float value) => new FloatIntBits { Float = value }.Int;
+    internal static int FloatToRawIntBits(float value) => new Bits { Float = value }.Int;
 
-    internal static float IntBitsToFloat(int bits) => new FloatIntBits { Int = bits }.Float;
+    internal static float IntBitsToFloat(int bits) => new Bits { Int = bits }.Float;
 
     /// <summary>A <see cref="float"/> and an <see cref="int"/> over the same four bytes.</summary>
     [StructLayout(LayoutKind.Explicit)]
-    private struct FloatIntBits
+    private struct Bits
     {
         [FieldOffset(0)]
         public float Float;
