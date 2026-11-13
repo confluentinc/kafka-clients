@@ -10,9 +10,9 @@ tools/java-perf-test/bin/
 *.svg
 *.json
 *.jsonl
-# The test selection of `make select-tests` is committed with the branch; the
-# pre-commit hook's own selection is local to a checkout.
-!/test-selection.json
+# The test selections of `make select-tests` are committed with the branch;
+# the pre-commit hook's own selection is local to a checkout.
+!/test-selection/test-selection-*.json
 /.test-selection-commit.json
 !design/current/img/*.svg
 # The Confluent.Kafka NuGet package's icon (dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj).

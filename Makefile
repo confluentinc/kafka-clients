@@ -39,7 +39,7 @@ VENV = . venv/bin/activate
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
 	verify-commit verify-commit-checks format-check lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer \
-	select-tests clean-test-selection clean
+	select-tests pre-push-test-selection clean-test-selection clean
 
 build: init-hooks build-all
 
@@ -146,9 +146,9 @@ build-grpc-images-dotnet: devel-build-rust-all-features
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests) and the
-# Python development dependencies. Run this before `make build` on a new
-# checkout.
-init: submodules init-venv
+# Python development dependencies, and registers the git hooks (init-hooks).
+# Run this before `make build` on a new checkout.
+init: submodules init-venv init-hooks
 	@($(VENV) && $(MAKE) -C python $(ROOTS) init)
 
 test: test-rust-all-features test-c test-python
@@ -436,9 +436,11 @@ verify-commit:
 
 verify-commit-checks: devel-build-c format-check check-generated lint test-integration test-c
 
+# Registers .githooks: pre-commit runs verify-commit, pre-push
+# pre-push-test-selection.
 init-hooks:
 	@git config core.hooksPath .githooks
-	@chmod +x .githooks/pre-commit
+	@chmod +x .githooks/pre-commit .githooks/pre-push
 
 # Opt-in editor/AI-assistant tooling (see rust/Makefile); run by hand.
 install-rust-analyzer:
@@ -489,15 +491,19 @@ check-bindings:
 #
 # `make select-tests` gives an agent the changes from BASE (committed,
 # uncommitted and untracked) and writes the tests they can affect, per
-# language, to test-selection.json (or $TEST_SELECTION, relative to this
-# directory), together with the working tree it was made for. The agent is
-# told to include a test whenever in doubt. Commit test-selection.json with the
-# branch.
+# language, to test-selection/test-selection-<HEAD>.json (or to
+# $TEST_SELECTION, relative to this directory, when it names a .json file),
+# together with the working tree it was made for, and deletes every file in
+# test-selection/ but the four most recent. The agent is told to include a
+# test whenever in doubt. Commit test-selection/ with the branch: the
+# pre-push hook (pre-push-test-selection) does it, as a commit of its own,
+# when a pushed HEAD has no selection made for it.
 #
-# A selection applies only where TEST_SELECTION names it: CI sets it to
-# test-selection.json on a pull request build, `verify-commit` to its own
+# A selection applies only where TEST_SELECTION names it, a file or the
+# folder, of which the file made for the working tree applies: CI sets it to
+# test-selection on a pull request build, `verify-commit` to its own
 # .test-selection-commit.json, and it can be set by hand
-# (`TEST_SELECTION=test-selection.json make test`). Then every test recipe
+# (`TEST_SELECTION=test-selection make test`). Then every test recipe
 # (`test`, `verify`, the integration and performance targets, in Rust, C,
 # Python and .NET) runs only the selected tests, and a suite the file leaves out does
 # not run at all, but only while the working tree is the one the file was made
@@ -522,8 +528,21 @@ SELECT_TESTS_FLAGS ?=
 select-tests:
 	cd rust && cargo xtask select-tests --base "$(BASE)" --agent "$(AGENT)" --model "$(AGENT_MODEL)" $(SELECT_TESTS_FLAGS)
 
+# The pre-push hook's task, reading the pushed refs on standard input: when
+# HEAD is pushed and its committed test-selection/ holds no selection made for
+# it, it selects for HEAD, commits test-selection/ (with --no-verify), and
+# stops the push, which git cannot extend with a commit made by its hook: push
+# again. A working tree holding changes HEAD does not, or a failed selection,
+# lets the push go on without one, and CI then runs every test. It builds only
+# xtask's test-selection binary.
+pre-push-test-selection:
+	cd rust && cargo run -q --locked -p xtask --bin test-selection -- pre-push --base "$(BASE)" --agent "$(AGENT)" --model "$(AGENT_MODEL)"
+
+# Removes the selections of test-selection/ and the .json file TEST_SELECTION
+# names, if any.
 clean-test-selection:
-	rm -f "$${TEST_SELECTION:-test-selection.json}"
+	rm -f test-selection/test-selection-*.json
+	case "$${TEST_SELECTION:-}" in *.json) rm -f "$$TEST_SELECTION" ;; esac
 
 clean:
 	$(MAKE) -C rust clean

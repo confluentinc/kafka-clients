@@ -23,8 +23,9 @@
 # Windows agents do not run.
 #
 # On a pull request the unit tests run through the test selection, as in the Linux and macOS jobs:
-# only the tests the committed test-selection.json selects in its dotnet.solution section, if it was
-# made for exactly this working tree (rust/xtask/src/test_selection.rs); otherwise every test runs.
+# only the tests that the selection in the committed test-selection/ folder made for exactly this
+# working tree selects in its dotnet.solution section (rust/xtask/src/test_selection.rs); otherwise
+# every test runs.
 # The selection tasks run in xtask's test-selection binary, which builds on Windows, where xtask
 # itself does not.
 #
@@ -55,7 +56,7 @@ Invoke-Retry { Invoke-Native git @('-C', $repo, 'submodule', 'update', '--init',
 
 Write-Output "== Test selection ($Platform)"
 if ($env:SEMAPHORE_GIT_PR_NUMBER) {
-    $env:TEST_SELECTION = 'test-selection.json'
+    $env:TEST_SELECTION = 'test-selection'
 }
 $rust = Join-Path $repo 'rust'
 # The selection tasks run in rust\, as `cargo xtask` does: they find the repository from there.

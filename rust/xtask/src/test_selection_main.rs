@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! The test selection tasks of xtask on their own: `selected-run`,
-//! `selected-cargo-test`, `show-test-selection` and `select-tests`, taking the
+//! `selected-cargo-test`, `show-test-selection`, `select-tests` and `pre-push`, taking the
 //! same arguments as `cargo xtask <task>`.
 //!
 //! This binary builds on Windows, where xtask itself does not: its chaos and
@@ -38,8 +38,9 @@ fn main() -> anyhow::Result<()> {
         Some("selected-cargo-test") => test_selection::cargo_test(&args),
         Some("selected-run") => test_selection::selected_run(&args),
         Some("show-test-selection") => test_selection::show(),
+        Some("pre-push") => test_selection::pre_push(&args),
         other => anyhow::bail!(
-            "unknown task {other:?}; it runs select-tests, selected-cargo-test, selected-run or show-test-selection"
+            "unknown task {other:?}; it runs select-tests, selected-cargo-test, selected-run, show-test-selection or pre-push"
         ),
     }
 }

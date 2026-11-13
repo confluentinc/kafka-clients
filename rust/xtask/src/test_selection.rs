@@ -15,12 +15,21 @@
 //! Test selection.
 //!
 //! `select-tests` gives an agent the changes from a base branch and writes the
-//! tests they can affect to `test-selection.json` at the repository root (or
-//! the file `TEST_SELECTION` names, relative to the root), to be committed with
-//! the branch. `selected-cargo-test` and `selected-run`, which the Makefiles'
-//! test recipes go through, apply a selection only when `TEST_SELECTION` names
-//! one: CI sets it on a pull request build and `make verify-commit` on the
-//! pre-commit hook's own file. Without it they run everything.
+//! tests they can affect to `test-selection/test-selection-<commit>.json`,
+//! `<commit>` being the HEAD it was made at, to be committed with the branch
+//! (or to the file `TEST_SELECTION` names, relative to the repository root,
+//! when it names a `.json` file). Writing to the folder deletes every file in
+//! it but the four most recent. `selected-cargo-test` and `selected-run`,
+//! which the Makefiles' test recipes go through, apply a selection only when
+//! `TEST_SELECTION` names one: a file, or the folder, of which they use the
+//! file made for the working tree. CI names the folder on a pull request
+//! build and `make verify-commit` the pre-commit hook's own file. Without it
+//! they run everything.
+//!
+//! `pre-push`, which the pre-push hook runs, makes sure a pushed HEAD carries
+//! a selection made for it: when its committed folder has none, it selects,
+//! commits the folder, and stops the push, which then has to be repeated to
+//! include that commit.
 //!
 //! The file holds one section per suite. A section that is missing runs
 //! nothing, `[]` runs the whole suite, and a list runs only what it names:
@@ -38,10 +47,12 @@
 //!   the `__grpc_dotnet` tests.
 //!
 //! The file records the change it was made for: `merge_base`,
-//! `changed_files`, and `tree`, the git tree of the working tree with the
-//! selection files left out. The selection applies only while the working tree
-//! is still that tree; after any edit every test runs again, so a commit is
-//! never checked against a selection made for other content.
+//! `changed_files`, `head`, `created` (Unix seconds), and `tree`, the git tree
+//! of the working tree with the selection files and the folder left out. The
+//! selection applies only while the working tree is still that tree; after any
+//! edit every test runs again, so a commit is never checked against a
+//! selection made for other content. Leaving the folder out makes the commit
+//! that adds a selection still match it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -57,7 +68,14 @@ use serde_json::{Map, Value};
 
 use crate::REPO_ROOT;
 
-const SELECTION_FILE: &str = "test-selection.json";
+/// The committed selections' folder, relative to the repository root.
+const SELECTION_DIR: &str = "test-selection";
+/// A committed selection's file name: this prefix, the commit, `.json`.
+const SELECTION_PREFIX: &str = "test-selection-";
+/// How many selections the folder keeps.
+const KEPT_SELECTIONS: usize = 4;
+/// The length of the commit in a selection's file name.
+const COMMIT_ABBREV: usize = 12;
 const FORMAT_VERSION: u64 = 2;
 const ROOT_PACKAGE: &str = "confluent-kafka";
 
@@ -143,33 +161,153 @@ enum Choice {
     Only(Vec<String>),
 }
 
-/// The file `select-tests` writes: `$TEST_SELECTION`, by default
-/// `test-selection.json`.
-fn output_path() -> PathBuf {
-    let file = env::var_os("TEST_SELECTION").unwrap_or_else(|| OsString::from(SELECTION_FILE));
-    Path::new(REPO_ROOT).join(file)
+/// What `TEST_SELECTION` names: one selection file, or a folder of them.
+#[derive(Debug, PartialEq)]
+enum Target {
+    File(PathBuf),
+    Dir(PathBuf),
+}
+
+/// The target `TEST_SELECTION` names, `None` when it is not set.
+fn named_target() -> Option<Target> {
+    env::var_os("TEST_SELECTION").map(|name| target_of(Path::new(&name)))
+}
+
+/// `name`, relative to the repository root: a `.json` name is a file, any
+/// other a folder.
+fn target_of(name: &Path) -> Target {
+    let path = Path::new(REPO_ROOT).join(name);
+    if name.extension().is_some_and(|extension| extension == "json") {
+        Target::File(path)
+    } else {
+        Target::Dir(path)
+    }
+}
+
+/// The file, in the folder `dir`, of a selection made at `head`.
+fn dir_file(dir: &Path, head: &str) -> PathBuf {
+    let commit = head.get(..COMMIT_ABBREV).unwrap_or(head);
+    dir.join(format!("{SELECTION_PREFIX}{commit}.json"))
+}
+
+/// Whether `name` is a selection's file name in the folder.
+fn is_selection_name(name: &str) -> bool {
+    name.strip_prefix(SELECTION_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|commit| !commit.is_empty())
 }
 
 /// The selection to apply, `None` when there is none: `TEST_SELECTION` is not
-/// set, the file is missing, or it was made for another tree.
+/// set, or the file it names, or every file of the folder it names, is
+/// missing or was made for another tree.
 fn load() -> anyhow::Result<Option<Map<String, Value>>> {
-    let Some(file) = env::var_os("TEST_SELECTION") else {
+    let Some(target) = named_target() else {
         return Ok(None);
     };
-    let path = Path::new(REPO_ROOT).join(file);
-    let Some(selection) = read_selection(&path)? else {
-        eprintln!("test-selection: there is no {}, so every test runs", path.display());
-        return Ok(None);
+    let (path, selection) = match target {
+        Target::File(path) => {
+            let Some(selection) = read_selection(&path)? else {
+                eprintln!("test-selection: there is no {}, so every test runs", path.display());
+                return Ok(None);
+            };
+            if let Some(reason) = mismatch(&selection)? {
+                eprintln!(
+                    "test-selection: {} does not apply ({reason}), so every test runs; run `make select-tests` again",
+                    path.display()
+                );
+                return Ok(None);
+            }
+            (path, selection)
+        },
+        Target::Dir(dir) => {
+            let selections = dir_selections(&dir)?;
+            if selections.is_empty() {
+                eprintln!("test-selection: {} holds no selection, so every test runs", dir.display());
+                return Ok(None);
+            }
+            let current = working_tree(Path::new(REPO_ROOT), &selection_files())?;
+            let found = selections
+                .into_iter()
+                .find(|(_, selection)| mismatch_with(selection, &current).is_none());
+            let Some(found) = found else {
+                eprintln!(
+                    "test-selection: no selection in {} was made for the working tree {current}, so every test runs; \
+                     run `make select-tests` again",
+                    dir.display()
+                );
+                return Ok(None);
+            };
+            found
+        },
     };
-    if let Some(reason) = mismatch(&selection)? {
-        eprintln!(
-            "test-selection: {} does not apply ({reason}), so every test runs; run `make select-tests` again",
-            path.display()
-        );
-        return Ok(None);
-    }
     eprintln!("test-selection: running only the tests {} selects", path.display());
     Ok(Some(selection))
+}
+
+/// The selections of the folder `dir`, the most recent first; none when it
+/// does not exist. A file that cannot be read is reported and left out.
+fn dir_selections(dir: &Path) -> anyhow::Result<Vec<(PathBuf, Map<String, Value>)>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut selections = Vec::new();
+    for entry in entries {
+        let path = entry.with_context(|| format!("reading {}", dir.display()))?.path();
+        if !path.file_name().and_then(|n| n.to_str()).is_some_and(is_selection_name) {
+            continue;
+        }
+        match read_selection(&path) {
+            Ok(Some(selection)) => selections.push((path, selection)),
+            Ok(None) => {},
+            Err(e) => eprintln!("test-selection: leaving out {}: {e:#}", path.display()),
+        }
+    }
+    selections.sort_by(|(a_path, a), (b_path, b)| (created(b), b_path).cmp(&(created(a), a_path)));
+    Ok(selections)
+}
+
+/// When a selection was made, in Unix seconds; 0 when it does not say.
+fn created(selection: &Map<String, Value>) -> u64 {
+    selection.get("created").and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// The names of the selections to delete from a folder holding `dated`
+/// (creation time, file name): all but the `KEPT_SELECTIONS` most recent.
+fn stale(mut dated: Vec<(u64, String)>) -> Vec<String> {
+    dated.sort_by(|a, b| b.cmp(a));
+    dated.into_iter().skip(KEPT_SELECTIONS).map(|(_, name)| name).collect()
+}
+
+/// Deletes every selection of the folder `dir` but the `KEPT_SELECTIONS`
+/// most recent; a file that cannot be read counts as the oldest.
+fn prune(dir: &Path) -> anyhow::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut dated = Vec::new();
+    for entry in entries {
+        let Ok(name) = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .file_name()
+            .into_string()
+        else {
+            continue;
+        };
+        if is_selection_name(&name) {
+            let made = read_selection(&dir.join(&name)).ok().flatten().map_or(0, |s| created(&s));
+            dated.push((made, name));
+        }
+    }
+    for name in stale(dated) {
+        let path = dir.join(&name);
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        eprintln!("select-tests: removed {}", path.display());
+    }
+    Ok(())
 }
 
 /// The selection file as written, `None` when there is none.
@@ -189,15 +327,21 @@ fn read_selection(path: &Path) -> anyhow::Result<Option<Map<String, Value>>> {
 /// Why the selection does not apply to the working tree, `None` when it does:
 /// it has this format and was made for the current tree.
 fn mismatch(selection: &Map<String, Value>) -> anyhow::Result<Option<String>> {
+    let current = working_tree(Path::new(REPO_ROOT), &selection_files())?;
+    Ok(mismatch_with(selection, &current))
+}
+
+/// Why the selection does not apply to the tree `current`, `None` when it
+/// does.
+fn mismatch_with(selection: &Map<String, Value>, current: &str) -> Option<String> {
     let version = selection.get("version").and_then(Value::as_u64);
     if version != Some(FORMAT_VERSION) {
-        return Ok(Some(format!("its version is not {FORMAT_VERSION}")));
+        return Some(format!("its version is not {FORMAT_VERSION}"));
     }
     let Some(selected) = selection.get("tree").and_then(Value::as_str) else {
-        return Ok(Some("it names no tree".into()));
+        return Some("it names no tree".into());
     };
-    let current = working_tree(Path::new(REPO_ROOT), &selection_files())?;
-    Ok((selected != current).then(|| format!("it was made for tree {selected}, the working tree is {current}")))
+    (selected != current).then(|| format!("it was made for tree {selected}, the working tree is {current}"))
 }
 
 /// Why the selection file cannot be kept for HEAD, `None` when it can: it was
@@ -257,23 +401,24 @@ fn string_list(value: &Value, name: &str) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
-/// The selection files, relative to the repository root: the committed
-/// `test-selection.json` and the one `TEST_SELECTION` names. Neither is ever
-/// part of a change.
+/// The selection paths, relative to the repository root: the committed
+/// `test-selection/` folder and the file or folder `TEST_SELECTION` names.
+/// Nothing in them is ever part of a change.
 fn selection_files() -> Vec<String> {
-    let mut files = vec![SELECTION_FILE.to_string()];
+    let mut files = vec![SELECTION_DIR.to_string()];
     if let Ok(file) = env::var("TEST_SELECTION") {
-        if !files.contains(&file) {
+        if !files.iter().any(|known| Path::new(known) == Path::new(&file)) {
             files.push(file);
         }
     }
     files
 }
 
-/// Whether a `<status> <path>...` change touches only selection files.
+/// Whether a `<status> <path>...` change touches only selection paths: a
+/// selection file, or a file in a selection folder.
 fn is_selection_change(change: &str, selection_files: &[String]) -> bool {
     let mut paths = change.split(' ').skip(1).peekable();
-    paths.peek().is_some() && paths.all(|path| selection_files.iter().any(|file| Path::new(path) == Path::new(file)))
+    paths.peek().is_some() && paths.all(|path| selection_files.iter().any(|file| Path::new(path).starts_with(file)))
 }
 
 /// The changes from `merge_base`, working tree and untracked files included,
@@ -299,6 +444,20 @@ fn changed_files(merge_base: &str) -> anyhow::Result<Vec<String>> {
 /// in a copy of the index, which keeps the index's file stat cache, so the
 /// real index is left as it is.
 fn working_tree(repo: &Path, excluded: &[String]) -> anyhow::Result<String> {
+    tree_without(repo, None, excluded)
+}
+
+/// The id of the git tree of `commit` in `repo`, without the `excluded`
+/// paths.
+fn commit_tree(repo: &Path, commit: &str, excluded: &[String]) -> anyhow::Result<String> {
+    tree_without(repo, Some(commit), excluded)
+}
+
+/// The tree of `commit`, or of the working tree when it is `None`, without
+/// the `excluded` paths (a folder with everything in it). It is built in a
+/// scratch index: for the working tree a copy of the index, which keeps the
+/// index's file stat cache. The real index is left as it is.
+fn tree_without(repo: &Path, commit: Option<&str>, excluded: &[String]) -> anyhow::Result<String> {
     // Absolute, because git reads GIT_INDEX_FILE relative to `-C repo`. Not
     // `fs::canonicalize`: on Windows it returns a verbatim `\\?\C:\...` path,
     // which git cannot create its index lock under.
@@ -308,13 +467,16 @@ fn working_tree(repo: &Path, excluded: &[String]) -> anyhow::Result<String> {
     let mut scratch = index.clone().into_os_string();
     scratch.push(format!(".test-selection-{}", std::process::id()));
     let scratch = PathBuf::from(scratch);
-    if index.exists() {
+    if commit.is_none() && index.exists() {
         fs::copy(&index, &scratch).with_context(|| format!("copying {}", index.display()))?;
     }
     let envs = [("GIT_INDEX_FILE", scratch.as_os_str())];
     let tree = (|| {
-        git_in(repo, &envs, &["add", "-A"])?;
-        let mut rm = vec!["rm", "--cached", "-q", "--ignore-unmatch", "--"];
+        match commit {
+            Some(commit) => git_in(repo, &envs, &["read-tree", commit])?,
+            None => git_in(repo, &envs, &["add", "-A"])?,
+        };
+        let mut rm = vec!["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--"];
         rm.extend(excluded.iter().map(String::as_str));
         git_in(repo, &envs, &rm)?;
         git_in(repo, &envs, &["write-tree"])
@@ -530,39 +692,72 @@ fn unit_key(package: &str, kind: &str, name: &str) -> String {
 
 // ── select-tests ───────────────────────────────────────────────────────────
 
-/// `select-tests [--base <ref>] [--agent <command>] [--model <model>]
-/// [--timeout <seconds>] [--reuse]`.
-pub fn select(args: &[String]) -> anyhow::Result<()> {
-    let mut base = DEFAULT_BASE.to_string();
-    let mut agent = DEFAULT_AGENT.to_string();
-    let mut model = DEFAULT_MODEL.to_string();
-    let mut timeout = Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECS);
-    let mut reuse = false;
+/// The options of `select-tests` and `pre-push`.
+struct SelectOptions {
+    base: String,
+    agent: String,
+    model: String,
+    timeout: Duration,
+    reuse: bool,
+}
+
+/// Parses `[--base <ref>] [--agent <command>] [--model <model>]
+/// [--timeout <seconds>]`, and `[--reuse]` when `task` takes it.
+fn select_options(task: &str, args: &[String], takes_reuse: bool) -> anyhow::Result<SelectOptions> {
+    let mut options = SelectOptions {
+        base: DEFAULT_BASE.to_string(),
+        agent: DEFAULT_AGENT.to_string(),
+        model: DEFAULT_MODEL.to_string(),
+        timeout: Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECS),
+        reuse: false,
+    };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().with_context(|| format!("{arg} needs a value"));
         match arg.as_str() {
-            "--base" => base = value()?,
-            "--agent" => agent = value()?,
-            "--model" => model = value()?,
+            "--base" => options.base = value()?,
+            "--agent" => options.agent = value()?,
+            "--model" => options.model = value()?,
             "--timeout" => {
                 let secs = value()?;
                 let secs: u64 = secs
                     .parse()
                     .with_context(|| format!("--timeout: {secs:?} is not a number of seconds"))?;
-                timeout = Duration::from_secs(secs);
+                options.timeout = Duration::from_secs(secs);
             },
-            "--reuse" => reuse = true,
-            other => bail!("select-tests: unknown argument {other:?}"),
+            "--reuse" if takes_reuse => options.reuse = true,
+            other => bail!("{task}: unknown argument {other:?}"),
         }
     }
+    Ok(options)
+}
+
+/// `select-tests [--base <ref>] [--agent <command>] [--model <model>]
+/// [--timeout <seconds>] [--reuse]`.
+pub fn select(args: &[String]) -> anyhow::Result<()> {
+    let options = select_options("select-tests", args, true)?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    let target = named_target().unwrap_or_else(|| target_of(Path::new(SELECTION_DIR)));
+    select_into(&options, &head, &target)
+}
+
+/// Selects for the working tree at `head` and writes the selection to
+/// `target`: the file it is, or the file for `head` in the folder it is, of
+/// which every selection but the `KEPT_SELECTIONS` most recent is then
+/// deleted.
+fn select_into(options: &SelectOptions, head: &str, target: &Target) -> anyhow::Result<()> {
+    let SelectOptions { base, agent, model, timeout, reuse } = options;
+    let (timeout, reuse) = (*timeout, *reuse);
     let agent: Vec<&str> = agent.split_whitespace().collect();
     let Some((program, agent_args)) = agent.split_first() else {
         bail!("select-tests: --agent is empty");
     };
 
-    let path = output_path();
-    let head = git(&["rev-parse", "HEAD"])?;
+    let (path, dir) = match target {
+        Target::File(path) => (path.clone(), None),
+        Target::Dir(dir) => (dir_file(dir, head), Some(dir.as_path())),
+    };
+    let head = head.to_string();
     if reuse {
         match reuse_obstacle(&path, &head) {
             None => {
@@ -581,15 +776,19 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
 
-    let merge_base = git(&["merge-base", &base, "HEAD"])?;
+    let merge_base = git(&["merge-base", base, "HEAD"])?;
     let changes = changed_files(&merge_base)?;
     let tree = working_tree(Path::new(REPO_ROOT), &selection_files())?;
+    let made = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
 
     let mut selection = Map::new();
     selection.insert("version".into(), FORMAT_VERSION.into());
     selection.insert("base".into(), base.clone().into());
     selection.insert("merge_base".into(), merge_base.clone().into());
     selection.insert("head".into(), head.clone().into());
+    selection.insert("created".into(), made.into());
     selection.insert("tree".into(), tree.into());
     selection.insert("changed_files".into(), changes.clone().into());
 
@@ -597,7 +796,7 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
         eprintln!("select-tests: no change from {base}, so no test is selected");
     } else {
         let inventory = inventory()?;
-        let prompt = prompt(&base, &merge_base, &head, &changes, &inventory);
+        let prompt = prompt(base, &merge_base, &head, &changes, &inventory);
         eprintln!(
             "select-tests: asking `{}` ({} changed files)...",
             agent.join(" "),
@@ -606,7 +805,7 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
         let mut command = Command::new(program);
         command
             .args(agent_args)
-            .args(["--model", &model])
+            .args(["--model", model])
             .args(["--restricted", "--strict-mcp-config", "--tools", AGENT_BUILTIN_TOOLS])
             .args(["--allowedTools", AGENT_TOOLS, "--disallowedTools", AGENT_DENIED_TOOLS])
             .args(["-p", &prompt])
@@ -620,11 +819,102 @@ pub fn select(args: &[String]) -> anyhow::Result<()> {
         selection.extend(chosen);
     }
 
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
     fs::write(&path, serde_json::to_string_pretty(&Value::Object(selection.clone()))? + "\n")
         .with_context(|| format!("writing {}", path.display()))?;
     eprintln!("select-tests: wrote {}", path.display());
     print_summary("select-tests", &selection);
+    if let Some(dir) = dir {
+        prune(dir)?;
+    }
     Ok(())
+}
+
+// ── pre-push ───────────────────────────────────────────────────────────────
+
+/// `pre-push [--base <ref>] [--agent <command>] [--model <model>]
+/// [--timeout <seconds>]`, run by the pre-push hook with the hook's standard
+/// input: one `<local ref> <local commit> <remote ref> <remote commit>` line
+/// per pushed ref.
+///
+/// When HEAD is pushed and its committed `test-selection/` folder holds no
+/// selection made for it, it selects for HEAD (keeping a selection already
+/// made for it in the folder), commits the folder, and exits with 1: git has
+/// chosen the commits it pushes before the hook runs, so the push stops, to
+/// be repeated with the new commit. Otherwise the push goes on: when HEAD is
+/// not pushed or already carries its selection, and, with no selection and so
+/// every test running in CI, when the working tree holds changes HEAD does not
+/// or the selection fails.
+pub fn pre_push(args: &[String]) -> anyhow::Result<()> {
+    let mut options = select_options("pre-push", args, false)?;
+    options.reuse = true;
+    let mut refs = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut refs).context("reading the pushed refs")?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    if !pushes(&refs, &head) {
+        return Ok(());
+    }
+    let repo = Path::new(REPO_ROOT);
+    let excluded = selection_files();
+    let head_tree = commit_tree(repo, &head, &excluded)?;
+    if let Some(path) = committed_selection(&head_tree)? {
+        eprintln!("pre-push: HEAD carries {path}, made for it");
+        return Ok(());
+    }
+    if working_tree(repo, &excluded)? != head_tree {
+        eprintln!(
+            "pre-push: the working tree holds changes HEAD does not, so no test selection is made for HEAD and CI \
+             runs every test; commit or stash them and push again to make one"
+        );
+        return Ok(());
+    }
+    if let Err(e) = select_into(&options, &head, &target_of(Path::new(SELECTION_DIR))) {
+        eprintln!("pre-push: the test selection failed, so the push goes on without one and CI runs every test: {e:#}");
+        return Ok(());
+    }
+    git(&["add", "-A", "--", SELECTION_DIR])?;
+    if git(&["status", "--porcelain", "--", SELECTION_DIR])?.is_empty() {
+        return Ok(());
+    }
+    let made_at = head.get(..COMMIT_ABBREV).unwrap_or(&head);
+    let message = format!("Test selection for {made_at}");
+    git(&["commit", "--no-verify", "-q", "-m", &message, "--", SELECTION_DIR])?;
+    let commit = git(&["rev-parse", "--short", "HEAD"])?;
+    eprintln!(
+        "pre-push: committed {commit} \"{message}\", which this push does not include, so the push stops; push \
+         again"
+    );
+    std::process::exit(1);
+}
+
+/// Whether the hook's standard input `refs` pushes the commit `head`.
+fn pushes(refs: &str, head: &str) -> bool {
+    refs.lines().any(|line| line.split_whitespace().nth(1) == Some(head))
+}
+
+/// The selection HEAD's committed folder holds for the tree `tree`, `None`
+/// when it holds none.
+fn committed_selection(tree: &str) -> anyhow::Result<Option<String>> {
+    let listing = git(&["ls-tree", "--name-only", "HEAD", &format!("{SELECTION_DIR}/")])?;
+    for path in listing.lines() {
+        if !Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_selection_name)
+        {
+            continue;
+        }
+        let text = git(&["show", &format!("HEAD:{path}")])?;
+        let Ok(Value::Object(selection)) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if mismatch_with(&selection, tree).is_none() {
+            return Ok(Some(path.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 fn prompt(base: &str, merge_base: &str, head: &str, changes: &[String], inventory: &Inventory) -> String {
@@ -1557,17 +1847,116 @@ mod tests {
 
     #[test]
     fn test_is_selection_change() {
-        let files = strings(&["test-selection.json", ".test-selection-commit.json"]);
-        assert!(is_selection_change("A test-selection.json", &files));
+        let files = strings(&["test-selection", ".test-selection-commit.json"]);
+        assert!(is_selection_change("A test-selection/test-selection-0123456789ab.json", &files));
+        assert!(is_selection_change("D test-selection/test-selection-ba9876543210.json", &files));
         assert!(is_selection_change("M .test-selection-commit.json", &files));
         assert!(is_selection_change(
-            "R100 test-selection.json .test-selection-commit.json",
+            "R100 test-selection/test-selection-0123456789ab.json .test-selection-commit.json",
             &files
         ));
-        assert!(!is_selection_change("R100 test-selection.json rust/x.json", &files));
-        assert!(!is_selection_change("M rust/test-selection.json", &files));
+        assert!(!is_selection_change(
+            "R100 test-selection/test-selection-0123456789ab.json rust/x.json",
+            &files
+        ));
+        assert!(!is_selection_change("M rust/test-selection/x.json", &files));
+        assert!(!is_selection_change("A test-selection-other/x.json", &files));
         assert!(!is_selection_change("M rust/src/lib.rs", &files));
         assert!(!is_selection_change("M", &files));
+    }
+
+    #[test]
+    fn test_target_of_and_dir_file() {
+        let root = Path::new(REPO_ROOT);
+        assert_eq!(
+            target_of(Path::new(".test-selection-commit.json")),
+            Target::File(root.join(".test-selection-commit.json"))
+        );
+        assert_eq!(target_of(Path::new(SELECTION_DIR)), Target::Dir(root.join(SELECTION_DIR)));
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            dir_file(Path::new("d"), head),
+            Path::new("d").join("test-selection-0123456789ab.json")
+        );
+        assert_eq!(dir_file(Path::new("d"), "abc"), Path::new("d").join("test-selection-abc.json"));
+    }
+
+    #[test]
+    fn test_is_selection_name() {
+        assert!(is_selection_name("test-selection-0123456789ab.json"));
+        assert!(!is_selection_name("test-selection-.json"));
+        assert!(!is_selection_name("test-selection-0123456789ab.json.tmp"));
+        assert!(!is_selection_name("notes.json"));
+    }
+
+    #[test]
+    fn test_stale_keeps_the_four_most_recent() {
+        let dated = |entries: &[(u64, &str)]| entries.iter().map(|&(t, n)| (t, n.to_string())).collect::<Vec<_>>();
+        assert!(stale(dated(&[(3, "c"), (1, "a"), (2, "b")])).is_empty());
+        assert!(stale(dated(&[(1, "a"), (2, "b"), (3, "c"), (4, "d")])).is_empty());
+        let mut removed = stale(dated(&[(5, "e"), (1, "a"), (6, "f"), (3, "c"), (2, "b"), (4, "d")]));
+        removed.sort();
+        assert_eq!(removed, strings(&["a", "b"]));
+        // A file that cannot be read is dated 0, so it goes first.
+        assert_eq!(
+            stale(dated(&[(0, "x"), (1, "a"), (2, "b"), (3, "c"), (4, "d")])),
+            strings(&["x"])
+        );
+    }
+
+    #[test]
+    fn test_pushes() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let other = "89abcdef0123456789abcdef0123456789abcdef";
+        let zero = "0000000000000000000000000000000000000000";
+        assert!(pushes(&format!("refs/heads/b {head} refs/heads/b {other}\n"), head));
+        assert!(pushes(
+            &format!("refs/heads/a {other} refs/heads/a {zero}\nrefs/heads/b {head} refs/heads/b {zero}\n"),
+            head
+        ));
+        assert!(!pushes(&format!("refs/heads/a {other} refs/heads/a {head}\n"), head));
+        assert!(!pushes(&format!("(delete) {zero} refs/heads/b {head}\n"), head));
+        assert!(!pushes("", head));
+    }
+
+    #[test]
+    fn test_dir_selections_and_prune() {
+        let dir = env::temp_dir().join(format!("xtask-test-selection-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(dir_selections(&dir).unwrap().is_empty(), "a missing folder holds none");
+        prune(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        for made in 1..=6u64 {
+            let selection = json!({"version": FORMAT_VERSION, "tree": format!("t{made}"), "created": made});
+            fs::write(dir.join(format!("test-selection-c{made}.json")), selection.to_string()).unwrap();
+        }
+        fs::write(dir.join("test-selection-bad.json"), "not json").unwrap();
+        fs::write(dir.join("README.md"), "kept").unwrap();
+
+        let trees: Vec<String> = dir_selections(&dir)
+            .unwrap()
+            .iter()
+            .map(|(_, s)| s["tree"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(trees, strings(&["t6", "t5", "t4", "t3", "t2", "t1"]), "the most recent first");
+
+        prune(&dir).unwrap();
+        let mut left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            strings(&[
+                "README.md",
+                "test-selection-c3.json",
+                "test-selection-c4.json",
+                "test-selection-c5.json",
+                "test-selection-c6.json",
+            ])
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1592,15 +1981,19 @@ mod tests {
             "-m",
             "init",
         ]);
-        let excluded = strings(&["test-selection.json"]);
+        let excluded = strings(&["test-selection", ".test-selection-commit.json"]);
         let tree = || working_tree(&repo, &excluded).unwrap();
 
         let clean = tree();
         assert_eq!(clean, git(&["rev-parse", "HEAD^{tree}"]));
-        fs::write(repo.join("test-selection.json"), "{}").unwrap();
+        assert_eq!(commit_tree(&repo, "HEAD", &excluded).unwrap(), clean);
+        fs::create_dir_all(repo.join("test-selection")).unwrap();
+        fs::write(repo.join("test-selection").join("test-selection-0123.json"), "{}").unwrap();
+        fs::write(repo.join(".test-selection-commit.json"), "{}").unwrap();
         fs::write(repo.join("x.log"), "ignored").unwrap();
-        assert_eq!(tree(), clean, "the selection file and ignored files are left out");
-        git(&["add", "test-selection.json"]);
+        assert_eq!(tree(), clean, "the selection folder and file and ignored files are left out");
+        fs::remove_file(repo.join(".test-selection-commit.json")).unwrap();
+        git(&["add", "test-selection"]);
         git(&[
             "-c",
             "user.name=t",
@@ -1613,7 +2006,13 @@ mod tests {
             "-m",
             "selection",
         ]);
-        assert_eq!(tree(), clean, "a committed selection file is left out");
+        assert_eq!(tree(), clean, "a committed selection folder is left out");
+        assert_eq!(
+            commit_tree(&repo, "HEAD", &excluded).unwrap(),
+            clean,
+            "a commit adding a selection still matches it"
+        );
+        assert_ne!(git(&["rev-parse", "HEAD^{tree}"]), clean);
 
         fs::write(repo.join("a.txt"), "b\n").unwrap();
         let edited = tree();

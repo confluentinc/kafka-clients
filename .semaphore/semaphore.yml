@@ -56,10 +56,10 @@ name: build-test-release
 #   blocks (see the comments there).
 #
 # On a pull request build the Linux and macOS verify blocks run only the tests
-# that the committed test-selection.json selects (`make select-tests`, run
-# before pushing), and only while the checkout is the working tree it was made
-# for; every other build, and a pull request without a matching selection, runs
-# every test. The Windows block's script, which does not go through the
+# that a selection in the committed test-selection/ folder selects (`make
+# select-tests`, or the pre-push hook, which commits one for a pushed HEAD), the
+# one made for the checkout's working tree; every other build, and a pull
+# request without a matching selection, runs every test. The Windows block's script, which does not go through the
 # Makefiles, applies the selection's dotnet.solution section to the .NET unit
 # tests through xtask's test-selection binary.
 #
@@ -252,11 +252,11 @@ blocks:
         # its own checkout.
         commands:
           - . .semaphore/job-start.sh
-          # On a pull request, only the tests that the committed
-          # test-selection.json selects, if it was made for exactly this
-          # working tree (`make select-tests`, see
+          # On a pull request, only the tests that the selection in the
+          # committed test-selection/ folder made for exactly this working
+          # tree selects (`make select-tests`, see
           # rust/xtask/src/test_selection.rs); otherwise every test runs.
-          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection; fi
           - ./.semaphore/dependencies.sh
           # What the selection runs and why, at the top of the job's own log.
           - (cd rust && cargo -q xtask show-test-selection)
@@ -367,7 +367,7 @@ blocks:
         commands:
           - . .semaphore/job-start.sh
           # The test selection, as in "Verify Rust and language bindings (Linux amd64)".
-          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection; fi
           - source ./.semaphore/dependencies-macos.sh
           # What the selection runs and why, at the top of the job's own log.
           - (cd rust && cargo -q xtask show-test-selection)

@@ -124,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         Some("selected-cargo-test") => test_selection::cargo_test(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("selected-run") => test_selection::selected_run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("show-test-selection") => test_selection::show()?,
+        Some("pre-push") => test_selection::pre_push(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
         // .semaphore/semaphore.yml, rely on the exit status of these tasks.
@@ -2932,9 +2933,11 @@ fn print_help() {
                     it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
                     by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
   select-tests    Ask an agent which tests the changes from a base branch can affect and write
-                  them to ../test-selection.json (or $TEST_SELECTION, relative to the repository
-                  root), to commit with the branch; the Makefiles' test recipes run only those
-                  tests while $TEST_SELECTION names the file and the working tree is unchanged
+                  them to ../test-selection/test-selection-<HEAD>.json, keeping the four most
+                  recent files there (or to $TEST_SELECTION, relative to the repository root, when
+                  it names a .json file), to commit with the branch; the Makefiles' test recipes
+                  run only those tests while $TEST_SELECTION names the file or the folder and the
+                  working tree is the one the file was made for
                     --base REF       compare with REF (default origin/master)
                     --agent COMMAND  a command taking Claude Code's --model, --restricted,
                                      --strict-mcp-config, --tools, --allowedTools,
@@ -2944,6 +2947,10 @@ fn print_help() {
                                      seconds (default 600)
                     --reuse          keep the file when it was made at HEAD for the current
                                      working tree
+  pre-push        The pre-push hook's task, reading the pushed refs on standard input: when HEAD
+                  is pushed without a selection made for it in its test-selection/ folder,
+                  select for it, commit the folder and stop the push, to be repeated; it takes
+                  select-tests' options but --reuse
   show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
                   tree and, when it does, list the suites it runs with their entries and reasons
   selected-cargo-test  `cargo test` restricted to the test selection $TEST_SELECTION names, if any
