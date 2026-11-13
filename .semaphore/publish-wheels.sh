@@ -16,7 +16,7 @@
 #
 #
 # Packages the tested wheels of a Python release tag build and publishes them
-# to one index, for the "Release (Python): packaging" block of semaphore.yml
+# to one index, for the "Release (Python): packaging" block of release.yml
 # and the "Release (Python): publish to ..." blocks of publish-testpypi.yml
 # and publish-pypi.yml, the tag build's manual promotions. Every version goes
 # to Test PyPI first, then to PyPI, after its wheels have passed the
