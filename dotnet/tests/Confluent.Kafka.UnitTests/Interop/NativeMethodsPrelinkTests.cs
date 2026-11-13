@@ -72,7 +72,12 @@ public sealed class NativeMethodsPrelinkTests
             method => Assert.False(string.IsNullOrEmpty(EntryPointOf(method)), $"{method.Name} must set EntryPoint"));
     }
 
+    // The imports of the core's library: the .NET Framework preload's one import of Windows' loader is
+    // not part of the ABI (NativeLibraryPreloadTests).
     internal static MethodInfo[] LibraryImports() =>
+        AllImports().Where(method => method.GetCustomAttribute<DllImportAttribute>()!.Value == "confluent_kafka").ToArray();
+
+    internal static MethodInfo[] AllImports() =>
         typeof(NativeMethods).Assembly
             .GetTypes()
             .SelectMany(type => type.GetMethods(
