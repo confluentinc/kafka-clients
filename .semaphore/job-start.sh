@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 #
-# The start of every Linux and macOS job of semaphore.yml, sourced as the first command of each
+# The start of every Linux and macOS job of semaphore.yml and release.yml, sourced as the first command of each
 # block's task prologue (`. .semaphore/job-start.sh`) so that its environment stays in the job's
 # shell. The global prologue runs only `checkout`, because it also runs on the Windows agents,
 # whose shell is PowerShell; the Windows blocks start with .semaphore/job-start.ps1 instead.
@@ -50,7 +50,7 @@ if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
   git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD || return 1
 fi
 
-# Replaces this job's previous result with `running` (see the global epilogue of semaphore.yml),
+# Replaces this job's previous result with `running` (see ci-result.sh and "CI results" in semaphore.yml),
 # so that a rerun that is still running, was stopped, or could not upload its result does not
 # leave an earlier `passed` in place. On a build of master or of a release branch
 # <major>.<minor>.x, the only kinds create-release-tag.yml tags, a job that cannot record

@@ -18,7 +18,8 @@
 # Checks that an index lists every uploaded wheel, not yanked, with the
 # checksum of the uploaded bytes, serves exactly those bytes for download, and
 # lists no other file for the version. Used by the "Release (Python):
-# post-publish checksum" blocks of semaphore.yml. Standard library only.
+# post-publish checksum" blocks of publish-testpypi.yml and publish-pypi.yml. Standard
+# library only.
 #
 # Usage: check-published-wheels.py <index> <package> <version> <uploaded.sha256>
 #   <index> is https://test.pypi.org or https://pypi.org, and
