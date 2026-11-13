@@ -22,10 +22,11 @@
 # built for the platform and run in a process of it, on net8.0, net10.0 and the agent's .NET
 # Framework (net462), with no RID of its own, as users build it: on .NET Framework the SDK gives an
 # application the RID of its PlatformTarget, and NuGet copies that RID's native library beside it.
-# A second .NET Framework build sets no platform, so it is AnyCPU and NuGet copies it the win-x86
-# library: run as a 64-bit process on x64, and with Prefer32Bit as a 32-bit one on x86, it must load
-# the library of its process from runtimes\<rid>\native, where the package's build targets copy both
-# Windows libraries. Each run must load one copy of the library, from where it is expected. A
+# A second .NET Framework build is AnyCPU. On x64 it sets no platform, as most applications do: the
+# SDK then gives it the win-x86 RID, so NuGet copies the win-x86 library beside it, yet it runs as a
+# 64-bit process, the reported failure. On x86 it sets AnyCPU and Prefer32Bit, so it has no RID and
+# nothing beside it, and runs as a 32-bit process. Either way it must load the library of its
+# process from runtimes\<rid>\native, where the package's build targets copy both Windows libraries. Each run must load one copy of the library, from where it is expected. A
 # self-contained `dotnet publish` for the platform's RID must carry the native library and run. The
 # binding's unit tests then run against the package, on the same three frameworks, with no RID, as
 # a test project is built; on .NET Framework they load the library the build targets copy. The
@@ -204,6 +205,15 @@ foreach ($windowsRid in $WindowsRids.Values) {
     if (-not (Test-Path (Join-Path $exe[0].DirectoryName "runtimes\$windowsRid\native\confluent_kafka.dll"))) {
         throw "the AnyCPU net462 smoke program has no runtimes\$windowsRid\native\confluent_kafka.dll: the package's build targets did not copy it"
     }
+}
+# The layout above: on x64 a library of the wrong platform beside the program, so that the run below
+# reproduces the reported failure; on x86 none.
+$adjacent = Test-Path (Join-Path $exe[0].DirectoryName 'confluent_kafka.dll')
+if ($Platform -eq 'x64' -and -not $adjacent) {
+    throw "the AnyCPU net462 smoke program has no confluent_kafka.dll beside it: the SDK no longer gives an AnyCPU application the win-x86 RID, so this run no longer reproduces a 64-bit process beside the win-x86 library"
+}
+if ($Platform -eq 'x86' -and $adjacent) {
+    throw "the AnyCPU net462 smoke program built with Prefer32Bit has a confluent_kafka.dll beside it, which the expected load below does not account for"
 }
 Invoke-Smoke $exe[0].FullName @($version) "runtimes\$rid\native\confluent_kafka.dll"
 
