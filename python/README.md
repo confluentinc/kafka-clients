@@ -318,13 +318,13 @@ The extension links the Rust library and includes its C header, so build the
 Rust client first:
 
 ```bash
-make -C ../rust build-all-features   # or: cd ../rust && cargo build --all-features --release
+make -C ../rust devel-build-all-features   # the debug build the tests use
 ```
 
-This produces `../rust/target/release/libconfluent_kafka.*` and
+This produces `../rust/target/debug/libconfluent_kafka.*` and
 `../rust/target/include/confluent_kafka.h`. `setup.py` finds them there;
 set `CONFLUENT_KAFKA_LIB_DIR` to link a library from another directory
-(e.g. `../rust/target/debug`).
+(e.g. `../rust/target/release`, from `make -C ../rust build-all-features`).
 
 ## Building
 
@@ -370,7 +370,8 @@ make grpc-image grpc-image-async
 make clean
 ```
 
-`PROFILE` (`release` by default, or `debug`) selects which Rust build to link.
+`PROFILE` (`debug` by default, or `release`) selects which Rust build to link;
+the root Makefile passes `release` for the benchmarks.
 `CLIENT_VERSION=2` runs the benchmarks against the PyPI librdkafka client in
 its own venv (`make init-venv-librdkafka` at the root): it installs the same
 top-level `confluent_kafka` package as this client, so the two cannot share one.

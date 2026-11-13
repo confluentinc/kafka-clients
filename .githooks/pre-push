@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Pre-push hook: makes sure a pushed HEAD carries a test selection made for it
+# (`make pre-push-test-selection`, with AGENT, AGENT_MODEL and BASE as for
+# `make select-tests`). Installed by `make init-hooks`, which `make init` runs
+# and which sets core.hooksPath to .githooks. Bypass with `git push --no-verify`.
+#
+# When HEAD is pushed and its committed test-selection/ folder holds no
+# selection made for it, the agent selects the tests the changes from BASE can
+# affect, the folder is committed (keeping its four most recent selections),
+# and this push stops: git has already chosen the commits it pushes, so push
+# again to include the new one. With uncommitted changes, or when the
+# selection fails, the push goes on without one, and CI runs every test.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+exec make -s pre-push-test-selection
