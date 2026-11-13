@@ -57,6 +57,14 @@ public sealed class PublicClientConfigTests
 
     private const string NullBootstrapServers = "Configuration 'bootstrap.servers' values must not be null.";
 
+    private const string InvalidConfigKey =
+        "A configuration key must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    private const string InvalidConfigValue =
+        "A configuration value must not contain a NUL character: such a string cannot be passed to the native " +
+        "client unchanged.";
+
     private const string GroupIdNotDefinedMessage =
         "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer " +
         "configuration.";
@@ -502,6 +510,54 @@ public sealed class PublicClientConfigTests
 
         Constructs(client, configs);
     }
+
+    [Theory]
+    [MemberData(nameof(AllClients))]
+    public void ANulInAConfigurationKey_IsRejectedBeforeTheClientIsCreated(string client)
+    {
+        ArgumentException rejected = NulRefusal(client, Configs(client, ("client.id\0", "x")));
+
+        Assert.Equal(new ArgumentException(InvalidConfigKey, ConfigsParameter(client)).Message, rejected.Message);
+    }
+
+    [Theory]
+    [MemberData(nameof(AllClients))]
+    public void ANulInAConfigurationValue_IsRejectedWithoutTheValue(string client)
+    {
+        ArgumentException rejected = NulRefusal(client, Configs(client, ("ssl.key.password", "s3cret\0tail")));
+
+        Assert.Equal(new ArgumentException(InvalidConfigValue, ConfigsParameter(client)).Message, rejected.Message);
+        Assert.DoesNotContain("s3cret", rejected.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(AllClients))]
+    public void ANulSuffixedKey_CannotReplaceTheKeyItSpells(string client)
+    {
+        ArgumentException rejected = NulRefusal(
+            client, Configs(client, ("security.protocol", "SASL_SSL"), ("security.protocol\0", "PLAINTEXT")));
+
+        Assert.Equal(new ArgumentException(InvalidConfigKey, ConfigsParameter(client)).Message, rejected.Message);
+    }
+
+    [Theory]
+    [MemberData(nameof(AllClients))]
+    public void AValueOfTheWrongType_IsRefusedBeforeANulInAnotherKey(string client)
+    {
+        Assert.Equal(
+            Invalid("client.id", "System.Object", "Expected value to be a string, but it was a System.Object"),
+            Refusal(client, Configs(client, ("x\0", "y"), ("client.id", new object()))).Message);
+    }
+
+    private static ArgumentException NulRefusal(string client, IReadOnlyDictionary<string, object?> configs)
+    {
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => Constructs(client, configs));
+        Assert.Equal(ConfigsParameter(client), rejected.ParamName);
+        return rejected;
+    }
+
+    private static string ConfigsParameter(string client) =>
+        client is KafkaAdminClientClient or AsyncKafkaAdminClientClient ? "conf" : "configs";
 
     private static string ClientOfJavaTest(string test) =>
         test.StartsWith("Producer", StringComparison.Ordinal) || test.StartsWith("KafkaProducer", StringComparison.Ordinal)

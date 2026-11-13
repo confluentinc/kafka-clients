@@ -20,15 +20,22 @@ using Confluent.Kafka.Common;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Creates a real client from its prepared configuration: pins each key and text as NUL-terminated UTF-8 in one
-/// <c>kafka_Map_t</c>, reads it with the client's config constructor, creates the client from that config, and frees
-/// the config, the pins and the map on every path; and finds, in the prepared configuration, the text the core keeps
-/// for a key: its last entry's.
+/// Creates a real client from its prepared configuration: rejects a key or text containing <c>'\0'</c>, pins each as
+/// NUL-terminated UTF-8 in one <c>kafka_Map_t</c>, reads it with the client's config constructor, creates the client
+/// from that config, and frees the config, the pins and the map on every path; and finds, in the prepared
+/// configuration, the text the core keeps for a key: its last entry's.
 /// </summary>
 internal static class ConfigMarshal
 {
     internal static IntPtr NewClient(IReadOnlyList<KeyValuePair<string, string>> configs, ClientKind client)
     {
+        string parameter = client == ClientKind.Admin ? "conf" : "configs";
+        foreach (KeyValuePair<string, string> entry in configs)
+        {
+            AdminStrings.Validate(entry.Key, AdminStrings.InvalidConfigKeyMessage, parameter);
+            AdminStrings.Validate(entry.Value, AdminStrings.InvalidConfigValueMessage, parameter);
+        }
+
         List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(configs.Count * 2);
         IntPtr map = IntPtr.Zero;
         IntPtr clientConfig = IntPtr.Zero;
