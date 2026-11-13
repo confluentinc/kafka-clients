@@ -25,7 +25,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <see cref="IntPtr"/> to UTF-8 bytes, a C <c>bool</c> as <c>[MarshalAs(UnmanagedType.I1)]</c>, and a handle as an
 /// <see cref="IntPtr"/>, or as its <see cref="SafeHandle"/> where the marshaller should hold a reference for the call
 /// or own a returned handle. The admin declarations are in the other parts of the class, the
-/// <c>NativeMethods.Admin*.cs</c> files.
+/// <c>NativeMethods.Admin*.cs</c> files. On .NET Framework, <c>NativeMethods.NetFramework.cs</c> first loads the
+/// native library of the process's bitness.
 /// </summary>
 internal static partial class NativeMethods
 {
