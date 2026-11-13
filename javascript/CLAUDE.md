@@ -846,6 +846,36 @@ The rules, each named in its finding:
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
 
+## How the client is used, in tests and reviews
+
+- **Callers await what the client returns.** Every method that returns a
+  Promise is meant to be awaited: `await producer.send(record)`,
+  `await producer.flush()`, `await producer.close()`. The client is built and
+  documented for that use: zero copy holds "until the Promise from `send()`
+  settles; awaiting `send()` is enough", and the docs say to await every
+  `send()` before `commitTransaction()` (root conventions, Serialization and
+  Futures and waiting). The binding's own code is held to it by typescript-eslint's
+  `no-floating-promises`, which lints `src/`. Tests, examples and reviews use
+  the client the same way.
+- **A misuse without `await` is not a bug.** A test or a finding that depends
+  on a caller who doesn't await is not a defect of the client. That covers a
+  caller who drops a call's Promise, who changes, transfers or reuses a call's
+  arguments before its Promise settles, or who relies on the order of calls
+  that aren't awaited one by one. A Critic doesn't report one and an Actor
+  doesn't write a test for one. If the docs don't already tell users to
+  await at that point, it is a documentation item, not a code change.
+- **What the root conventions promise without `await` is still tested,**
+  because it's part of the contract:
+  - a send's delivery future need not be awaited: `await send()` is
+    expected and `await future.get()` isn't, and a failed future that nobody
+    awaits leaves no unhandled rejection (root conventions, Futures and
+    waiting; Tests);
+  - several calls in flight at once and awaited together, as in
+    `await Promise.all(sends)`, work on the producer, with no order promised
+    between them (root conventions, Threads and callbacks; rule 7);
+  - a callback that returns a Promise is awaited by the binding (root
+    conventions, Threads and callbacks).
+
 ## Files and process
 
 - Every file carries the Apache 2.0 header, copyright Confluent Inc. (the
