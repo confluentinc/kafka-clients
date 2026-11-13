@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 #
-# The start of every Linux and macOS job of semaphore.yml, sourced as the first command of each
+# The start of every Linux and macOS job of semaphore.yml and release.yml, sourced as the first command of each
 # block's task prologue (`. .semaphore/job-start.sh`) so that its environment stays in the job's
 # shell. The global prologue runs only `checkout`, because it also runs on the Windows agents,
 # whose shell is PowerShell; the Windows blocks start with .semaphore/job-start.ps1 instead.
@@ -50,24 +50,40 @@ if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
   git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD || return 1
 fi
 
-# Replaces this job's previous result with `running` (see the global epilogue of semaphore.yml),
+# Replaces this job's previous result with `running` (see ci-result.sh and "CI results" in semaphore.yml),
 # so that a rerun that is still running, was stopped, or could not upload its result does not
 # leave an earlier `passed` in place. On a build of master or of a release branch
 # <major>.<minor>.x, the only kinds create-release-tag.yml tags, a job that cannot record
 # `running` fails before it runs anything, because an earlier `passed` of this job would
 # otherwise still count. Elsewhere it only warns, so that an artifact store outage does not fail
 # pull requests.
+release_ref=
+if [ "${SEMAPHORE_GIT_REF_TYPE}" = "branch" ] \
+  && [[ "${SEMAPHORE_GIT_BRANCH}" == master || "${SEMAPHORE_GIT_BRANCH}" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
+  release_ref=yes
+fi
 marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
 if ! { result_file=$(mktemp) \
   && printf 'running %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
   && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force; }; then
-  if [ "${SEMAPHORE_GIT_REF_TYPE}" = "branch" ] \
-    && [[ "${SEMAPHORE_GIT_BRANCH}" == master || "${SEMAPHORE_GIT_BRANCH}" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
+  if [ -n "${release_ref}" ]; then
     echo "Could not record that this job started, so an earlier result of this job could still be counted by create-release-tag.yml; rerun the job" >&2
     return 1
   fi
   echo "Warning: could not record that this job started; an earlier result of this job remains recorded"
 fi
 unset marker result_file
+
+# On a build of master or of a release branch, where every test runs, the debug builds the tests
+# use (Cargo's dev and test profiles) are optimized as the release build is: opt-level 3, the
+# default of rust/Cargo.toml's [profile.release]. They keep their debug assertions, overflow checks
+# and line tables, so the tests also run the code optimized as it ships, with the checks on.
+# Release's fat LTO and single codegen unit are left out: they would multiply the link time of
+# every test binary.
+if [ -n "${release_ref}" ]; then
+  export CARGO_PROFILE_DEV_OPT_LEVEL=3 CARGO_PROFILE_TEST_OPT_LEVEL=3
+  echo "A ${SEMAPHORE_GIT_BRANCH} build: the debug builds use opt-level 3, as the release build does"
+fi
+unset release_ref
 
 sem-version python 3.10
