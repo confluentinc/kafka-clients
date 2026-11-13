@@ -16,7 +16,8 @@
 #
 # The "verify-dotnet (Windows ...)" jobs of semaphore.yml: builds the native library for one
 # Windows platform, the platforms of the Confluent.Kafka package being win-x64 and win-x86, with
-# build-dotnet-native.ps1, as the package's native blocks do, then builds the .NET solution and runs
+# build-dotnet-native.ps1 (its debug all-features build, the one the Linux and macOS binding tests
+# link; the package's native blocks build the release one), then builds the .NET solution and runs
 # the unit tests, which drive the mock clients, on net462, net8.0 and net10.0, all in that
 # platform's process. The broker-backed tests do not run: they need Linux containers, which the
 # Windows agents do not run.
@@ -42,7 +43,8 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 $native = Join-Path $ToolsDir "native-$Platform"
 Remove-Item -Recurse -Force $native -ErrorAction SilentlyContinue
-& (Join-Path $PSScriptRoot 'build-dotnet-native.ps1') -Platform $Platform -OutDir $native
+# The debug all-features library, as the Linux and macOS binding tests link.
+& (Join-Path $PSScriptRoot 'build-dotnet-native.ps1') -Platform $Platform -OutDir $native -RustProfile debug
 
 Write-Output "== .NET ($Platform)"
 $dotnet = Install-DotNet $Platform
@@ -69,8 +71,8 @@ try {
 
 Write-Output "== .NET build and unit tests ($Platform)"
 # PlatformTarget makes every assembly, the net462 test host's included, run in this platform's
-# process; CargoTargetTriple points the library project at the native built above.
-$properties = @('-c', 'Release', "-p:PlatformTarget=$Platform", "-p:CargoTargetTriple=$triple")
+# process; CargoTargetTriple and CargoProfileDir point the library project at the native built above.
+$properties = @('-c', 'Release', "-p:PlatformTarget=$Platform", "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug')
 Invoke-Native $dotnet (@('build', (Join-Path $repo 'dotnet\Confluent.Kafka.sln')) + $properties)
 $failed = @()
 foreach ($tfm in 'net462', 'net8.0', 'net10.0') {

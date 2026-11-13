@@ -25,17 +25,25 @@
 # checked, so an application needs no Visual C++ Redistributable.
 #
 # Usage, from the repository root:
-#   .\.semaphore\build-dotnet-native.ps1 -Platform x64|x86 -OutDir <dir>
+#   .\.semaphore\build-dotnet-native.ps1 -Platform x64|x86 -OutDir <dir> [-RustProfile release|debug]
 # Writes <dir>\<rid>\confluent_kafka.dll and <dir>\<rid>\confluent_kafka_bindings.h, the header of
 # that library's C ABI. <dir> must not exist or be empty. The library also stays in
-# rust\target\<triple>\release, where the library project reads it with -p:CargoTargetTriple.
+# rust\target\<triple>\<release|debug>, where the library project reads it with -p:CargoTargetTriple
+# (and -p:CargoProfileDir=debug for the debug one).
+#
+# -RustProfile release (the default) is the package's library: `--features ffi --release`.
+# -RustProfile debug is the library the Linux and macOS binding tests link: the debug
+# all-features build of the root's devel-build-rust-all-features, for verify-dotnet-windows.ps1.
 
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('x64', 'x86')]
     [string] $Platform,
     [Parameter(Mandatory = $true)]
-    [string] $OutDir
+    [string] $OutDir,
+    # Not $Profile, which PowerShell already defines.
+    [ValidateSet('release', 'debug')]
+    [string] $RustProfile = 'release'
 )
 
 . (Join-Path $PSScriptRoot 'windows-tools.ps1')
@@ -107,11 +115,18 @@ try {
     # A scanner can hold a build output for a moment (os error 32, or LNK1114 from the linker), which
     # fails the build; the build is retried, and Cargo keeps what it already built. A real build error
     # also runs three times before the job fails.
-    Invoke-Retry { Invoke-Native cargo @('build', '--locked', '--features', 'ffi', '--release', '--target', $triple) }
+    $buildArgs = if ($RustProfile -eq 'release') {
+        @('--features', 'ffi', '--release')
+    } else {
+        # rust/Makefile's devel-build-all-features without its integration test binary, which no
+        # Windows job runs; the test profile's output directory is debug.
+        @('--all-features', '--profile', 'test', '--lib')
+    }
+    Invoke-Retry { Invoke-Native cargo (@('build', '--locked') + $buildArgs + @('--target', $triple)) }
 } finally {
     Pop-Location
 }
-$library = Join-Path $repo "rust\target\$triple\release\confluent_kafka.dll"
+$library = Join-Path $repo "rust\target\$triple\$RustProfile\confluent_kafka.dll"
 if (-not (Test-Path $header)) {
     throw "the build wrote no $header"
 }
