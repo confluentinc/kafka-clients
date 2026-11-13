@@ -2010,6 +2010,9 @@ pub(crate) struct NetworkThreadCloseHandle {
     wakeup_fn: Arc<dyn Fn() + Send + Sync>,
     /// How the bg loop is joined on close (tokio task vs dedicated thread).
     join: BgJoin,
+    /// Temporary, for the macOS CI hang investigation: the id the hang trace
+    /// gives this consumer (the address of its background-loop flag).
+    trace_id: usize,
 }
 
 impl NetworkThreadCloseHandle {
@@ -2026,6 +2029,7 @@ impl NetworkThreadCloseHandle {
             signal_close_fn,
             wakeup_fn: Arc::from(wakeup_fn),
             join: BgJoin::Spawned(Some(join_handle)),
+            trace_id: 0,
         }
     }
 
@@ -2044,6 +2048,7 @@ impl NetworkThreadCloseHandle {
             signal_close_fn,
             wakeup_fn: Arc::from(wakeup_fn),
             join: BgJoin::Dedicated { done: Some(done), thread: Some(thread) },
+            trace_id: 0,
         }
     }
 
@@ -2051,7 +2056,15 @@ impl NetworkThreadCloseHandle {
     /// build a [`ConsumerHandle`] that can fire the bg-task `select!` from
     /// another task without holding any reference to the consumer.
     pub(crate) fn wakeup_fn_clone(&self) -> Arc<dyn Fn() + Send + Sync> {
-        Arc::clone(&self.wakeup_fn)
+        let wakeup_fn = Arc::clone(&self.wakeup_fn);
+        let trace_id = self.trace_id;
+        Arc::new(move || {
+            crate::consumer::internals::consumer_network_thread::hang_trace(
+                trace_id,
+                format_args!("handle: bg wakeup"),
+            );
+            wakeup_fn();
+        })
     }
 
     /// Signals the bg task to exit and wakes it from its current
@@ -2060,12 +2073,17 @@ impl NetworkThreadCloseHandle {
     /// (`ConsumerNetworkThread#closeInternal`; the join is
     /// [`Self::await_join`]). Idempotent.
     pub(crate) fn signal_close(&self, timeout: Duration) {
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            self.trace_id,
+            format_args!("app: signal_close timeout={}ms", timeout.as_millis()),
+        );
         (self.signal_close_fn)(timeout);
     }
 
     /// Wakes the bg task's `select!` without signalling shutdown. Used
     /// from `AsyncKafkaConsumer::wakeup`.
     pub(crate) fn wakeup(&self) {
+        crate::consumer::internals::consumer_network_thread::hang_trace(self.trace_id, format_args!("app: bg wakeup"));
         (self.wakeup_fn)();
     }
 
@@ -2101,14 +2119,43 @@ impl NetworkThreadCloseHandle {
                 // treat that as a clean exit and proceed to reap the
                 // thread, mirroring the `None` (already-joined) case.
                 if let Some(done_rx) = done.take() {
-                    let _ = done_rx.await;
+                    crate::consumer::internals::consumer_network_thread::hang_trace(
+                        self.trace_id,
+                        format_args!("app: await_join waits for done"),
+                    );
+                    let done_result = done_rx.await;
+                    crate::consumer::internals::consumer_network_thread::hang_trace(
+                        self.trace_id,
+                        format_args!("app: await_join done, sent={}", done_result.is_ok()),
+                    );
                 }
                 // Reap the OS thread off the async runtime so the close
                 // future is not blocked on `JoinHandle::join`. A panic
                 // inside the dedicated thread is mapped to the SAME
                 // message shape as the `Spawned` panic path.
                 if let Some(thread) = thread.take() {
-                    let join_result = tokio::task::spawn_blocking(move || thread.join()).await;
+                    crate::consumer::internals::consumer_network_thread::hang_trace(
+                        self.trace_id,
+                        format_args!("app: await_join spawns the thread join"),
+                    );
+                    let trace_id = self.trace_id;
+                    let join_result = tokio::task::spawn_blocking(move || {
+                        crate::consumer::internals::consumer_network_thread::hang_trace(
+                            trace_id,
+                            format_args!("app: join task runs"),
+                        );
+                        let joined = thread.join();
+                        crate::consumer::internals::consumer_network_thread::hang_trace(
+                            trace_id,
+                            format_args!("app: join task returns, ok={}", joined.is_ok()),
+                        );
+                        joined
+                    })
+                    .await;
+                    crate::consumer::internals::consumer_network_thread::hang_trace(
+                        self.trace_id,
+                        format_args!("app: await_join joined, ok={}", join_result.is_ok()),
+                    );
                     match join_result {
                         // Outer: the spawn_blocking task itself; inner: the
                         // dedicated OS thread.
@@ -4352,10 +4399,16 @@ where
         // The loop is `ConsumerNetworkThread::run`, which carries Java's
         // per-iteration `catch (Throwable)`: a panicking iteration is logged
         // and the loop continues, and `cleanup()` still runs on exit.
+        let trace_id = Arc::as_ptr(&network_thread.running_handle()) as usize;
         let (done_rx, thread_handle) = network_thread.spawn_dedicated();
 
-        let network_thread_close =
+        let mut network_thread_close =
             NetworkThreadCloseHandle::with_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
+        network_thread_close.trace_id = trace_id;
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("app: consumer created client={client_id}"),
+        );
 
         // ── Assemble `AsyncKafkaConsumerComponents` and hand off ──
         //
@@ -4700,6 +4753,10 @@ where
         //      returns promptly instead of running out its poll wait. Idempotent
         //      and not user-visible, so it is safe even when the token was
         //      already cancelled.
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            self.network_thread_close.trace_id,
+            format_args!("app: wakeup"),
+        );
         self.wakeup_trigger.wakeup();
         self.network_thread_close.wakeup();
     }
@@ -7302,6 +7359,17 @@ where
         membership_operation: crate::consumer::GroupMembershipOperation,
         swallow_error: bool,
     ) -> Result<(), Error> {
+        let trace_id = self.network_thread_close.trace_id;
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!(
+                "close: start client={} timeout={}ms closed={} wakeup_armed={}",
+                self.client_id,
+                timeout.as_millis(),
+                self.is_closed(),
+                self.wakeup_trigger.current_token().is_cancelled()
+            ),
+        );
         log::trace!("Closing the Kafka consumer");
         if self.is_closed() {
             // Java treats double-close as a silent no-op (the closed
@@ -7336,20 +7404,33 @@ where
             }
         };
 
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: step 2 auto-commit starts"),
+        );
         // Step 2: auto_commit_on_close.
         if let Err(err) = self.auto_commit_on_close(close_deadline_ms).await {
             record(&mut first_error, "Failed to auto-commit offsets", err);
         }
+        crate::consumer::internals::consumer_network_thread::hang_trace(trace_id, format_args!("close: step 2 done"));
 
         // Step 3: stop_find_coordinator_on_close.
         if let Err(err) = self.stop_find_coordinator_on_close() {
             record(&mut first_error, "Failed to stop finding coordinator", err);
         }
 
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: step 3 done, step 4 rebalance callbacks starts"),
+        );
         // Step 4: run_rebalance_callbacks_on_close.
         if let Err(err) = self.run_rebalance_callbacks_on_close().await {
             record(&mut first_error, "Failed to run rebalance callbacks", err);
         }
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: step 4 done, step 5 leave group starts"),
+        );
 
         // Step 5: leave_group_on_close.
         if let Err(err) = self
@@ -7358,6 +7439,10 @@ where
         {
             record(&mut first_error, "Failed to leave group while closing consumer", err);
         }
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: step 5 done, step 6 pending async commits starts"),
+        );
 
         // Step 6: drain pending async commits one last time.
         // Java passes `enable_wakeup=false` here.
@@ -7371,6 +7456,10 @@ where
                 err,
             );
         }
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: step 6 done, step 7 network thread shutdown starts"),
+        );
 
         // Step 7 & 8: shut down the network thread, bounding its cleanup by
         // what is left of the close timer — Java's
@@ -7383,6 +7472,7 @@ where
         if let Err(err) = self.network_thread_close.await_join().await {
             record(&mut first_error, "Failed shutting down network thread", err);
         }
+        crate::consumer::internals::consumer_network_thread::hang_trace(trace_id, format_args!("close: step 7 done"));
 
         // Final reaper pass (Java `backgroundEventReaper.reap(backgroundEventQueue)`) — drain any background events
         // queued during the close path.
@@ -7428,6 +7518,10 @@ where
         if let Err(err) = deserializers_closed {
             record(&mut first_error, "Failed to close consumer deserializers", err);
         }
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: deserializers closed"),
+        );
 
         // Rust-only: release the rebalance listener. The last callback ran in
         // step 4 or 5 and the background task has been joined, so nothing
@@ -7447,6 +7541,10 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 
         self.closed.store(true, Ordering::Release);
+        crate::consumer::internals::consumer_network_thread::hang_trace(
+            trace_id,
+            format_args!("close: end, error={}", first_error.is_some()),
+        );
         log::debug!("Kafka consumer has been closed");
 
         // Java

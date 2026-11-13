@@ -3156,6 +3156,17 @@ where
             "Closing the Kafka producer with timeoutMillis = {} ms.",
             timeout_ms
         );
+        // Temporary, for the macOS CI hang investigation: keyed by this producer's address, which the
+        // C FFI's close lines use too; `sender=` names the Sender task's key.
+        let trace_id = self as *const Self as *const () as usize;
+        let trace =
+            |event: std::fmt::Arguments<'_>| crate::consumer::internals::hang_trace_keyed("prod", trace_id, event);
+        trace(format_args!(
+            "close: core starts client={} timeout={timeout_ms}ms sender={:x} sender_handle={}",
+            self.client_id,
+            Arc::as_ptr(&self.running) as usize,
+            self.sender_handle.lock().unwrap().is_some()
+        ));
 
         // Track whether the sender is still alive after the graceful close attempt.
         let mut sender_still_alive = false;
@@ -3163,9 +3174,38 @@ where
         if timeout_ms > 0 {
             // Try to close gracefully: close accumulator, set running=false, wake sender.
             self.initiate_close();
+            let sender_id = Arc::as_ptr(&self.running) as usize;
+            let sender_step = || match crate::consumer::internals::hang_step_of(sender_id) {
+                Some((iteration, step, ago)) => format!("sender at iteration {iteration}: {step} for {ago} ms"),
+                None => "sender step unknown".to_owned(),
+            };
+            trace(format_args!("close: core initiate_close done, sender woken, {}", sender_step()));
 
-            // Await the sender task with the remaining timeout.
-            sender_still_alive = !self.await_sender_handle(timeout).await;
+            // Await the sender task with the remaining timeout. With the hang trace on, in
+            // 5 s slices that each log the Sender's current step; the total wait is the same.
+            let started = std::time::Instant::now();
+            loop {
+                let left = timeout.saturating_sub(started.elapsed());
+                let slice = if crate::consumer::internals::hang_trace_enabled() {
+                    left.min(Duration::from_secs(5))
+                } else {
+                    left
+                };
+                if self.await_sender_handle(slice).await {
+                    sender_still_alive = false;
+                    break;
+                }
+                if slice >= left {
+                    sender_still_alive = true;
+                    break;
+                }
+                trace(format_args!(
+                    "close: core still waiting for the sender after {} ms, {}",
+                    started.elapsed().as_millis(),
+                    sender_step()
+                ));
+            }
+            trace(format_args!("close: core sender joined={}", !sender_still_alive));
         }
 
         if timeout_ms == 0 || sender_still_alive {
@@ -3177,9 +3217,11 @@ where
                 timeout_ms
             );
             self.force_close();
+            trace(format_args!("close: core force_close done"));
 
             // Await the sender task indefinitely after force close.
             self.await_sender_handle_indefinitely().await;
+            trace(format_args!("close: core sender joined after force_close"));
         }
 
         // Java `close`'s `Utils.closeQuietly(...)` chain, in order:
@@ -3191,6 +3233,7 @@ where
         if let Some(partitioner) = &self.partitioner {
             partitioner.close();
         }
+        trace(format_args!("close: core ends, error={}", first_error.is_some()));
 
         // `KafkaProducer`: the first failure `closeQuietly`
         // recorded is raised once everything is closed.
