@@ -34,9 +34,6 @@ Updated 2026-11-12.
 
 Recorded here, not worked around in the binding (CLAUDE.md §1.6):
 
-- `kafka_consumer_ConsumerRecord__take_key` / `__take_value`: hand out the record's key or value as
-  an owned `kafka_Bytes_t` sharing the fetch batch's buffer, freed with `kafka_Bytes_destroy`
-  (`BytesDeserializer`, §9.3).
 - A log hook in the FFI, so the binding can route the core's log records (§7.5).
 - `when_complete` on `kafka_common_KafkaFuture_t` (§8.4).
 - Config setters for `interceptor.classes`, `metric.reporters` and `partition.assignment.strategy`

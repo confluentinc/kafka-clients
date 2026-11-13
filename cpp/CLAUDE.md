@@ -331,11 +331,16 @@ Interfaces Java declares:
    `std::span<const std::byte>` views and are never copied by the binding. A serializer's
    returned span stays valid until its next call on that thread or its destruction; the core
    copies it into the batch during the trampoline's report. `ByteArrayDeserializer` copies into
-   a `std::vector<std::byte>`; `BytesDeserializer` returns `common::utils::Bytes`, which owns a
-   refcount on the fetch batch through `kafka_consumer_ConsumerRecord__take_key` /
-   `__take_value` (core entry points to add) and frees it with `kafka_Bytes_destroy` from its
-   last copy. A core error's payload buffers are copied *(deviation: the exception outlives the
-   freed handle)*.
+   a `std::vector<std::byte>`; `BytesDeserializer` returns `common::utils::Bytes` without a copy.
+   No C deserializer is registered for it, so each record's key or value is the
+   `kafka_Bytes_t *` the record owns. `ConsumerRecords` holds its native handle in a
+   `std::shared_ptr`, and each `Bytes` shares it through the aliasing constructor
+   (`std::shared_ptr<const std::byte>` plus a length), owning the records while pointing at its
+   own bytes; whichever `ConsumerRecords` copy or `Bytes` dies last calls
+   `kafka_consumer_ConsumerRecords_destroy`, on whatever thread that is. A `Bytes` therefore
+   keeps its whole `ConsumerRecords` alive (every record of that poll and the fetch buffers
+   behind them), so data held for long goes through `ByteArrayDeserializer`. A core error's
+   payload buffers are copied *(deviation: the exception outlives the freed handle)*.
 4. Inside a listener or commit callback the Java shape works: `consumer.commit_sync()` on the
    consumer. A `thread_local` "inside this consumer's callback" flag routes the methods
    KIP-1306's `RebalanceConsumer` has (commit, seek, pause, resume, position, committed, the
