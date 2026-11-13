@@ -14,8 +14,8 @@
 # limitations under the License.
 #
 #
-# Records the result of a Windows job of semaphore.yml for create-release-tag.yml, as the bash
-# global prologue (.semaphore/job-start.sh) and epilogue of semaphore.yml do for the other jobs:
+# Records the result of a Windows job of semaphore.yml for create-release-tag.yml, as
+# .semaphore/job-start.sh and .semaphore/ci-result.sh do for the Linux and macOS jobs:
 # `<result> <commit tested> <job id>` in ci-result/<job name> in the workflow's artifacts. The job
 # name is mapped byte by byte, as `LC_ALL=C tr -c 'A-Za-z0-9._-' '_'` maps it, so that an em dash
 # gives the same three underscores on every agent.

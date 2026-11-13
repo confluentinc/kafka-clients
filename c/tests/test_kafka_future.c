@@ -30,6 +30,7 @@
 #endif
 
 #include "unity.h"
+#include "test_filter.h"
 
 void setUp(void) {}
 void tearDown(void) {}
