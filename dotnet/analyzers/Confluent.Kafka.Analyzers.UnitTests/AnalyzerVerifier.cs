@@ -21,8 +21,8 @@ using Microsoft.CodeAnalysis.Testing;
 namespace Confluent.Kafka.Analyzers.UnitTests;
 
 /// <summary>
-/// Runs one analyzer over a test source compiled against the .NET 8 reference assemblies, or others a test names,
-/// and compares its diagnostics with the expected ones.
+/// Runs one analyzer over a test source, with any additional files a test gives, compiled against the .NET 8
+/// reference assemblies or others a test names, and compares its diagnostics with the expected ones.
 /// </summary>
 internal static class AnalyzerVerifier<TAnalyzer>
     where TAnalyzer : DiagnosticAnalyzer, new()
@@ -40,6 +40,25 @@ internal static class AnalyzerVerifier<TAnalyzer>
             TestCode = source,
             ReferenceAssemblies = references,
         };
+        test.ExpectedDiagnostics.AddRange(expected);
+        return test.RunAsync();
+    }
+
+    internal static Task VerifyWithFilesAsync(
+        string source,
+        (string Name, string Content)[] additionalFiles,
+        params DiagnosticResult[] expected)
+    {
+        CSharpAnalyzerTest<TAnalyzer, DefaultVerifier> test = new CSharpAnalyzerTest<TAnalyzer, DefaultVerifier>
+        {
+            TestCode = source,
+            ReferenceAssemblies = ReferenceAssemblies.Net.Net80,
+        };
+        foreach ((string name, string content) in additionalFiles)
+        {
+            test.TestState.AdditionalFiles.Add((name, content));
+        }
+
         test.ExpectedDiagnostics.AddRange(expected);
         return test.RunAsync();
     }
