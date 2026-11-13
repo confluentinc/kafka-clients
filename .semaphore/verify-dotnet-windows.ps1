@@ -42,6 +42,15 @@ param(
 $triple = $WindowsTriples[$Platform]
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
+# On a build of master or of a release branch the debug builds use the release build's opt-level,
+# as in the Linux and macOS jobs (.semaphore/job-start.sh).
+if ($env:SEMAPHORE_GIT_REF_TYPE -eq 'branch' -and
+    ($env:SEMAPHORE_GIT_BRANCH -ceq 'master' -or $env:SEMAPHORE_GIT_BRANCH -cmatch '^[0-9]+\.[0-9]+\.x$')) {
+    $env:CARGO_PROFILE_DEV_OPT_LEVEL = '3'
+    $env:CARGO_PROFILE_TEST_OPT_LEVEL = '3'
+    Write-Output "A $env:SEMAPHORE_GIT_BRANCH build: the debug builds use opt-level 3, as the release build does"
+}
+
 $native = Join-Path $ToolsDir "native-$Platform"
 Remove-Item -Recurse -Force $native -ErrorAction SilentlyContinue
 # The debug all-features library, as the Linux and macOS binding tests link.
