@@ -128,7 +128,8 @@ impl ChunkedProducerBatch {
     fn attached_capacity(&self) -> Option<usize> {
         match self.records_builder.buffer_stream() {
             crate::common::utils::internals::ByteBufferOutputStream::Chunked(stream) => stream.attached_capacity().ok(),
-            crate::common::utils::internals::ByteBufferOutputStream::Single(_) => None,
+            crate::common::utils::internals::ByteBufferOutputStream::Single(_)
+            | crate::common::utils::internals::ByteBufferOutputStream::Frozen(_) => None,
         }
     }
 
@@ -147,7 +148,7 @@ impl ChunkedProducerBatch {
     /// [`Error::LocalIllegalState`] for a plain batch (Java's failing `ChunkedProducerBatch` cast),
     /// and the stream's errors: closed for appends, deallocated, or a chunk of the wrong size.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedProducerBatch#addBuffers")]
-    pub(crate) fn add_buffers(&mut self, chunks: &mut Vec<Vec<u8>>) -> Result<(), Error> {
+    pub(crate) fn add_buffers(&mut self, chunks: &mut Vec<bytes::BytesMut>) -> Result<(), Error> {
         self.stream()?.add_buffers(chunks)
     }
 
