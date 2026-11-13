@@ -169,9 +169,6 @@ def copy_of(values: Iterable[_E], name: str) -> tuple[_E, ...]:
     return copied
 
 
-_TEXT_TYPES = (str, bytes, bytearray)
-
-
 def reject_str(name: str, value: object, *, element: str = "str") -> None:
     """Refuse a ``str``, ``bytes`` or ``bytearray`` given for ``name``, a parameter
     whose Java type is a collection of ``String`` (CLAUDE.md, Python Binding
@@ -181,7 +178,7 @@ def reject_str(name: str, value: object, *, element: str = "str") -> None:
     own ``TypeError``, raised before any other check, like a positional call's. ``element``
     names what the iterable holds when it is not ``str`` (``"lists of str"`` for a
     ``List<List<String>>``)."""
-    if isinstance(value, _TEXT_TYPES):
+    if isinstance(value, (str, bytes, bytearray)):
         raise TypeError(f"{name} must be an iterable of {element}, not {type(value).__name__}")
 
 
