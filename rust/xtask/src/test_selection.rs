@@ -52,7 +52,11 @@
 //! selection applies only while the working tree is still that tree; after any
 //! edit every test runs again, so a commit is never checked against a
 //! selection made for other content. Leaving the folder out makes the commit
-//! that adds a selection still match it.
+//! that adds a selection still match it. On a Semaphore pull request build,
+//! whose checkout is the pull request merged with its base branch, the tree
+//! checked is the pull request head's (`SEMAPHORE_GIT_PR_SHA`): the selection
+//! covers the pull request's own changes, and the base branch's were verified
+//! by its own builds.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -199,20 +203,22 @@ fn is_selection_name(name: &str) -> bool {
 
 /// The selection to apply, `None` when there is none: `TEST_SELECTION` is not
 /// set, or the file it names, or every file of the folder it names, is
-/// missing or was made for another tree.
+/// missing or was made for another tree than [`applicable_tree`].
 fn load() -> anyhow::Result<Option<Map<String, Value>>> {
     let Some(target) = named_target() else {
         return Ok(None);
     };
+    let (current, what) = applicable_tree()?;
     let (path, selection) = match target {
         Target::File(path) => {
             let Some(selection) = read_selection(&path)? else {
                 eprintln!("test-selection: there is no {}, so every test runs", path.display());
                 return Ok(None);
             };
-            if let Some(reason) = mismatch(&selection)? {
+            if let Some(reason) = mismatch_with(&selection, &current) {
                 eprintln!(
-                    "test-selection: {} does not apply ({reason}), so every test runs; run `make select-tests` again",
+                    "test-selection: {} does not apply to {what} ({reason}), so every test runs; run `make \
+                     select-tests` again",
                     path.display()
                 );
                 return Ok(None);
@@ -225,14 +231,13 @@ fn load() -> anyhow::Result<Option<Map<String, Value>>> {
                 eprintln!("test-selection: {} holds no selection, so every test runs", dir.display());
                 return Ok(None);
             }
-            let current = working_tree(Path::new(REPO_ROOT), &selection_files())?;
             let found = selections
                 .into_iter()
                 .find(|(_, selection)| mismatch_with(selection, &current).is_none());
             let Some(found) = found else {
                 eprintln!(
-                    "test-selection: no selection in {} was made for the working tree {current}, so every test runs; \
-                     run `make select-tests` again",
+                    "test-selection: no selection in {} was made for {what}, tree {current}, so every test runs; run \
+                     `make select-tests` again",
                     dir.display()
                 );
                 return Ok(None);
@@ -240,8 +245,33 @@ fn load() -> anyhow::Result<Option<Map<String, Value>>> {
             found
         },
     };
-    eprintln!("test-selection: running only the tests {} selects", path.display());
+    eprintln!(
+        "test-selection: running only the tests {} selects, made for {what}",
+        path.display()
+    );
     Ok(Some(selection))
+}
+
+/// The tree a selection must have been made for to apply, without the
+/// selection paths, with what it is the tree of. On a Semaphore pull request
+/// build it is the tree of the pull request's head, `SEMAPHORE_GIT_PR_SHA`:
+/// the checkout is that head merged with the base branch, whose own changes
+/// the base branch's builds verified and the selection does not cover.
+/// Elsewhere, or when that commit cannot be read, it is the working tree.
+fn applicable_tree() -> anyhow::Result<(String, String)> {
+    let repo = Path::new(REPO_ROOT);
+    let excluded = selection_files();
+    if let Some(head) = env::var("SEMAPHORE_GIT_PR_SHA").ok().filter(|sha| !sha.trim().is_empty()) {
+        let head = head.trim();
+        match commit_tree(repo, head, &excluded) {
+            Ok(tree) => return Ok((tree, format!("the pull request's head {head}"))),
+            Err(e) => eprintln!(
+                "test-selection: cannot read the pull request's head {head} ({e:#}), so the selection is checked \
+                 against the working tree"
+            ),
+        }
+    }
+    Ok((working_tree(repo, &excluded)?, "the working tree".to_string()))
 }
 
 /// The selections of the folder `dir`, the most recent first; none when it
@@ -341,7 +371,7 @@ fn mismatch_with(selection: &Map<String, Value>, current: &str) -> Option<String
     let Some(selected) = selection.get("tree").and_then(Value::as_str) else {
         return Some("it names no tree".into());
     };
-    (selected != current).then(|| format!("it was made for tree {selected}, the working tree is {current}"))
+    (selected != current).then(|| format!("it was made for tree {selected}, not {current}"))
 }
 
 /// Why the selection file cannot be kept for HEAD, `None` when it can: it was
