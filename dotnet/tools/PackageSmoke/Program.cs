@@ -14,7 +14,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -86,6 +88,8 @@ internal static class Program
         {
             throw new InvalidOperationException($"the native library was loaded from {native}, not from the application in {AppContext.BaseDirectory}");
         }
+        // test-nupkg.ps1 reads which of the application's native libraries was loaded.
+        Console.WriteLine($"OK: loaded {native.Substring(AppContext.BaseDirectory.Length)} of the application");
 
         foreach (string codec in new[] { "gzip", "snappy", "lz4", "zstd" })
         {
@@ -124,7 +128,8 @@ internal static class Program
         foreach (MethodInfo method in nativeMethods.GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly))
         {
-            if (method.GetCustomAttribute<DllImportAttribute>() is not { } import)
+            // The .NET Framework assembly's preload also imports Windows' loader, which is not the native library.
+            if (method.GetCustomAttribute<DllImportAttribute>() is not { } import || import.Value != "confluent_kafka")
             {
                 continue;
             }
@@ -170,6 +175,14 @@ internal static class Program
             if (module == IntPtr.Zero || GetModuleFileNameW(module, path, path.Capacity) == 0)
             {
                 throw new InvalidOperationException("confluent_kafka.dll is not loaded in this process");
+            }
+            string[] copies = Process.GetCurrentProcess().Modules.Cast<ProcessModule>()
+                .Where(loaded => string.Equals(loaded.ModuleName, "confluent_kafka.dll", StringComparison.OrdinalIgnoreCase))
+                .Select(loaded => loaded.FileName)
+                .ToArray();
+            if (copies.Length != 1)
+            {
+                throw new InvalidOperationException($"{copies.Length} copies of confluent_kafka.dll are loaded, not 1: {string.Join(", ", copies)}");
             }
             return Path.GetFullPath(path.ToString());
         }

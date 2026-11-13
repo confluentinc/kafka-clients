@@ -7,8 +7,8 @@
     TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): net462 for .NET Framework 4.6.2
     and later, netstandard2.0 for the other runtimes it covers (.NET 6 and 7 among
     them), net8.0 and net10.0, as confluent-kafka-dotnet's package. The net462 and
-    netstandard2.0 legs build the same code: the binding has no Framework-specific
-    code.
+    netstandard2.0 legs build the same code but for the net462 leg's native-library preload
+    (Internal/Interop/NativeMethods.NetFramework.cs).
   -->
 
   <PropertyGroup>
@@ -66,6 +66,14 @@
   -->
   <ItemGroup Condition="'$(NativeAssetsDir)' != ''">
     <None Include="$(NativeAssetsDir)/**/*" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" Visible="false" />
+  </ItemGroup>
+
+  <!-- The .NET Framework build targets, which copy both Windows natives into a .NET Framework
+       project's output (Packaging/buildTransitive-net462.targets). build/ has them for packages.config. -->
+  <ItemGroup>
+    <None Remove="Packaging/**" />
+    <None Include="Packaging/buildTransitive-net462.targets" Pack="true" PackagePath="buildTransitive/net462/Confluent.Kafka.targets" />
+    <None Include="Packaging/build-net462.targets" Pack="true" PackagePath="build/net462/Confluent.Kafka.targets" />
   </ItemGroup>
 
   <Target Name="RequireNativeAssetsForPack" BeforeTargets="GenerateNuspec">
