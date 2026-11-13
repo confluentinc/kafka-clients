@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DeleteRecords"/> — Java's
+/// The result of <see cref="IAdmin.DeleteRecords(IReadOnlyDictionary{TopicPartition, RecordsToDelete}, DeleteRecordsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DeleteRecordsResult</c>: one future per topic partition.
 /// </summary>
 /// <seealso cref="AsyncDeleteRecordsResult"/>

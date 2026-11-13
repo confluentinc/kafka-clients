@@ -308,7 +308,7 @@ internal sealed partial class NativeAdminClient
                 natives[i] = ConfigResourceMarshal.NativeType(types[i]);
             }
 
-            IntPtr list = NewList(natives);
+            IntPtr list = configResourceTypes is null ? IntPtr.Zero : NewList(natives);
             SafeAdminResultHandle result;
             try
             {

@@ -18,7 +18,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.AlterPartitionReassignments"/> — the .NET realization of
+/// Options for <see cref="IAdmin.AlterPartitionReassignments(System.Collections.Generic.IReadOnlyDictionary{TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)"/> — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions</c>.
 /// </summary>
 /// <remarks>

@@ -144,7 +144,6 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     [Fact]
     public void ListOffsetsOptions_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, ReadUncommitted()), ReadBack(null));
         Assert.Equal((-1, ReadUncommitted()), ReadBack(new ListOffsetsOptions()));
         Assert.Empty(new ListOffsetsOptions().Setters.InOrder);
     }
@@ -180,20 +179,20 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         Assert.Equal("Unknown isolation level 7", isolation.Message);
 
         ArgumentException nullTopic = Assert.Throws<ArgumentException>(() =>
-            admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [default] = OffsetSpec.Latest() }, null));
+            admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [default] = OffsetSpec.Latest() }, new ListOffsetsOptions()));
         Assert.Equal("topicPartitionOffsets", nullTopic.ParamName);
 
         Assert.Equal(
             "topicPartitionOffsets",
-            Assert.Throws<ArgumentNullException>(() => admin.ListOffsets(null!, null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.ListOffsets(null!, new ListOffsetsOptions())).ParamName);
 
         TopicPartition nullSpec = new TopicPartition("p4s2-args", 1);
-        var listed = admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullSpec] = null! }, null);
+        var listed = admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullSpec] = null! }, new ListOffsetsOptions());
         Assert.Equal(-1L, listed.Futures[nullSpec].Get(TimeSpan.FromSeconds(30)).Offset());
     }
 
     private static long Offset(NativeAdminClient admin, TopicPartition partition, OffsetSpec spec) =>
-        admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec }, null)
+        admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec }, new ListOffsetsOptions())
             .Futures[partition].Get(TimeSpan.FromSeconds(30)).Offset();
 
     private static OffsetSpec? Spec(string kind) => kind switch
@@ -249,7 +248,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         return level;
     }
 
-    private static (int TimeoutMs, IntPtr IsolationLevel) ReadBack(ListOffsetsOptions? options)
+    private static (int TimeoutMs, IntPtr IsolationLevel) ReadBack(ListOffsetsOptions options)
     {
         IntPtr native = NativeAdminClient.NewListOffsetsOptions(options);
         try

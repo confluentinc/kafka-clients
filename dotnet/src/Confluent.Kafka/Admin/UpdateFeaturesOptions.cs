@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.UpdateFeatures"/> — Java's
+/// Options for <see cref="IAdmin.UpdateFeatures(System.Collections.Generic.IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.UpdateFeaturesOptions</c>.
 /// </summary>
 public sealed class UpdateFeaturesOptions

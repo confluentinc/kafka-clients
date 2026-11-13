@@ -33,7 +33,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <see cref="IAdmin.CreateTopics"/> end to end against the mocks: one future per topic carrying that topic's own
+/// <see cref="IAdmin.CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)"/> end to end against the mocks: one future per topic carrying that topic's own
 /// outcome, the derived accessors and their cancellation, the options, and the C options and topic the call builds.
 /// </summary>
 public sealed class PublicAdminCreateTopicsTests
@@ -681,7 +681,6 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(null));
         Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions()));
         Assert.Empty(new CreateTopicsOptions().Setters.InOrder);
     }
@@ -800,7 +799,7 @@ public sealed class PublicAdminCreateTopicsTests
     private static void AssertCreateTopicsThreadExited(object? thrown) =>
         BlockingCall.AssertThrew(thrown, 7, CreateTopicsThreadExited);
 
-    private static (int TimeoutMs, sbyte ValidateOnly, sbyte RetryOnQuotaViolation) ReadBack(CreateTopicsOptions? options)
+    private static (int TimeoutMs, sbyte ValidateOnly, sbyte RetryOnQuotaViolation) ReadBack(CreateTopicsOptions options)
     {
         IntPtr native = NativeAdminClient.NewCreateTopicsOptions(options);
         try

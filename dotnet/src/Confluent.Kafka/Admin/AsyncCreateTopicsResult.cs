@@ -22,7 +22,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.CreateTopics"/> — Java's
+/// The result of <see cref="IAsyncAdmin.CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.CreateTopicsResult</c>: one future per topic.
 /// </summary>
 /// <remarks>

@@ -21,13 +21,13 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The target replica set for one partition in a call to
-/// <see cref="IAdmin.AlterPartitionReassignments"/> — Java's
+/// <see cref="IAdmin.AlterPartitionReassignments(IReadOnlyDictionary{Common.TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.NewPartitionReassignment</c>.
 /// </summary>
 /// <remarks>
 /// <para>
 /// An empty replica list is rejected, as Java rejects it, so a cancellation is a
-/// <see langword="null"/> entry in <see cref="IAdmin.AlterPartitionReassignments"/> (Java's
+/// <see langword="null"/> entry in <see cref="IAdmin.AlterPartitionReassignments(IReadOnlyDictionary{Common.TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)"/> (Java's
 /// <c>Optional.empty()</c>), never an empty list.
 /// </para>
 /// <para>

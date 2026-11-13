@@ -23,7 +23,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeClientQuotas"/> — Java's
+/// The result of <see cref="IAdmin.DescribeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeClientQuotasResult</c>: one future over the whole
 /// entity-to-quota map.
 /// </summary>

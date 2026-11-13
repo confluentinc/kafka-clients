@@ -19,7 +19,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ExpireDelegationToken"/> — Java's
+/// The result of <see cref="IAdmin.ExpireDelegationToken(byte[], ExpireDelegationTokenOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.ExpireDelegationTokenResult</c>: one future over the
 /// token's expiry timestamp.
 /// </summary>

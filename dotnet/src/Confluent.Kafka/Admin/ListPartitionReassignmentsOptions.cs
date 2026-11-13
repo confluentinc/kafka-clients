@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for
-/// <see cref="IAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
+/// <see cref="IAdmin.ListPartitionReassignments(System.Collections.Generic.IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)"/>
 /// — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.ListPartitionReassignmentsOptions</c>.
 /// </summary>

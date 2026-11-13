@@ -18,7 +18,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/> —
+/// Options for <see cref="IAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions)"/> —
 /// the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DeleteTopicsOptions</c>.
 /// </summary>

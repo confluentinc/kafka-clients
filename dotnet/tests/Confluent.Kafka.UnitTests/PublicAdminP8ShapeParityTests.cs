@@ -41,16 +41,20 @@ public sealed class PublicAdminP8ShapeParityTests
     [InlineData(nameof(IAdmin.DescribeTransactions), typeof(DescribeTransactionsResult))]
     [InlineData(nameof(IAdmin.DescribeProducers), typeof(DescribeProducersResult))]
     [InlineData(nameof(IAdmin.ListTransactions), typeof(ListTransactionsResult))]
-    public void EachRpc_IsSynchronous_AndEndsInAnOptionalOptions(string name, Type resultType)
+    public void EachRpc_IsSynchronous_WithAFormEndingInItsOptionsAndOneWithout(string name, Type resultType)
     {
-        MethodInfo rpc = typeof(IAdmin).GetMethod(name)!;
+        MethodInfo rpc = LongForm(name);
 
         Assert.Equal(resultType, rpc.ReturnType);
 
         ParameterInfo[] parameters = rpc.GetParameters();
         ParameterInfo options = parameters[parameters.Length - 1];
-        Assert.EndsWith("Options", options.ParameterType.Name, StringComparison.Ordinal);
-        Assert.True(options.IsOptional, $"{name}'s options must be optional");
+        Assert.False(options.IsOptional, $"{name}'s options must be required");
+
+        MethodInfo? shortForm = typeof(IAdmin).GetMethod(
+            name, parameters.Take(parameters.Length - 1).Select(parameter => parameter.ParameterType).ToArray());
+        Assert.NotNull(shortForm);
+        Assert.Equal(resultType, shortForm!.ReturnType);
     }
 
     [Fact]
@@ -58,25 +62,22 @@ public sealed class PublicAdminP8ShapeParityTests
     {
         Assert.Equal(
             typeof(AbortTransactionSpec),
-            typeof(IAdmin).GetMethod(nameof(IAdmin.AbortTransaction))!.GetParameters()[0].ParameterType);
+            LongForm(nameof(IAdmin.AbortTransaction)).GetParameters()[0].ParameterType);
 
         Assert.Equal(
             typeof(string),
-            typeof(IAdmin).GetMethod(nameof(IAdmin.ForceTerminateTransaction))!
-                .GetParameters()[0].ParameterType);
+            LongForm(nameof(IAdmin.ForceTerminateTransaction)).GetParameters()[0].ParameterType);
 
         Assert.Equal(
             typeof(IReadOnlyCollection<string>),
-            typeof(IAdmin).GetMethod(nameof(IAdmin.FenceProducers))!.GetParameters()[0].ParameterType);
+            LongForm(nameof(IAdmin.FenceProducers)).GetParameters()[0].ParameterType);
         Assert.Equal(
             typeof(IReadOnlyCollection<string>),
-            typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeTransactions))!
-                .GetParameters()[0].ParameterType);
+            LongForm(nameof(IAdmin.DescribeTransactions)).GetParameters()[0].ParameterType);
 
         Assert.Equal(
             typeof(IReadOnlyCollection<TopicPartition>),
-            typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeProducers))!
-                .GetParameters()[0].ParameterType);
+            LongForm(nameof(IAdmin.DescribeProducers)).GetParameters()[0].ParameterType);
     }
 
     [Theory]
@@ -130,7 +131,7 @@ public sealed class PublicAdminP8ShapeParityTests
     [InlineData(typeof(IAsyncAdmin), typeof(AsyncListTransactionsResult), typeof(AsyncKafkaFuture<>))]
     public void ListTransactions_TakesOnlyOptions_AndPublishesJavasThreeViews(Type client, Type result, Type future)
     {
-        MethodInfo rpc = client.GetMethod(nameof(IAdmin.ListTransactions))!;
+        MethodInfo rpc = client.GetMethod(nameof(IAdmin.ListTransactions), new[] { typeof(ListTransactionsOptions) })!;
         Assert.Single(rpc.GetParameters());
         Assert.Equal(result, rpc.ReturnType);
 
@@ -205,4 +206,14 @@ public sealed class PublicAdminP8ShapeParityTests
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
+
+    private static MethodInfo LongForm(string name) =>
+        typeof(IAdmin).GetMethods().Single(method => method.Name == name && EndsInOptions(method));
+
+    private static bool EndsInOptions(MethodInfo method)
+    {
+        ParameterInfo[] parameters = method.GetParameters();
+        return parameters.Length > 0
+            && parameters[parameters.Length - 1].ParameterType.Name.EndsWith("Options", StringComparison.Ordinal);
+    }
 }

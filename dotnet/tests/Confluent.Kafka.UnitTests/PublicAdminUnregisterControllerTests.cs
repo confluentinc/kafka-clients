@@ -52,8 +52,9 @@ public sealed class PublicAdminUnregisterControllerTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        UnregisterControllerResult result = admin.UnregisterController(
-            controllerId, withOptions ? new UnregisterControllerOptions().TimeoutMs(1000) : null);
+        UnregisterControllerResult result = withOptions
+            ? admin.UnregisterController(controllerId, new UnregisterControllerOptions().TimeoutMs(1000))
+            : admin.UnregisterController(controllerId);
 
         UnsupportedVersionException failure = FutureAssert.Throws<UnsupportedVersionException>(() => result.All().Get(s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
@@ -71,8 +72,9 @@ public sealed class PublicAdminUnregisterControllerTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncUnregisterControllerResult result = admin.UnregisterController(
-            controllerId, withOptions ? new UnregisterControllerOptions().TimeoutMs(1000) : null);
+        AsyncUnregisterControllerResult result = withOptions
+            ? admin.UnregisterController(controllerId, new UnregisterControllerOptions().TimeoutMs(1000))
+            : admin.UnregisterController(controllerId);
 
         UnsupportedVersionException failure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnsupportedVersionException>(() => result.All().Get()), s_deadline);
@@ -88,8 +90,9 @@ public sealed class PublicAdminUnregisterControllerTests
         MockAdminClient admin = MockAdminClient.Create().UsingRaftController(true).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        UnregisterControllerResult result = admin.UnregisterController(
-            controllerId, withOptions ? new UnregisterControllerOptions().TimeoutMs(1000) : null);
+        UnregisterControllerResult result = withOptions
+            ? admin.UnregisterController(controllerId, new UnregisterControllerOptions().TimeoutMs(1000))
+            : admin.UnregisterController(controllerId);
 
         result.All().Get(s_deadline);
         Assert.True(result.All().IsDone());
@@ -104,8 +107,9 @@ public sealed class PublicAdminUnregisterControllerTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().UsingRaftController(true).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncUnregisterControllerResult result = admin.UnregisterController(
-            controllerId, withOptions ? new UnregisterControllerOptions().TimeoutMs(1000) : null);
+        AsyncUnregisterControllerResult result = withOptions
+            ? admin.UnregisterController(controllerId, new UnregisterControllerOptions().TimeoutMs(1000))
+            : admin.UnregisterController(controllerId);
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.True(result.All().IsDone());

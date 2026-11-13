@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.IncrementalAlterConfigs"/> — Java's
+/// The result of <see cref="IAdmin.IncrementalAlterConfigs(IReadOnlyDictionary{ConfigResource, IReadOnlyCollection{AlterConfigOp}}, AlterConfigsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterConfigsResult</c>: one future per resource.
 /// </summary>
 /// <remarks>

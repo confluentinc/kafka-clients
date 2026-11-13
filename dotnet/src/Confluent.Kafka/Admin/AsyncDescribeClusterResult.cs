@@ -22,7 +22,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeCluster"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DescribeCluster(DescribeClusterOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeClusterResult</c>: four futures over the cluster's
 /// attributes.
 /// </summary>

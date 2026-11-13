@@ -39,9 +39,13 @@ public sealed class PublicAdminP2bShapeParityTests
     [Fact]
     public void IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        MethodInfo listTopics = typeof(IAdmin).GetMethod(nameof(IAdmin.ListTopics))!;
-        MethodInfo createPartitions = typeof(IAdmin).GetMethod(nameof(IAdmin.CreatePartitions))!;
-        MethodInfo deleteRecords = typeof(IAdmin).GetMethod(nameof(IAdmin.DeleteRecords))!;
+        MethodInfo listTopics = typeof(IAdmin).GetMethod(nameof(IAdmin.ListTopics), new[] { typeof(ListTopicsOptions) })!;
+        MethodInfo createPartitions = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.CreatePartitions),
+            new[] { typeof(IReadOnlyDictionary<string, NewPartitions>), typeof(CreatePartitionsOptions) })!;
+        MethodInfo deleteRecords = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DeleteRecords),
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, RecordsToDelete>), typeof(DeleteRecordsOptions) })!;
 
         Assert.Equal(typeof(ListTopicsResult), listTopics.ReturnType);
         Assert.Equal(typeof(CreatePartitionsResult), createPartitions.ReturnType);
@@ -59,13 +63,17 @@ public sealed class PublicAdminP2bShapeParityTests
             new[] { typeof(IReadOnlyDictionary<TopicPartition, RecordsToDelete>), typeof(DeleteRecordsOptions) },
             deleteRecords.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // The options are optional, collapsing Java's one-argument default overload, and nullable: null means Java's
-        // defaults.
+        // The options are required and not nullable: the overload without them is its own member.
         foreach (MethodInfo rpc in new[] { listTopics, createPartitions, deleteRecords })
         {
-            ParameterInfo options = rpc.GetParameters()[rpc.GetParameters().Length - 1];
-            Assert.True(options.IsOptional, $"{rpc.Name}'s options parameter must be optional");
-            Assert.Equal(2, NullableFlag(options));
+            ParameterInfo[] parameters = rpc.GetParameters();
+            ParameterInfo options = parameters[parameters.Length - 1];
+            Assert.False(options.IsOptional, $"{rpc.Name}'s options parameter must be required");
+            Assert.Equal(1, NullableFlag(options));
+            MethodInfo? shortForm = typeof(IAdmin).GetMethod(
+                rpc.Name, parameters.Take(parameters.Length - 1).Select(parameter => parameter.ParameterType).ToArray());
+            Assert.NotNull(shortForm);
+            Assert.Equal(rpc.ReturnType, shortForm!.ReturnType);
         }
 
         Assert.Empty(

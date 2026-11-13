@@ -20,7 +20,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeLogDirs"/> — Java's
+/// The result of <see cref="IAdmin.DescribeLogDirs(IReadOnlyCollection{int}, DescribeLogDirsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeLogDirsResult</c>: one future per broker id, each
 /// yielding that broker's log directories keyed by path.
 /// </summary>

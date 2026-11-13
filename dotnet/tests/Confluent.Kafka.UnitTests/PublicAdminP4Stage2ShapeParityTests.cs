@@ -43,7 +43,9 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         MethodInfo listReassignments = typeof(IAdmin).GetMethod(
             nameof(IAdmin.ListPartitionReassignments),
             new[] { typeof(IReadOnlyCollection<TopicPartition>), typeof(ListPartitionReassignmentsOptions) })!;
-        MethodInfo listOffsets = typeof(IAdmin).GetMethod(nameof(IAdmin.ListOffsets))!;
+        MethodInfo listOffsets = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.ListOffsets),
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetSpec>), typeof(ListOffsetsOptions) })!;
 
         Assert.Equal(typeof(ListPartitionReassignmentsResult), listReassignments.ReturnType);
         Assert.Equal(typeof(ListOffsetsResult), listOffsets.ReturnType);
@@ -55,11 +57,14 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetSpec>), typeof(ListOffsetsOptions) },
             listOffsets.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // The selection is nullable and optional: null is Java's Optional.empty(), every ongoing reassignment, and Java's
-        // zero-argument listPartitionReassignments() is () here.
+        // The selection is nullable and required: null is Java's Optional.empty(), every ongoing reassignment, and the
+        // zero-argument ListPartitionReassignments() is its own member.
         ParameterInfo selection = listReassignments.GetParameters()[0];
-        Assert.True(selection.IsOptional, "the selection defaults, as Java's zero-arg overload");
+        Assert.False(selection.IsOptional, "the selection is required, as in Java's two-argument overload");
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(selection));
+        Assert.Equal(
+            typeof(ListPartitionReassignmentsResult),
+            typeof(IAdmin).GetMethod(nameof(IAdmin.ListPartitionReassignments), Type.EmptyTypes)!.ReturnType);
 
         // ListOffsets' map is required and non-nullable, as in Java.
         ParameterInfo offsets = listOffsets.GetParameters()[0];
@@ -69,8 +74,11 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         foreach (MethodInfo rpc in new[] { listReassignments, listOffsets })
         {
             ParameterInfo options = rpc.GetParameters()[1];
-            Assert.True(options.IsOptional, $"{rpc.Name}'s options must be optional");
-            Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(options));
+            Assert.False(options.IsOptional, $"{rpc.Name}'s options must be required");
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(options));
+            MethodInfo? shortForm = typeof(IAdmin).GetMethod(rpc.Name, new[] { rpc.GetParameters()[0].ParameterType });
+            Assert.NotNull(shortForm);
+            Assert.Equal(rpc.ReturnType, shortForm!.ReturnType);
         }
 
         Assert.Empty(

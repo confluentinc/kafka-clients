@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeAcls"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.DescribeAcls(Common.Acl.AclBindingFilter, DescribeAclsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DescribeAclsOptions</c>.
 /// </summary>
 /// <remarks>

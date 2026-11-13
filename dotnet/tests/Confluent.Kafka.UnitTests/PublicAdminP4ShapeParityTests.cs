@@ -40,8 +40,12 @@ public sealed class PublicAdminP4ShapeParityTests
     [Fact]
     public void IAdmin_TheTwoNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        MethodInfo elect = typeof(IAdmin).GetMethod(nameof(IAdmin.ElectLeaders))!;
-        MethodInfo reassign = typeof(IAdmin).GetMethod(nameof(IAdmin.AlterPartitionReassignments))!;
+        MethodInfo elect = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.ElectLeaders),
+            new[] { typeof(ElectionType), typeof(IReadOnlyCollection<TopicPartition>), typeof(ElectLeadersOptions) })!;
+        MethodInfo reassign = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.AlterPartitionReassignments),
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, NewPartitionReassignment>), typeof(AlterPartitionReassignmentsOptions) })!;
 
         Assert.Equal(typeof(ElectLeadersResult), elect.ReturnType);
         Assert.Equal(typeof(AlterPartitionReassignmentsResult), reassign.ReturnType);
@@ -63,16 +67,25 @@ public sealed class PublicAdminP4ShapeParityTests
             },
             reassign.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // The partition selection is required, as Java has no electLeaders overload without it; only the options collapse
-        // Java's convenience overload.
+        // The partition selection is required, as Java has no electLeaders overload without it; the overload without
+        // the options is its own member.
         ParameterInfo partitions = elect.GetParameters()[1];
         Assert.False(partitions.IsOptional, "the partition selection mirrors Java's required Set parameter");
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(partitions));
 
-        Assert.True(elect.GetParameters()[2].IsOptional);
-        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(elect.GetParameters()[2]));
-        Assert.True(reassign.GetParameters()[1].IsOptional);
-        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(reassign.GetParameters()[1]));
+        Assert.False(elect.GetParameters()[2].IsOptional);
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(elect.GetParameters()[2]));
+        Assert.False(reassign.GetParameters()[1].IsOptional);
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(reassign.GetParameters()[1]));
+        MethodInfo electShort = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.ElectLeaders), new[] { typeof(ElectionType), typeof(IReadOnlyCollection<TopicPartition>) })!;
+        Assert.Equal(typeof(ElectLeadersResult), electShort.ReturnType);
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(electShort.GetParameters()[1]));
+        Assert.Equal(
+            typeof(AlterPartitionReassignmentsResult),
+            typeof(IAdmin).GetMethod(
+                nameof(IAdmin.AlterPartitionReassignments),
+                new[] { typeof(IReadOnlyDictionary<TopicPartition, NewPartitionReassignment>) })!.ReturnType);
 
         // The reassignment value is nullable: null is Java's Optional.empty(), "revert this partition". Position 1 of the
         // flattened parameter type: position 0 is the dictionary, and TopicPartition, a value type, takes no position.

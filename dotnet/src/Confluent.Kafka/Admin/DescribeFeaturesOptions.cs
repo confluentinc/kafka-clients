@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeFeatures"/> — Java's
+/// Options for <see cref="IAdmin.DescribeFeatures(DescribeFeaturesOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeFeaturesOptions</c>.
 /// </summary>
 public sealed class DescribeFeaturesOptions

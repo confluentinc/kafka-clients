@@ -42,15 +42,12 @@ public sealed class AdminLogDirsSubmitArgumentTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefault()
     {
-        Assert.Equal(-1, ReadBack((DescribeLogDirsOptions?)null));
         Assert.Equal(-1, ReadBack(new DescribeLogDirsOptions()));
         Assert.Empty(new DescribeLogDirsOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((AlterReplicaLogDirsOptions?)null));
         Assert.Equal(-1, ReadBack(new AlterReplicaLogDirsOptions()));
         Assert.Empty(new AlterReplicaLogDirsOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((DescribeReplicaLogDirsOptions?)null));
         Assert.Equal(-1, ReadBack(new DescribeReplicaLogDirsOptions()));
         Assert.Empty(new DescribeReplicaLogDirsOptions().Setters.InOrder);
     }
@@ -88,7 +85,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
             () => admin.AlterReplicaLogDirs(
-                new Dictionary<TopicPartitionReplica, string?> { [s_replica] = null }!, options: null));
+                new Dictionary<TopicPartitionReplica, string?> { [s_replica] = null }!, options: new AlterReplicaLogDirsOptions()));
 
         Assert.Equal("replicaAssignment", failure.ParamName);
         Assert.Contains("logdir-topic-3-7", failure.Message, StringComparison.Ordinal);
@@ -101,7 +98,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await TestTimeout.Run(
             () => AsyncCreateTopicsResult.OfClient(
-                admin.CreateTopics(new[] { new NewTopic("first-wins-replicas", 1, 1) }, null)).All().Get(),
+                admin.CreateTopics(new[] { new NewTopic("first-wins-replicas", 1, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
         TopicPartitionReplica first = new TopicPartitionReplica("first-wins-replicas", 0, 0);
@@ -114,7 +111,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
             };
         Assert.Equal(2, request.Count);
 
-        AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(request, null));
+        AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(request, new AlterReplicaLogDirsOptions()));
 
         Assert.Single(result.Values());
         KafkaStorageException failure = FutureAssert.Throws<KafkaStorageException>(() => result.Values()[second].Get(s_deadline));
@@ -138,16 +135,16 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
         Assert.Equal(
             "brokers",
-            Assert.Throws<ArgumentNullException>(() => admin.DescribeLogDirs(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.DescribeLogDirs(null!, options: new DescribeLogDirsOptions())).ParamName);
         Assert.Equal(
             "replicaAssignment",
-            Assert.Throws<ArgumentNullException>(() => admin.AlterReplicaLogDirs(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.AlterReplicaLogDirs(null!, options: new AlterReplicaLogDirsOptions())).ParamName);
         Assert.Equal(
             "replicas",
-            Assert.Throws<ArgumentNullException>(() => admin.DescribeReplicaLogDirs(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.DescribeReplicaLogDirs(null!, options: new DescribeReplicaLogDirsOptions())).ParamName);
 
         ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: null));
+            () => admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: new DescribeReplicaLogDirsOptions()));
         Assert.Equal("replicas", nullElement.ParamName);
     }
 
@@ -157,20 +154,20 @@ public sealed class AdminLogDirsSubmitArgumentTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        var described = admin.DescribeLogDirs(Array.Empty<int>(), null);
+        var described = admin.DescribeLogDirs(Array.Empty<int>(), new DescribeLogDirsOptions());
         Assert.Empty(described.Descriptions);
         described.Result.Dispose();
 
-        var altered = admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>(), null);
+        var altered = admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>(), new AlterReplicaLogDirsOptions());
         Assert.Empty(altered.Values);
         altered.Result.Dispose();
 
-        var replicas = admin.DescribeReplicaLogDirs(Array.Empty<TopicPartitionReplica>(), null);
+        var replicas = admin.DescribeReplicaLogDirs(Array.Empty<TopicPartitionReplica>(), new DescribeReplicaLogDirsOptions());
         Assert.Empty(replicas.Values);
         replicas.Result.Dispose();
     }
 
-    private static int ReadBack(DescribeLogDirsOptions? options)
+    private static int ReadBack(DescribeLogDirsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeLogDirsOptions(options);
         try
@@ -186,7 +183,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
         }
     }
 
-    private static int ReadBack(AlterReplicaLogDirsOptions? options)
+    private static int ReadBack(AlterReplicaLogDirsOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterReplicaLogDirsOptions(options);
         try
@@ -202,7 +199,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
         }
     }
 
-    private static int ReadBack(DescribeReplicaLogDirsOptions? options)
+    private static int ReadBack(DescribeReplicaLogDirsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeReplicaLogDirsOptions(options);
         try

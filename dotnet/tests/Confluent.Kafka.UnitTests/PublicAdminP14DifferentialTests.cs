@@ -459,8 +459,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         IReadOnlyCollection<ConfigResource> topics = Assert.IsAssignableFrom<IReadOnlyCollection<ConfigResource>>(
             await Agree(
-                FutureProbe.Of(sync.ListConfigResources(new[] { ConfigResourceType.TOPIC }).All()),
-                FutureProbe.Of(async.ListConfigResources(new[] { ConfigResourceType.TOPIC }).All()),
+                FutureProbe.Of(sync.ListConfigResources(new[] { ConfigResourceType.TOPIC }, new ListConfigResourcesOptions()).All()),
+                FutureProbe.Of(async.ListConfigResources(new[] { ConfigResourceType.TOPIC }, new ListConfigResourcesOptions()).All()),
                 static outcome => Resources((IReadOnlyCollection<ConfigResource>)outcome)));
         Assert.Equal(new ConfigResource(ConfigResourceType.TOPIC, "diff-j"), Assert.Single(topics));
 
@@ -2001,8 +2001,10 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (ListTransactionsOptions? options in new[] { null, filtered })
         {
-            ListTransactionsResult syncResult = sync.ListTransactions(options);
-            AsyncListTransactionsResult asyncResult = async.ListTransactions(options);
+            ListTransactionsResult syncResult =
+                options is null ? sync.ListTransactions() : sync.ListTransactions(options);
+            AsyncListTransactionsResult asyncResult =
+                options is null ? async.ListTransactions() : async.ListTransactions(options);
             AssertNotSupported(
                                 NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.ByBrokerId()), FutureProbe.Of(asyncResult.ByBrokerId())));

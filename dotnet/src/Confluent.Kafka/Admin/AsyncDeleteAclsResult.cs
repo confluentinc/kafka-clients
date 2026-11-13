@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteAcls"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DeleteAclsResult</c>: one future per filter, each resolving
 /// to the ACLs that filter matched.
 /// </summary>

@@ -50,7 +50,7 @@ public sealed class AdminP3ResultMarshalTests
             KafkaFutureImpl<Node?> controllerFuture,
             KafkaFutureImpl<string> clusterIdFuture,
             KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> operationsFuture,
-            SafeAdminResultHandle result) = admin.DescribeCluster(options: null);
+            SafeAdminResultHandle result) = admin.DescribeCluster(options: new DescribeClusterOptions());
         result.Dispose();
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => clusterIdFuture.GetAsync(), s_deadline));
@@ -144,7 +144,7 @@ public sealed class AdminP3ResultMarshalTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         (KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native =
-            admin.ListConfigResources(null, null);
+            admin.ListConfigResources(Array.Empty<ConfigResourceType>(), new ListConfigResourcesOptions());
         AsyncListConfigResourcesResult result = AsyncListConfigResourcesResult.OfClient(native);
 
         IReadOnlyCollection<ConfigResource> resources = await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -178,7 +178,7 @@ public sealed class AdminP3ResultMarshalTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        IReadOnlyCollection<ConfigResource> unfiltered = await List(admin, null);
+        IReadOnlyCollection<ConfigResource> unfiltered = await List(admin, Array.Empty<ConfigResourceType>());
         IReadOnlyCollection<ConfigResource> brokersOnly = await List(admin, new[] { ConfigResourceType.BROKER });
         IReadOnlyCollection<ConfigResource> groups = await List(admin, new[] { ConfigResourceType.GROUP });
 
@@ -219,9 +219,9 @@ public sealed class AdminP3ResultMarshalTests
     }
 
     private static async Task<IReadOnlyCollection<ConfigResource>> List(
-        NativeAdminClient admin, IReadOnlyCollection<ConfigResourceType>? types) =>
+        NativeAdminClient admin, IReadOnlyCollection<ConfigResourceType> types) =>
         await TestTimeout.Run(
-            () => AsyncListConfigResourcesResult.OfClient(admin.ListConfigResources(types, null)).All().Get(),
+            () => AsyncListConfigResourcesResult.OfClient(admin.ListConfigResources(types, new ListConfigResourcesOptions())).All().Get(),
             s_deadline);
 
     private static IReadOnlyCollection<ConfigResource> CopyOutThroughANativeList(IReadOnlyList<ConfigResource> resources)
