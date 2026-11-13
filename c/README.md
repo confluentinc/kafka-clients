@@ -111,4 +111,4 @@ make clean
 
 ## License
 
-Apache License 2.0. See [LICENSE](../LICENSE) for the details.
+Apache License 2.0. See [LICENSE](../LICENSE) for details.
