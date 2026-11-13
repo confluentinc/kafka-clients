@@ -438,10 +438,7 @@ internal sealed partial class NativeAdminClient
                 new Dictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>>(keys.Count);
             for (int i = 0; i < keys.Count; i++)
             {
-                IntPtr outErr = IntPtr.Zero;
-                IntPtr future = s_listOffsetsPartitionResult(
-                    result.DangerousGetHandle(), partitions[i], ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr future = CallAccessor(result, s_listOffsetsPartitionResult, partitions[i]);
                 futures.Add(
                     keys[i],
                     NativeFutureSource<ListOffsetsResult.ListOffsetsResultInfo>.Start(
