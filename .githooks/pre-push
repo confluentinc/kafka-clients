@@ -12,6 +12,14 @@
 # `git push`. This push then fails: git has already chosen the commits it
 # pushes. With uncommitted changes, or when the selection fails, the push goes
 # on without one, and CI runs every test.
+#
+# The hook's output is also appended to .git/pre-push.log, since a push command
+# such as git_push_external may show it only when the push fails, and a failed
+# selection lets the push go on with a warning alone. It is appended, not
+# rewritten, because the push the hook makes runs the hook again.
 set -e
 cd "$(git rev-parse --show-toplevel)"
-exec make -s pre-push-test-selection PUSH_REMOTE="$1"
+log="$(git rev-parse --absolute-git-dir)/pre-push.log"
+echo "== $(date '+%Y-%m-%d %H:%M:%S') pre-push to $1" >> "$log"
+make -s pre-push-test-selection PUSH_REMOTE="$1" 2>&1 | tee -a "$log" >&2
+exit "${PIPESTATUS[0]}"
