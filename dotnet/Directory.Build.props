@@ -44,7 +44,7 @@
        dotnet/v<version> tag releases it (.semaphore/semaphore.yml, the "Release (.NET):" blocks). The one
        <Version> element in this file: cargo xtask bump-version and the release scripts read and write it. -->
   <PropertyGroup>
-    <Version>4.4.0-alpha.0.dev.1</Version>
+    <Version>4.4.0-alpha.0.dev.2</Version>
   </PropertyGroup>
 
   <!-- A CI build (Semaphore sets CI=true) maps the source paths in the PDBs to the repository's, so a
