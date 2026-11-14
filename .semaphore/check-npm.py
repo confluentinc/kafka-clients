@@ -606,23 +606,39 @@ def read_tarball(path):
     return files, problems
 
 
-# The licence header every compiled .js and .d.ts file starts with (root CLAUDE.md, Q76): the
-# sources' header, Confluent's copyright line and the Apache 2.0 text, which the build puts first
-# in each file (javascript/scripts/dist_headers.js).
-LICENSE_HEADER = re.compile(
-    r"// Copyright 20[0-9]{2} Confluent Inc\.\n"
-    r"//\n"
-    r"// Licensed under the Apache License, Version 2\.0 \(the \"License\"\);\n"
-    r"// you may not use this file except in compliance with the License\.\n"
-    r"// You may obtain a copy of the License at\n"
-    r"//\n"
-    r"//     http://www\.apache\.org/licenses/LICENSE-2\.0\n"
-    r"//\n"
-    r"// Unless required by applicable law or agreed to in writing, software\n"
-    r"// distributed under the License is distributed on an \"AS IS\" BASIS,\n"
-    r"// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied\.\n"
-    r"// See the License for the specific language governing permissions and\n"
-    r"// limitations under the License\.\n"
+# The licence headers a compiled .js or .d.ts file may start with (root CLAUDE.md, Translation
+# Rules 1.3 and Q76), which the build puts first in each file (javascript/scripts/dist_headers.js):
+# Confluent's copyright line with the Apache 2.0 text, every translated file's; the Apache Software
+# Foundation's, for a file copied unchanged from Apache Kafka; OpenJDK's GPL version 2 with the
+# Classpath Exception, for code translated from OpenJDK.
+LICENSE_HEADERS = (
+    re.compile(
+        r"// Copyright 20[0-9]{2} Confluent Inc\.\n"
+        r"//\n"
+        r"// Licensed under the Apache License, Version 2\.0 \(the \"License\"\);\n"
+        r"// you may not use this file except in compliance with the License\.\n"
+        r"// You may obtain a copy of the License at\n"
+        r"//\n"
+        r"//     http://www\.apache\.org/licenses/LICENSE-2\.0\n"
+        r"//\n"
+        r"// Unless required by applicable law or agreed to in writing, software\n"
+        r"// distributed under the License is distributed on an \"AS IS\" BASIS,\n"
+        r"// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied\.\n"
+        r"// See the License for the specific language governing permissions and\n"
+        r"// limitations under the License\.\n"
+    ),
+    re.compile(
+        r"// Licensed to the Apache Software Foundation \(ASF\) under one or more\n"
+        r"(?://(?: .*)?\n)*?"
+        r"// limitations under the License\.\n"
+    ),
+    re.compile(
+        r"// Copyright \(c\) [0-9]{4}(?:, [0-9]{4})?, Oracle and/or its affiliates\. All rights reserved\.\n"
+        r"(?://(?: .*)?\n)*?"
+        r"// particular file as subject to the \"Classpath\" exception as provided\n"
+        r"(?://(?: .*)?\n)*?"
+        r"// questions\.\n"
+    ),
 )
 
 
@@ -630,7 +646,8 @@ def header_problems(tarball, files):
     """Every .js and .d.ts file of a tarball that does not start with the licence header."""
     return [f"{tarball}: {name[len('package/'):]} does not start with the licence header"
             for name in sorted(files)
-            if name.endswith((".js", ".d.ts")) and not LICENSE_HEADER.match(files[name].decode("utf-8", "replace"))]
+            if name.endswith((".js", ".d.ts"))
+            and not any(header.match(files[name].decode("utf-8", "replace")) for header in LICENSE_HEADERS)]
 
 
 def dist_problems(dist, manifest, compare_sources):
