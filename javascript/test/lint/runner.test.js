@@ -65,6 +65,7 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-zero-copy',
     'check-string-encoding',
     'check-no-binding-queue',
+    'check-no-closed-flag',
   ]);
   assert.deepEqual(shape(ESLINT_CHECKS), [
     'check-no-todo',
