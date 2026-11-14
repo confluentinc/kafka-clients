@@ -16,7 +16,7 @@
 // the Java source of `org.apache.kafka.common.errors.CoordinatorNotAvailableException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../../internal/throwable';
+import { create, setForms } from '../../internal/throwable';
 import { RefreshRetriableError } from './refresh_retriable_error';
 
 /**
@@ -46,6 +46,11 @@ export class CoordinatorNotAvailableError extends RefreshRetriableError {
   static override readonly _ffiId: number = 15;
 
   /**
+   * Java's `public static final CoordinatorNotAvailableException INSTANCE`.
+   */
+  declare static readonly INSTANCE: CoordinatorNotAvailableError;
+
+  /**
    * Java's `(String message)` constructor.
    *
    * @param options - the message
@@ -73,3 +78,4 @@ setForms(CoordinatorNotAvailableError, [
   [['message'], 'message'],
   [['message', 'cause'], 'message'],
 ]);
+Object.defineProperty(CoordinatorNotAvailableError, 'INSTANCE', { value: create(CoordinatorNotAvailableError, ''), enumerable: true });

@@ -43,41 +43,41 @@ export class KafkaError extends Error {
 }
 
 // @public
-export class KafkaFuture<T> {
+export abstract class KafkaFuture<T> {
+    constructor();
     static allOf(options: {
         futures: ReadonlyArray<KafkaFuture<unknown>>;
     }): KafkaFuture<void>;
     static allOf(futures: ReadonlyArray<KafkaFuture<unknown>>): KafkaFuture<void>;
-    cancel(options: {
+    abstract cancel(options: {
         mayInterruptIfRunning: boolean;
     }): boolean;
-    cancel(mayInterruptIfRunning: boolean): boolean;
+    abstract cancel(mayInterruptIfRunning: boolean): boolean;
     static completedFuture<U>(options: {
         value: U;
     }): KafkaFuture<U>;
     static completedFuture<U>(value: U, ...check: BareCheck<U>): KafkaFuture<U>;
-    get(): Promise<T>;
-    get(options: {
+    abstract get(): Promise<T>;
+    abstract get(options: {
         timeout: Duration;
     }): Promise<T>;
-    get(timeout: Duration): Promise<T>;
-    getNow(options: {
+    abstract get(timeout: Duration): Promise<T>;
+    abstract getNow(options: {
         valueIfAbsent: T | null;
     }): T | null;
-    getNow(valueIfAbsent: Bare<T | null>): T | null;
-    isCancelled(): boolean;
-    isCompletedExceptionally(): boolean;
-    isDone(): boolean;
-    thenApply<R>(options: {
+    abstract getNow(valueIfAbsent: Bare<T | null>): T | null;
+    abstract isCancelled(): boolean;
+    abstract isCompletedExceptionally(): boolean;
+    abstract isDone(): boolean;
+    abstract thenApply<R>(options: {
         function: KafkaFuture.BaseFunction<T, R>;
     }): KafkaFuture<R>;
-    thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;
-    toCompletionStage(): Promise<T>;
-    toString(): string;
-    whenComplete(options: {
+    abstract thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;
+    abstract toCompletionStage(): Promise<T>;
+    abstract whenComplete(options: {
         action: KafkaFuture.BiConsumer<T | null, unknown>;
     }): KafkaFuture<T>;
-    whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;
+    abstract whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;
 }
 
 // @public (undocumented)

@@ -442,15 +442,24 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   core's errors included, rejects it. `send` returns
   `Promise<KafkaFuture<RecordMetadata>>` (PLAN D8), resolving at the
   hand-over, and the future's `get()` returns `Promise<RecordMetadata>`,
-  settling at delivery. `KafkaFuture` is Java's, with its members in Java's
-  order: static `completedFuture(value)` and `allOf(futures)` (Java's varargs:
+  settling at delivery. `KafkaFuture` is Java's: a TypeScript `abstract
+  class`, as Java's is, whose public constructor throws `TypeError`
+  ("KafkaFuture cannot be constructed directly; use
+  KafkaFuture.completedFuture(...) or KafkaFuture.allOf(...)", Python's text)
+  when `new.target` is `KafkaFuture` itself, so a caller's own subclass may be
+  built and `allOf` reads one through its `whenComplete`; every future the
+  client makes is of its private subclass `KafkaFutureImpl`
+  (`src/common/kafka_future.ts`, not exported, its `name` the public class's),
+  Python's `_KafkaFutureImpl` (how a Java abstract class is presented: not
+  decided yet in the root conventions; this follows the error classes' abstract
+  bases). Its members, in Java's order: static `completedFuture(value)` and `allOf(futures)` (Java's varargs:
   an array, bare or `{futures}`), `toCompletionStage()` (a `Promise` settling
   with the future, rejecting with the raw failure, the same Promise every
   call), `thenApply(function)`, `whenComplete(action)`,
   `cancel(mayInterruptIfRunning)`, `get()` and `get(timeout)` (Java's `(long,
   TimeUnit)` as one `Duration`), `getNow(valueIfAbsent)`, `isCancelled()`,
   `isCompletedExceptionally()`, `isDone()`, plus `KafkaFutureImpl`'s
-  `toString()`; the nested `BaseFunction` / `BiConsumer` are type aliases on
+  `toString()` on the subclass; the nested `BaseFunction` / `BiConsumer` are type aliases on
   the class's namespace (`KafkaFuture.BaseFunction<A, B>`). One class has two
   value sources, as Python's: a record's future (`send()`'s, Java's
   `FutureRecordMetadata`, over the native future, rule 5: `cancel()` false,
@@ -513,6 +522,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   and never propagated. Such a Promise must not wait for `flush()` or
   `close()` of its own producer, which wait for it (root conventions, Threads
   and callbacks: anti-patterns inside a send callback).
+- Java's `Producer` interface is a TypeScript `interface` (root conventions,
+  Class family, Q10) with the members `KafkaProducer` translates (`send`,
+  `flush`, `close`, and `[Symbol.asyncDispose]` for Java's `Closeable`), in
+  `src/producer/producer.ts`; `KafkaProducer implements Producer`. Java's
+  `Producer` has no static member, so it has no runtime object (one would
+  hold the statics, as `Admin.create()`'s will).
 - `KafkaProducer` has `close()` and `[Symbol.asyncDispose]()`, which calls
   `close()`, so `await using` closes it.
 - A Java `long` is a `bigint` (root conventions, Types): returned always as a
@@ -575,10 +590,14 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   class is presented: not decided yet in the root conventions). A user's
   subclass takes the forms of its nearest generated class. The constructors
   that take a payload, the payload getters (`TopicAuthorizationError`'s
-  topics, ...), the `INSTANCE` singletons (`DisconnectError`,
-  `CoordinatorNotAvailableError`) and
+  topics, ...) and
   `RecordDeserializationError.DeserializationExceptionOrigin` are not
-  generated yet (each module's header comment says so); a class whose every
+  generated yet. Java's `public static final` instances are: `INSTANCE` on
+  `DisconnectError` and `CoordinatorNotAvailableError`, a static property of
+  the class that is not writable, built by Java's no-argument chain (an empty
+  message, no cause) whatever that constructor's visibility
+  (`CoordinatorNotAvailableException`'s is private), as Python's
+  `_throwable.singleton` (each module's header comment says so); a class whose every
   Java constructor takes a payload (`QuotaViolationError`, ...) has a
   `protected` constructor that throws `TypeError` until then, and no payload is
   read across the FFI.
@@ -806,7 +825,10 @@ binding:
 `cargo xtask generate-error-codes` generates, from the Java sources and the
 FFI enum (the Python client's generators, `rust/xtask/src/javascript_gen.rs`):
 the error classes and `src/internal/error_registry.ts`, the config classes'
-constants (`ProducerConfig`, `SslConfigs`, `SaslConfigs`, `SecurityConfig`)
+constants (`ProducerConfig`, the client config class, its constants only;
+`SslConfigs`, `SaslConfigs`, `SecurityConfig`, the key-name classes,
+translated in full, Java's public default constructor included, but the
+`addClient...Support(ConfigDef)` methods: root conventions, Scope, Q55)
 and the `ProducerConfigs` type's key list (`src/producer/producer_configs.ts`),
 all TypeScript (typed: a config constant's type is written out, `static
 readonly X: string = '...'`, a `long` one a `bigint`), which

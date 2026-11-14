@@ -20,8 +20,7 @@
 // (lint-mapping.json's `invented` and `javaTargets`); its file is the Java class's
 // name snake_cased; a file holds one public Java type; a Java exception's
 // class is named `...Error`. An error class takes its Java class from
-// src/internal/error_registry.ts, the generated hierarchy's list. One file holds a
-// second type by decision (`SECOND_TYPES`). A function or
+// src/internal/error_registry.ts, the generated hierarchy's list. A function or
 // constant export is on the list of invented names; an enum, or a namespace
 // that does not merge with its class (root CLAUDE.md, JavaScript Binding
 // Conventions, Names: a namespace with the class's name holds its types), is a
@@ -32,15 +31,6 @@ const { atNode } = require('../location');
 const path = require('node:path');
 
 const { PREFIX, javaIndexOf, exportedItems, mappedItems, snakeCase, shortName } = require('../java_ts');
-
-/**
- * The second public Java types a file may hold, by the user's decision of
- * 2026-11-05 (design/current/javascript-rule-linter/PLAN.md §8): the record
- * header type `Header` (Java's common.header.Header) beside `ProducerRecord`,
- * in producer_record.ts only. Any other second type there, or `Header` beside
- * another type elsewhere, is still a finding.
- */
-const SECOND_TYPES = new Map([['src/producer/producer_record.ts', { main: 'ProducerRecord', second: 'Header' }]]);
 
 module.exports = {
   name: 'check-java-name',
@@ -126,14 +116,12 @@ module.exports = {
       }
     }
     for (const [rel, all] of perFile) {
-      const allowed = SECOND_TYPES.get(rel);
-      const names = allowed && all.includes(allowed.main) ? all.filter((n) => n !== allowed.second) : all;
-      if (names.length > 1) {
+      if (all.length > 1) {
         findings.push({
           kind: 'one-type-per-file',
           subject: rel,
           at: atNode(ctx, firstOf.get(rel)),
-          message: `holds ${names.length} public Java types (${names.join(', ')}); a file holds one`,
+          message: `holds ${all.length} public Java types (${all.join(', ')}); a file holds one`,
         });
       }
     }

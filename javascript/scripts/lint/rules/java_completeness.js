@@ -23,12 +23,14 @@
 // what is not translated yet is listed in lint-baseline.txt and burnt down.
 //
 // Asked for:
-//   - a config class (`ProducerConfig`, ...): its constants only, the
+//   - a client config class (`ProducerConfig`, ...): its constants only, the
 //     `ConfigDef` machinery not being translated (javascript/CLAUDE.md
 //     "Generated files");
+//   - any class: not a method that takes a `ConfigDef` (the key-name
+//     classes' `addClientSslSupport`, `addClientSaslSupport`);
 //   - an error class: nothing, its members being javascript/CLAUDE.md
-//     "Errors"'s fixed fields (Java's constructor forms, payload getters and
-//     `INSTANCE` are not generated);
+//     "Errors"'s fixed fields (Java's constructor forms and payload getters
+//     are not generated);
 //   - a function type (`Callback`): nothing;
 //   - an enum: also the members `java.lang.Enum` gives it (`values`,
 //     `valueOf`, `name`, `ordinal`), which every translated enum has
@@ -89,6 +91,10 @@ module.exports = {
         for (const o of cls.overloads) {
           if (o.visibility !== 'public' || o.deprecated) continue;
           if (NOT_TRANSLATED.has(o.name)) continue;
+          // A method that takes a `ConfigDef`, whose machinery is not
+          // translated (root CLAUDE.md, JavaScript Binding Conventions,
+          // Scope: SaslConfigs.addClientSaslSupport, SslConfigs.addClientSslSupport).
+          if (o.param_types.some((t) => /\bConfigDef\b/.test(t))) continue;
           // An abstract class's constructor serves its subclasses only.
           if (cls.abstract && o.name === className) continue;
           if (!wanted.includes(o.name)) wanted.push(o.name);

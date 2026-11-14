@@ -278,4 +278,9 @@ export class SslConfigs {
    * Java's `SslConfigs.NON_RECONFIGURABLE_CONFIGS`.
    */
   static readonly NON_RECONFIGURABLE_CONFIGS: ReadonlySet<string> = readOnlySet(['ssl.client.auth', 'ssl.protocol', 'ssl.provider', 'ssl.cipher.suites', 'ssl.enabled.protocols', 'ssl.keymanager.algorithm', 'ssl.trustmanager.algorithm', 'ssl.endpoint.identification.algorithm', 'ssl.secure.random.implementation', 'ssl.engine.factory.class']);
+
+  /**
+   * Java's default constructor. The class holds only its constants, which are static.
+   */
+  constructor() {}
 }

@@ -130,11 +130,15 @@ module.exports = {
       }
     }
     // The error classes: the allowance's fields only.
-    for (const { item, isError } of mappedItems(ctx)) {
+    for (const { item, java, isError } of mappedItems(ctx)) {
       if (!isError || item.kind !== 'class') continue;
       for (const m of publicMembers(ts, item.node)) {
         checked += 1;
-        if (!ERROR_ALLOWANCE.members.has(m.name)) {
+        // Java's `public static final` instances of the class itself
+        // (`DisconnectException.INSTANCE`), static properties of the class.
+        const jm = java && java.cls && m.isStatic && m.kind === 'property' ? javaMember(index, java.cls, m) : null;
+        const singleton = jm !== null && jm.kind === 'field' && jm.owner === java.cls && jm.field.static && jm.field.final;
+        if (!singleton && !ERROR_ALLOWANCE.members.has(m.name)) {
           findings.push({
             kind: 'error-member',
             subject: memberName(item, m), at: atNode(ctx, m.node),

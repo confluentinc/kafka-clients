@@ -114,7 +114,7 @@ const ALLOWED = [
     reason: "the futures completed in one call whose waiters have not run yet, emptied before the call returns: Java's postComplete loop, not a store of records",
   },
   {
-    key: 'KafkaFuture.#waiters',
+    key: 'KafkaFutureImpl.#waiters',
     reason: "the get() Promises and dependants waiting on one future, run once at its completion: not a store of records",
   },
   {

@@ -84,13 +84,17 @@ test('every public module is declared, no private one is, and no declaration ref
 test('the declarations keep private constructors and leave out the library\'s own members', () => {
   for (const [rel, cls] of [
     ['producer/record_metadata.d.ts', 'RecordMetadata'],
-    ['common/kafka_future.d.ts', 'KafkaFuture'],
     ['common/security/auth/security_protocol.d.ts', 'SecurityProtocol'],
     ['common/config/ssl_client_auth.d.ts', 'SslClientAuth'],
   ]) {
     const text = fs.readFileSync(path.join(DIST, rel), 'utf8');
     assert.match(text, new RegExp(`export declare class ${cls}\\b[^]*\\n    private constructor\\(\\);\\n`), `dist/${rel}: ${cls} has no private constructor`);
   }
+  // KafkaFuture is abstract, as Java's, its constructor public for a
+  // subclass; the client's own subclass is not declared.
+  const future = fs.readFileSync(path.join(DIST, 'common/kafka_future.d.ts'), 'utf8');
+  assert.match(future, /export declare abstract class KafkaFuture<T> \{\n[^]*?\n    constructor\(\);\n/);
+  assert.doesNotMatch(future, /class KafkaFutureImpl/);
   for (const rel of [...walk(DIST)].filter((f) => f.endsWith('.d.ts'))) {
     const text = fs.readFileSync(path.join(DIST, rel), 'utf8');
     for (const line of text.split('\n')) {
@@ -101,7 +105,7 @@ test('the declarations keep private constructors and leave out the library\'s ow
   // The internal members the sources do have, so the check above is not vacuous.
   const sources = ['producer/producer_record.ts', 'producer/record_metadata.ts', 'common/kafka_future.ts'].map((rel) => fs.readFileSync(path.join(LIB, rel), 'utf8'));
   for (const name of ['internalToNative', 'internalCreate', 'internalComplete']) {
-    assert.ok(sources.some((text) => text.includes(`@internal\n   */\n  ${name}`) || text.includes(`@internal\n   */\n  static ${name}`)), `src/ has no @internal ${name}`);
+    assert.ok(sources.some((text) => ['', 'static ', 'abstract '].some((m) => text.includes(`@internal\n   */\n  ${m}${name}`))), `src/ has no @internal ${name}`);
   }
 });
 

@@ -820,4 +820,9 @@ export class SaslConfigs {
    * The documentation of `SaslConfigs.SASL_OAUTHBEARER_HEADER_URLENCODE`.
    */
   static readonly SASL_OAUTHBEARER_HEADER_URLENCODE_DOC: string = 'The (optional) setting to enable the OAuth client to URL-encode the client_id and client_secret in the authorization header in accordance with RFC6749, see <a href="https://datatracker.ietf.org/doc/html/rfc6749#section-2.3.1">here</a> for more details. The default value is set to \'false\' for backward compatibility';
+
+  /**
+   * Java's default constructor. The class holds only its constants, which are static.
+   */
+  constructor() {}
 }

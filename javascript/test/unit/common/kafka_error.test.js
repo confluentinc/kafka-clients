@@ -72,3 +72,28 @@ test('the cause chain follows Error_source', () => {
     },
   );
 });
+
+test("Java's INSTANCE singletons: an instance of the class, built by Java's no-argument chain", () => {
+  const errors = require('@confluentinc/kafka-javascript/common/errors');
+  for (const cls of [errors.DisconnectError, errors.CoordinatorNotAvailableError]) {
+    const instance = cls.INSTANCE;
+    assert.ok(instance instanceof cls, cls.name);
+    assert.equal(instance.constructor, cls);
+    assert.equal(instance.name, cls.name);
+    assert.equal(instance.message, '');
+    assert.equal(instance.cause, undefined);
+    // Java's final field: the same instance every read, not writable.
+    assert.equal(cls.INSTANCE, instance);
+    assert.throws(() => {
+      'use strict';
+      cls.INSTANCE = null;
+    }, TypeError);
+    assert.equal(cls.INSTANCE, instance);
+  }
+  // CoordinatorNotAvailableException's no-argument constructor is private:
+  // only INSTANCE is built by it.
+  assert.throws(() => new errors.CoordinatorNotAvailableError(), {
+    name: 'IllegalArgumentError',
+    message: 'CoordinatorNotAvailableError() takes one of (message), (message, cause); got ()',
+  });
+});

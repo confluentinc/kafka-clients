@@ -126,7 +126,7 @@ test('every export the type checker lists is seen: re-exports, ambient classes, 
   ]);
 });
 
-test('Header may sit beside ProducerRecord in producer_record.ts, and nowhere else', () => {
+test('a file holds one public Java type: Header beside ProducerRecord is a finding too', () => {
   const header = '/** A header. */\nexport type Header = { key: string };\n';
   const lists = (...modules) =>
     mapping({
@@ -136,18 +136,16 @@ test('Header may sit beside ProducerRecord in producer_record.ts, and nowhere el
         ...Object.fromEntries(modules.map((m) => [`src/producer/${m}.ts:Header`, 'org.apache.kafka.common.header.Header'])),
       },
     });
-  let r = lint(fixture({ 'src/producer/producer_record.ts': `export class ProducerRecord {}\n${header}`, 'lint-mapping.json': lists('producer_record') }), [RULE]);
-  assert.equal(r.status, 0, r.text);
-  r = lint(
+  const r = lint(
     fixture({
-      'src/producer/producer_record.ts': `export class ProducerRecord {}\n${header}export class Alpha {}\n`,
+      'src/producer/producer_record.ts': `export class ProducerRecord {}\n${header}`,
       'src/producer/rec.ts': `export class Rec {}\n${header}`,
       'lint-mapping.json': lists('producer_record', 'rec'),
     }),
     [RULE],
   );
   assert.deepEqual(findings(r).filter((f) => f.includes('holds')), [
-    'src/producer/producer_record.ts: holds 2 public Java types (ProducerRecord, Alpha); a file holds one',
+    'src/producer/producer_record.ts: holds 2 public Java types (ProducerRecord, Header); a file holds one',
     'src/producer/rec.ts: holds 2 public Java types (Rec, Header); a file holds one',
   ]);
 });

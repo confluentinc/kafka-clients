@@ -16,7 +16,7 @@
 // the Java source of `org.apache.kafka.common.errors.DisconnectException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../../internal/throwable';
+import { create, setForms } from '../../internal/throwable';
 import { RetriableError } from './retriable_error';
 
 /**
@@ -38,6 +38,11 @@ export class DisconnectError extends RetriableError {
    * @internal
    */
   static override readonly _ffiId: number = -11;
+
+  /**
+   * Java's `public static final DisconnectException INSTANCE`.
+   */
+  declare static readonly INSTANCE: DisconnectError;
 
   /**
    * Java's no-argument constructor. The message is empty, Java's null.
@@ -88,3 +93,4 @@ setForms(DisconnectError, [
   [['message'], 'message'],
   [['cause'], 'cause.toString()'],
 ]);
+Object.defineProperty(DisconnectError, 'INSTANCE', { value: create(DisconnectError, ''), enumerable: true });

@@ -29,6 +29,7 @@ import {
   type CloseArgs,
   type Data,
   KafkaProducer,
+  type Producer,
   ProducerConfig,
   type ProducerConfigs,
   ProducerRecord,
@@ -144,6 +145,12 @@ async function produce(): Promise<void> {
   const kafkaProducer = new KafkaProducer({ configs });
   // The configs on their own, Java's one-parameter constructor.
   const bareProducer = new KafkaProducer(configs);
+  // Java's Producer interface, which KafkaProducer implements.
+  const asInterface: Producer = kafkaProducer;
+  expectTypeOf(asInterface.send).returns.toEqualTypeOf<Promise<KafkaFuture<RecordMetadata>>>();
+  expectTypeOf(asInterface.flush).returns.toEqualTypeOf<Promise<void>>();
+  // @ts-expect-error KafkaFuture is abstract, as Java's is
+  void new KafkaFuture<number>();
   // `await using` closes it: KafkaProducer is AsyncDisposable.
   const disposed = bareProducer[Symbol.asyncDispose]();
   expectTypeOf(disposed).toEqualTypeOf<Promise<void>>();
