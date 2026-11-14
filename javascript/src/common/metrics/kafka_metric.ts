@@ -20,7 +20,10 @@
 // `milliseconds()`. Java's lock guards the reads against other threads; the
 // JavaScript thread is the only one, so it is kept and never taken.
 //
-// Not translated: the package-private measurableValue(long).
+// Not translated: the package-private measurableValue(long). Left out (root
+// CLAUDE.md, JavaScript Binding Conventions, Scope, Q30): the setter
+// config(MetricConfig), whose only extra parameter over the getter is
+// `config`, and which Java says is for the server only.
 
 import { JavaForms } from '../../internal/args';
 import { illegalState } from '../../internal/errors';
@@ -31,7 +34,7 @@ import type { MetricConfig } from './metric_config';
 import type { MetricValueProvider } from './metric_value_provider';
 
 const FORMS = new JavaForms('KafkaMetric', [['lock', 'metricName', 'valueProvider', 'config', 'time']]);
-const CONFIG_FORMS = new JavaForms('config', [[], ['config']], { bareTypes: { config: () => true } });
+const CONFIG_FORMS = new JavaForms('config', [[]], { reader: true });
 const METRIC_NAME_FORMS = new JavaForms('metricName', [[]], { reader: true });
 const METRIC_VALUE_FORMS = new JavaForms('metricValue', [[]], { reader: true });
 const IS_MEASURABLE_FORMS = new JavaForms('isMeasurable', [[]], { reader: true });
@@ -69,7 +72,7 @@ export class KafkaMetric implements Metric {
   readonly #lock: unknown;
   readonly #time: unknown;
   readonly #metricValueProvider: MetricValueProvider;
-  #config: MetricConfig;
+  readonly #config: MetricConfig;
 
   /**
    * Create a metric to monitor an object that implements
@@ -115,29 +118,11 @@ export class KafkaMetric implements Metric {
    * server only.
    *
    * @returns Return the config of this metric
+   * @throws `TypeError` when it is given an argument
    */
-  config(): MetricConfig;
-  /**
-   * Set the metric config. This is supposed to be used by server only.
-   *
-   * @param options - the configuration
-   */
-  config(options: {
-    /** configuration for this metrics */
-    config: MetricConfig;
-  }): void;
-  /**
-   * Set the metric config: the configuration on its own, the same as
-   * `config({config})`. A plain object is read as the options object.
-   *
-   * @param config - configuration for this metrics
-   */
-  config(config: MetricConfig): void;
-  config(config?: unknown): unknown {
-    const form = CONFIG_FORMS.match(config, arguments.length);
-    if (form === 0) return this.#config;
-    this.#config = CONFIG_FORMS.value(config, 'config');
-    return undefined;
+  config(): MetricConfig {
+    CONFIG_FORMS.match(undefined, arguments.length);
+    return this.#config;
   }
 
   /**

@@ -107,7 +107,7 @@ test('testToStringWithStatProvider', () => {
   );
 });
 
-test("metricValue passes the config and the time's milliseconds; a Measurable's value is its measure; config() reads and sets", () => {
+test("metricValue passes the config and the time's milliseconds; a Measurable's value is its measure; config() only reads", () => {
   const seen = [];
   const config = { samples: 2 };
   const measured = new KafkaMetric({
@@ -120,14 +120,8 @@ test("metricValue passes the config and the time's milliseconds; a Measurable's 
   assert.equal(measured.metricValue(), 4.5);
   assert.deepEqual(seen, [[config, 1000]]);
   assert.equal(measured.config(), config);
-  // A plain object is the options object; any other value is the config.
-  const other = { samples: 3 };
-  assert.equal(measured.config({ config: other }), undefined);
-  assert.equal(measured.config(), other);
-  class MetricConfig {}
-  const instance = new MetricConfig();
-  measured.config(instance);
-  assert.equal(measured.config(), instance);
+  // Java's setter config(MetricConfig) is left out (Q30): the getter only reads.
+  assert.throws(() => measured.config({ config: {} }), { constructor: TypeError, message: 'config() only reads: it takes no argument' });
   assert.equal(measured.metricName(), METRIC_NAME_1);
   const noTime = new KafkaMetric({ lock: null, metricName: METRIC_NAME_1, valueProvider: { value: () => 1 }, config: null, time: null });
   assert.throws(() => noTime.metricValue(), { constructor: TypeError, message: 'time must not be null' });

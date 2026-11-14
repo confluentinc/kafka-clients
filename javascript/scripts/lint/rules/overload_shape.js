@@ -67,6 +67,17 @@ const MERGED_FORMS = new Map([
     "root CLAUDE.md, JavaScript Binding Conventions, Serialization: a serde has one method for Java's two serialize methods (a deviation), which the user implements",
   ],
 ]);
+/**
+ * The Java forms the root conventions leave out (Scope, Q30: a form whose
+ * only extra parameter has a type that isn't translated), by
+ * `<class fqn>#<formKey>`, with the reason: such a form is not asked for.
+ */
+const LEFT_OUT = new Map([
+  [
+    'org.apache.kafka.common.metrics.KafkaMetric#config(MetricConfig)',
+    "root CLAUDE.md, JavaScript Binding Conventions, Scope (Q30): the setter's only extra parameter over the getter is config, and Java says it is for the server only",
+  ],
+]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 
 /**
@@ -188,6 +199,7 @@ module.exports = {
     'Translate a Java overload set as one function taking one options object named after the overloads\' ' +
     'parameters, with one TypeScript overload signature per Java form (root CLAUDE.md, JavaScript Binding ' +
     'Conventions, Signatures).',
+  LEFT_OUT,
   liveForms,
   optionName,
   formOptionNames,
@@ -214,7 +226,7 @@ module.exports = {
         translations.set(key, subject);
       }
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
-      let forms = liveForms(jm.overloads);
+      let forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
       if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
