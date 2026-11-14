@@ -75,8 +75,9 @@ foreach ($tfm in $aotFrameworks) {
     Write-Output "== Native AOT check, $tfm, $Platform"
     $aotOut = Join-Path $ToolsDir "aot-smoke-$Platform-$tfm"
     Remove-Item -Recurse -Force $aotOut -ErrorAction SilentlyContinue
+    # AotSmokeFrameworks keeps the restore to this one framework, so the x86 restore never meets net8.0.
     Invoke-Native $dotnet @('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', $tfm,
-        '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-o', $aotOut)
+        "-p:AotSmokeFrameworks=$tfm", '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-o', $aotOut)
     Invoke-Native (Join-Path $aotOut 'AotSmoke.exe') @()
 }
 Write-Output "The Native AOT check passed on $($aotFrameworks -join ', ') ($Platform)"
