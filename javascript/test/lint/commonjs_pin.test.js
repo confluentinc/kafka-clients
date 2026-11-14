@@ -27,16 +27,18 @@ const TSCONFIG = '// A comment, as the real one has.\n{ "compilerOptions": { "mo
 const PACKAGE = (extra = {}, exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } }) =>
   JSON.stringify({ name: 'p', ...extra, exports }, null, 2);
 
-test('a CommonJS package built with nodenext, each export types then default, passes', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'package.json': PACKAGE() }), [RULE]);
-  assert.equal(r.status, 0, r.text);
+test('a CommonJS package built with nodenext, each export types then default, passes, with or without "type": "commonjs"', () => {
+  for (const extra of [{}, { type: 'commonjs' }]) {
+    const r = lint(project({ 'tsconfig.json': TSCONFIG, 'package.json': PACKAGE(extra) }), [RULE]);
+    assert.equal(r.status, 0, r.text);
+  }
 });
 
 test('a "type", another module setting and other export conditions are findings', () => {
   const r = lint(
     project({
       'tsconfig.json': '{ "compilerOptions": { "module": "node16" } }\n',
-      'package.json': PACKAGE({ type: 'commonjs' }, {
+      'package.json': PACKAGE({ type: 'module' }, {
         '.': { default: './dist/index.js', types: './dist/index.d.ts' },
         './producer': { types: './dist/producer/index.d.ts', import: './x.mjs', default: './dist/producer/index.js' },
         './common': './dist/common/index.js',
@@ -46,7 +48,7 @@ test('a "type", another module setting and other export conditions are findings'
   );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'package.json:type: is "commonjs": the package is CommonJS, with no "type"',
+    'package.json:type: is "module": the package is CommonJS, with no "type" or "type": "commonjs"',
     'package.json:exports["."]: has the conditions default, types, not exactly types then default',
     'package.json:exports["./producer"]: has the conditions types, import, default, not exactly types then default',
     'package.json:exports["./common"]: has "./dist/common/index.js", not exactly types then default',

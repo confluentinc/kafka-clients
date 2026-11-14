@@ -323,7 +323,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   marker itself, the declaration no JS), so TypeScript rejects it (TS1192)
   rather than letting it read a missing `default` (`test/typing` pins this).
   The package is CommonJS only, built with `module: nodenext` (root
-  conventions, Layout and modules, Q13): `package.json` has no `"type"`, and
+  conventions, Layout and modules, Q13): `package.json` has no `"type": "module"`, and
   each `exports` entry has the `types` and `default` conditions.
 - Data objects (root conventions, Class family): their Java getters are public
   `readonly` fields, set once in the constructor (not getter methods, not
@@ -1022,7 +1022,7 @@ The rules, each named in its finding:
   or value given without a serializer, which the serializers replace with a
   `TypeError` (Class family, Q27); the allowance fails as unused once that
   call goes.
-- `check-commonjs-pin`: `package.json` has no `"type"`, `tsconfig.json`'s
+- `check-commonjs-pin`: `package.json` has no `"type": "module"` (none, or `"commonjs"`), `tsconfig.json`'s
   `module` and `moduleResolution` are `nodenext`, and each `exports` entry
   has exactly the conditions `types` then `default` (root conventions,
   Layout and modules, Q13).
