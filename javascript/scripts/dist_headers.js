@@ -22,24 +22,64 @@
 // (a directive may follow comments) and writes the source's header at the top
 // of the `.d.ts`. Each source map is fixed to match, line for line: the
 // `.js.map`'s first lines are reordered as the lines are, and the
-// `.d.ts.map`'s mappings start as many lines later as the header has. A
-// source without the header fails the build.
+// `.d.ts.map`'s mappings start as many lines later as the header has. The
+// header is Confluent's, or one of the two others the root allows
+// (`HEADERS`); a source without one fails the build.
 //
 // Usage: node scripts/dist_headers.js <src> <dist>
 
 const fs = require('node:fs');
 const path = require('node:path');
 
-/** The header every source starts with: its 13 comment lines. */
-const HEADER_LINES = 13;
-const FIRST_LINE = /^\/\/ Copyright 20[0-9]{2} Confluent Inc\.$/;
-const LAST_LINE = '// limitations under the License.';
+/**
+ * The licence headers a source may start with (root CLAUDE.md, Translation
+ * Rules 1.3 and Build, packaging and release, Q76), as `//` comment lines:
+ *   - Confluent's copyright line with the Apache 2.0 text, every translated
+ *     file's: exactly 13 lines;
+ *   - the Apache Software Foundation's, for a file copied unchanged from
+ *     Apache Kafka;
+ *   - OpenJDK's GPL version 2 with the Classpath Exception, for code
+ *     translated from OpenJDK.
+ * Each is recognised by its first and last line (and, for OpenJDK's, its
+ * Classpath Exception sentence); the header is the file's leading run of `//`
+ * lines.
+ */
+const HEADERS = [
+  {
+    name: 'Confluent',
+    first: /^\/\/ Copyright 20[0-9]{2} Confluent Inc\.$/,
+    last: '// limitations under the License.',
+    lines: 13,
+  },
+  {
+    name: 'Apache Software Foundation',
+    first: /^\/\/ Licensed to the Apache Software Foundation \(ASF\) under one or more$/,
+    last: '// limitations under the License.',
+  },
+  {
+    name: 'OpenJDK',
+    first: /^\/\/ Copyright \(c\) [0-9]{4}(, [0-9]{4})?, Oracle and\/or its affiliates\. All rights reserved\.$/,
+    last: '// questions.',
+    contains: '// particular file as subject to the "Classpath" exception as provided',
+  },
+];
 
-/** The header of `text`, its first HEADER_LINES lines, or null when it has none. */
+/** The licence header `lines` start with, its lines, or null when it has none. */
 function headerOf(lines) {
-  if (lines.length < HEADER_LINES || !FIRST_LINE.test(lines[0]) || lines[HEADER_LINES - 1] !== LAST_LINE) return null;
-  if (!lines.slice(0, HEADER_LINES).every((l) => l === '//' || l.startsWith('// '))) return null;
-  return lines.slice(0, HEADER_LINES);
+  let n = 0;
+  while (n < lines.length && (lines[n] === '//' || lines[n].startsWith('// '))) n++;
+  if (n === 0) return null;
+  for (const h of HEADERS) {
+    if (!h.first.test(lines[0])) continue;
+    // The header ends at the first line that is its last line.
+    const end = lines.slice(0, n).indexOf(h.last);
+    if (end < 0) continue;
+    if (h.lines !== undefined && end + 1 !== h.lines) continue;
+    const header = lines.slice(0, end + 1);
+    if (h.contains !== undefined && !header.includes(h.contains)) continue;
+    return header;
+  }
+  return null;
 }
 
 /** Rewrites the `mappings` of the source map at `file` with `fix(lineGroups)`. */
@@ -54,14 +94,14 @@ function fixMap(file, fix) {
 function fixJs(file, source) {
   const lines = fs.readFileSync(file, 'utf8').split('\n');
   if (headerOf(lines)) return;
-  if (lines[0] !== '"use strict";' || !headerOf(lines.slice(1))) {
-    throw new Error(`${file}: does not start with "use strict"; and the licence header of ${source}`);
-  }
-  const moved = [...lines.slice(1, HEADER_LINES + 1), lines[0], ...lines.slice(HEADER_LINES + 1)];
+  const header = lines[0] === '"use strict";' ? headerOf(lines.slice(1)) : null;
+  if (!header) throw new Error(`${file}: does not start with "use strict"; and the licence header of ${source}`);
+  const n = header.length;
+  const moved = [...lines.slice(1, n + 1), lines[0], ...lines.slice(n + 1)];
   fs.writeFileSync(file, moved.join('\n'));
   fixMap(`${file}.map`, (groups) => {
-    while (groups.length < HEADER_LINES + 1) groups.push('');
-    return [...groups.slice(1, HEADER_LINES + 1), groups[0], ...groups.slice(HEADER_LINES + 1)];
+    while (groups.length < n + 1) groups.push('');
+    return [...groups.slice(1, n + 1), groups[0], ...groups.slice(n + 1)];
   });
 }
 
@@ -70,7 +110,7 @@ function fixDts(file, header) {
   const text = fs.readFileSync(file, 'utf8');
   if (headerOf(text.split('\n'))) return;
   fs.writeFileSync(file, `${header.join('\n')}\n${text}`);
-  fixMap(`${file}.map`, (groups) => [...new Array(HEADER_LINES).fill(''), ...groups]);
+  fixMap(`${file}.map`, (groups) => [...new Array(header.length).fill(''), ...groups]);
 }
 
 /** Every `.ts` file under `dir`, relative to it. */
@@ -109,4 +149,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { headerOf, HEADER_LINES };
+module.exports = { headerOf };
