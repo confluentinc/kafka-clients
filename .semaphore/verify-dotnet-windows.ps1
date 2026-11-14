@@ -76,10 +76,14 @@ $aotFrameworks = if ($Platform -eq 'x86') { @('net10.0') } else { @('net8.0', 'n
 foreach ($tfm in $aotFrameworks) {
     Write-Output "== Native AOT check, $tfm, $Platform"
     $aotOut = Join-Path $ToolsDir "aot-smoke-$Platform-$tfm"
-    Remove-Item -Recurse -Force $aotOut -ErrorAction SilentlyContinue
+    $aotBuild = Join-Path $ToolsDir "aot-build-$Platform-$tfm"
+    Remove-Item -Recurse -Force $aotOut, $aotBuild -ErrorAction SilentlyContinue
     # AotSmokeFrameworks keeps the restore to this one framework, so the x86 restore never meets net8.0.
+    # --artifacts-path builds every project afresh in its own folder: the unit-test build above compiled
+    # the analyzer for this platform only (PlatformTarget), which the x64 SDK's compiler cannot load.
     Invoke-Native $aotDotnet @('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', $tfm,
-        "-p:AotSmokeFrameworks=$tfm", '-r', "win-$Platform", "-p:CargoTargetTriple=$triple", '-o', $aotOut)
+        "-p:AotSmokeFrameworks=$tfm", '-r', "win-$Platform", "-p:CargoTargetTriple=$triple",
+        '--artifacts-path', $aotBuild, '-o', $aotOut)
     Invoke-Native (Join-Path $aotOut 'AotSmoke.exe') @()
 }
 Write-Output "The Native AOT check passed on $($aotFrameworks -join ', ') ($Platform)"
