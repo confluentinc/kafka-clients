@@ -361,12 +361,14 @@ test("after close every call goes to the core: send rejects with its closed erro
     // A second close while the first runs is a close of its own, in the core.
     const second = producer.close();
     assert.notEqual(second, first);
-    const whileClosing = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
-    assert.ok(whileClosing instanceof Promise);
-    await assert.rejects(whileClosing, closedError);
+    await first;
+    // Sent once the close was awaited (callers await, javascript/CLAUDE.md):
+    // a send racing the close may get either of Java's outcomes.
+    const afterClose = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
+    assert.ok(afterClose instanceof Promise);
+    await assert.rejects(afterClose, closedError);
     // Java's flush() has no closed check: the core's flush resolves.
     await producer.flush();
-    await first;
     await second;
     await producer.close();
     await producer.close({ timeout: 0 });
