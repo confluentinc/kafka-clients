@@ -460,9 +460,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   built and `allOf` reads one through its `whenComplete`; every future the
   client makes is of its private subclass `KafkaFutureImpl`
   (`src/common/kafka_future.ts`, not exported, its `name` the public class's),
-  Python's `_KafkaFutureImpl` (how a Java abstract class is presented: not
-  decided yet in the root conventions; this follows the error classes' abstract
-  bases). Its members, in Java's order: static `completedFuture(value)` and `allOf(futures)` (Java's varargs:
+  Python's `_KafkaFutureImpl`, as the root conventions present a Java
+  abstract class (Class family, Q16, Q32: a TypeScript `abstract class`, so
+  `tsc` refuses `new`, Java's abstract methods `abstract`, and a constructor
+  that throws `TypeError` for plain JavaScript when `new.target` is the
+  abstract class itself). Its members, in Java's order: static `completedFuture(value)` and `allOf(futures)` (Java's varargs:
   an array, bare or `{futures}`), `toCompletionStage()` (a `Promise` settling
   with the future, rejecting with the raw failure, the same Promise every
   call), `thenApply(function)`, `whenComplete(action)`,
@@ -598,8 +600,8 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `KafkaError() takes one of (message, cause), (message), (cause), (); got 2
   arguments, not one object of named parameters`; its class,
   `IllegalArgumentError` today, is not decided yet in the root conventions. Java's abstract bases (`RetriableError`, ...)
-  are catch-only: constructing one throws `TypeError` (how a Java abstract
-  class is presented: not decided yet in the root conventions). A user's
+  are catch-only, `abstract` classes without an FFI id: constructing one
+  throws `TypeError` (root conventions, Class family, Q16, Q32). A user's
   subclass takes the forms of its nearest generated class. The constructors
   that take a payload, the payload getters (`TopicAuthorizationError`'s
   topics, ...) and
