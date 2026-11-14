@@ -66,7 +66,7 @@ test('send resolves at hand-over; the future fails after the callback ran once',
   try {
     const calls = [];
     const sent = producer.send({
-      record: new ProducerRecord({ topic: 'unit-t', key: 'k', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-t', key: Buffer.from('k'), value: Buffer.from('v') }),
       // A block body: a callback that returns a value is awaited (rule 6).
       callback: ({ metadata, exception }) => {
         calls.push({ metadata, error: exception });
@@ -136,7 +136,7 @@ test('a throwing callback does not change the outcome', async () => {
   try {
     let ran = 0;
     const future = await producer.send({
-      record: new ProducerRecord({ topic: 'unit-x', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-x', value: Buffer.from('v') }),
       callback: () => {
         ran++;
         throw new Error('boom');
@@ -156,7 +156,7 @@ test('a callback that returns a Promise is awaited: the future and flush() wait 
     const released = new Promise((res) => (release = res));
     let seen = null;
     const future = await producer.send({
-      record: new ProducerRecord({ topic: 'unit-async', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-async', value: Buffer.from('v') }),
       callback: async ({ metadata, exception }) => {
         seen = { metadata, exception };
         await released;
@@ -201,7 +201,7 @@ test("callbacks run one at a time in completion order: a later record's callback
     for (let i = 0; i < 4; i++) {
       sends.push(
         producer.send({
-          record: new ProducerRecord({ topic: `unit-serial-${i}`, value: 'v' }),
+          record: new ProducerRecord({ topic: `unit-serial-${i}`, value: Buffer.from('v') }),
           callback: async () => {
             events.push(`start ${i}`);
             // The first holds back until released; the later ones take less
@@ -250,7 +250,7 @@ test("a callback's timed get() on a later record's future times out: that record
     let second;
     let outcome;
     const first = producer.send({
-      record: new ProducerRecord({ topic: 'unit-timed-1', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-timed-1', value: Buffer.from('v') }),
       callback: async () => {
         events.push('first callback');
         const future = await second;
@@ -263,7 +263,7 @@ test("a callback's timed get() on a later record's future times out: that record
     });
     await gap();
     second = producer.send({
-      record: new ProducerRecord({ topic: 'unit-timed-2', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-timed-2', value: Buffer.from('v') }),
       callback: () => {
         events.push('second callback');
       },
@@ -291,7 +291,7 @@ test('a callback queued behind a pending Promise runs once its turn comes, befor
   let closing = null;
   try {
     const first = producer.send({
-      record: new ProducerRecord({ topic: 'unit-close-1', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-close-1', value: Buffer.from('v') }),
       callback: async () => {
         events.push('first');
         await released;
@@ -299,7 +299,7 @@ test('a callback queued behind a pending Promise runs once its turn comes, befor
     });
     await gap();
     const second = producer.send({
-      record: new ProducerRecord({ topic: 'unit-close-2', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-close-2', value: Buffer.from('v') }),
       callback: () => {
         events.push('second');
       },
@@ -328,14 +328,14 @@ test("a callback's rejection is handled as a throw: the outcome is unchanged and
     (async () => {
       const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 } });
       const future = await p.send({
-        record: new ProducerRecord({ topic: 'rejects', value: 'v' }),
+        record: new ProducerRecord({ topic: 'rejects', value: Buffer.from('v') }),
         callback: () => Promise.reject(new Error('boom')),
       });
       await p.flush();
       const outcome = await future.get().then(() => 'delivered', (e) => e.cause.name);
       // A thenable that is no Promise, and a then getter that throws, too.
-      const thenable = await p.send({ record: new ProducerRecord({ topic: 'rejects', value: 'v' }), callback: () => ({ then: (ok, fail) => fail(1) }) });
-      const getter = await p.send({ record: new ProducerRecord({ topic: 'rejects', value: 'v' }), callback: () => ({ get then() { throw new Error('getter'); } }) });
+      const thenable = await p.send({ record: new ProducerRecord({ topic: 'rejects', value: Buffer.from('v') }), callback: () => ({ then: (ok, fail) => fail(1) }) });
+      const getter = await p.send({ record: new ProducerRecord({ topic: 'rejects', value: Buffer.from('v') }), callback: () => ({ get then() { throw new Error('getter'); } }) });
       await p.close();
       console.log(outcome, thenable.isDone(), getter.isDone());
     })();
@@ -357,8 +357,8 @@ test('a callback that throws or rejects with a value that cannot be read still c
       const values = [revoked, badMessage, symbolName];
       const futures = [];
       for (const make of values) {
-        futures.push(await p.send({ record: new ProducerRecord({ topic: 'exotic', value: 'v' }), callback: () => Promise.reject(make()) }));
-        futures.push(await p.send({ record: new ProducerRecord({ topic: 'exotic', value: 'v' }), callback: () => { throw make(); } }));
+        futures.push(await p.send({ record: new ProducerRecord({ topic: 'exotic', value: Buffer.from('v') }), callback: () => Promise.reject(make()) }));
+        futures.push(await p.send({ record: new ProducerRecord({ topic: 'exotic', value: Buffer.from('v') }), callback: () => { throw make(); } }));
       }
       await p.flush();
       await p.close();
@@ -378,7 +378,7 @@ test('a never-settling callback Promise nothing references is not reported at a 
     (async () => {
       const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 100 } });
       const future = await p.send({
-        record: new ProducerRecord({ topic: 'never', value: 'v' }),
+        record: new ProducerRecord({ topic: 'never', value: Buffer.from('v') }),
         callback: async () => { await new Promise(() => {}); },
       });
       let flushed = false;
@@ -402,7 +402,7 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   let release;
   const released = new Promise((res) => (release = res));
-  await producer.send({ record: new ProducerRecord({ topic: 'unit-dispose', value: 'v' }), callback: () => released });
+  await producer.send({ record: new ProducerRecord({ topic: 'unit-dispose', value: Buffer.from('v') }), callback: () => released });
   let closed = false;
   const closing = producer[Symbol.asyncDispose]().then(() => (closed = true));
   assert.ok(closing instanceof Promise);
@@ -410,7 +410,7 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
   assert.equal(closed, false);
   release();
   await closing;
-  await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: 'v' })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
+  await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
   // Disposing again resolves, as close() again does: the core's second
   // close, which holds Node until its answer, as any call made on a closed
   // producer does (javascript/CLAUDE.md, "Threads and liveness").
@@ -422,7 +422,7 @@ test('flush inside a callback rejects with the core error', async () => {
   try {
     let flushed;
     const future = await producer.send({
-      record: new ProducerRecord({ topic: 'unit-f', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-f', value: Buffer.from('v') }),
       callback: () => {
         flushed = producer.flush();
       },
@@ -448,7 +448,7 @@ test('a hand-over failure rejects send() and never reaches the callback', async 
   try {
     let calls = 0;
     await assert.rejects(
-      producer.send({ record: new ProducerRecord({ topic: 'unit-h', value: 'v' }), callback: () => calls++ }),
+      producer.send({ record: new ProducerRecord({ topic: 'unit-h', value: Buffer.from('v') }), callback: () => calls++ }),
       (e) => {
         assert.ok(e instanceof KafkaError);
         assert.ok(e instanceof errors.BootstrapResolutionError);
@@ -497,7 +497,7 @@ test("after close every call goes to the core: send rejects with its closed erro
   await first;
   // Sent once the close was awaited (callers await, javascript/CLAUDE.md):
   // a send racing the close may get either of Java's outcomes.
-  const afterClose = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
+  const afterClose = producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }) });
   assert.ok(afterClose instanceof Promise);
   await assert.rejects(afterClose, closedError);
   // Java's flush() has no closed check: the core's flush resolves.
@@ -505,7 +505,7 @@ test("after close every call goes to the core: send rejects with its closed erro
   await second;
   await producer.close();
   await producer.close({ timeout: 0 });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), closedError);
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }) }), closedError);
   await producer.flush();
 });
 
@@ -604,7 +604,7 @@ test("close(Infinity) is no limit: Java's Long.MAX_VALUE milliseconds, as close(
 test("close and send take Java's forms, the one-parameter ones bare too, and reject the others", async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
-    const record = new ProducerRecord({ topic: 'unit-forms', value: 'v' });
+    const record = new ProducerRecord({ topic: 'unit-forms', value: Buffer.from('v') });
     for (const [args, given] of [
       [{ timeoutMs: 0 }, 'timeoutMs'],
       [{ timeout: 0, timeoutMs: 0 }, 'timeout, timeoutMs'],
@@ -700,7 +700,7 @@ test("flush() takes no argument: Java's flush(), never 1.x's flush(timeout, call
 test('send reads only the parameters the form check saw: own enumerable keys', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
-    const record = new ProducerRecord({ topic: 'unit-own', value: 'v' });
+    const record = new ProducerRecord({ topic: 'unit-own', value: Buffer.from('v') });
     let ran = 0;
     // An object with an inherited callback is no options object: it is read
     // as a bare value, which fits no form.
@@ -738,11 +738,11 @@ test('a closed producer checks a send\'s record and callback before the core rep
   await assert.rejects(producer.send({ record: null }), { name: 'TypeError', message: 'record must not be null' });
   await assert.rejects(producer.send(null), { name: 'TypeError', message: 'record must not be null' });
   await assert.rejects(producer.send({ record: {} }), { name: 'TypeError', message: 'record must be a ProducerRecord' });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }), callback: 'cb' }), {
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }), callback: 'cb' }), {
     name: 'TypeError',
     message: 'callback must be a function ({ metadata, exception }) => void',
   });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }) }), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
   // The form is checked first: a bare value that fits no form included.
   await assert.rejects(producer.send({}), { name: 'IllegalArgumentError', message: 'send() takes one of (record), (record, callback); got ()' });
   await assert.rejects(producer.send(42), { name: 'IllegalArgumentError', message: 'send() takes one of (record), (record, callback); got a number' });
@@ -752,7 +752,7 @@ test("the constructor takes Java's {configs} or the configs on their own, a plai
   // The configs on their own and named build the same producer.
   for (const args of [UNREACHABLE, { configs: UNREACHABLE }]) {
     const producer = new KafkaProducer(args);
-    const future = await producer.send(new ProducerRecord({ topic: 'unit-ctor', value: 'v' }));
+    const future = await producer.send(new ProducerRecord({ topic: 'unit-ctor', value: Buffer.from('v') }));
     await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-ctor') });
     await producer.close();
   }
@@ -814,7 +814,7 @@ test('a negative close timeout on an open producer is rejected first and changes
   // the same turn is still accepted.
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   const rejected = producer.close({ timeout: -1 });
-  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-n', value: 'v' }) });
+  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) });
   await assert.rejects(rejected, negative);
   // The record is handed over (it fails only for the missing metadata, as any
   // record to this broker does).
@@ -827,7 +827,7 @@ test('a negative close timeout on an open producer is rejected first and changes
     assert.equal(e.message, TIMEOUT_MESSAGE('unit-n'));
     return true;
   });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'unit-n', value: 'v' }) }), { message: CLOSED_MESSAGE });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) }), { message: CLOSED_MESSAGE });
 
   // A close() in the same turn is a close of its own, not the rejected one.
   const other = new KafkaProducer({ configs: UNREACHABLE });
@@ -835,13 +835,13 @@ test('a negative close timeout on an open producer is rejected first and changes
   const closed = other.close();
   await assert.rejects(rejectedToo, negative);
   await closed;
-  await assert.rejects(other.send({ record: new ProducerRecord({ topic: 'unit-n', value: 'v' }) }), { message: CLOSED_MESSAGE });
+  await assert.rejects(other.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) }), { message: CLOSED_MESSAGE });
 });
 
 test('close() while a send waits for metadata rejects that send with a bare KafkaError', async () => {
   const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'max.block.ms': 60000 } });
   const calls = [];
-  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-close-waiting', value: 'v' }), callback: () => {
+  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-close-waiting', value: Buffer.from('v') }), callback: () => {
       calls.push('callback');
     } });
   let settled = false;
@@ -870,7 +870,7 @@ test('flush() does not wait for a send still waiting for metadata', async () => 
   try {
     const calls = [];
     const sent = producer.send({
-      record: new ProducerRecord({ topic: 'unit-flush-waiting', value: 'v' }),
+      record: new ProducerRecord({ topic: 'unit-flush-waiting', value: Buffer.from('v') }),
       callback: ({ exception }) => {
         calls.push(exception);
       },
@@ -907,7 +907,7 @@ test('argument errors reject: send() and close() never throw', async () => {
     // Java's doSend dereferences a null record.
     await assert.rejects(producer.send({ record: null }), { name: 'TypeError', message: 'record must not be null' });
     await assert.rejects(producer.send(null), { name: 'TypeError', message: 'record must not be null' });
-    await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }), callback: 'cb' }), {
+    await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }), callback: 'cb' }), {
       name: 'TypeError',
       message: 'callback must be a function ({ metadata, exception }) => void',
     });
@@ -933,13 +933,13 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   const calls = [];
   const callback = () => calls.push('callback');
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'good\0bad', value: 'v' }), callback }), {
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'good\0bad', value: Buffer.from('v') }), callback }), {
     name: 'TypeError',
     message: 'topic must be a string without null bytes',
   });
   await assert.rejects(
     producer.send({
-      record: new ProducerRecord({ topic: 'unit-nul', partition: null, key: null, value: 'v', headers: [new Header({ key: 'k\0x', value: Buffer.from('h') })] }),
+      record: new ProducerRecord({ topic: 'unit-nul', partition: null, key: null, value: Buffer.from('v'), headers: [new Header({ key: 'k\0x', value: Buffer.from('h') })] }),
       callback,
     }),
     { name: 'TypeError', message: 'a header key must be a string without null bytes' },
@@ -959,8 +959,8 @@ test('a refused NUL-holding send leaves nothing pending: the producer then close
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
     (async () => {
       for (const record of [
-        new ProducerRecord({ topic: 'a\\0b', value: 'v' }),
-        new ProducerRecord({ topic: 'idle', partition: null, key: null, value: 'v', headers: [new Header({ key: 'a\\0b', value: Buffer.from('v') })] }),
+        new ProducerRecord({ topic: 'a\\0b', value: Buffer.from('v') }),
+        new ProducerRecord({ topic: 'idle', partition: null, key: null, value: Buffer.from('v'), headers: [new Header({ key: 'a\\0b', value: Buffer.from('v') })] }),
       ]) {
         await p.send({ record, callback: () => console.log('callback ran') }).catch((e) => console.log(e.name, e.message));
       }
@@ -1092,7 +1092,7 @@ test('a pending send keeps the process alive until it completes and the producer
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 1500 } });
     p.send({
-      record: new ProducerRecord({ topic: 'alive', value: 'v' }),
+      record: new ProducerRecord({ topic: 'alive', value: Buffer.from('v') }),
       callback: ({ exception }) => console.log('callback:', exception.message),
     }).then(() => p.close());
   `);
@@ -1117,7 +1117,7 @@ const AFTER_CLOSE = [
   { call: 'p.flush()', outcome: 'resolved' },
   // Answered inside the call, with Java's errors.
   { call: 'p.close(-1)', outcome: 'IllegalArgumentError: The timeout cannot be negative.' },
-  { call: "p.send(new ProducerRecord({ topic: 't', value: 'v' }))", outcome: `IllegalStateError: ${CLOSED_MESSAGE}` },
+  { call: "p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') }))", outcome: `IllegalStateError: ${CLOSED_MESSAGE}` },
 ];
 
 for (const { call, outcome } of AFTER_CLOSE) {
@@ -1154,7 +1154,7 @@ test("a late close() and flush() settle while nothing else holds Node, after a r
     const lines = [];
     (async () => {
       await p.send({
-        record: new ProducerRecord({ topic: 't', value: 'v' }),
+        record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
         // A block body: a callback that returns a value is awaited (rule 6).
         callback: ({ exception }) => {
           lines.push('callback: ' + exception.constructor.name + ': ' + exception.message);
@@ -1211,7 +1211,7 @@ for (const { what, body } of [
   { what: 'a closed producer with no call waiting', body: 'await p.close();' },
   {
     what: 'a closed producer whose late calls settled',
-    body: "await p.close();\n        await p.flush();\n        await p.close();\n        await p.send(new ProducerRecord({ topic: 't', value: 'v' })).catch(() => {});",
+    body: "await p.close();\n        await p.flush();\n        await p.close();\n        await p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })).catch(() => {});",
   },
 ]) {
   test(`${what} lets the process exit right after its last answer`, () => {
@@ -1263,7 +1263,7 @@ test('a send waiting for metadata across close(0) rejects with Java\'s error and
       const outcomes = new Set();
       for (let round = 0; round < 25; round++) {
         const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
-        const sent = p.send(new ProducerRecord({ topic: 't', value: 'v' })).then(() => 'resolved', describe);
+        const sent = p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })).then(() => 'resolved', describe);
         // Long enough for the record to be waiting for metadata.
         await new Promise((res) => setTimeout(res, 100));
         await p.close(0);
@@ -1319,7 +1319,7 @@ test('a producer dropped while open keeps running: no garbage collection closes 
     `
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     let p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 300 } });
-    p.send({ record: new ProducerRecord({ topic: 'dropped', value: 'v' }), callback: ({ exception }) => console.log('callback:', exception.name) });
+    p.send({ record: new ProducerRecord({ topic: 'dropped', value: Buffer.from('v') }), callback: ({ exception }) => console.log('callback:', exception.name) });
     p = null;
     global.gc();
     setTimeout(() => {
@@ -1391,11 +1391,11 @@ test('a closed producer is destroyed when collected, a send refused after close(
       },
       'send after close': async (p) => {
         await p.close();
-        await p.send(new ProducerRecord({ topic: 't', value: 'v' })).catch(() => {});
+        await p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })).catch(() => {});
       },
       'send failed by close': async (p) => {
         // Waits for metadata in the core until the zero close fails it.
-        const sent = p.send(new ProducerRecord({ topic: 't', value: 'v' })).catch(() => {});
+        const sent = p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })).catch(() => {});
         await new Promise((r) => setImmediate(r));
         await p.close({ timeout: 0 });
         await sent;
@@ -1463,7 +1463,7 @@ test('an un-awaited send whose hand-over fails surfaces as an unhandled rejectio
       p.close();
     });
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': 'does-not-exist.invalid:9092', 'bootstrap.resolve.timeout.ms': 1000 } });
-    p.send({ record: new ProducerRecord({ topic: 'h', value: 'v' }), callback: () => console.log('callback ran') });
+    p.send({ record: new ProducerRecord({ topic: 'h', value: Buffer.from('v') }), callback: () => console.log('callback ran') });
   `);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, `unhandled: BootstrapResolutionError ${BOOTSTRAP_MESSAGE}\n`);
@@ -1475,7 +1475,7 @@ test('a failed future whose get() is never called raises no unhandled rejection'
     process.on('unhandledRejection', (e) => console.log('unhandled:', e.message));
     (async () => {
       const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 } });
-      const future = await p.send({ record: new ProducerRecord({ topic: 'unread', value: 'v' }) });
+      const future = await p.send({ record: new ProducerRecord({ topic: 'unread', value: Buffer.from('v') }) });
       await p.close();
       console.log('done', future.isCompletedExceptionally());
     })();
@@ -1560,11 +1560,25 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
   try {
     await producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: Buffer.from('k'), value: 'anything' }));
     assert.deepEqual(calls.map((c) => c.data), ['anything']);
-    // Without a key serializer the key must be bytes or a string.
+    // Without a key serializer the key must be bytes; a string points to stringSerializer() (root Q24, Q27).
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 3, value: 'v' })), {
       name: 'TypeError',
-      message: 'key must be a Buffer, a Uint8Array, a string or null when the producer has no key serializer',
+      message: 'key must be a Buffer, a Uint8Array or null when the producer has no key serializer',
     });
+    await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 'k', value: 'v' })), {
+      name: 'TypeError',
+      message:
+        "key is a string, and the producer has no key serializer: give the producer keySerializer: stringSerializer() (or 'key.serializer': " +
+        'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+    });
+    const bytesOnly = new KafkaProducer({ configs: UNREACHABLE });
+    await assert.rejects(bytesOnly.send(new ProducerRecord({ topic: 'unit-serde-n', value: 'v' })), {
+      name: 'TypeError',
+      message:
+        "value is a string, and the producer has no value serializer: give the producer valueSerializer: stringSerializer() (or 'value.serializer': " +
+        'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+    });
+    await bytesOnly.close();
   } finally {
     await producer.close();
   }

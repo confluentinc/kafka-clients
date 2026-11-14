@@ -57,6 +57,7 @@ const {
 } = require('./_common');
 const { ThroughputThrottler } = require('./throughput_throttler');
 
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 // ---------------------------------------------------------------------------
@@ -319,8 +320,10 @@ function parseArgs(parser, args) {
     // No producer retries
     retries: '0',
   };
-  // Java also sets key.serializer and value.serializer to StringSerializer;
-  // here the keys and values are strings, which the client encodes as UTF-8.
+  // Java also sets key.serializer and value.serializer to StringSerializer:
+  // here the factory of its JavaScript form, which a config key takes without ().
+  producerProps['key.serializer'] = stringSerializer;
+  producerProps['value.serializer'] = stringSerializer;
   if (res.producerConfig !== null) {
     printLine(
       'Option --producer.config has been deprecated and will be removed in a future version. Use ' +

@@ -539,7 +539,7 @@ test('errors built without their constructor keep the caller\'s stack frames', a
   // A closed producer's IllegalStateError.
   const p = new producer.KafkaProducer({ 'bootstrap.servers': 'localhost:1' });
   await p.close();
-  const closed = await p.send(new producer.ProducerRecord({ topic: 't', value: 'v' })).then(() => null, (e) => e);
+  const closed = await p.send(new producer.ProducerRecord({ topic: 't', value: Buffer.from('v') })).then(() => null, (e) => e);
   assert.ok(closed instanceof IllegalStateError);
   assertCallerFrames(closed, 'a closed producer');
   assert.match(closed.stack, /kafka_producer/);
