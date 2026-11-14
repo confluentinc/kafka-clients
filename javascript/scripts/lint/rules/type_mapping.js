@@ -46,9 +46,13 @@
 // | Throwable                                    | unknown (anything a function may throw)  |
 // | ? (an unbounded wildcard)                    | any type                                 |
 // | T, as a bare value's type                    | Bare<T> (Extract<T, BareValue>), at the bare parameter only |
-// | List / Set / Collection<T>, T[]              | an array of T                           |
-// | Set<T> (a constant Set)                      | ReadonlySet<T>, a read-only set          |
-// | Iterable<T>                                  | Iterable<T>, or an array of T           |
+// | List / Set / Collection / Iterable<T>, T[], taken | Iterable<T>, or an array of T      |
+// | List / Collection<T>, T[], returned          | an array of T (a new array each call)   |
+// | Iterable<T>, returned                        | Iterable<T>, or an array of T           |
+// | Set<T>, returned (a constant: read-only)     | Set<T> or ReadonlySet<T>                |
+// | Set<TopicPartition>, returned                | TopicPartitionSet                       |
+// | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
+// | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type     |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
@@ -175,12 +179,17 @@ module.exports = {
     };
     const parts = (t) => (t.isUnion() ? t.types : [t]);
     const symbolName = (t) => (t.aliasSymbol && t.aliasSymbol.name) || (t.symbol && t.symbol.name) || '';
-    const elementOf = (t) => {
+    // The element type of an array (any direction) or, taken only, of an
+    // Iterable: a Java array or collection the caller passes is any iterable
+    // of its elements, and one returned is an array (root CLAUDE.md,
+    // JavaScript Binding Conventions, Types; the plan's §5, item 1).
+    const elementOf = (t, iterable = !outward) => {
       if (checker.isArrayType(t) || checker.isTupleType(t)) return checker.getTypeArguments(t)[0];
       const n = symbolName(t);
-      if (n === 'ReadonlyArray' || n === 'Array' || n === 'Iterable') return (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
+      if (n === 'ReadonlyArray' || n === 'Array' || (iterable && n === 'Iterable')) return (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
       return undefined;
     };
+    const typeArgs = (t) => t.aliasTypeArguments || checker.getTypeArguments(t);
 
     /** Whether TS type `t` (null stripped) is what Java type `j` maps to: true, false, or 'unmapped'. */
     const matches = (j, t0) => {
@@ -235,15 +244,29 @@ module.exports = {
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
-      if (j.name === 'Set' && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
-        // A constant Set is a read-only set (root CLAUDE.md, JavaScript
-        // Binding Conventions, Names).
-        const e = (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
+      if (j.name === 'Set' && outward && j.args[0] !== undefined && j.args[0].name === 'TopicPartition') {
+        // A set of TopicPartition returned is a TopicPartitionSet, whose
+        // members compare by value (root CLAUDE.md, JavaScript Binding
+        // Conventions, Types).
+        return symbolName(t) === 'TopicPartitionSet';
+      }
+      if (j.name === 'Set' && outward && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
+        // A Set returned is a Set; a constant one a read-only set (root
+        // CLAUDE.md, JavaScript Binding Conventions, Names).
+        const e = typeArgs(t)[0];
         const elem = j.args[0];
         return elem === undefined || e === undefined ? true : matches(elem, e);
       }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'TopicPartition') {
+        return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'MetricName') {
+        return symbolName(t) === 'MetricNameMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Set' && outward) return false;
       if (LISTS.has(j.name) || j.name === 'Iterable') {
-        const e = elementOf(t);
+        // A Java Iterable returned stays an iterable.
+        const e = elementOf(t, !outward || j.name === 'Iterable');
         if (e === undefined) return false;
         const elem = j.args[0];
         return elem === undefined ? true : matches(elem, e);

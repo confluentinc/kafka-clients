@@ -109,6 +109,11 @@ export class Node {
         rack?: never;
         isFenced?: never;
     });
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
     readonly hasRack: boolean;
     readonly host: string | null;
     readonly id: number;
@@ -123,8 +128,32 @@ export class Node {
 
 // @public
 export class PartitionInfo {
+    constructor(options: {
+        topic: string;
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node> | null;
+        inSyncReplicas: Iterable<Node> | null;
+        offlineReplicas?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node> | null;
+        inSyncReplicas: Iterable<Node> | null;
+        offlineReplicas: Iterable<Node> | null;
+    });
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
+    inSyncReplicas(): Node[] | null;
     leader(): Node | null;
+    offlineReplicas(): Node[] | null;
     partition(): number;
+    replicas(): Node[] | null;
     topic(): string;
     toString(): string;
 }
@@ -135,6 +164,11 @@ export class TopicPartition {
         topic: string | null;
         partition: number;
     });
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
     readonly partition: number;
     toJSON(): {
         topic: string | null;

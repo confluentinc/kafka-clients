@@ -16,14 +16,15 @@
 // Class family): Java's no-argument value methods are readonly fields set in
 // the constructor (`node.id`, `node.host`, `node.isEmpty`), and Java's three
 // public constructors are one constructor taking one object of their named
-// parameters. Java's equals() and hashCode() are left out: how they are
-// translated is not decided yet (Q29, the fixed table for the JDK interfaces
-// and toString()).
+// parameters. The object is frozen when it is created. `equals` and
+// `hashCode` are Java's bodies (Q29).
 //
 // Not translated: Java's protected constructor Node(id, host, port, rack,
 // isFenced, idString), which only a subclass calls.
 
 import { JavaForms } from '../internal/args';
+import { objectHashCode, objectsEquals, sameClass } from '../internal/java_object';
+import { checkInt } from '../internal/java_number';
 
 // Java's public constructors, in Java declaration order (src/internal/args.ts).
 const FORMS = new JavaForms('Node', [
@@ -32,11 +33,8 @@ const FORMS = new JavaForms('Node', [
   ['id', 'host', 'port', 'rack', 'isFenced'],
 ]);
 const NO_NODE_FORMS = new JavaForms('noNode', [[]], { reader: true });
-
-function checkInteger(value: unknown, what: string): number {
-  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be an integer`);
-  return value;
-}
+const EQUALS_FORMS = new JavaForms('equals', [['obj']]);
+const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
 function checkOptionalString(value: unknown, what: string): string | null {
   if (value !== null && typeof value !== 'string') throw new TypeError(`${what} must be a string or null`);
@@ -100,9 +98,11 @@ export class Node {
    *   `{id, host, port}`, `{id, host, port, rack}` or
    *   `{id, host, port, rack, isFenced}`
    * @throws `TypeError` when an argument has the wrong type or is `undefined`
+   * @throws `RangeError` when the id or the port is beyond Java's `int`
    *
    * @remarks Java's three constructors are one, each a signature of its own;
    * one a constructor leaves out is what it passes (no rack, not fenced).
+   * The object is frozen.
    */
   constructor(options: {
     /** The node id. */
@@ -149,9 +149,9 @@ export class Node {
   });
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
-    const id = checkInteger(FORMS.value(options, 'id'), 'id');
+    const id = checkInt(FORMS.value(options, 'id'), 'id');
     const host = checkOptionalString(FORMS.value(options, 'host'), 'host');
-    const port = checkInteger(FORMS.value(options, 'port'), 'port');
+    const port = checkInt(FORMS.value(options, 'port'), 'port');
     const given = FORMS.value(options, 'rack');
     const rack = given === undefined ? null : checkOptionalString(given, 'rack');
     const fenced = FORMS.value(options, 'isFenced');
@@ -164,6 +164,7 @@ export class Node {
     this.rack = rack;
     this.isFenced = fenced === true;
     this.isEmpty = host === null || host === '' || port < 0;
+    Object.freeze(this);
   }
 
   /**
@@ -177,6 +178,59 @@ export class Node {
     NO_NODE_FORMS.match(undefined, arguments.length);
     Node.#noNode ??= new Node({ id: -1, host: '', port: -1 });
     return Node.#noNode;
+  }
+
+  /**
+   * Java's hash code of the node: `31` plus the host's hash code (0 for
+   * null), then `31 * result` plus the id, the port, the rack's hash code (0
+   * for null) and `isFenced`'s (`Boolean.hashCode`).
+   *
+   * @returns the hash code, a 32-bit integer
+   * @throws `TypeError` when it is given an argument
+   */
+  hashCode(): number {
+    HASH_CODE_FORMS.match(undefined, arguments.length);
+    let result = (31 + objectHashCode(this.host)) | 0;
+    result = (Math.imul(31, result) + this.id) | 0;
+    result = (Math.imul(31, result) + this.port) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.rack)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.isFenced)) | 0;
+    return result;
+  }
+
+  /**
+   * Whether `obj` is a `Node` with the same id, port, host, rack and fenced
+   * state, Java's `Node.equals`.
+   *
+   * @param options - the object to compare with
+   * @returns true when `obj` is an equal node
+   * @throws `IllegalArgumentError` when the given parameters are not `{obj}`
+   */
+  equals(options: {
+    /** The object to compare with. */
+    obj: unknown;
+  }): boolean;
+  /**
+   * The same as `equals({obj})`, with the object on its own; a plain object
+   * is read as the options object.
+   *
+   * @param obj - the object to compare with
+   * @returns true when `obj` is an equal node
+   */
+  equals(obj: unknown): boolean;
+  equals(options: unknown): boolean {
+    EQUALS_FORMS.match(options, arguments.length);
+    const obj = EQUALS_FORMS.value(options, 'obj');
+    if (this === obj) return true;
+    if (obj === null || obj === undefined || !sameClass(this, obj)) return false;
+    const other = obj as Node;
+    return (
+      this.id === other.id &&
+      this.port === other.port &&
+      objectsEquals(this.host, other.host) &&
+      objectsEquals(this.rack, other.rack) &&
+      objectsEquals(this.isFenced, other.isFenced)
+    );
   }
 
   /**

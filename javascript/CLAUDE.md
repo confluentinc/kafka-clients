@@ -332,8 +332,8 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
-  A `ProducerRecord` is frozen (`Object.freeze(this)` in its constructor,
-  as `TopicPartition` is), so `ProducerRecord.internalToNative` reads
+  Every data class is frozen (`Object.freeze(this)` in its constructor,
+  which `check-data-objects` requires), so `ProducerRecord.internalToNative` reads
   the fields its constructor checked and checks nothing again at `send()`
   (root conventions, Q35: no repeated precondition); its `Headers` stays
   writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
@@ -769,12 +769,11 @@ The layout is the root conventions' (Layout and modules).
   to match. `dist/` is git-ignored and is what
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
-  TypeScript `private` constructor (`protected` where Java's is), and so is
-  one users must not call (`RecordMetadata`, whose Java constructor's `long`
-  parameters wait on how a `long` is typed, not decided yet in the root
-  conventions); there is no run-time guard (root
-  conventions, Class family). The library builds such an object through one
-  static factory, `internalCreate`, and calls its own methods on public
+  TypeScript `private` constructor (`protected` where Java's is); there is no
+  run-time guard (root conventions, Class family). The library builds such an
+  object through one static factory, `internalCreate` (`RecordMetadata`'s
+  builds it from the native layer's fields, through its public constructor
+  with a module-private mark that no caller can give), and calls its own methods on public
   classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)
   with dot access: each is a public member marked `@internal` in its TSDoc
   and named `internal...`, which tsc's `stripInternal` leaves out of the

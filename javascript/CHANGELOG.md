@@ -165,8 +165,15 @@ newer.
   what the serializers take, checked at `send()` when there is no serializer.
 - `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
   in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
-  `Node` (a data object) and `PartitionInfo` (Java's methods; no public
-  constructor yet).
+  `Node` (a frozen data object) and `PartitionInfo` (Java's methods, its
+  public constructors taking any iterable of `Node` for Java's `Node[]`, and
+  `replicas()`, `inSyncReplicas()` and `offlineReplicas()` returning a new
+  array each call). The three have Java's `equals` and `hashCode`, and an
+  `int` argument beyond Java's `int` is a `RangeError`.
+- `RecordMetadata` has Java's public constructor, `new RecordMetadata({
+  topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,
+  serializedValueSize })`, a `long` taking a bigint or a whole number; every
+  `RecordMetadata` is frozen.
 
 ### Errors and security
 

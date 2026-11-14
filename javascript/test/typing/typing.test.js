@@ -83,13 +83,18 @@ test('every public module is declared, no private one is, and no declaration ref
 // assume a public one.
 test('the declarations keep private constructors and leave out the library\'s own members', () => {
   for (const [rel, cls] of [
-    ['producer/record_metadata.d.ts', 'RecordMetadata'],
     ['common/security/auth/security_protocol.d.ts', 'SecurityProtocol'],
     ['common/config/ssl_client_auth.d.ts', 'SslClientAuth'],
   ]) {
     const text = fs.readFileSync(path.join(DIST, rel), 'utf8');
     assert.match(text, new RegExp(`export declare class ${cls}\\b[^]*\\n    private constructor\\(\\);\\n`), `dist/${rel}: ${cls} has no private constructor`);
   }
+  // RecordMetadata has Java's public constructor only: the library's own
+  // construction is no declared signature.
+  const metadata = fs.readFileSync(path.join(DIST, 'producer/record_metadata.d.ts'), 'utf8');
+  assert.match(metadata, /\n    constructor\(options: \{\n[^]*?\n        topicPartition: TopicPartition;/);
+  assert.doesNotMatch(metadata, /private constructor/);
+  assert.doesNotMatch(metadata, /internal\?/);
   // KafkaFuture is abstract, as Java's, its constructor public for a
   // subclass; the client's own subclass is not declared.
   const future = fs.readFileSync(path.join(DIST, 'common/kafka_future.d.ts'), 'utf8');
