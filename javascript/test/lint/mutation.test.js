@@ -500,7 +500,8 @@ MUTATIONS.push(
       ),
   },
   {
-    rule: 'check-notify-hook',
+    // An unreference off the close path, too.
+    rules: ['check-notify-hook', 'check-tsfn-lifetime'],
     what: 'a call added in cbq_notify',
     apply: (root) =>
       edit(
