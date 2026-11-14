@@ -139,6 +139,47 @@ function isAbstract(fqn) {
   return javaClass(fqn).abstract;
 }
 
+/** Whether a form is a message and cause form: no payload parameter. */
+function plainForm(params) {
+  return params.every((p) => p === 'message' || p === 'cause');
+}
+
+/**
+ * A form as a form error lists it: a one-parameter form of a message or a
+ * cause as its value, any other as its options object (an error's payload is
+ * given by name only, root CLAUDE.md, JavaScript Binding Conventions, Errors).
+ */
+function shapeOf(params) {
+  return params.length > 1 || !plainForm(params) ? `({ ${params.join(', ')} })` : `(${params.join(', ')})`;
+}
+
+/**
+ * The payload getters each class adds to its prototype, by Java class: Java's
+ * public getters of the class (javaPayloadGetters), less those of a type the
+ * client does not translate, and Java's toString() override.
+ */
+const PAYLOAD_MEMBERS = new Map([
+  ['org.apache.kafka.common.errors.TopicAuthorizationException', ['unauthorizedTopics']],
+  ['org.apache.kafka.common.errors.InvalidTopicException', ['invalidTopics']],
+  ['org.apache.kafka.common.errors.GroupAuthorizationException', ['groupId']],
+  ['org.apache.kafka.common.errors.ThrottlingQuotaExceededException', ['throttleTimeMs']],
+  ['org.apache.kafka.common.errors.RecordTooLargeException', ['recordTooLargePartitions']],
+  ['org.apache.kafka.common.errors.ResourceNotFoundException', ['resource']],
+  ['org.apache.kafka.common.errors.DuplicateResourceException', ['resource']],
+  ['org.apache.kafka.clients.consumer.OffsetOutOfRangeException', ['offsetOutOfRangePartitions', 'partitions']],
+  ['org.apache.kafka.clients.consumer.NoOffsetForPartitionException', ['partitions']],
+  ['org.apache.kafka.common.metrics.QuotaViolationException', ['metric', 'value', 'bound', 'toString']],
+  ['org.apache.kafka.common.requests.CorrelationIdMismatchException', ['requestCorrelationId', 'responseCorrelationId']],
+]);
+
+/** Java's public instance methods of class `fqn` (getters and overrides), from the Java index. */
+function javaPayloadGetters(fqn) {
+  if (fqn.startsWith('java.')) return [];
+  const cls = javaClass(fqn);
+  const simple = cls.path[cls.path.length - 1];
+  return [...new Set(cls.overloads.filter((o) => o.name !== simple && !o.static && o.visibility === 'public' && !o.abstract).map((o) => o.name))];
+}
+
 /** An instance of `cls`, as the core reports one. */
 function instance(cls) {
   return create(cls, 'm');
@@ -288,7 +329,18 @@ test('an error has no public field but name, message and cause: classify with in
       assert.ok(!(gone in cls), `${cls.name}.${gone} (static)`);
     }
     assert.deepEqual(Object.getOwnPropertyNames(e).sort(), ['message', 'name', 'stack'], cls.name);
-    assert.deepEqual(Object.getOwnPropertyNames(cls.prototype), ['constructor'], cls.name);
+    // Java's payload getters are methods over private fields (Q39).
+    const payload = PAYLOAD_MEMBERS.get(JAVA_OF.get(cls)) ?? [];
+    assert.deepEqual(Object.getOwnPropertyNames(cls.prototype).sort(), ['constructor', ...payload].sort(), cls.name);
+    // Every Java public method the class declares is a member, but those of a
+    // type the client does not translate, Java's fillInStackTrace() (a JVM
+    // stack-trace override JavaScript has no counterpart of), and an abstract
+    // base's abstract getter, which has no body.
+    const untranslated = new Set(['divergentOffsets', 'origin', 'topicPartition', 'offset', 'timestampType', 'timestamp', 'keyBuffer', 'valueBuffer', 'headers', 'fillInStackTrace']);
+    if (isAbstract(JAVA_OF.get(cls))) continue;
+    for (const m of javaPayloadGetters(JAVA_OF.get(cls))) {
+      if (!untranslated.has(m)) assert.ok(payload.includes(m), `${cls.name}.${m}`);
+    }
   }
   const withCause = create(KafkaError, 'm', null);
   assert.deepEqual(Object.getOwnPropertyNames(withCause).sort(), ['cause', 'message', 'name', 'stack']);
@@ -297,7 +349,7 @@ test('an error has no public field but name, message and cause: classify with in
 test("every class takes Java's message and cause forms, both ways", () => {
   for (const cls of errorClasses()) {
     const java = JAVA_OF.get(cls);
-    const forms = (ownForms(cls) ?? []).map(([params]) => params);
+    const forms = (ownForms(cls) ?? []).map(([params]) => params).filter(plainForm);
     assert.deepEqual(
       forms.map((f) => f.join(',')).sort(),
       [...new Set(javaForms(java).map((f) => f.join(',')))].sort(),
@@ -317,16 +369,18 @@ test('each form gives Java\'s message and cause, and a call no form takes is ref
     if (registered.length === 0) {
       assert.throws(() => new target({ message: 'm' }), {
         name: 'TypeError',
-        message: `${cls.name} cannot be constructed: its Java constructors take a payload the client does not translate yet`,
+        message: `${cls.name} cannot be constructed: its Java constructors take a type the client does not translate yet`,
       });
       continue;
     }
     const list = [...registered]
       .map(([params]) => params)
       .sort((a, b) => a.length - b.length)
-      .map((params) => (params.length > 1 ? `({ ${params.join(', ')} })` : `(${params.join(', ')})`))
+      .map(shapeOf)
       .join(', ');
     for (const [params, message] of registered) {
+      // A payload form is checked by the payload tests (test/unit/common/errors/payload.test.js).
+      if (!plainForm(params)) continue;
       const args = {};
       if (params.includes('message')) args.message = 'm';
       if (params.includes('cause')) args.cause = cause;
@@ -466,7 +520,7 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   });
   assert.throws(() => new TopicAuthorizationError('m', cause, 3), {
     name: 'IllegalArgumentError',
-    message: 'TopicAuthorizationError() takes one of (message); got 3 arguments',
+    message: 'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 3 arguments',
   });
   assert.throws(() => new common.errors.CoordinatorNotAvailableError('m', cause), {
     name: 'IllegalArgumentError',
@@ -480,7 +534,7 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   // (String, Throwable) constructor.
   assert.throws(() => new TopicAuthorizationError({ message: 'm', cause }), {
     name: 'IllegalArgumentError',
-    message: 'TopicAuthorizationError() takes one of (message); got (message, cause)',
+    message: 'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got (message, cause)',
   });
   // Java's own messages, pinned in full (python/test/unit/test_errors.py's
   // test_constructors_with_a_literal_message).
@@ -506,10 +560,10 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.equal(new consumer.RetriableCommitFailedError(cause).cause, cause);
   assert.ok(new consumer.CommitFailedError().message.startsWith('Commit cannot be completed since the group has already rebalanced'));
   assert.equal(new consumer.CommitFailedError('mine').message, 'mine');
-  // A class whose every Java constructor takes a payload cannot be constructed yet.
-  assert.throws(() => new common.metrics.QuotaViolationError('m'), {
+  // A class whose every Java constructor takes a type the client does not translate cannot be constructed yet.
+  assert.throws(() => new consumer.LogTruncationError('m'), {
     name: 'TypeError',
-    message: 'QuotaViolationError cannot be constructed: its Java constructors take a payload the client does not translate yet',
+    message: 'LogTruncationError cannot be constructed: its Java constructors take a type the client does not translate yet',
   });
   assert.equal(Object.keys(new KafkaError('m')).includes('name'), false);
 });
@@ -642,7 +696,7 @@ test("every error class's form error lists its forms as JavaScript calls them, b
     const shapes = [...forms]
       .map(([params]) => params)
       .sort((a, b) => a.length - b.length)
-      .map((params) => (params.length > 1 ? `({ ${params.join(', ')} })` : `(${params.join(', ')})`));
+      .map(shapeOf);
     assert.throws(() => new target({ message: null }, null), {
       name: 'IllegalArgumentError',
       message: `${cls.name}() takes one of ${shapes.join(', ')}; got 2 arguments`,

@@ -15,12 +15,12 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.clients.consumer.NoOffsetForPartitionException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `NoOffsetForPartitionException(TopicPartition)`,
-// `NoOffsetForPartitionException(Collection<TopicPartition>)`.
 
-import { setForms } from '../internal/throwable';
+import type { TopicPartition } from '../common/topic_partition';
+import type { TopicPartitionSet } from '../common/topic_partition_set';
+import { javaString } from '../internal/java_string';
+import * as P from '../internal/payload';
+import { payloadOf, setForms } from '../internal/throwable';
 import { InvalidOffsetError } from './invalid_offset_error';
 
 /**
@@ -28,9 +28,6 @@ import { InvalidOffsetError } from './invalid_offset_error';
  * offset reset policy.
  *
  * Java: `org.apache.kafka.clients.consumer.NoOffsetForPartitionException`.
- *
- * Not constructible yet: Java's constructors take a payload the client does not
- * translate yet; the client builds this error when the core reports it.
  */
 export class NoOffsetForPartitionError extends InvalidOffsetError {
   /**
@@ -38,6 +35,11 @@ export class NoOffsetForPartitionError extends InvalidOffsetError {
    * not by shape. It holds no state.
    */
   readonly #brand = true;
+
+  /**
+   * Java's field `Set<TopicPartition> partitions`.
+   */
+  readonly #partitions: TopicPartitionSet | null;
 
   /**
    * The FFI id of the class,
@@ -49,14 +51,42 @@ export class NoOffsetForPartitionError extends InvalidOffsetError {
   static override readonly _ffiId: number = -21;
 
   /**
-   * Not constructible yet: Java's constructors take a payload the client does
-   * not translate yet.
+   * Java's `(TopicPartition partition)` constructor. The message is the one
+   * Java's constructor builds from the payload.
    *
-   * @param args - refused: constructing the error throws `TypeError`
+   * @param options - the `partition`
    */
-  protected constructor(...args: unknown[]) {
+  constructor(options: { /** Java's `TopicPartition partition`. */ partition: TopicPartition; name?: never });
+  /**
+   * Java's `(Collection<TopicPartition> partitions)` constructor. The message
+   * is the one Java's constructor builds from the payload.
+   *
+   * @param options - the `partitions`
+   */
+  constructor(options: { /** Java's `Collection<TopicPartition> partitions`. */ partitions: Iterable<TopicPartition>; name?: never });
+  constructor(...args: unknown[]) {
     super(...(args as [{ message: string | null; name?: never }]));
+    const fields = payloadOf(this);
+    this.#partitions = fields.partitions as TopicPartitionSet | null;
+  }
+
+  /**
+   * Java's `partitions()`.
+   *
+   * @returns Java's `partitions`, as a new TopicPartitionSet the caller may
+   * change @throws `TypeError` when it is given an argument: it only reads
+   */
+  override partitions(): TopicPartitionSet {
+    P.readOnly('partitions', arguments.length);
+    return P.topicPartitions.copy(this.#partitions) as TopicPartitionSet;
   }
 }
 
-setForms(NoOffsetForPartitionError, []);
+setForms(NoOffsetForPartitionError, [
+  [['partition'], (v) => 'Undefined offset with no reset policy for partition: ' + javaString(v.partition), (v) => ({ partitions: P.singleton(v.partition, 'partition') })],
+  [['partitions'], (v) => 'Undefined offset with no reset policy for partitions: ' + javaString(v.partitions), (v) => ({ partitions: P.nonNull(v.partitions, 'partitions') })],
+], {
+  order: ['partition', 'partitions'],
+  params: { partition: P.topicPartition, partitions: P.topicPartitions },
+  fields: { partitions: [P.topicPartitions, null] },
+});

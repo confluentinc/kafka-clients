@@ -16,11 +16,14 @@
 // the Java source of `org.apache.kafka.common.errors.RecordDeserializationException`;
 // `cargo xtask check-generated` checks it is up to date.
 //
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters:
+// Not generated: Java's payload, as its payload holds the consumer's
+// `TimestampType` and Java's nested `DeserializationExceptionOrigin`, which
+// the client does not translate before the consumer: the constructors
 // `RecordDeserializationException(DeserializationExceptionOrigin,
 // TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers,
-// String, Throwable)`.
+// String, Throwable)`, the getters `origin()`, `topicPartition()`, `offset()`,
+// `timestampType()`, `timestamp()`, `keyBuffer()`, `valueBuffer()` and
+// `headers()`, and the payload of an error the core reports.
 
 import { setForms } from '../../internal/throwable';
 import { SerializationError } from './serialization_error';
@@ -51,8 +54,8 @@ export class RecordDeserializationError extends SerializationError {
   static override readonly _ffiId: number = -27;
 
   /**
-   * Not constructible yet: Java's constructors take a payload the client does
-   * not translate yet.
+   * Not constructible yet: Java's constructors take a type the client does not
+   * translate yet.
    *
    * @param args - refused: constructing the error throws `TypeError`
    */

@@ -15,11 +15,9 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.common.errors.ThrottlingQuotaExceededException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `ThrottlingQuotaExceededException(int, String)`.
 
-import { setForms } from '../../internal/throwable';
+import * as P from '../../internal/payload';
+import { payloadOf, setForms } from '../../internal/throwable';
 import { RetriableError } from './retriable_error';
 
 /**
@@ -33,6 +31,11 @@ export class ThrottlingQuotaExceededError extends RetriableError {
    * not by shape. It holds no state.
    */
   readonly #brand = true;
+
+  /**
+   * Java's field `int throttleTimeMs`.
+   */
+  readonly #throttleTimeMs: number;
 
   /**
    * The FFI id of the class, `kafka_common_Error_THROTTLING_QUOTA_EXCEEDED`,
@@ -55,11 +58,35 @@ export class ThrottlingQuotaExceededError extends RetriableError {
    * @param message - the message; `null` reads as `''`
    */
   constructor(message: string | null);
+  /**
+   * Java's `(int throttleTimeMs, String message)` constructor.
+   *
+   * @param options - the `throttleTimeMs` and the message
+   */
+  constructor(options: { /** Java's `int throttleTimeMs`. */ throttleTimeMs: number; /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   constructor(...args: unknown[]) {
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));
+    const fields = payloadOf(this);
+    this.#throttleTimeMs = fields.throttleTimeMs as number;
+  }
+
+  /**
+   * Java's `throttleTimeMs()`.
+   *
+   * @returns Java's `throttleTimeMs` @throws `TypeError` when it is given an
+   * argument: it only reads
+   */
+  throttleTimeMs(): number {
+    P.readOnly('throttleTimeMs', arguments.length);
+    return this.#throttleTimeMs;
   }
 }
 
 setForms(ThrottlingQuotaExceededError, [
-  [['message'], 'message'],
-]);
+  [['message'], 'message', () => ({ throttleTimeMs: 0 })],
+  [['throttleTimeMs', 'message'], 'message', (v) => ({ throttleTimeMs: v.throttleTimeMs })],
+], {
+  order: ['throttleTimeMs', 'message'],
+  params: { throttleTimeMs: P.int },
+  fields: { throttleTimeMs: [P.int, 0] },
+});

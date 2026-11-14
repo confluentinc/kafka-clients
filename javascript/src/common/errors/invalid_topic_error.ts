@@ -15,12 +15,10 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.common.errors.InvalidTopicException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `InvalidTopicException(Set<String>)`,
-// `InvalidTopicException(String, Set<String>)`.
 
-import { setForms } from '../../internal/throwable';
+import { javaString } from '../../internal/java_string';
+import * as P from '../../internal/payload';
+import { payloadOf, setForms } from '../../internal/throwable';
 import { InvalidConfigurationError } from './invalid_configuration_error';
 
 /**
@@ -36,6 +34,11 @@ export class InvalidTopicError extends InvalidConfigurationError {
    * shape. It holds no state.
    */
   readonly #brand = true;
+
+  /**
+   * Java's field `Set<String> invalidTopics`.
+   */
+  readonly #invalidTopics: Set<string> | null;
 
   /**
    * The FFI id of the class, `kafka_common_Error_INVALID_TOPIC_ERROR`, for the
@@ -83,14 +86,46 @@ export class InvalidTopicError extends InvalidConfigurationError {
    * @param cause - the cause (`Error`'s `cause`)
    */
   constructor(cause: Error);
+  /**
+   * Java's `(Set<String> invalidTopics)` constructor. The message is the one
+   * Java's constructor builds from the payload.
+   *
+   * @param options - the `invalidTopics`
+   */
+  constructor(options: { /** Java's `Set<String> invalidTopics`. */ invalidTopics: Iterable<string>; name?: never });
+  /**
+   * Java's `(String message, Set<String> invalidTopics)` constructor.
+   *
+   * @param options - the message and the `invalidTopics`
+   */
+  constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** Java's `Set<String> invalidTopics`. */ invalidTopics: Iterable<string>; name?: never });
   constructor(...args: unknown[]) {
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));
+    const fields = payloadOf(this);
+    this.#invalidTopics = fields.invalidTopics as Set<string> | null;
+  }
+
+  /**
+   * Java's `invalidTopics()`.
+   *
+   * @returns Java's `invalidTopics`, as a new Set the caller may change @throws
+   * `TypeError` when it is given an argument: it only reads
+   */
+  invalidTopics(): Set<string> {
+    P.readOnly('invalidTopics', arguments.length);
+    return P.stringSet.copy(this.#invalidTopics) as Set<string>;
   }
 }
 
 setForms(InvalidTopicError, [
-  [[], null],
-  [['message', 'cause'], 'message'],
-  [['message'], 'message'],
-  [['cause'], 'cause.toString()'],
-]);
+  [[], null, () => ({ invalidTopics: new Set<string>() })],
+  [['message', 'cause'], 'message', () => ({ invalidTopics: new Set<string>() })],
+  [['message'], 'message', () => ({ invalidTopics: new Set<string>() })],
+  [['cause'], 'cause.toString()', () => ({ invalidTopics: new Set<string>() })],
+  [['invalidTopics'], (v) => 'Invalid topics: ' + javaString(v.invalidTopics), (v) => ({ invalidTopics: v.invalidTopics })],
+  [['message', 'invalidTopics'], 'message', (v) => ({ invalidTopics: v.invalidTopics })],
+], {
+  order: ['message', 'cause', 'invalidTopics'],
+  params: { invalidTopics: P.stringSet },
+  fields: { invalidTopics: [P.stringSet, null] },
+});
