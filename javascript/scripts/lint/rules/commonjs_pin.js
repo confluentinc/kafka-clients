@@ -19,8 +19,9 @@
 // CommonJS with `module: nodenext`, `package.json` has no `"type":
 // "module"`, and each `exports` entry has the `types` and `default`
 // conditions"):
-//   - package.json has no `"type"` (`package-type`): CommonJS by Node's
-//     default;
+//   - package.json's `"type"` is not `"module"` (`package-type`): it is
+//     absent, CommonJS by Node's default, or `"commonjs"`, which publint
+//     suggests;
 //   - tsconfig.json's `module` and `moduleResolution` are `nodenext`
 //     (`tsconfig-module`);
 //   - each `exports` entry is an object of exactly the conditions `types`
@@ -37,7 +38,7 @@ module.exports = {
   kinds: ['package-type', 'tsconfig-module', 'exports-conditions', 'commonjs-unreadable'],
   needs: ['typescript'],
   hint:
-    'Keep the package CommonJS only: no "type" in package.json, module and moduleResolution nodenext, and each ' +
+    'Keep the package CommonJS only: no "type": "module" in package.json, module and moduleResolution nodenext, and each ' +
     'exports entry { types, default } (root CLAUDE.md, JavaScript Binding Conventions, Layout and modules, Q13).',
   check(ctx) {
     const ts = ctx.typescript();
@@ -51,8 +52,12 @@ module.exports = {
     }
     if (pkg !== null) {
       checked++;
-      if (Object.hasOwn(pkg, 'type')) {
-        findings.push({ kind: 'package-type', subject: `${PACKAGE}:type`, message: `is ${JSON.stringify(pkg.type)}: the package is CommonJS, with no "type"` });
+      if (Object.hasOwn(pkg, 'type') && pkg.type !== 'commonjs') {
+        findings.push({
+          kind: 'package-type',
+          subject: `${PACKAGE}:type`,
+          message: `is ${JSON.stringify(pkg.type)}: the package is CommonJS, with no "type" or "type": "commonjs"`,
+        });
       }
       for (const [subpath, entry] of Object.entries(pkg.exports || {})) {
         checked++;
