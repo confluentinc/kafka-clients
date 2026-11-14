@@ -34,6 +34,9 @@
 #   python/native/lib/libconfluent_kafka.{so,dylib}
 #   python/native/include/confluent_kafka.h
 #   python/native/include/confluent_kafka_bindings.h
+# With STAGE_STATIC_LIB=1, also the static archive of the same build, which
+# the Node.js addon links (.semaphore/build-javascript-native.sh):
+#   python/native/lib/libconfluent_kafka.a
 
 set -eu
 
@@ -82,6 +85,9 @@ build_and_stage() {
     rm -rf "$dest/python/native"
     mkdir -p "$dest/python/native/lib" "$dest/python/native/include"
     cp "rust/target/release/$lib" "$dest/python/native/lib/"
+    if [ "${STAGE_STATIC_LIB:-}" = 1 ]; then
+        cp rust/target/release/libconfluent_kafka.a "$dest/python/native/lib/"
+    fi
     cp rust/target/include/confluent_kafka.h rust/target/include/confluent_kafka_bindings.h \
         "$dest/python/native/include/"
 }
@@ -117,6 +123,7 @@ if [ "${1:-}" = "--in-docker" ]; then
     echo "== LINKAGE =="; ldd "$lib" || true
     echo "== GLIBC symbol floor =="; objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || true
     echo "== SHA256 =="; sha256sum "$lib" /io/python/native/include/*.h || true
+    if [ "${STAGE_STATIC_LIB:-}" = 1 ]; then sha256sum /io/python/native/lib/libconfluent_kafka.a || true; fi
     exit 0
 fi
 
@@ -147,11 +154,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
     echo "== INSTALL NAME =="; otool -D "$lib" || true
     echo "== MINIMUM OS VERSION =="; otool -l "$lib" | grep -A3 LC_BUILD_VERSION || true
     echo "== SHA256 =="; shasum -a 256 "$lib" python/native/include/*.h || true
+    if [ "${STAGE_STATIC_LIB:-}" = 1 ]; then shasum -a 256 python/native/lib/libconfluent_kafka.a || true; fi
     exit 0
 fi
 
 docker_image="${1:?Usage: $0 <docker-image>}"
 
 retry docker pull "$docker_image"
-exec docker run --rm -v "$PWD":/io -w /io "$docker_image" \
+exec docker run --rm -e STAGE_STATIC_LIB -v "$PWD":/io -w /io "$docker_image" \
     sh /io/.semaphore/build-ffi-library.sh --in-docker

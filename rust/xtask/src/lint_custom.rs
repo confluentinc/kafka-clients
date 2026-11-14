@@ -2507,7 +2507,7 @@ impl Rule for NoDeprecatedTranslation {
 
 /// The types annotated `@InterfaceAudience.Public` at [`java::AUDIENCE_REF`],
 /// one fully-qualified top-level name per line.
-const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
+pub(crate) const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
 
 /// Where the C header's `[export] include` list lives.
 const CBINDGEN_TOML: &str = "cbindgen.toml";
@@ -3053,7 +3053,7 @@ fn cbindgen_includes(toml: &str) -> Vec<String> {
 }
 
 /// The fully-qualified names of the Public list.
-fn parse_public_list(text: &str) -> BTreeSet<String> {
+pub(crate) fn parse_public_list(text: &str) -> BTreeSet<String> {
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -4607,6 +4607,7 @@ mod tests {
             supertypes: Vec::new(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         }
     }
 
@@ -5919,6 +5920,7 @@ mod enum_translation_tests {
             supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         }
     }
 
@@ -6033,7 +6035,9 @@ mod functional_interface_trait_tests {
             is_static: false,
             is_default: false,
             param_names: params.iter().map(|_| "p".to_string()).collect(),
+            param_types: params.iter().map(|p| p.to_string()).collect(),
             returns_class: false,
+            return_type: None,
             javadoc: None,
         }
     }
@@ -6061,6 +6065,7 @@ mod functional_interface_trait_tests {
             supertypes: Vec::new(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         }
     }
 

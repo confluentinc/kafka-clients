@@ -1,0 +1,27 @@
+{
+  "name": "@confluentinc/kafka-javascript-darwin-arm64",
+  "version": "4.4.0-beta.1",
+  "description": "The darwin-arm64 native binary of @confluentinc/kafka-javascript",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/confluentinc/kafka-clients.git",
+    "directory": "javascript/npm/darwin-arm64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "confluent-kafka-javascript.node",
+  "files": [
+    "dist/",
+    "NOTICE",
+    "confluent-kafka-javascript.node",
+    "THIRD_PARTY_LICENSES.txt"
+  ],
+  "engines": {
+    "node": ">=22.14.0"
+  }
+}
