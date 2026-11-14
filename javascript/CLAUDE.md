@@ -1048,7 +1048,8 @@ The rules, each named in its finding:
   other class keeps methods.
 - `check-overload-shape`: one Java overload set is one method taking one
   options object of Java's parameter names, with one TypeScript overload
-  signature per Java form and the bare value of a one-parameter form.
+  signature per Java form, the signatures of its null combinations (a `null`
+  key or value, above) and the bare value of a one-parameter form.
 - `check-type-mapping`: each member's type is the one the Types table gives
   (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
   returned as a `bigint`, taken as a `bigint` or a whole `number`); a Java
