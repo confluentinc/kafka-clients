@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         This form is for the **4.x** client (version 4.0.0 or higher, published under
-        npm's `preview` dist-tag while it is in preview).
+        npm's `beta` dist-tag while it is in preview).
 
         The npm **1.x** releases, the librdkafka-based client, are built from the
         [`2.x` branch](https://github.com/confluentinc/confluent-kafka-javascript/tree/2.x)

@@ -6,11 +6,14 @@ Status: **approved 2026-11-05** (revision 3 of the design: publishing to npm and
 The record block records the tested tarballs under `npm/release/` (no bundle, no `publish.sh`),
 and the manual "Publish to npm" promotion (`.semaphore/publish-npm.yml`,
 `.semaphore/publish-npm.sh`) publishes them with a granular npm token from Vault and no
-provenance, under the dist-tag `check-npm.py dist-tag` gives (`preview` for a pre-release, never
+provenance, under the dist-tag `check-npm.py dist-tag` gives (`beta` for a pre-release, never
 `latest`; `legacy` for 1.x fixes). The preview has two platform packages, `linux-x64-gnu` and
 `darwin-arm64`, each a committed folder of `javascript/npm/` and shipping `NOTICE` and
 `THIRD_PARTY_LICENSES.txt` (cargo-about). The sections below describe revision 3 where they
 differ.
+
+**Revision 5 (root Q75):** the preview's version is `4.4.0-beta.1` and pre-releases go under
+npm's `beta` dist-tag, which supersedes `preview` in R4 and wherever revision 3 names it below.
 
 ## 1. Summary
 
