@@ -16,6 +16,10 @@
 // has: KafkaMetric, and the placeholder types of the untranslated
 // MetricValueProvider, MetricConfig and Measurable it takes or returns.
 // QuotaViolationError is generated from the Java sources.
+//
+// Left out (Q30): the setter KafkaMetric.config(MetricConfig), whose only
+// extra parameter over the getter is `config`, and which Java says is for the
+// server only.
 
 export { KafkaMetric } from './kafka_metric';
 export type { Measurable } from './measurable';
