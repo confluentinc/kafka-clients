@@ -140,6 +140,20 @@ test("one signature per Java form: each names exactly its form's parameters", ()
   const TWO = '{ topic: string; partition?: never; key?: never; value: unknown }';
   let r = lint(root([FOUR, THREE, TWO]), [RULE]);
   assert.deepEqual(shapeFindings(r), [], r.text);
+  // The signatures of a form's null combinations, a key or value typed null
+  // (which binds never), name the form's parameters: they are taken, not closed.
+  r = lint(
+    root([
+      '{ topic: string; partition: number | null; key: null; value: null }',
+      '{ topic: string; partition: number | null; key: null; value: unknown }',
+      FOUR,
+      '{ topic: string; partition?: never; key?: never; value: null }',
+      THREE,
+      TWO,
+    ]),
+    [RULE],
+  );
+  assert.deepEqual(shapeFindings(r), [], r.text);
   // A form without a signature; a signature of no form; an optional parameter.
   r = lint(root([FOUR, '{ topic: string; partition: number | null; key?: never; value: unknown }', '{ topic: string; partition?: never; key?: unknown; value: unknown }']), [RULE]);
   assert.deepEqual(shapeFindings(r), [

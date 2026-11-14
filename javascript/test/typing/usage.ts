@@ -554,12 +554,31 @@ const loose = { topic: 't', partition: 0, value: 'v' };
 new ProducerRecord(loose);
 // @ts-expect-error ProducerRecord takes no bare value: Java has no one-parameter constructor
 new ProducerRecord('t');
-// A record's key and value are what the serializers take; an omitted one
-// binds never, and a null one null (TypeScript infers null from a null
-// argument), which every producer sends.
+// A record's key and value are what the serializers take; an omitted or a
+// null one binds never, through a signature per null combination, so every
+// producer sends it.
 expectTypeOf(new ProducerRecord({ topic: 't', key: 1, value: 'v' })).toEqualTypeOf<ProducerRecord<number, string>>();
 expectTypeOf(new ProducerRecord({ topic: 't', value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
-expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: null })).toEqualTypeOf<ProducerRecord<null, null>>();
+expectTypeOf(new ProducerRecord({ topic: 't', value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
+expectTypeOf(new ProducerRecord({ topic: 't', key: 1, value: null })).toEqualTypeOf<ProducerRecord<number, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: null, value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: 1, value: null, headers: null })).toEqualTypeOf<ProducerRecord<number, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: null, headers: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+// A key or value that may be null binds its type without null.
+declare const maybeKey: string | null;
+expectTypeOf(new ProducerRecord({ topic: 't', key: maybeKey, value: maybeKey })).toEqualTypeOf<ProducerRecord<string, string>>();
+// send() takes the ProducerRecord<K, V> of the producer's serializers: a null
+// key or value fits any producer.
+async function nullRecords(typedProducer: KafkaProducer<string, string>): Promise<void> {
+  await typedProducer.send(new ProducerRecord({ topic: 't', key: null, value: null }));
+  await typedProducer.send({ record: new ProducerRecord({ topic: 't', key: null, value: 'v' }), callback: null });
+  // @ts-expect-error a number key goes to no producer of string keys
+  await typedProducer.send(new ProducerRecord({ topic: 't', key: 1, value: 'v' }));
+}
+void nullRecords;
 // Covariant: a record of narrower types is a record of wider ones.
 const wider: ProducerRecord<number | string, unknown> = new ProducerRecord({ topic: 't', key: 1, value: { a: 1 } });
 void wider;

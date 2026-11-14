@@ -164,6 +164,93 @@ export class ProducerRecord<out K = never, out V = never> {
   readonly headers: Headers;
 
   /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value, headers)`, with a null key and a null value, which binds `never`,
+   * as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * `Header` objects are kept), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value, headers)`, with a null key, which binds `never`, as an omitted one
+   * does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * `Header` objects are kept), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value, headers)`, with a null value, which binds `never`, as an omitted
+   * one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * `Header` objects are kept), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
    * Creates a record with a specified timestamp to be sent to a specified
    * topic and partition.
    *
@@ -187,9 +274,10 @@ export class ProducerRecord<out K = never, out V = never> {
    * cannot be reassigned, so `send()` reads what this constructor checked.
    * Its `headers` stay writable until the record is sent. The key and the
    * value are what the producer's serializers take, checked by `send()` when
-   * there is none. An omitted key or value binds `never`, and a `null` one
-   * `null` (one signature per Java constructor cannot bind it to `never`), so
-   * the producers take a `ProducerRecord<K | null, V | null>`.
+   * there is none. An omitted or `null` key or value binds `never`, through
+   * a signature per null combination beside each Java constructor's, as
+   * Python's binding adds one stub per combination, so a producer takes the
+   * `ProducerRecord<K, V>` of its serializers.
    */
   constructor(options: {
     /** The topic the record will be appended to. */
@@ -212,6 +300,76 @@ export class ProducerRecord<out K = never, out V = never> {
      * `Header` objects are kept), or null.
      */
     headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value)`, with a null key and a null value, which binds `never`, as an
+   * omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value)`, with a null key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value)`, with a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
   });
   /**
    * Creates a record with the specified timestamp to be sent to a specified
@@ -238,6 +396,76 @@ export class ProducerRecord<out K = never, out V = never> {
     headers?: never;
   });
   /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
+   * headers)`, with a null key and a null value, which binds `never`, as an
+   * omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * `Header` objects are kept), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
+   * headers)`, with a null key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * `Header` objects are kept), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
+   * headers)`, with a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * `Header` objects are kept), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
    * Creates a record to be sent to a specified topic and partition, Java's
    * `ProducerRecord(topic, partition, key, value, headers)`: no timestamp.
    *
@@ -261,6 +489,61 @@ export class ProducerRecord<out K = never, out V = never> {
     headers: Iterable<Header> | null;
   });
   /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
+   * with a null key and a null value, which binds `never`, as an omitted one
+   * does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
+   * with a null key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
+   * with a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
    * Creates a record to be sent to a specified topic and partition, Java's
    * `ProducerRecord(topic, partition, key, value)`: no timestamp, no headers.
    *
@@ -279,6 +562,57 @@ export class ProducerRecord<out K = never, out V = never> {
     headers?: never;
   });
   /**
+   * Creates a record, Java's `ProducerRecord(topic, key, value)`, with a null
+   * key and a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, key, value)`, with a null
+   * key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, key, value)`, with a null
+   * value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
    * Create a record to be sent to Kafka, Java's `ProducerRecord(topic, key,
    * value)`: no partition, timestamp or headers.
    *
@@ -293,6 +627,22 @@ export class ProducerRecord<out K = never, out V = never> {
     key: K | null;
     /** The record contents, or null (a tombstone). */
     value: V | null;
+    headers?: never;
+  });
+  /**
+   * Create a record with no key, Java's `ProducerRecord(topic, value)`, with a
+   * null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    key?: never;
+    /** A null value (a tombstone). */
+    value: null;
     headers?: never;
   });
   /**
