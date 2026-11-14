@@ -95,6 +95,12 @@ newer.
   Java's does. A method that
   only reads throws `TypeError` when it is given an argument.
   `RecordMetadata` and the enums have private constructors.
+- `ProducerRecord`, `Header` and `Headers` have Java's `equals` and
+  `hashCode`, with Java's hash codes. A `Uint8Array` key or value is Java's
+  `byte[]`: a record equals another only when it holds the same `Uint8Array`,
+  and the bytes add nothing to its hash code; a string key or value compares
+  as a string. A header's value is compared by its bytes, as Java's
+  `RecordHeader` does.
 - `Header` and `Headers`, in `common/header`, with Java's members: `Header`
   with Java's methods (`new Header({ key, value })`, `header.key()`,
   `header.value()`, a `Buffer`) and a `toJSON()`, `Headers` with `add`,
