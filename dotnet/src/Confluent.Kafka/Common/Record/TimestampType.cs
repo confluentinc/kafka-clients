@@ -52,7 +52,13 @@ public enum TimestampType
 /// </summary>
 public static class TimestampTypeMethods
 {
-    private static readonly TimestampType[] s_values = (TimestampType[])Enum.GetValues(typeof(TimestampType));
+    // Java's values(), written out: Enum.GetValues(Type) is not Native AOT safe.
+    private static readonly TimestampType[] s_values =
+    {
+        TimestampType.NO_TIMESTAMP_TYPE,
+        TimestampType.CREATE_TIME,
+        TimestampType.LOG_APPEND_TIME,
+    };
 
     extension(TimestampType)
     {
