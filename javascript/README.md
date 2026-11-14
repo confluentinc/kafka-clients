@@ -3,7 +3,7 @@
 A Node.js client for Apache Kafka built on the C FFI of the Confluent Kafka
 Rust client, in the same way as the Python client in `../python`. It is a
 Node-API addon written in plain C (`native/`), so one build works on every Node
-release supporting Node-API version 8, under a thin layer written in
+release supporting Node-API version 9 (Node.js 22.14 and later), under a thin layer written in
 TypeScript (`src/`), compiled into CommonJS with its type declarations
 (`dist/`), so it is used from CommonJS (`require`), from ES modules (`import`)
 and from TypeScript alike (see "Layout" for the import forms).
@@ -51,7 +51,10 @@ carries the addon with the Rust client linked in, so nothing is built at
 install time, nothing is downloaded, and `--ignore-scripts` changes nothing; do
 not install with `--omit=optional`. Installing for another machine (a
 container image built on a laptop) needs npm's `--os`, `--cpu` and `--libc` of
-that machine. Linux arm64, musl (Alpine) and Windows have no platform package
+that machine, and so does a lockfile made on one OS and installed on another:
+without them it has no entry for the other machine's platform package. A
+missing platform package fails at load with an error that names the package
+and these causes. Linux arm64, musl (Alpine) and Windows have no platform package
 in the preview: build from source there.
 
 ## Requirements
