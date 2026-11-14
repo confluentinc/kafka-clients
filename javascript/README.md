@@ -458,21 +458,22 @@ a lone surrogate, which UTF-8 cannot hold, becomes `?`, where Node's own
 `Buffer.from` writes U+FFFD. Header keys and config keys and values are
 encoded the same way; topic names are not.
 
-**Close every producer.** No garbage collection closes a producer: one whose
-`close()` was never called keeps running, even once nothing refers to it,
-until its worker ends (`worker.terminate()`, or `process.exit()` inside the
-worker) or the main event loop runs out of work. It is then force-closed, as
-Java's `close(Duration.ZERO)`: its unsent records fail, and no JS callback or
-future runs for them. When the event loop is about to empty with such
-producers, the client emits one warning (code
-`CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED`) with their number. A
-`process.exit()` on the main thread runs no cleanup at all: the process ends
-at once and the unsent records are lost the same way. The force-close can still block the thread briefly, while the
-client's I/O task finishes a wait it is in (for a broker connection, up to
-`socket.connection.setup.timeout.max.ms`). So when records must be delivered,
-`await producer.close()` (or at least `flush()`) before ending a worker or the
-process; Java's daemon I/O thread loses unsent records at JVM exit the same
-way.
+**Close every producer.** A producer keeps Node running from the moment it's
+created until `close()` closes it, as KafkaJS and 1.x do from `connect()` to
+`disconnect()`, so no pending send is cut off by Node exiting in the middle
+of an `await`. A script that never calls `close()` never exits on its own,
+even an idle one, and no garbage collection closes a producer, even once
+nothing refers to it *(deviation: Java's client threads are daemon threads,
+so a program can exit with a client still open)*. Once closed, a producer no
+longer holds Node, and its native client is released when the producer is
+garbage collected. A call made after `close()` goes to the client, which
+answers as Java's does: `send()` rejects with `IllegalStateError` "Cannot
+perform operation after producer has been closed", and `flush()` and a second
+`close()` resolve. Such a later call does not hold Node either, so await it
+while something else keeps the process running. A `process.exit()` runs no
+cleanup: the process ends at once and the unsent records are lost, as Java's
+daemon I/O thread loses unsent records at JVM exit. The preview doesn't
+support clients in worker threads.
 
 `examples/producer.js` produces one record, awaiting its hand-over and then
 its delivery, and prints its metadata:
@@ -518,7 +519,6 @@ code relying on them keeps running with another meaning: check each.
 | `close(undefined)`, `flush(undefined)`, `get(undefined)` were the calls without an argument | they throw (or reject with) `TypeError`: leave the argument out |
 | a bare value of the wrong type threw `TypeError` | it fits no overload: `IllegalArgumentError` "… takes one of (…); got a number" |
 | a Temporal.Duration with years, months or weeks was an `IllegalArgumentError` | **silent** for `instanceof RangeError`: it is a plain `RangeError` |
-| `close(-1)` on a closed producer rejected | it is a harmless second close: the closed check comes before the timeout |
 | `SslClientAuth.REQUIRED.toString()` was `'required'` | **silent**: it is `'REQUIRED'`, the name, as for every enum |
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
 | `key.serializer` / `value.serializer` reached the core | they throw `ConfigError`: a serializer is a constructor argument |
@@ -535,9 +535,9 @@ code relying on them keeps running with another meaning: check each.
 | `new QuotaViolationError(message)` and the other errors whose every Java constructor takes a payload | they throw `TypeError`: `QuotaViolationError`, `RecordDeserializationError`, `CorrelationIdMismatchError`, `LogTruncationError`, `NoOffsetForPartitionError` and the consumer's `OffsetOutOfRangeError` |
 | `IllegalArgumentError extends Error` | it, and `IndexOutOfBoundsError`, extend `RangeError` |
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
-| `flush()` after `close()` resolved | it rejects with `IllegalStateError`; an argument to `flush()` is refused |
+| an argument to `flush()` | it is refused: Java's `flush()` takes none |
 | a lone surrogate in a string was written as U+FFFD | it is written as `?`, as Java's `StringSerializer` writes it |
-| an unclosed producer was force-closed when garbage collected | no garbage collection closes it: close every producer (or `await using` it); a warning counts those never closed |
+| an idle producer let the process exit | a producer keeps Node running until `close()` closes it, and no garbage collection closes one: close every producer (or `await using` it) |
 | `KafkaFuture` had `get()`, `isDone()`, `isCompletedExceptionally()`, `isCancelled()`, `cancel()` | Java's whole `KafkaFuture`: also `get(timeout)`, `getNow`, `thenApply`, `whenComplete`, `toCompletionStage()`, `completedFuture` and `allOf`; `cancel(mayInterruptIfRunning)` takes a boolean |
 | `KafkaFuture` and the enums guarded their constructors with a run-time token (`RecordMetadata`'s was TypeScript `private` only) | their constructors are TypeScript `private`, with no run-time guard |
 | Node.js 18 | Node.js 22.14 or newer |
@@ -660,8 +660,8 @@ An error the client has nowhere else to report (a failed report to the core,
 an error freeing a native object) goes to `process.emitWarning`.
 
 Java's built-in exceptions (`IllegalStateError`, `IllegalArgumentError`, ...)
-are at the package root and, as in Java, are not `KafkaError`s: `send()` and
-`flush()` on a closed producer reject with an `IllegalStateError`.
+are at the package root and, as in Java, are not `KafkaError`s: `send()` on
+a closed producer rejects with an `IllegalStateError`.
 `IllegalArgumentError` and `IndexOutOfBoundsError` extend JavaScript's
 `RangeError`, `CancellationError` extends `IllegalStateError`, as Java's
 `CancellationException` extends `IllegalStateException`, and the others

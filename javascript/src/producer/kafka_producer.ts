@@ -21,7 +21,6 @@ import { JavaForms } from '../internal/args';
 import { configEntries } from '../internal/config';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
-import { illegalState } from '../internal/errors';
 import { producerClosed, producerOpened, warnPreview } from '../internal/lifecycle';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Duration } from '../duration';
@@ -65,9 +64,6 @@ export type CloseArgs = {
 
 /** The native producer handle (`internal/native.ts`). */
 type ProducerHandle = ReturnType<typeof native.producerCreate>;
-
-// Java's KafkaProducer.throwIfProducerClosed message.
-const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed';
 
 // Java's forms of each method, in Java declaration order (src/internal/args.ts). The
 // constructor's Map and Properties forms are the one `configs`, which is also
@@ -171,16 +167,15 @@ function thrownMessage(thrown: unknown): string {
  * already due before handing its record over (so a callback may run while the
  * code that called `send()` is mid-call). Records are batched and sent by the
  * client in the background; `send` resolves once the record has reached the
- * producer, with a future of the record's metadata. No garbage collection
- * closes a producer: close every one (`close()`, or `await using`).
+ * producer, with a future of the record's metadata. A producer keeps Node
+ * running from its creation until `close()` closes it, and no garbage
+ * collection closes one: close every producer (`close()`, or `await using`).
+ * *(deviation: Java's client threads are daemon threads, so a program can
+ * exit with a client still open. Why: Node exits in the middle of an `await`
+ * when nothing holds it, so this way no pending send is cut off.)*
  */
 export class KafkaProducer {
   #handle: ProducerHandle;
-  // close() was called: send refuses records from then on.
-  #closed = false;
-  // The native producer was destroyed by a completed close.
-  #destroyed = false;
-  #closing: Promise<void> | null = null;
   // Sends whose hand-over completed inside the call since the event loop last
   // turned (as far as this producer saw: the deferral's setImmediate).
   #fastPathSends = 0;
@@ -247,7 +242,8 @@ export class KafkaProducer {
    *   been acknowledged
    * @returns resolving at hand-over to the future of the record's metadata,
    *   rejecting with the error Java's send() would throw
-   * @throws `IllegalStateError` rejects with it when the producer is closed
+   * @throws `IllegalStateError` rejects with it when the producer is closed,
+   *   the core's error with Java's message
    * @throws `IllegalArgumentError` rejects with it when the given parameters
    *   are not `{record}` or `{record, callback}`, or a bare value is not a
    *   ProducerRecord, or a field of the record was reassigned to a value its
@@ -318,7 +314,11 @@ export class KafkaProducer {
    * headers itself, after that wait.)*
    *
    * Every failure rejects the returned Promise, an argument check's and the
-   * closed check's included: `send()` never throws.
+   * closed producer's included: `send()` never throws. *(deviation: on a
+   * closed producer the record is checked and converted before the core's
+   * closed error, where Java checks the closed producer before it
+   * serializes. Why: the binding keeps no state, and the conversion runs in
+   * JavaScript before the call reaches the core.)*
    *
    * Inside a callback, do not call `flush()` or `close()` of the same
    * producer, run a transaction call, or await the future of a record sent
@@ -367,12 +367,11 @@ export class KafkaProducer {
     }
   }
 
-  // send()'s body: a throw is the returned Promise's rejection. The checks
-  // run in Java's order (Java's doSend checks the closed producer before it
-  // reads the record): the form, the closed producer, then the arguments.
+  // send()'s body: a throw is the returned Promise's rejection. The form,
+  // then the arguments; a closed producer is the core's to report, once the
+  // record reached it (javascript/CLAUDE.md, rule 1).
   #send(options: unknown, count: number): Promise<KafkaFuture<RecordMetadata>> {
     SEND_FORMS.match(options, count);
-    if (this.#closed) throw illegalState(CLOSED_MESSAGE);
     const record = SEND_FORMS.value(options, 'record');
     // Java's doSend dereferences the record: a NullPointerException.
     if (record === null) throw new TypeError('record must not be null');
@@ -383,8 +382,6 @@ export class KafkaProducer {
       // A no-op inside a drain (a send from a delivery callback).
       debug('KafkaProducer pump');
       native.producerPump(this.#handle);
-      // A callback it ran may have closed the producer.
-      if (this.#closed) throw illegalState(CLOSED_MESSAGE);
     }
     const args = record.internalToNative();
     const future: KafkaFuture<RecordMetadata> = KafkaFuture.internalCreate(true);
@@ -496,8 +493,6 @@ export class KafkaProducer {
    * until the callback's first `await`; after it, it waits for that callback,
    * which waits for it: do not call it from a callback.
    *
-   * @throws `IllegalStateError` rejects with it once `close()` was called,
-   *   with Java's closed-producer message
    * @throws `IllegalArgumentError` rejects with it when it is given an
    *   argument: Java's flush() takes none
    * @throws `TypeError` rejects with it when it is given `undefined`
@@ -507,12 +502,8 @@ export class KafkaProducer {
    *   `send` callback
    *
    * @remarks A callback that returned a Promise counts as run once it
-   * settled, so a callback's Promise must not wait for this flush.
-   * *(deviation)* Once `close()` was called, it rejects with
-   * `IllegalStateError`, as the Python client's does. Why: Java's `flush()`
-   * has no closed check, since its object outlives `close()`, and the native
-   * producer here does not. Goes when: the native producer outlives
-   * `close()`.
+   * settled, so a callback's Promise must not wait for this flush. On a
+   * closed producer it does what the core does.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {
@@ -524,9 +515,6 @@ export class KafkaProducer {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's (typed unknown by catch)
       return Promise.reject(error);
     }
-    // Python's KafkaProducer.flush: the native producer is released by a
-    // close, so a flush from the moment close() is called is refused.
-    if (this.#closed) return Promise.reject(illegalState(CLOSED_MESSAGE));
     return new Promise<void>((resolve, reject) => {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
       native.producerFlush(this.#handle, (error) => (error !== null ? reject(error) : resolve()));
@@ -545,20 +533,19 @@ export class KafkaProducer {
    *   indicate the client is no longer usable
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
-   * @remarks The close then releases the native client. The records waited
-   * for are those whose `send()` had resolved before `close()` was called,
-   * and their callbacks' Promises: a callback Promise that never settles
-   * holds the close. Calling it again returns the close in progress, or
-   * resolves once the producer is closed. Every failure rejects the returned
-   * Promise: `close()` never throws.
+   * @remarks The records waited for are those whose `send()` had resolved
+   * before `close()` was called, and their callbacks' Promises: a callback
+   * Promise that never settles holds the close. Calling it again closes as
+   * the core does, harmlessly. Every failure rejects the returned Promise:
+   * `close()` never throws.
    *
-   * Close every producer: no garbage collection closes one. A producer never
-   * closed keeps running until its worker or the process ends (a warning
-   * says how many were never closed when the event loop empties), and is
-   * then closed as by `close({timeout: 0})`: its unsent records fail, and no
-   * JS callback or future runs for them. `await using` closes a producer at
-   * the end of its scope (`[Symbol.asyncDispose]`). Do not call it from a
-   * send callback: it waits for that callback.
+   * Close every producer: a producer keeps Node running until it is closed,
+   * and no garbage collection closes one, so a script that never calls
+   * `close()` never exits on its own. Once closed, the producer no longer
+   * holds Node, and its native client is released when the producer is
+   * garbage collected. `await using` closes a producer at the end of its
+   * scope (`[Symbol.asyncDispose]`). Do not call it from a send callback: it
+   * waits for that callback.
    */
   close(): Promise<void>;
   /**
@@ -584,10 +571,8 @@ export class KafkaProducer {
    *   trying to close the client; this error should be treated as fatal and
    *   indicate the client is no longer usable
    *
-   * @remarks On a producer already closing or closed the call returns that
-   * close, before its timeout is read. A negative `timeout` on an open
-   * producer is rejected and changes nothing. A callback Promise that never
-   * settles holds the close past its timeout.
+   * @remarks A negative `timeout` is rejected and changes nothing. A
+   * callback Promise that never settles holds the close past its timeout.
    */
   close(options: CloseArgs): Promise<void>;
   /**
@@ -607,11 +592,6 @@ export class KafkaProducer {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's or JavaScript's (typed unknown by catch)
       return Promise.reject(error);
     }
-    // The closed client first, then the timeout (root CLAUDE.md, JavaScript
-    // Binding Conventions, Signatures).
-    if (this.#closing !== null || this.#destroyed) {
-      return this.#closing !== null ? this.#closing : Promise.resolve();
-    }
     let timeoutMs: number | bigint;
     try {
       timeoutMs = form === 0 ? NO_TIMEOUT : durationToMillis(CLOSE_FORMS.value(options, 'timeout'), 'timeout');
@@ -622,27 +602,19 @@ export class KafkaProducer {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
       return Promise.reject(error);
     }
-    this.#closed = true;
-    producerClosed();
     debug('KafkaProducer closing, timeout %s', form === 0 ? 'none' : String(timeoutMs));
-    this.#closing = new Promise<void>((resolve, reject) => {
-      native.producerClose(this.#handle, timeoutMs, (error, destroyed) => {
-        this.#closing = null;
-        if (destroyed) {
-          this.#destroyed = true;
+    return new Promise<void>((resolve, reject) => {
+      native.producerClose(this.#handle, timeoutMs, (error, closedNow) => {
+        // This close closed the producer: the core reported it closed.
+        if (closedNow) {
+          producerClosed();
           debug('KafkaProducer closed');
-        } else {
-          // The core rejected the timeout and closed nothing (Java's
-          // IllegalArgumentException): the producer stays open.
-          this.#closed = false;
-          producerOpened();
         }
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
         if (error !== null) reject(error);
         else resolve();
       });
     });
-    return this.#closing;
   }
 
   /**

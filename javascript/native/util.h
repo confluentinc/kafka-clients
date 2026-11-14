@@ -127,11 +127,11 @@ void error_warn(napi_env env, int js, kafka_common_Error_t* e);
 // when that vector goes from empty to non-empty, from any thread. The hook
 // (cbq_notify) only calls a threadsafe function; its call_js then runs the
 // drain on the JS thread, which calls the client's `__execute_callbacks`
-// while it returns > 0. Drains never nest. The queue also keeps the process
-// alive while operations are pending, keeps the client's handle object from
-// garbage collection until the client is destroyed, and owns the threadsafe
-// function's teardown (javascript/CLAUDE.md, rules 2, 3
-// and 10). Each client embeds one and passes its own `__execute_callbacks`.
+// while it returns > 0. Drains never nest. The queue also keeps Node running
+// and the client's handle object from garbage collection until the core
+// reports the client closed, and owns the threadsafe function's teardown
+// (javascript/CLAUDE.md, rules 2, 3 and 10). Each client embeds one and
+// passes its own `__execute_callbacks`.
 
 // The client's `__execute_callbacks_err` over `client`: how many callbacks ran.
 typedef int32_t (*cbq_execute_fn)(void* client, kafka_common_Error_t** out_err);
@@ -142,31 +142,28 @@ typedef struct {
     napi_env env;                       // the environment that created it (JS thread)
     void* client;                       // what the hooks receive
     cbq_execute_fn execute;             // the client's __execute_callbacks
-    cbq_client_fn after_drain;          // run after every drain loop, outside it; may be NULL
     cbq_client_fn on_tsfn_finalize;     // the tsfn's finalizer: drops the tsfn's ownership of client
     napi_threadsafe_function tsfn;
     int tsfn_alive;                     // not released or finalized yet
     pthread_mutex_t notify_mtx;         // guards notify_open and the hook's tsfn call
     int notify_open;                    // the hook may call the tsfn
-    napi_ref self_ref;                  // the client's handle object; strong until the client is destroyed
-    int self_strong;                    // self_ref is strong
-    int64_t pending;                    // operations in flight (sends, flushes, a close)
-    int busy;                           // the tsfn is currently ref'd
+    napi_ref self_ref;                  // the client's handle object; strong until the core reports it closed
+    int self_strong;                    // self_ref is strong: no close the core reported yet
     int draining;                       // a drain loop is running
     int stopped;                        // the client's destroy began: no drain from now on
     int finalizing;                     // the handle object is being finalized: run no JS
 } CallbackQueue;
 
-// Creates the threadsafe function (unref'd: idle) named `name`. Returns 0, or
-// -1 with a JS exception pending and nothing left to free. From then on the
-// tsfn is one owner of `client`: its finalizer calls `on_tsfn_finalize`.
+// Creates the threadsafe function, referenced (the client keeps Node running
+// until it is closed), named `name`. Returns 0, or -1 with a JS exception
+// pending and nothing left to free. From then on the tsfn is one owner of
+// `client`: its finalizer calls `on_tsfn_finalize`.
 int cbq_init(napi_env env, CallbackQueue* q, const char* name, void* client, cbq_execute_fn execute,
-             cbq_client_fn after_drain, cbq_client_fn on_tsfn_finalize);
+             cbq_client_fn on_tsfn_finalize);
 
-// Takes a strong reference on the client's handle object, released by
-// cbq_release once the client is destroyed, so garbage collection never
-// finalizes a client still running. Returns 0, or -1 with a JS exception
-// pending.
+// Takes a strong reference on the client's handle object, made weak by
+// cbq_closed, so garbage collection never finalizes an open client. Returns
+// 0, or -1 with a JS exception pending.
 int cbq_attach(napi_env env, CallbackQueue* q, napi_value handle);
 
 // The notify hook (`kafka_producer_Producer__set_callbacks_notify`'s, opaque
@@ -174,22 +171,25 @@ int cbq_attach(napi_env env, CallbackQueue* q, napi_value handle);
 // function, under `notify_mtx` and while `notify_open`.
 void cbq_notify(void* opaque);
 
-// Asks for a drain from the event loop (JS thread): for a completion that
-// fired outside one.
-void cbq_schedule(CallbackQueue* q);
+// The core reported the client closed (a close completion without error, or
+// with any error but a rejected timeout): unreferences the tsfn, which stays
+// alive for later completions, so Node may exit, and makes the reference on
+// the handle object weak, so its finalizer may destroy the client. Returns 1
+// the first time, 0 for a client already closed. JS thread. This records the
+// core's answer: no call is refused on it (javascript/CLAUDE.md, rule 1).
+int cbq_closed(napi_env env, CallbackQueue* q);
 
-// Adds `delta` operations in flight and refs or unrefs the tsfn accordingly.
-// JS thread.
-void cbq_pending_add(napi_env env, CallbackQueue* q, int64_t delta);
+// Whether the core reported the client closed (cbq_closed ran): what the
+// handle object's finalizer asks before it destroys the client.
+int cbq_is_closed(const CallbackQueue* q);
 
-// The drain: the client's __execute_callbacks while it returns > 0, then
-// `after_drain`. A no-op inside a drain, once stopped, or while finalizing.
+// The drain: the client's __execute_callbacks while it returns > 0. A no-op
+// inside a drain, once stopped, or while finalizing.
 void cbq_drain(napi_env env, CallbackQueue* q);
 
 // Ends the queue once the client is destroyed (no callback can fire any
 // more): closes the hook's way to the tsfn and releases the tsfn, whose
-// finalizer then drops its ownership of the client, and lets the handle
-// object be collected.
+// finalizer then drops its ownership of the client.
 void cbq_release(napi_env env, CallbackQueue* q);
 
 // The handle object is being finalized: drops the reference on it.

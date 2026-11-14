@@ -75,9 +75,9 @@ test('an allowlist entry allows exactly its call; one that allows nothing is a f
   assert.deepEqual(findings(r), ['native/producer.c:js_send:kafka_x_P_flush(p, 0, &ffi_err): is allowed as the test, but nothing matches it any more: delete the entry']);
 });
 
-test("the real tree's entry is the finalizer's force-close", () => {
+test('the real tree allows no blocking call: no finalizer force-closes a client', () => {
   const { ALLOWED } = require('../../scripts/lint/rules/cb_twin_only');
-  assert.deepEqual(ALLOWED.map((e) => e.key), ['native/producer.c:producer_force_close:kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)']);
+  assert.deepEqual(ALLOWED, []);
 });
 
 test('cannot run without the header', () => {

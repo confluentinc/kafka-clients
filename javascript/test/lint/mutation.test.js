@@ -501,7 +501,12 @@ MUTATIONS.push(
     rule: 'check-notify-hook',
     what: 'a call added in cbq_notify',
     apply: (root) =>
-      edit(root, 'native/callback_queue.c', '    pthread_mutex_unlock(&q->notify_mtx);\n}\n\nvoid cbq_schedule', '    pthread_mutex_unlock(&q->notify_mtx);\n    cbq_schedule(q);\n}\n\nvoid cbq_schedule'),
+      edit(
+        root,
+        'native/callback_queue.c',
+        '    pthread_mutex_unlock(&q->notify_mtx);\n}\n\nint cbq_closed',
+        '    pthread_mutex_unlock(&q->notify_mtx);\n    napi_unref_threadsafe_function(q->env, q->tsfn);\n}\n\nint cbq_closed',
+      ),
   },
   {
     rule: 'check-notify-hook',
@@ -629,7 +634,8 @@ MUTATIONS.push(
   {
     rule: 'check-single-drainer',
     what: 'the producer destroyed in its close completion',
-    apply: (root) => edit(root, 'native/producer.c', '    p->close_error = error;\n', '    p->close_error = error;\n    producer_destroy(env, p);\n'),
+    apply: (root) =>
+      edit(root, 'native/producer.c', '    delete_ref(env, &ctx->done);\n    free(ctx);\n}\n\n// producerClose', '    delete_ref(env, &ctx->done);\n    free(ctx);\n    producer_destroy(env, p);\n}\n\n// producerClose'),
   },
   {
     rule: 'check-single-drainer',
@@ -645,11 +651,25 @@ MUTATIONS.push(
   },
   {
     rule: 'check-single-drainer',
-    what: "the queue's after_drain moved inside the drain loop",
-    apply: (root) => {
-      edit(root, 'native/callback_queue.c', '    if (q->after_drain != NULL) q->after_drain(env, q->client);\n', '');
-      edit(root, 'native/callback_queue.c', '        if (ran <= 0) break;\n', '        if (ran <= 0) break;\n        if (q->after_drain != NULL) q->after_drain(env, q->client);\n');
-    },
+    what: 'the finalizer destroying a producer without asking whether it is closed',
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    int open = p->kp != NULL && !cbq_is_closed(&p->queue);\n    if (p->kp != NULL && cbq_is_closed(&p->queue)) producer_destroy(env, p);\n',
+        '    int open = 0;\n    if (p->kp != NULL) producer_destroy(env, p);\n',
+      ),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: 'close() destroying the producer, not the finalizer',
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);\n',
+        '    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);\n    producer_destroy(env, p);\n',
+      ),
   },
   {
     // The directive does waive the field's finding: only kafka/directives fails.

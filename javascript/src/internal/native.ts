@@ -80,7 +80,9 @@ interface Native {
     handle: ProducerHandle,
     // -1 when the timeout was left out (Java's close()).
     timeoutMs: number | bigint,
-    onComplete: (error: unknown, destroyed: boolean) => void,
+    // closedNow: this close closed the producer (a rejected timeout, or a
+    // later close, did not).
+    onComplete: (error: unknown, closedNow: boolean) => void,
   ): void;
   producerPump(handle: ProducerHandle): void;
 }

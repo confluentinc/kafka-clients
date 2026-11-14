@@ -121,6 +121,7 @@ const ALLOWED = [
   { key: 'native/producer.c:string_or_null:malloc#1', reason: 'the message a user callback threw or rejected with' },
   { key: 'native/producer.c:js_producer_send:calloc#1', reason: "the send's context" },
   { key: 'native/producer.c:js_producer_flush:calloc#1', reason: "the flush's context" },
+  { key: 'native/producer.c:js_producer_close:calloc#1', reason: "the close's context" },
   { key: 'native/producer.c:new_kafka_producer:calloc#1', reason: "the configuration's string array" },
   { key: 'native/producer.c:js_producer_create:calloc#1', reason: 'the producer struct' },
 ];

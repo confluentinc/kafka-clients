@@ -37,16 +37,14 @@ These decide every question, in this order:
 1. **Java shape, host idiom, no Kafka logic.** Batching, partitioning, retries
    and config validation live only in the Rust core. The binding's own checks
    are the listed few of the root conventions (Implementation over the FFI),
-   in their order: the form of the arguments, then the closed client, then
-   the rest. Each has its Why and its Goes when:
+   in their order: the form of the arguments, then the rest. There is no
+   closed-client check (root conventions, Q61): the binding keeps no closed
+   flag, and a call after `close()` goes to the FFI, whose error is the
+   core's. Each check has its Why and its Goes when:
    - **The form of the arguments** (`JavaForms`, unknown option keys). Why:
      one JavaScript method stands for Java's overload set, and only the
      binding sees which form was written. Goes when: never; it is the
      language mapping, not a missing FFI feature.
-   - **The closed client** (`IllegalStateError` with Java's message). Why:
-     `close()` frees the native handle, so the check also guards memory.
-     Goes when: the native object outlives `close()` and the core reports the
-     closed state itself.
    - **Run-time types and a missing topic.** Why: TypeScript's types are not
      checked at run time, and a wrong JavaScript type has no C form to cross
      as. Goes when: never, for the same reason.
@@ -67,13 +65,9 @@ These decide every question, in this order:
      truncated silently at the ABI. Goes when: these values cross the ABI with
      a length, as `kafka_Bytes_t` does.
 
-   So `close({timeout})` on a closing or closed producer
-   returns that close before it reads its timeout; on an open one, a negative
-   timeout is rejected by the binding before `close()` changes any state
-   (although the core checks it too): the core's verdict is queued and
-   reaches JavaScript only at the next drain, after `close()` has marked the
-   producer closed, so a `send()` or `close()` in between would see a
-   producer closing that then stays open.
+   A negative timeout is rejected by the binding before `close()` reaches
+   the core (although the core checks it too), so a rejected close changes
+   nothing.
 2. **The notify hook only signals.** `cbq_notify` (`native/callback_queue.c`)
    calls `napi_call_threadsafe_function(..., napi_tsfn_nonblocking)` and
    nothing else, under the client queue's `notify_mtx` and only while
@@ -87,9 +81,9 @@ These decide every question, in this order:
    > 0, `cbq_drain`) run from the threadsafe function's `call_js` or from
    `send()`'s pump (below), and drains never nest: a drain started inside a
    drain (a `send()` from a delivery callback) or once destroy began is a
-   no-op. The binding never calls `_destroy` from inside a drain: a close
-   completion only marks the producer for destruction, and the drain destroys
-   it after its loop.
+   no-op. The binding never calls `_destroy` from inside a drain, nor from a
+   completion or a call: only the handle object's finalizer destroys a
+   producer, and only a closed one (rule 10).
 
    **Cooperative scheduling.** The rule is the root conventions' (Threads and
    callbacks): every 64th send that is accepted at once, and the first send
@@ -115,14 +109,10 @@ These decide every question, in this order:
 4. **Waiting calls use the `_cb` twin** (root conventions, Futures and
    waiting): `send_with_callback_cb`, `flush_cb`, `close_cb`,
    `close_with_timeout_cb`. The blocking forms would block the event loop and
-   run callbacks on the caller's thread. One exception, the environment
-   teardown's force-close (below): `producer_force_close` calls the blocking
-   `kafka_producer_Producer_close_with_timeout(view, 0, ...)` once, only while
-   the handle is finalized, where no JS runs and no event-loop turn will come
-   (`test/static/header_conformance.test.js` pins it there). The root
-   conventions' "from JavaScript, the binding calls only `_cb` forms" does not
-   name this call, which no JavaScript makes; the cleanup hook it belongs to is
-   not decided yet in the root conventions.
+   run callbacks on the caller's thread. There is no exception: no finalizer
+   closes a client, so no teardown needs a blocking close
+   (`test/static/header_conformance.test.js` and `check-cb-twin-only` pin
+   it).
 5. **Never call `KafkaFuture_get`.** The `kafka_common_KafkaFuture_t*` a send's
    hand-over completion receives is destroyed unread; the delivery result comes
    from the record's `kafka_producer_Callback_t`.
@@ -140,10 +130,10 @@ These decide every question, in this order:
    a rejection reported as a throw. The function is held by a strong reference
    until it reports, so a garbage collection never reports a Promise early,
    even one nothing references: a Promise that never settles keeps its record
-   pending until the environment's teardown. Before a producer is closed or
-   destroyed by its environment's teardown, a callback Promise still pending is
-   reported as returned (`send_report_awaiting`): the force-close waits for
-   every report, and no JS will settle it.
+   pending, and a `flush` or `close` covering it. Before the finalizer
+   destroys a closed producer, a callback Promise still pending is reported as
+   returned (`send_report_awaiting`): no JS will settle it, and no report may
+   follow the destroy.
 7. **No binding-side send queue, buffer, cap or lock** (PLAN D8; root
    conventions, Threads and callbacks: no tracking and no async locks of the
    binding's own). The core does NOT serialise a caller that does not wait: a
@@ -207,10 +197,22 @@ These decide every question, in this order:
    never destroyed. If a send fails at hand-over, its per-record context stays
    on the producer's orphan list until after destroy (the delivery callback
    may still fire, once).
-10. **Teardown order:** refuse new calls (JS side, synchronously) → `close_cb`
-    → its completion → `KafkaProducer_destroy_err` on the JS thread, outside a
-    drain → release the threadsafe function, whose finalizer frees the notify
-    opaque.
+10. **Closed state and teardown** (root conventions, Lifetime and
+    Implementation over the FFI, Q21, Q61): `close()` goes to `close_cb` /
+    `close_with_timeout_cb` every time, a second close included, and does not
+    free the native handle. Its completion (`close_on_complete`) records the
+    core's answer: any outcome but a rejected timeout closed the producer, so
+    `cbq_closed` unreferences the threadsafe function and makes the queue's
+    reference on the handle object weak. The handle object's Node-API
+    finalizer (`producer_finalize`) then calls `KafkaProducer_destroy_err`,
+    on the JS thread, outside a drain, running no JS (`finalizing`), only for
+    a producer that `cbq_is_closed` says is closed, and releases the
+    threadsafe function, whose finalizer frees the notify opaque. No
+    finalizer closes or destroys an open producer: only an environment
+    teardown finalizes one (the reference is strong until the close), and it
+    leaves the producer to the core and its memory to the process. So a late
+    call never touches freed memory: the handle is destroyed only once no JS
+    can reach it.
 
 ## Threads and liveness
 
@@ -220,39 +222,31 @@ binding:
 - Every callback the core queues (delivery callbacks, hand-over completions,
   `flush` / `close` completions) runs on the JS thread that owns the client,
   inside the drain, so JS values are created there directly.
-- The threadsafe function is `ref`'d while any send, flush or close is
-  outstanding (an awaited callback's Promise included) and `unref`'d when the
-  count reaches zero: an idle producer does not keep the process alive, one
-  with pending work does (whether a client keeps Node running while work is
-  pending: not decided yet in the root conventions).
-- There is no garbage-collection finalizer: the native handle object is held
-  by a strong reference from its creation until the producer is destroyed
-  (`cbq_attach` / `cbq_release`), so a producer never closed keeps running
-  until its environment ends, even once the `KafkaProducer` object is
-  collected, with a warning (root conventions, Lifetime). The binding warns
-  once, when the event loop is about to empty (`process` `'beforeExit'`), with
-  the number of producers whose `close()` was never called
-  (`src/internal/lifecycle.ts`, code `CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED`);
-  an explicit `process.exit()` or `worker.terminate()` skips it (when and how
-  this warning is logged: not decided yet in the root conventions).
-- The environment's teardown (a worker ending, the main thread's event loop
-  ending) finalizes the handle object of a producer not destroyed, and that
-  finalizer destroys it, running no JS (clients in worker threads and the
-  cleanup hook: not decided yet in the root conventions): it first reports
-  every callback Promise still pending as returned (`send_report_awaiting`);
-  then it replaces the notify hook with a no-op, so the pending callbacks only
-  free their contexts; then it force-closes the producer,
-  `close(Duration.ZERO)`: destroy would otherwise close an unclosed producer
-  gracefully itself, blocking the JS thread up to `max.block.ms` +
-  `delivery.timeout.ms` (60 s + 120 s, three minutes by default) for records
-  no broker may take, so a `worker.terminate()` would stall. Unsent records
-  fail instead, as soon as the I/O task leaves a wait it is in (for a node's
-  connection, up to `socket.connection.setup.timeout.max.ms`), as with Java's
-  `close(Duration.ZERO)`, whose Sender waits the same way; their delivery
-  callbacks run, inline, without JS, and still report through
-  `__set_callback_result` (`destroying` is set only after the close).
-  `await producer.close()` is unaffected: a completed close leaves nothing for
-  the finalizer to do.
+- A producer keeps Node running from its creation until `close()` closes it
+  (root conventions, Lifetime): the threadsafe function is created
+  referenced, as Node-API creates it, and `cbq_closed` calls
+  `napi_unref_threadsafe_function` once the core reported the producer
+  closed, so nothing is counted. The threadsafe function is not released
+  then: the completions of calls made after the close still run, while
+  something else keeps the event loop alive (a closed producer no longer
+  holds it). A script that never calls `close()` never exits on its own.
+- The handle object is held by a strong reference from its creation until
+  the close (`cbq_attach` / `cbq_closed`), so garbage collection never
+  finalizes an open producer, even once the `KafkaProducer` object is
+  collected; after the close the reference is weak, and the finalizer
+  destroys the closed producer (rule 10).
+- The never-closed warning (`src/internal/lifecycle.ts`, `process`
+  `'beforeExit'`, code `CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED`) is still in
+  the code, but it can no longer fire: an open producer keeps the event loop
+  from emptying, so `'beforeExit'` never comes while one is open. When and
+  how the warning is logged is not decided yet in the root conventions, so
+  the code stays as it is until it is.
+- Clients in worker threads are not supported in the preview (root
+  conventions, Threads and callbacks); the binding keeps no check for one. A
+  worker ended with its producer open (`worker.terminate()`,
+  `process.exit()`, an uncaught error) leaves the producer to the core, as
+  an environment teardown does (rule 10); the cleanup hook that would close
+  it is a Future improvement of the root conventions, not built.
 - The preview warning follows the root conventions (Implementation over the
   FFI): `process.emitWarning` with the type `ExperimentalWarning`, once per
   process, with no code (the root's invented names list only deprecation
@@ -547,16 +541,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   Java constructor takes a payload (`QuotaViolationError`, ...) has a
   `protected` constructor that throws `TypeError` until then, and no payload is
   read across the FFI.
-- The closed producer (root conventions, Implementation over the FFI): once
-  `close()` was called (while it runs too), `send` rejects with
-  `IllegalStateError` and Java's `throwIfProducerClosed` message, and so does
-  `flush()` *(deviation, the Python client's: Java's `flush()` has no closed
-  check, since its object outlives `close()`; here the native producer does
-  not. Goes when: the native producer outlives `close()`)*. The closed check
-  runs before the timeout check, so a second `close` returns the close in
-  progress, or resolves, whatever its timeout; on an open producer a negative
-  `timeout` is `IllegalArgumentError` "The timeout cannot be negative.", and
-  such a close changes nothing (rule 1).
+- The closed producer (root conventions, Implementation over the FFI, Q61):
+  the binding keeps no closed flag. A call after `close()` goes to the core:
+  `send` rejects with its `IllegalStateError` "Cannot perform operation after
+  producer has been closed", after the record was checked and converted in
+  JavaScript *(deviation: Java checks the closed producer before it
+  serializes. Why: the binding keeps no state, and the conversion runs in
+  JavaScript before the call reaches the core)*; `flush()` and a second
+  `close()` do what the core does (they resolve), with no deviation. A
+  negative `timeout` is `IllegalArgumentError` "The timeout cannot be
+  negative.", and such a close changes nothing (rule 1).
 - Configuration (root conventions, Configuration): a plain object of Java's
   config keys (a `Map`, or another non-plain object, throws `TypeError`),
   checked as Python's `_config.py` checks it (`src/internal/config.ts`): a

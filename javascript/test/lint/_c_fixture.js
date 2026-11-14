@@ -84,17 +84,15 @@ void cbq_drain(CallbackQueue* q) {
         error_discard(ffi_take(&ffi_err));
         if (ran <= 0) break;
     }
-    if (q->after_drain != NULL) q->after_drain(q->client);
 }
 
 static void call_js(void* env, void* context) {
     cbq_drain((CallbackQueue*)context);
 }
 
-int cbq_init(CallbackQueue* q, void* client, cbq_execute_fn execute, cbq_client_fn after_drain) {
+int cbq_init(CallbackQueue* q, void* client, cbq_execute_fn execute) {
     q->client = client;
     q->execute = execute;
-    q->after_drain = after_drain;
     return 0;
 }
 `;
@@ -145,12 +143,8 @@ void js_setup(void* p) {
     FFI_DISCARD(kafka_x_P__set_callbacks_notify_err(p, cbq_notify, p, &ffi_err));
 }
 
-static void producer_after_drain(void* client) {
-    (void)client;
-}
-
 void js_create(CallbackQueue* q, void* p) {
-    cbq_init(q, p, producer_execute, producer_after_drain);
+    cbq_init(q, p, producer_execute);
 }
 `;
 
@@ -223,6 +217,7 @@ const LISTS = {
       { key: 'call_js', reason: 'the tsfn call_js' },
       { key: 'js_pump', reason: 'the pump' },
     ],
+    DESTROY_CALLERS: [],
   },
   'check-completion-order': { COMPLETIONS: [{ key: 'send_on_completion', reason: 'the record callback' }] },
   'check-zero-copy': { ALLOWED: [{ key: 'native/producer.c:js_send:calloc#1', reason: "the send's context" }] },

@@ -28,7 +28,7 @@ included), a bare value of no overload's type refused with
 package imported from its own path (the root's namespaces are gone), `ExecutionError` from a failed
 `get()`, errors without `code` / `errorName` / `retriable` / `apiError`,
 Java's `long` as a `bigint` (`metadata.offset`, `metadata.timestamp`,
-`record.timestamp`), keys and values borrowed until `send()` settles, no garbage-collection close, and Node.js 22.14 or
+`record.timestamp`), keys and values borrowed until `send()` settles, a producer keeping Node running until it is closed, no garbage-collection close, and Node.js 22.14 or
 newer.
 
 ### Packaging
@@ -105,8 +105,9 @@ newer.
   `KafkaFuture` whose `get()` settles at delivery; `flush()` and `close()` /
   `close(timeout)`, a timeout being milliseconds or a `Temporal.Duration`
   (`RangeError` for one with years, months or weeks; `CloseArgs` is the type
-  of `close`'s options). `close()` on a closing or closed producer returns
-  that close before it reads its timeout. Each Java overload has its own
+  of `close`'s options). A call after `close()` goes to the client, which
+  answers as Java's does: `send()` rejects with `IllegalStateError`, and
+  `flush()` and a second `close()` resolve. Each Java overload has its own
   TypeScript signature.
   `KafkaProducer` has `[Symbol.asyncDispose]`, so `await using` closes it.
 - The callback is Java's `onCompletion(metadata, exception)` as one object,
@@ -125,13 +126,11 @@ newer.
   `CancellationException` (an `IllegalStateError`). A record's future is never
   cancelled (`cancel()` returns `false`); the futures `completedFuture`,
   `allOf`, `thenApply` and `whenComplete` make can be.
-- No garbage collection closes a producer: one never closed keeps running
-  until its worker or the process ends, and is then force-closed (Java's
-  `close(Duration.ZERO)`): its unsent records fail, and no JS callback or
-  future runs for them. When the event loop is about to empty with such
-  producers, one warning (code `CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED`) gives
-  their number. `await producer.close()` before teardown when records must be
-  delivered.
+- A producer keeps Node running from its creation until `close()` closes it,
+  idle or not, as KafkaJS and 1.x do from `connect()` to `disconnect()`, and
+  no garbage collection closes one: a script that never calls `close()` never
+  exits on its own. Once closed, a producer no longer holds Node, and its
+  native client is released when it is garbage collected.
 
 ### Errors and security
 
