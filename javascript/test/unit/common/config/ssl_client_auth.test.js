@@ -28,9 +28,12 @@ test('SslClientAuth', () => {
   assert.equal(SslClientAuth.VALUES[0], SslClientAuth.REQUIRED);
   assert.ok(Object.isFrozen(SslClientAuth.VALUES));
   assert.ok(Object.isFrozen(SslClientAuth.NONE));
-  // An enum's toString() is its name (root CLAUDE.md, JavaScript Binding
-  // Conventions, Class family), not Java's lower-case override.
-  assert.equal(String(SslClientAuth.REQUESTED), 'REQUESTED');
+  // Java's toString() override, the name in lower case; name() and toJSON()
+  // keep the name.
+  assert.deepEqual(SslClientAuth.VALUES.map((a) => a.toString()), ['required', 'requested', 'none']);
+  assert.equal(String(SslClientAuth.REQUESTED), 'requested');
+  assert.equal(`${SslClientAuth.NONE}`, 'none');
+  assert.equal(SslClientAuth.REQUESTED.name(), 'REQUESTED');
   assert.equal(SslClientAuth.forConfig(null), SslClientAuth.NONE);
   // Java's one-parameter forConfig(String key): the key on its own or named.
   assert.equal(SslClientAuth.forConfig({ key: null }), SslClientAuth.NONE);
@@ -86,7 +89,7 @@ test("SslClientAuth has java.lang.Enum's members", () => {
   assert.throws(() => SslClientAuth.NONE.name('x'), { name: 'TypeError', message: 'name() only reads: it takes no argument' });
   assert.throws(() => SslClientAuth.NONE.ordinal(1, 2), { name: 'TypeError', message: 'ordinal() only reads: it takes no argument' });
 
-  // JSON writes the name, as toString() does.
+  // JSON writes the name, not toString()'s lower case.
   assert.equal(JSON.stringify([SslClientAuth.REQUIRED]), '["REQUIRED"]');
   assert.deepEqual(Object.keys(SslClientAuth.NONE), []);
 });

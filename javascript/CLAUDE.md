@@ -329,8 +329,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   released (`Header`'s writes `{ key, value }`, `Headers`' its array, an
   enum's its name, `ProducerRecord`'s and `RecordMetadata`'s their fields
   with each `long` as a decimal string, root conventions, Types).
-  `toString()` is Java's but an enum's (a fixed table for
-  `toString()` is not decided yet in the root conventions). A constant Java
+  `toString()` is Java's, an enum's included (below). A constant Java
   `List` is a frozen array, a constant `Set` a read-only set
   (`src/internal/read_only_set.ts`) whose `add`, `delete` and `clear` throw
   `UnsupportedOperationError`.
@@ -367,12 +366,23 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `values()` and `valueOf(name)` (exact; `IllegalArgumentError` "No enum
   constant <Java canonical class name>.<name>", `TypeError` "Name is null" for
   `null`), and `toJSON()`, the name (it ignores the key `JSON.stringify`
-  passes it). `toString()` returns the name too. **(root conflict)** Rule 1
-  keeps Java's content, and Java's `SslClientAuth` overrides `toString()` to
-  write the name in lower case; the code follows the root text, so
-  `SslClientAuth.REQUIRED.toString()` is `'REQUIRED'`, marked *(deviation)*
-  on the method. Java's `SecurityProtocol.name` field and `name()` are the
-  one method.
+  passes it). `toString()` returns the name, unless Java overrides it:
+  `SslClientAuth.REQUIRED.toString()` is `'required'`, Java's
+  `super.toString().toLowerCase(Locale.ROOT)`, while its `toJSON()` stays
+  `'REQUIRED'`. This reading follows the rule for the similar case (the
+  root's Class family names `toString()` with `toJSON()` for an enum, the
+  name, but says nothing of Java's override): Rule 1 puts content with Java,
+  root §3 prints a constant's name "unless Java overrides it", and Python
+  reaches Java's `toString()` through `__str__` (a fixed table for
+  `toString()` is still not decided yet in the root conventions). Java's
+  `SecurityProtocol.name` field and `name()` are the one method.
+- A `null` key or value binds `never` (root conventions, Class family, Q26),
+  through extra TypeScript signatures for the null combinations, as Python's
+  Binding rule adds one stub per combination beside its one stub per Java
+  overload, so the per-form rule (Q15) and the binding (Q26) both hold. It
+  applies once a class is generic over a key and a value: today neither
+  `KafkaProducer` nor `ProducerRecord` is (no serializer is translated, so a
+  key or value is `Data`), so there is nothing to bind.
 - Signatures (root conventions, Signatures): one Java overload set is one
   method taking one options object of Java's parameter names
   (`new KafkaProducer({configs})`, `send({record, callback})`,

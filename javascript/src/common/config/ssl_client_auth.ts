@@ -163,17 +163,17 @@ export class SslClientAuth {
   }
 
   /**
-   * The name of this constant, as `name()` returns it.
+   * The name of this constant in lower case, Java's override
+   * (`super.toString().toLowerCase(Locale.ROOT)`): `'required'`,
+   * `'requested'`, `'none'`.
    *
-   * @returns the name
+   * @returns the name in lower case
    *
-   * @remarks *(deviation)* Java's `SslClientAuth.toString()` returns the name
-   * in lower case. Why: an enum's `toString()` and `toJSON()` return its name
-   * (root CLAUDE.md, JavaScript Binding Conventions, Class family). Use
-   * `name().toLowerCase()` for Java's text.
+   * @remarks `toJSON()` writes the name itself, as for every enum.
+   * JavaScript's `toLowerCase()` ignores the locale, as `Locale.ROOT` does.
    */
   toString(): string {
-    return this.#name;
+    return this.#name.toLowerCase();
   }
 
   /**
