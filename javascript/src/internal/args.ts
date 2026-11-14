@@ -104,6 +104,15 @@ export interface JavaFormsOptions {
    * Conventions, Class family).
    */
   readonly reader?: boolean;
+  /**
+   * An error class's constructor (root CLAUDE.md, JavaScript Binding
+   * Conventions, Errors, Q39): the form error lists the forms as JavaScript
+   * calls them, by number of parameters, ties in Java's order: `()`, a
+   * one-parameter form's value on its own, `(message)`, and a longer form's
+   * options object, `({ message, cause })`; more than one argument is
+   * `got <n> arguments`.
+   */
+  readonly callShapes?: boolean;
 }
 
 /** Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null. */
@@ -132,6 +141,7 @@ export class JavaForms {
   readonly #bare: ReadonlyArray<readonly [name: string, index: number, test: ((value: unknown) => boolean) | null]>;
   readonly #bareIsPlainObject: boolean;
   readonly #reader: boolean;
+  readonly #callShapes: boolean;
   readonly #undefinedMessages: Readonly<Record<string, string>>;
 
   /**
@@ -157,7 +167,13 @@ export class JavaForms {
       if (!table.has(mask)) table.set(mask, index);
     });
     this.#forms = table;
-    this.#prefix = `${method}() takes one of ${forms.map((form) => `(${this.#inOrder(this.#mask(form))})`).join(', ')}; got `;
+    this.#callShapes = options.callShapes === true;
+    const listed = this.#callShapes ? [...forms].sort((a, b) => a.length - b.length) : forms;
+    const shape = (form: Form): string => {
+      const text = this.#inOrder(this.#mask(form));
+      return this.#callShapes && form.length > 1 ? `({ ${text} })` : `(${text})`;
+    };
+    this.#prefix = `${method}() takes one of ${listed.map(shape).join(', ')}; got `;
     // Java's one-parameter forms sharing one name (Map and Properties as
     // `configs`) are one bare form. One-parameter forms of different names
     // (an error's `(message)` and `(cause)`) are told apart by the value's
@@ -198,7 +214,7 @@ export class JavaForms {
   match(args: unknown, count: number): number {
     if (count > 0 && this.#reader) throw new TypeError(`${this.#method}() only reads: it takes no argument`);
     if (count > 1) {
-      throw illegalArgument(`${this.#prefix}${count} arguments, not one object of named parameters`);
+      throw illegalArgument(`${this.#prefix}${count} arguments${this.#callShapes ? '' : ', not one object of named parameters'}`);
     }
     if (count === 0) return this.#matched(0, null);
     if (args === undefined) {

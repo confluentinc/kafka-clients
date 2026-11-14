@@ -94,6 +94,6 @@ test("Java's INSTANCE singletons: an instance of the class, built by Java's no-a
   // only INSTANCE is built by it.
   assert.throws(() => new errors.CoordinatorNotAvailableError(), {
     name: 'IllegalArgumentError',
-    message: 'CoordinatorNotAvailableError() takes one of (message), (message, cause); got ()',
+    message: 'CoordinatorNotAvailableError() takes one of (message), ({ message, cause }); got ()',
   });
 });

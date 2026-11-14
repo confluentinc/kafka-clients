@@ -321,7 +321,11 @@ test('each form gives Java\'s message and cause, and a call no form takes is ref
       });
       continue;
     }
-    const list = registered.map(([params]) => `(${params.join(', ')})`).join(', ');
+    const list = [...registered]
+      .map(([params]) => params)
+      .sort((a, b) => a.length - b.length)
+      .map((params) => (params.length > 1 ? `({ ${params.join(', ')} })` : `(${params.join(', ')})`))
+      .join(', ');
     for (const [params, message] of registered) {
       const args = {};
       if (params.includes('message')) args.message = 'm';
@@ -377,7 +381,7 @@ test('the abstract bases are Java-abstract, have no id and cannot be constructed
   assert.equal(new Mine().message, '');
   assert.throws(() => new Mine({ reason: 'r' }), {
     name: 'IllegalArgumentError',
-    message: 'RetriableError() takes one of (message, cause), (message), (cause), (); got (reason)',
+    message: 'RetriableError() takes one of (), (message), (cause), ({ message, cause }); got (reason)',
   });
   assert.equal(errorFfiId(mine), ownFfiId(ApiError));
   class MyTimeout extends common.errors.TimeoutError {}
@@ -431,15 +435,15 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.equal(new ExecutionError({ message: 'x', cause }).message, 'x');
   assert.throws(() => new ExecutionError('x'), {
     name: 'IllegalArgumentError',
-    message: 'ExecutionError() takes one of (message, cause), (cause); got a string',
+    message: 'ExecutionError() takes one of (cause), ({ message, cause }); got a string',
   });
   assert.throws(() => new ExecutionError(), {
     name: 'IllegalArgumentError',
-    message: 'ExecutionError() takes one of (message, cause), (cause); got ()',
+    message: 'ExecutionError() takes one of (cause), ({ message, cause }); got ()',
   });
   assert.throws(() => new KafkaError(5), {
     name: 'IllegalArgumentError',
-    message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got a number',
+    message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got a number',
   });
   assert.throws(() => new KafkaError({ message: 5 }), { name: 'TypeError', message: 'message must be a string, not number' });
   assert.throws(() => new KafkaError({ message: undefined }), {
@@ -448,29 +452,29 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   });
   assert.throws(() => new KafkaError({ message: 'm', reason: 'r' }), {
     name: 'IllegalArgumentError',
-    message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got (message, reason)',
+    message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got (message, reason)',
   });
   // The ES2022 `new Error(message, { cause })`, and any second argument, is
   // the form check's error, listing the class's forms.
   assert.throws(() => new KafkaError('m', { cause }), {
     name: 'IllegalArgumentError',
-    message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got 2 arguments, not one object of named parameters',
+    message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments',
   });
   assert.throws(() => new KafkaError({ message: 'm' }, undefined), {
     name: 'IllegalArgumentError',
-    message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got 2 arguments, not one object of named parameters',
+    message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments',
   });
   assert.throws(() => new TopicAuthorizationError('m', cause, 3), {
     name: 'IllegalArgumentError',
-    message: 'TopicAuthorizationError() takes one of (message); got 3 arguments, not one object of named parameters',
+    message: 'TopicAuthorizationError() takes one of (message); got 3 arguments',
   });
   assert.throws(() => new common.errors.CoordinatorNotAvailableError('m', cause), {
     name: 'IllegalArgumentError',
-    message: 'CoordinatorNotAvailableError() takes one of (message), (message, cause); got 2 arguments, not one object of named parameters',
+    message: 'CoordinatorNotAvailableError() takes one of (message), ({ message, cause }); got 2 arguments',
   });
   assert.throws(() => new IllegalStateError('m', cause), {
     name: 'IllegalArgumentError',
-    message: 'IllegalStateError() takes one of (), (message), (message, cause), (cause); got 2 arguments, not one object of named parameters',
+    message: 'IllegalStateError() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments',
   });
   // A form Java does not have is refused: TopicAuthorizationException has no
   // (String, Throwable) constructor.
@@ -626,4 +630,24 @@ test("the gRPC server sends a failed future's delivery error, the cause of get()
   assert.equal(futureError(bare), bare);
   const other = new TypeError('bad');
   assert.equal(futureError(other), other);
+});
+
+test("every error class's form error lists its forms as JavaScript calls them, by count, ties in Java order", () => {
+  let checked = 0;
+  for (const cls of errorClasses()) {
+    const forms = ownForms(cls);
+    if (forms === undefined || forms.length === 0) continue;
+    // An abstract base's forms are its subclasses': check them through one.
+    const target = isAbstract(JAVA_OF.get(cls)) ? class Sub extends cls {} : cls;
+    const shapes = [...forms]
+      .map(([params]) => params)
+      .sort((a, b) => a.length - b.length)
+      .map((params) => (params.length > 1 ? `({ ${params.join(', ')} })` : `(${params.join(', ')})`));
+    assert.throws(() => new target({ message: null }, null), {
+      name: 'IllegalArgumentError',
+      message: `${cls.name}() takes one of ${shapes.join(', ')}; got 2 arguments`,
+    }, cls.name);
+    checked += 1;
+  }
+  assert.ok(checked > 50, `${checked} classes`);
 });
