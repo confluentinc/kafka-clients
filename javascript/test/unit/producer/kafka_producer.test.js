@@ -1513,7 +1513,7 @@ test('a serializer argument wins over its config key, which is then ignored; a n
   assert.equal(called, 1);
 });
 
-test("a serde config key that is no synchronous function throws ConfigError, saying what to pass", () => {
+test("a serde config key that is no synchronous function throws ConfigError, saying what to pass", async () => {
   const pass = (argument) =>
     `pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, or the serializer itself as the ${argument} argument of the constructor`;
   class StringSerializer {
@@ -1551,7 +1551,7 @@ test("a serde config key that is no synchronous function throws ConfigError, say
     // null and undefined leave the key unset: no serializer.
     for (const value of [null, undefined]) {
       const producer = new KafkaProducer({ ...UNREACHABLE, [key]: value });
-      void producer.close();
+      await producer.close();
     }
   }
 });
@@ -1571,6 +1571,41 @@ test('a serde config function that throws is a construction failure, and the ser
     (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
   );
   assert.deepEqual(closed, ['key']);
+  // A key function that throws closes nothing: the value serializer given is
+  // not taken yet, as Java's constructor takes the key serializer first.
+  closed.length = 0;
+  assert.throws(
+    () =>
+      new KafkaProducer({
+        configs: {
+          ...UNREACHABLE,
+          'key.serializer': () => {
+            throw cause;
+          },
+        },
+        keySerializer: null,
+        valueSerializer: { serialize: () => null, close: () => closed.push('value argument') },
+      }),
+    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
+  );
+  assert.deepEqual(closed, []);
+  // A value function that throws closes the key serializer given, which was taken.
+  closed.length = 0;
+  assert.throws(
+    () =>
+      new KafkaProducer({
+        configs: {
+          ...UNREACHABLE,
+          'value.serializer': () => {
+            throw cause;
+          },
+        },
+        keySerializer: { serialize: () => null, close: () => closed.push('key argument') },
+        valueSerializer: null,
+      }),
+    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
+  );
+  assert.deepEqual(closed, ['key argument']);
   // One the core's configuration check refuses afterwards is closed too: only
   // the producer holds it.
   closed.length = 0;

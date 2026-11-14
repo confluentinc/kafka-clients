@@ -731,9 +731,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   once, key then value, with a frozen copy of the whole configuration, each
   value as given, through a `Proxy` that records each of its keys the
   function reads. The two serde keys are left out of the configuration the
-  core gets, and so is each read key that is not a producer key of Java's
-  (`src/internal/producer_config_keys.ts`, generated with the
-  `ProducerConfigs` type), such as `schema.registry.url`, so that the core
+  core gets, and so is each read key that is not a producer key, of Java's
+  or of the core's own (`partitioner.type`):
+  `src/internal/producer_config_keys.ts`, generated with the
+  `ProducerConfigs` type, from Java's `ProducerConfig` and the core's
+  `rust/src/producer/producer_config.rs`. A key such as
+  `schema.registry.url` is left out, so that the core
   doesn't list it as unused; the consumer's serde keys reach the core, which
   lists them as unused (root conventions, Serialization, Q53). **(root
   conflict)** The root text says "the binding leaves those keys out of the

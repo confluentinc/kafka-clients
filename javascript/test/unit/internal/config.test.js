@@ -158,6 +158,11 @@ test("the producer's own serde keys and the keys a serde function read never rea
       ['b', '2'],
     ],
   );
+  // So does a producer key only the core defines.
+  assert.deepEqual(
+    entriesAsBytes({ 'partitioner.type': 'RoundRobinPartitioner' }, new Set(['partitioner.type'])).map(([k, v]) => [k.toString(), v.toString()]),
+    [['partitioner.type', 'RoundRobinPartitioner']],
+  );
 });
 
 test('the checked configuration is a frozen copy, a __proto__ key a key', () => {
