@@ -49,6 +49,25 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
+    /// Creates a broker-free mock consumer with the default reset strategy, <c>"latest"</c>: the three-argument
+    /// constructor with a <see langword="null"/> strategy.
+    /// </summary>
+    /// <param name="keyDeserializer">Deserializer for record keys.</param>
+    /// <param name="valueDeserializer">Deserializer for record values.</param>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// </exception>
+    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer)
+        : this(keyDeserializer, valueDeserializer, null)
+    {
+    }
+
+    /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
     /// <see cref="AddRecord"/> with the two deserializers.
     /// </summary>
@@ -70,7 +89,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null)
+        string? autoOffsetReset)
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
@@ -219,7 +238,10 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
 
     /// <inheritdoc/>
-    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+    public void EnforceRebalance() => _native.EnforceRebalance(null);
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
     public void CommitAsync() => _native.CommitAsync();
@@ -230,7 +252,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null) =>
+        IOffsetCommitCallback? callback) =>
         _native.CommitAsync(offsets, callback);
 
     /// <inheritdoc/>

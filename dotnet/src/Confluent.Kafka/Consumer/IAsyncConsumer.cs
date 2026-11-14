@@ -648,7 +648,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <remarks>
     /// The callback runs as for <see cref="CommitAsync(IOffsetCommitCallback, CancellationToken)"/>. An empty
     /// <paramref name="offsets"/> commits nothing; the callback then receives <see langword="null"/> offsets, or the
-    /// empty map on <see cref="AsyncMockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it.
+    /// empty map on <see cref="AsyncMockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it. A
+    /// <see langword="null"/> literal for the callback is ambiguous with the asynchronous form: write
+    /// <c>(IOffsetCommitCallback?)null</c>.
     /// </remarks>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="callback">The callback that receives the commit's outcome, or <see langword="null"/> for none.</param>
@@ -661,7 +663,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null,
+        IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -697,7 +699,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <paramref name="offsets"/> commits nothing; the callback then receives <see langword="null"/> offsets, or the
     /// empty map on <see cref="AsyncMockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it. With a
     /// <see langword="null"/> literal for the callback the call is ambiguous: write
-    /// <c>CommitAsync(offsets)</c> to commit without one.
+    /// <c>CommitAsync(offsets, (IOffsetCommitCallback?)null)</c> to commit without one.
     /// </remarks>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="callback">The callback that receives the commit's outcome.</param>

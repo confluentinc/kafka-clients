@@ -44,12 +44,30 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     private readonly ISerializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
+    /// Creates a broker-free mock producer whose sends complete at once: the three-argument constructor with
+    /// <c>autoComplete</c> set to <see langword="true"/>.
+    /// </summary>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
+    /// </exception>
+    public MockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer)
+        : this(keySerializer, valueSerializer, true)
+    {
+    }
+
+    /// <summary>
     /// Creates a broker-free mock producer with the key and value serializers, as Java's <c>MockProducer</c> takes them.
     /// </summary>
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
-    /// When <see langword="true"/> (the default), each send completes at once. When <see langword="false"/>,
+    /// When <see langword="true"/>, each send completes at once. When <see langword="false"/>,
     /// <c>Send</c> still returns at once, and the future's <see cref="KafkaFuture{T}.Get()"/> blocks until
     /// <see cref="CompleteNext"/> or <see cref="ErrorNext"/> resolves the send, which the sending thread may call
     /// itself; <see cref="Dispose"/> first flushes, completing the pending sends, unless a close has begun, and
@@ -65,7 +83,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     public MockProducer(
         ISerializer<TKey> keySerializer,
         ISerializer<TValue> valueSerializer,
-        bool autoComplete = true)
+        bool autoComplete)
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));

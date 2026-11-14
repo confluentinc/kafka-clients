@@ -339,8 +339,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     // Mock TAKES the serializers — Java-faithful (MockProducer.java takes Serializer<K>/Serializer<V>
     // and serializes records into its history); UNLIKE the consumer, where mock-takes-deserializers is
     // a deviation. Send serializes K/V → bytes exactly like the real client (§4).
+    public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer);  // autoComplete true
     public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
-        bool autoComplete = true);
+        bool autoComplete);
     public bool CompleteNext();
     public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
@@ -464,7 +465,8 @@ public interface IConsumerCommon {               // shared sync surface (IAsyncC
     IReadOnlyCollection<TopicPartition> Assignment();
     IReadOnlyCollection<string> Subscription();
     IReadOnlyCollection<TopicPartition> Paused();
-    void EnforceRebalance(string? reason = null); // KIP-848 logged no-op → returns success
+    void EnforceRebalance();                      // KIP-848 logged no-op → returns success
+    void EnforceRebalance(string? reason);        // Java enforceRebalance(String); the same no-op
 
     // CommitAsync, Seek and CurrentLag live on each flavor's interface (decisions 13 and 22,
     // ledger 103): the async flavor returns a Task.
@@ -505,7 +507,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     Task CommitAsync(CancellationToken cancellationToken = default);
     Task CommitAsync(IOffsetCommitCallback callback, CancellationToken cancellationToken = default);
     Task CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null, CancellationToken cancellationToken = default);
+        IOffsetCommitCallback? callback, CancellationToken cancellationToken = default);  // a null literal is ambiguous
+        // with the IAsyncOffsetCommitCallback form: (IOffsetCommitCallback?)null is Java's commitAsync(Map, null)
     // Java commitAsync(callback) / commitAsync(Map, callback) with an async callback: Java has none;
     // Python's async consumer takes an `async def` one (M19/P1). Not on IConsumer or ConsumerHandle.
     Task CommitAsync(IAsyncOffsetCommitCallback callback, CancellationToken cancellationToken = default);
@@ -540,8 +543,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     // Deviation (§7): the ctor TAKES the deserializers (Java's mock doesn't) — its Poll decodes native
     // bytes like the real consumer. AddRecord stays BYTES-in (Java's is typed-in) — tests the deserialize
     // path in isolation + forced by the bytes-only core ABI. Mock helpers are inherent, not on IAsyncConsumer.
+    public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null);
+        string? autoOffsetReset);
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
     public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);    // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
     public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // lose_partitions_cb (ledger 48)
@@ -580,7 +584,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // J
     void CommitAsync();
     void CommitAsync(IOffsetCommitCallback callback);
     void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null);                           // null callback = Java's commitAsync(Map, null)
+        IOffsetCommitCallback? callback);                                  // null callback = Java's commitAsync(Map, null)
     void Seek(TopicPartition partition, long offset);                      // Java seek(tp, long) — blocking form
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
     long? CurrentLag(TopicPartition topicPartition);                       // Java currentLag(tp) — blocking form; empty → null (ledger 103)
@@ -610,8 +614,9 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   //
 }
 
 public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    // Java `MockConsumer`, synchronous
+    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null);   // deviation §7: takes deserializers (Java's mock doesn't)
+        string? autoOffsetReset);          // deviation §7: takes deserializers (Java's mock doesn't)
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
     public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);  // Java MockConsumer.rebalance — inherent (M9/P6)
     public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent

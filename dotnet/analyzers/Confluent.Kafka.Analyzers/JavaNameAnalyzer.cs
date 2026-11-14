@@ -1005,7 +1005,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             for (int j = 0; j < java.Count; j++)
             {
                 // A .NET overload with optional parameters accepts every shorter Java overload whose parameters are a
-                // prefix of its own, as EnforceRebalance(reason = null) accepts both of Java's enforceRebalance forms.
+                // prefix of its own, as an M(string? reason = null) accepts both of Java's m() and m(String).
                 string[] javaNames = java[j].Names;
                 bool accepted = net.Any(n => n.Required <= javaNames.Length
                     && javaNames.Length < n.Names.Count

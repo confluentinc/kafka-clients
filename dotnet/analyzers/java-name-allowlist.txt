@@ -42,6 +42,14 @@ missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consu
 overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
 overload M:Confluent.Kafka.Consumer.MockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
 
+# C2: the two-argument mock constructors replace an optional argument (the default reset strategy, autoComplete
+# true) with an overload, so a parameter added later breaks no compiled caller. The mock producer's other forms
+# stay in the baseline: Java's take a partitioner and a cluster, which are not translated.
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1})
+overload M:Confluent.Kafka.Consumer.MockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1})
+overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1})
+overload M:Confluent.Kafka.Producer.MockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1})
+
 # M9: AddRecord takes bytes, which the mock deserializes on Poll, for the same reason.
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)
 missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)
