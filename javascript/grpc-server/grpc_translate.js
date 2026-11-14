@@ -170,6 +170,22 @@ function partitionInfoToProto(info) {
   return out;
 }
 
+/**
+ * One entry of a metrics() snapshot as the proto's Metric
+ * (python/grpc_translate.py's _metric_to_proto): the MetricName's fields and
+ * the value, a bigint (Java's long) as long_value, a string as string_value
+ * and a number as double_value.
+ */
+function metricToProto(metric) {
+  const name = metric.metricName();
+  const out = { name: name.name(), group: name.group(), description: name.description(), tags: Object.fromEntries(name.tags()) };
+  const value = metric.metricValue();
+  if (typeof value === 'string') out.string_value = value;
+  else if (typeof value === 'bigint') out.long_value = value.toString();
+  else out.double_value = Number(value);
+  return out;
+}
+
 /** The CallbackLogEntry.offsets key for a partition: "<topic>-<partition>". */
 function offsetKey(topic, partition) {
   return `${topic}-${partition}`;
@@ -242,6 +258,7 @@ module.exports = {
   kafkaErrorToProto,
   makeLoggingDeliveryCallback,
   protoToProducerRecord,
+  metricToProto,
   partitionInfoToProto,
   recordMetadataToProto,
   serverError,

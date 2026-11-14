@@ -27,6 +27,10 @@ import { producerClosed, producerOpened, warnPreview } from '../internal/lifecyc
 import { checkSerializer, closeSerializer, isThenable, serializedBytes } from '../internal/serde';
 import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
+import type { Metric } from '../common/metric';
+import { MetricName } from '../common/metric_name';
+import { MetricNameMap } from '../common/metric_name_map';
+import { KafkaMetric } from '../common/metrics/kafka_metric';
 import { Node } from '../common/node';
 import { PartitionInfo } from '../common/partition_info';
 import type { Serializer } from '../common/serialization/serializer';
@@ -74,6 +78,7 @@ const SEND_FORMS = new JavaForms('send', [['record'], ['record', 'callback']], {
 });
 const CLOSE_FORMS = new JavaForms('close', [[], ['timeout']], { bareTypes: { timeout: isDurationOrNull } });
 const FLUSH_FORMS = new JavaForms('flush', [[]]);
+const METRICS_FORMS = new JavaForms('metrics', [[]], { reader: true });
 const PARTITIONS_FOR_FORMS = new JavaForms('partitionsFor', [['topic']], {
   bareTypes: { topic: (value) => value === null || typeof value === 'string' },
 });
@@ -744,6 +749,29 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
         }
       });
     });
+  }
+
+  /**
+   * Get the full set of internal metrics maintained by the producer.
+   *
+   * @returns the producer's metrics, by name
+   * @throws `TypeError` when it is given an argument
+   *
+   * @remarks Java's `Map<MetricName, ? extends Metric>` is a
+   * `MetricNameMap<Metric>`, whose keys compare as `MetricName.equals` does.
+   * Each value is a `KafkaMetric`. *(deviation: Java's map is a live view,
+   * whose metrics read their value when asked. Why: the values are read
+   * through the C ABI when `metrics()` runs, as the Python binding reads
+   * them; call `metrics()` again for newer values. Goes when: the JavaScript
+   * metrics wrap the core's.)*
+   */
+  metrics(): MetricNameMap<Metric> {
+    METRICS_FORMS.match(undefined, arguments.length);
+    const entries: Array<[MetricName, Metric]> = native.producerMetrics(this.#handle).map((m) => {
+      const name = new MetricName({ name: m.name, group: m.group, description: m.description, tags: new Map(m.tags) });
+      return [name, KafkaMetric.internalSnapshot(name, m.value, m.measurable)];
+    });
+    return new MetricNameMap(entries);
   }
 
   /**

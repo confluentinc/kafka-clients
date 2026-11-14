@@ -17,6 +17,9 @@
 // which this index does not re-export.
 
 export { KafkaFuture } from './kafka_future';
+export type { Metric } from './metric';
+export { MetricName } from './metric_name';
+export { MetricNameMap } from './metric_name_map';
 export { Node } from './node';
 export { PartitionInfo } from './partition_info';
 export { TopicPartition } from './topic_partition';

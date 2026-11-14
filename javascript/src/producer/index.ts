@@ -24,8 +24,6 @@
  * `KafkaProducer.clientInstanceId`, `registerMetricForSubscription` and
  * `unregisterMetricFromSubscription`.
  *
- * Not translated yet: `KafkaProducer.metrics`.
- *
  * Serializers: what a string key or value gets without a serializer, and
  * the built-in serializer factories, come with the serdes; whether a
  * serializer's methods must all be async is not decided yet (Q50).

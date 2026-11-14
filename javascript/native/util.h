@@ -244,6 +244,7 @@ napi_value js_producer_create(napi_env env, napi_callback_info info);
 napi_value js_producer_send(napi_env env, napi_callback_info info);
 napi_value js_producer_flush(napi_env env, napi_callback_info info);
 napi_value js_producer_partitions_for(napi_env env, napi_callback_info info);
+napi_value js_producer_metrics(napi_env env, napi_callback_info info);
 napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);

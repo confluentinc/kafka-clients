@@ -166,9 +166,9 @@ make test-integration-javascript         # Linux only: the server in a container
 
 The native arm loads `@grpc/grpc-js` and `@grpc/proto-loader`, two of the
 devDependencies, from `javascript/node_modules` (`npm ci`);
-`make -C javascript grpc-native` checks they are there. The transaction and
-metrics cases are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`),
-as the producer has none of them yet.
+`make -C javascript grpc-native` checks they are there. The transaction cases
+are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`), as the
+producer has no transactions yet.
 
 ## Layout
 

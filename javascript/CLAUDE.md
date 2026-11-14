@@ -446,6 +446,24 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   other `U` through the rest parameter, which no call gives, and a member of a
   class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
   other object goes by name there, while plain JavaScript takes it bare.
+- Collections (root conventions, Types): a Java array or collection taken is
+  any iterable (`PartitionInfo`'s `Node[]`, plan §5 item 1), and one
+  returned is a new array each call (`PartitionInfo.replicas()`,
+  `partitionsFor()`'s `List`). `MetricName.tags()`, Java's
+  `Map<String, String>`, is a new `Map` each call, and its constructor takes
+  a `Map`. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
+  *(js-only, on the invented-names list)*, a read-only map keyed by the
+  JSON text of the group, the name and the tags sorted by key (the fields
+  `MetricName.equals` compares), keeping the original `MetricName`s;
+  `check-type-mapping` holds the rows.
+- `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
+  runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
+  constructor, its untranslated `MetricValueProvider`, `MetricConfig` and
+  `Measurable` placeholder types typed `unknown`, read by their Java
+  methods), each built with a provider returning the value read. *(deviation:
+  Java's map is a live view. Why: only the clients call the addon, and
+  Python's `metrics()` is a snapshot too. Goes when: the JavaScript metrics
+  wrap the core's.)* A long value is a `bigint`.
 - Serializers (root conventions, Serialization): `Serializer` is an object
   type in `common/serialization`, run in JavaScript inside `send()`
   (`src/internal/serde.ts`), key then value, after the form and argument

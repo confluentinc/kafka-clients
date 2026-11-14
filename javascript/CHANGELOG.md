@@ -175,6 +175,16 @@ newer.
   (Java's `List`), and rejecting with the core's errors (a metadata timeout,
   "topic cannot be null" as a `TypeError`). The gRPC server serves its
   `PartitionsFor` RPC.
+- `KafkaProducer.metrics()`, Java's `metrics()`, synchronous: a
+  `MetricNameMap<Metric>` (`common`, *js-only*: a read-only map keyed as
+  `MetricName.equals` compares, by group, name and tags) of `KafkaMetric`
+  (`common/metrics`), the values read when `metrics()` runs, where Java's map
+  is a live view. `MetricName` (`common`) has Java's methods, its `tags()` a
+  `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public
+  constructor, its value provider, configuration and time Java types this
+  client does not translate (`MetricValueProvider`, `MetricConfig` and
+  `Measurable` are placeholder types). A long value is a `bigint`. The gRPC
+  server serves its `Metrics` RPC.
 - `RecordMetadata` has Java's public constructor, `new RecordMetadata({
   topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,
   serializedValueSize })`, a `long` taking a bigint or a whole number; every

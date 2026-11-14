@@ -44,6 +44,8 @@
 // | CompletionStage<T>                           | Promise<T>                              |
 // | KafkaFuture.BaseFunction<A, B>, BiConsumer   | the alias of the same name: KafkaFuture.BaseFunction<A, B> |
 // | Throwable                                    | unknown (anything a function may throw)  |
+// | MetricValueProvider, MetricConfig, Measurable, Partitioner (placeholders) | unknown    |
+// | Time (not a public Java type)                | unknown                                 |
 // | ? (an unbounded wildcard)                    | any type                                 |
 // | T, as a bare value's type                    | Bare<T> (Extract<T, BareValue>), at the bare parameter only |
 // | List / Set / Collection / Iterable<T>, T[], taken | Iterable<T>, or an array of T      |
@@ -53,6 +55,7 @@
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
+// | Map<String, String> (MetricName's tags)      | Map<string, string>, a ReadonlyMap taken |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type     |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
@@ -86,7 +89,7 @@ const AWAITED_RETURNS = new Map([
     'a serializer may return a Promise, which the producer awaits before it hands the record over',
   ],
 ]);
-const { mappedItems, functionType, constantsOnly, formParameters } = require('../java_ts');
+const { mappedItems, functionType, constantsOnly, formParameters, PLACEHOLDERS, NOT_PUBLIC_TYPES } = require('../java_ts');
 
 const NUMBERS = new Set(['byte', 'short', 'int', 'float', 'double', 'Byte', 'Short', 'Integer', 'Float', 'Double', 'Number']);
 const LONGS = new Set(['long', 'Long']);
@@ -240,6 +243,10 @@ module.exports = {
         );
       }
       if (j.name === 'Throwable') return (t.flags & ts.TypeFlags.Unknown) !== 0;
+      // The types the client does not translate, and those Java does not make
+      // public, typed unknown (root CLAUDE.md, JavaScript Binding
+      // Conventions, Scope). A placeholder is an alias of unknown.
+      if (PLACEHOLDERS.has(j.name) || NOT_PUBLIC_TYPES.has(j.name)) return (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0;
       if (j.name === '?') return true;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
@@ -259,6 +266,13 @@ module.exports = {
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'TopicPartition') {
         return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Map' && j.args.length === 2 && j.args.every((a) => a.name === 'String' && a.dims === 0)) {
+        // MetricName's tags: a Map returned, a Map or ReadonlyMap taken.
+        const n = symbolName(t);
+        if (!(n === 'Map' || (!outward && n === 'ReadonlyMap'))) return (t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs') ? true : false;
+        const [k, v] = typeArgs(t);
+        return matches(j.args[0], k) === true && matches(j.args[1], v) === true;
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'MetricName') {
         return symbolName(t) === 'MetricNameMap' && matches(j.args[1], typeArgs(t)[0]) === true;

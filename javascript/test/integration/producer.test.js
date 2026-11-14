@@ -897,3 +897,17 @@ test("partitionsFor resolves to the topic's partitions, PartitionInfo with Node 
     await producer.close();
   }
 });
+
+test('metrics() counts the records sent, read again on each call', { skip: SKIP, timeout: 120000 }, async () => {
+  const { MetricName } = require('@confluentinc/kafka-javascript/common');
+  const topic = freshTopic('metrics');
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-metrics' } });
+  try {
+    const key = new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', 'js-it-metrics']]) });
+    assert.equal(producer.metrics().get(key).metricValue(), 0);
+    for (let i = 0; i < 3; i++) await (await producer.send(new ProducerRecord({ topic, value: Buffer.from(`v${i}`) }))).get();
+    assert.equal(producer.metrics().get(key).metricValue(), 3);
+  } finally {
+    await producer.close();
+  }
+});

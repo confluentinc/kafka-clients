@@ -219,7 +219,6 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | The consumer: `KafkaConsumer` with `poll()`, `subscribe()`, `assign()`, `commitSync()` and `commitAsync()` | the consumer |
 | The admin client: `Admin.create()`, its RPCs, `*Options` and `*Result` classes | the admin client |
 | Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
-| `metrics()` | not translated yet |
 | `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
 | The built-in serializer factories (`stringSerializer()`, ...) | the serdes |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |

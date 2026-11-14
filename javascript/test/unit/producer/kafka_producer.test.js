@@ -1478,3 +1478,34 @@ test("partitionsFor rejects with the core's errors: a metadata timeout, Java's n
     await producer.close();
   }
 });
+
+// metrics (Java's metrics()): synchronous, a snapshot of the core's metrics.
+test("metrics() is a MetricNameMap of KafkaMetric, read when it runs, keyed by Java's MetricName", async () => {
+  const { MetricName, MetricNameMap } = require('@confluentinc/kafka-javascript/common');
+  const { KafkaMetric } = require('@confluentinc/kafka-javascript/common/metrics');
+  const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-metrics' } });
+  try {
+    const metrics = producer.metrics();
+    assert.ok(metrics instanceof MetricNameMap);
+    assert.ok(metrics.size() > 0);
+    for (const [name, metric] of metrics) {
+      assert.ok(name instanceof MetricName);
+      assert.ok(metric instanceof KafkaMetric);
+      assert.equal(metric.metricName(), name);
+      const value = metric.metricValue();
+      assert.ok(['number', 'bigint', 'string'].includes(typeof value), `${name}: ${typeof value}`);
+    }
+    // Looked up by an equal MetricName, Java's equals: group, name and tags.
+    const key = new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', 'unit-metrics']]) });
+    assert.equal(metrics.has(key), true);
+    const total = metrics.get(key);
+    assert.equal(total.isMeasurable(), true);
+    assert.equal(total.metricValue(), 0);
+    // A snapshot: a second call reads the values again.
+    await producer.send(new ProducerRecord({ topic: 'unit-metrics', value: Buffer.from('v') }));
+    assert.notEqual(producer.metrics(), metrics);
+    assert.throws(() => producer.metrics(1), { constructor: TypeError, message: 'metrics() only reads: it takes no argument' });
+  } finally {
+    await producer.close();
+  }
+});

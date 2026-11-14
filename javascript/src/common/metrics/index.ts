@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
-// the Java sources (the generated modules of src/common/metrics/);
-// `cargo xtask check-generated` checks it is up to date.
+// The public classes of Java's org.apache.kafka.common.metrics this client
+// has: KafkaMetric, and the placeholder types of the untranslated
+// MetricValueProvider, MetricConfig and Measurable it takes or returns.
+// QuotaViolationError is generated from the Java sources.
 
-// `src/common/metrics`: the generated modules of src/common/metrics/.
-
+export { KafkaMetric } from './kafka_metric';
+export type { Measurable } from './measurable';
+export type { MetricConfig } from './metric_config';
+export type { MetricValueProvider } from './metric_value_provider';
+// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { QuotaViolationError } from './quota_violation_error';
+// END GENERATED EXPORTS
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
-// under `esModuleInterop` is a compile error rather than `undefined`.
+// under `esModuleInterop` is a compile error rather than `undefined` (import by
+// name or `import * as` instead; Node's own ESM default import still works).
 export declare const __esModule: true;
