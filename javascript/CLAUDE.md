@@ -26,8 +26,9 @@ wherever both are silent. The approved design is
 These decide every question, in this order:
 
 1. The root conventions (root `CLAUDE.md`, JavaScript Binding Conventions).
-2. The C ABI in `rust/target/include/confluent_kafka_bindings.h`, the header
-   the addon includes (which header: not decided yet in the root conventions).
+2. The C ABI in `rust/target/include/confluent_kafka_bindings.h`, the only
+   header the addon includes (root conventions, Build, packaging and
+   release).
 3. The Java public API (`KafkaProducer`, `ProducerRecord`, `RecordMetadata`,
    `Callback`, Apache Kafka 4.4.0 in `kafka/`).
 4. Root `CLAUDE.md` §4 "C FFI Conventions".
@@ -54,9 +55,10 @@ These decide every question, in this order:
    - **The configuration's shape**: a `Map` or another non-plain object is a
      `TypeError`, a symbol key a `ConfigError`, and the serde config keys
      are refused. Why: a `Map`'s entries and a symbol have no string to
-     cross as, and the serde keys name classes (root §2) until their route is
-     built. Goes when: never for the shape; the serde keys when their route
-     is built. No config value is checked (root conventions, Configuration).
+     cross as, and the serde keys' config route (a synchronous
+     `({ configs, isKey }) => serde`, root conventions, Serialization, Q53)
+     is not built yet. Goes when: never for the shape; the serde keys when
+     their route is built. No config value is checked (root conventions, Configuration).
    - **A NUL byte in a string or bytes that cross as a C string** (the topic,
      the header keys, the config keys and values: `js_string_dup` and
      `js_bytes_cstring` in `native/record.c`), a `TypeError` "... without null
@@ -221,9 +223,10 @@ These decide every question, in this order:
    for header keys, and the config code once per client, for the config keys
    and values (group IDs among them), call it, and the addon reads those
    bytes into C strings (`native/record.c` `js_bytes_cstring`); topic names
-   skip it and cross as JS strings. What plain JavaScript
-   gets for a string key or value without a serializer is not decided yet in
-   the root conventions; the producer now encodes it through the same rule.
+   skip it and cross as JS strings. The root conventions decide that a string
+   key or value given without a serializer throws `TypeError` pointing to
+   `stringSerializer()` (Class family, Q24, Q27); that comes with the
+   serializers, and until then the producer encodes it through the same rule.
    `check-zero-copy` and `check-string-encoding` partly enforce this (The rule
    linter, below), and an integration test checks that an accepted record's
    Buffers are collectable once its `send()` resolved, before delivery. Not
@@ -299,8 +302,9 @@ binding:
 - The preview warning follows the root conventions (Implementation over the
   FFI): `process.emitWarning` with the type `ExperimentalWarning`, once per
   process, with no code (the root's invented names list only deprecation
-  codes), silenced by `--no-warnings`; its text is not decided yet in the
-  root conventions. Debug lines use `util.debuglog('confluent_kafka')`
+  codes), silenced by `--no-warnings`; its text is the root conventions',
+  Python's `PREVIEW_WARNING` with "JavaScript" in place of "Python"
+  (`src/internal/lifecycle.ts`). Debug lines use `util.debuglog('confluent_kafka')`
   (`src/internal/debug.ts`): the addon's load, the producer's creation,
   close and pump. The main thread and the
   workers share the one notice: the addon, loaded once per process and kept
@@ -318,8 +322,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `index.ts` declares `export declare const __esModule: true;` (tsc emits the
   marker itself, the declaration no JS), so TypeScript rejects it (TS1192)
   rather than letting it read a missing `default` (`test/typing` pins this).
-  The module format is not decided yet in the root conventions (the lean is
-  ESM only, with `require(esm)` for CommonJS).
+  The package is CommonJS only, built with `module: nodenext` (root
+  conventions, Layout and modules, Q13): `package.json` has no `"type"`, and
+  each `exports` entry has the `types` and `default` conditions.
 - Data objects (root conventions, Class family): their Java getters are public
   `readonly` fields, set once in the constructor (not getter methods, not
   `get` accessors), so a spread and `JSON.stringify` keep them
@@ -349,9 +354,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (`src/internal/read_only_set.ts`) whose `add`, `delete` and `clear` throw
   `UnsupportedOperationError`.
 - Headers are Java's `Header` and `Headers` (`common/header`), as the Python
-  client's (whether `Headers` is a plain class or wraps the C `RecordHeaders`,
-  and whether plain-object headers join the binding's own checks: not decided
-  yet in the root conventions): `Header` keeps Java's methods, `key()` and
+  client's. The root conventions decide that `Headers` and `Header` wrap the
+  FFI's `RecordHeaders` and `RecordHeader` (Serialization, Q31); that is not
+  built yet, and both are plain classes today. Whether a record also takes
+  headers as plain `[key, value]` pairs is not decided yet in the root
+  conventions. `Header` keeps Java's methods, `key()` and
   `value()`, over private fields (`new Header({ key, value })`, the
   constructor of Java's internal `RecordHeader`), its value bytes, taken as a
   `Uint8Array` and given back as a `Buffer` over the same memory (root
@@ -681,9 +688,12 @@ The layout is the root conventions' (Layout and modules).
 - `native/`: the addon, its C sources and its build file. `binding.gyp` and
   `addon.exports.map` (the Linux export list of a static build) are here, not
   at the package root, so npm never compiles on install; `make build-addon`
-  runs node-gyp in `native/`, which builds `native/build/Release/` (the build
-  tool, the build target and paths and the exported symbols: not decided yet
-  in the root conventions). `util.h` is the only file including the bindings
+  runs node-gyp in `native/`, which builds `native/build/Release/` (root
+  conventions, Build, packaging and release, Q73: the build tool is node-gyp,
+  `javascript/` finds the core in `../rust`, `CONFLUENT_KAFKA_LIB_DIR`
+  overrides that, the target is `make build-javascript`, the addon targets
+  Node-API 9 (`NAPI_VERSION=9`), and a release `.node` exports only Node-API's
+  registration symbols). `util.h` is the only file including the bindings
   header and holds the `out_err` macros (`FFI_ERR`, `FFI_SET`,
   `FFI_DISCARD`); `addon.c` is the entry point and registers every native
   function; `callback_queue.c` is a client's notify hook, threadsafe
@@ -721,13 +731,21 @@ The layout is the root conventions' (Layout and modules).
   names, and one the naming convention cannot map is listed with its Java
   target, both in `lint-mapping.json` (The rule linter); `src/` carries no
   `@java` or `@jsOnly` tag. Each module's header comment lists the Java
-  overloads it leaves out. There is no docs lint in the preview. `make build` (`build-ts`)
-  compiles `src/` into `dist/` (`.js`, `.d.ts`, both with maps): CommonJS
-  today (`module: node16`, the package having no `"type"`), so `require`
-  loads it and an ES module `import`s it through Node's CommonJS interop,
-  ES2022 (and ES2024's string methods) for Node >= 22.14.0, `engines.node`
-  (the module format, the other `tsc` settings and `engines.node`: not decided
-  yet in the root conventions). `dist/` is git-ignored and is what
+  overloads it leaves out; the producer package's is its `index.ts`'s
+  `@packageDocumentation` TSDoc, so the declarations and the API report show
+  it. The root conventions add a docs lint, the `require-param` and
+  `require-returns` rules of `eslint-plugin-jsdoc` (Documentation, Q64, Q74),
+  and an HTML reference built with TypeDoc; neither is set up yet. `make
+  build` (`build-ts`) compiles `src/` into `dist/` (`.js`, `.d.ts`, both with
+  maps): CommonJS (`module: nodenext`, the package having no `"type"`, root
+  conventions, Layout and modules), so `require` loads it and an ES module
+  `import`s it through Node's CommonJS interop, ES2022 (and ES2024's string
+  methods) for Node >= 22.14.0, `engines.node` (root conventions, Build,
+  packaging and release); the other `tsc` settings, such as the target, are
+  not decided yet in the root conventions. `scripts/dist_headers.js` then
+  puts each source's licence header first in its `.js` (above tsc's
+  `"use strict";`) and `.d.ts` (where tsc drops it), the source maps shifted
+  to match. `dist/` is git-ignored and is what
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
   TypeScript `private` constructor (`protected` where Java's is), and so is
@@ -810,9 +828,12 @@ binding:
   (`test/static/lockfile.test.js`). Each platform package is a folder of
   `npm/` (`npm/README.md`): its committed `package.json`, published as it is,
   with npm's `os`, `cpu` and, on Linux, `libc` set and no install scripts, and
-  its README. The preview has linux-x64 (glibc) and darwin-arm64 (the
-  platforms after the preview, musl and the CPU floor: not decided yet in the
-  root conventions). Each platform package's `files` name `dist/` and
+  its README. The preview has linux-x64 (glibc) and darwin-arm64; after the
+  preview the platforms are the release RFC's list (Linux with glibc on x86-64
+  and arm64, macOS on arm64, Windows on x86-64), each built natively, with no
+  musl package and the core built with no `target-cpu` flag, so x86-64 needs
+  only Rust's baseline CPU (root conventions, Build, packaging and release,
+  Q73). Each platform package's `files` name `dist/` and
   `NOTICE`, the addon and `THIRD_PARTY_LICENSES.txt`, the licences of the
   crates linked into the addon. **(root conflict)** The root conventions
   (Build, packaging and release) have every JavaScript package's `files` name
@@ -820,27 +841,34 @@ binding:
   the root text literally, so the entry is there and matches nothing. CI
   builds the licence file with cargo-about (`npm/about.toml`,
   `npm/about.hbs`, `.semaphore/third-party-licenses.sh`) from
-  `rust/Cargo.lock`; npm adds the
-  README and the LICENSE (each package's `LICENSE` file and `license` field:
-  not decided yet in the root conventions). `test/static/layout.test.js` pins
-  the repository's side.
+  `rust/Cargo.lock`. Each package declares `"license": "Apache-2.0"` and
+  ships its own `LICENSE`, which `pack-npm.sh` copies into the package's
+  folder, since npm packs a `LICENSE` only from there; npm adds the README
+  and that LICENSE (root conventions, Q76). `test/static/layout.test.js`
+  pins the repository's side.
+- The root conventions also ask CI for Prettier as the formatter and for
+  publint among the package checks (Build, packaging and release, Q74);
+  neither is set up yet.
 - No package has an install script or builds at install; `native/` (with
   `binding.gyp`), `src/`, `scripts/`, `test/`, `tools/` and the gRPC
   server are never published (`check-npm.py package` checks each tarball's
-  exact file list).
+  exact file list), and every `.js` and `.d.ts` in each tarball starts with
+  the licence header (`check-npm.py package`, Q76).
 - The released addon links the Rust core statically
   (`CONFLUENT_KAFKA_LINK=static`, `native/binding.gyp`), needs glibc 2.28 or
-  macOS 11.0 at most (the glibc floor: not decided yet in the root
-  conventions), loads only the system's libraries and exports only
+  macOS 11.0 at most (the glibc floor is 2.28, as for Python's wheels: root
+  conventions, Q73), loads only the system's libraries and exports only
   `napi_register_module_v1` and `node_api_module_get_api_version_v1`
   (`check-npm.py native`). Development builds, the tests and the gRPC image
   link it dynamically, the default.
-- The version follows Kafka's line, now `4.4.0-preview.1`: `"version"` in
-  `package.json`, repeated in `package-lock.json` and in every
-  `npm/<platform>/package.json`, which `cargo xtask bump-version` writes
-  together (`make bump-version JAVASCRIPT_VERSION=...`), `-preview.N` included
-  (between dev and rc in semver order), which every version check of the
-  release pipeline accepts. It refuses a version whose `MAJOR.MINOR` is not
+- The version follows Kafka's line, now `4.4.0-beta.1`, the preview (root
+  conventions, Q75): `"version"` in `package.json`, repeated in
+  `package-lock.json` and in every `npm/<platform>/package.json`, which
+  `cargo xtask bump-version` writes together (`make bump-version
+  JAVASCRIPT_VERSION=...`), a preview as
+  `-beta.N`, as Python's is `bN`; there is no `-preview.N`. The version and
+  the npm tag say `beta`, while the docs and the warning call the stage the
+  preview. It refuses a version whose `MAJOR.MINOR` is not
   the Kafka release of `kafka/gradle.properties`, or whose `PATCH` does not
   follow `rfc/versioning.md` (`AK_patch × 100 + core_patch × 10 +
   binding_patch`, the hundreds Kafka's patch, a digit back at 0 when one to
@@ -848,15 +876,15 @@ binding:
   tested tarballs, and its manual "Publish to npm" promotion
   (`.semaphore/publish-npm.yml`, `.semaphore/publish-npm.sh`) publishes them
   from Semaphore with a granular npm token from Vault and no provenance. The
-  dist-tag is `check-npm.py dist-tag`'s: pre-releases go under `preview` only,
+  dist-tag is `check-npm.py dist-tag`'s: pre-releases go under `beta` only,
   and it refuses to put one on `latest`; a release goes under `latest`; 1.x
   fixes go out under `legacy`, from the earlier client's repository (the
   publish job refuses a version below 4). There is no manual publish script.
   `javascript/` is mirrored read-only to `confluent-kafka-javascript` and
   released from `<major>.<minor>.x` branches.
 - CI runs the binding on Node 22 (every suite) and on Node 24 and 26 (the
-  static, unit and typing tests, which need no broker); CI on Node 22, 24 and
-  26 is not decided yet in the root conventions.
+  static, unit and typing tests, which need no broker), as the root
+  conventions ask (CI on Node 22, 24 and 26, Q73).
 
 ## Generated files
 
@@ -899,7 +927,9 @@ a line that matches no finding any more is itself a finding. Code that does
 not follow a rule yet is a finding to fix, never a new baseline line. The
 mapping lists are in `lint-mapping.json`: `invented`, the list of invented
 names for the exported items and public members (root conventions, Layout and
-modules), each with its reason, and `javaTargets`, the Java class or member of
+modules), a member named by a well-known symbol keyed
+`<Class>.[Symbol.<name>]` (`KafkaProducer.[Symbol.asyncDispose]`,
+`Headers.[Symbol.iterator]`), each with its reason, and `javaTargets`, the Java class or member of
 an item the naming convention does not find; the other invented names are
 `NODE_DEBUG=confluent_kafka`, the warning code
 `CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED` (of the warning for a producer never
@@ -931,8 +961,9 @@ The rules, each named in its finding:
   options object of Java's parameter names, with one TypeScript overload
   signature per Java form and the bare value of a one-parameter form.
 - `check-type-mapping`: each member's type is the one the Types table gives
-  (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; the rows not
-  decided yet in the root conventions keep their current mapping).
+  (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
+  returned as a `bigint`, taken as a `bigint` or a whole `number`); a Java
+  type the rule's table lacks is `unmapped`.
 - `check-waiting-call-promise`: a method returns a Promise if and only if its
   native path reaches a `_cb` twin.
 - `check-native-registry`: the addon's registrations and the native handle's
@@ -960,8 +991,8 @@ The rules, each named in its finding:
   Promise is meant to be awaited: `await producer.send(record)`,
   `await producer.flush()`, `await producer.close()`. The client is built and
   documented for that use: zero copy holds "until the Promise from `send()`
-  settles; awaiting `send()` is enough", and the docs say to await every
-  `send()` before `commitTransaction()` (root conventions, Serialization and
+  settles; awaiting `send()` is enough", and a send is part of a transaction
+  once its `send()` Promise has resolved (root conventions, Serialization and
   Futures and waiting). The binding's own code is held to it by typescript-eslint's
   `no-floating-promises`, which lints `src/`. Tests, examples and reviews use
   the client the same way.
@@ -986,9 +1017,12 @@ The rules, each named in its finding:
 
 ## Files and process
 
-- Every file carries the Apache 2.0 header, copyright Confluent Inc. (the
-  header of each file is not decided yet in the root conventions). No TODO
-  or FIXME.
+- Every file carries Python's header, Confluent's copyright line with the
+  Apache 2.0 text, as the core's files do (root conventions, Build, packaging
+  and release, Q76); a file copied unchanged from Apache Kafka keeps the
+  Foundation's header. `make build-ts` puts it first in each compiled `.js`
+  and `.d.ts` (`scripts/dist_headers.js`), and the package check confirms it
+  in each tarball. No TODO or FIXME.
 - No Rust or C changes for the binding: a missing FFI function is reported,
   not added (root conventions, Implementation over the FFI).
 - `test/static/header_conformance.test.js` asserts that every `kafka_*`
