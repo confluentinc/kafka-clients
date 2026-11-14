@@ -20,9 +20,10 @@
 // event loop and run callbacks on the caller's thread. This generalises
 // test/static/header_conformance.test.js's fixed producer list to every
 // client, in function bodies and in the bodies of `#define`s (native/*.c and
-// native/*.h), a macro's call checked once, at its definition. The one
-// exception is listed with its reason and the exact call it allows; an entry
-// that allows nothing is a finding.
+// native/*.h), a macro's call checked once, at its definition. There is no
+// exception (no blocking call at a teardown either: no finalizer closes a
+// client); an entry, if one is ever listed, names the exact call it allows,
+// and one that allows nothing is a finding.
 //
 // It also owns javascript/CLAUDE.md boundary rule 5 (never read the future):
 // no function named by `FORBIDDEN` is called in native/, its `_cb` twins
@@ -30,15 +31,8 @@
 
 const { cModel, applyAllowlist } = require('../c_model');
 
-/** The blocking calls allowed: `<file>:<function>:<callee>(<args>)`. */
-const ALLOWED = [
-  {
-    key: 'native/producer.c:producer_force_close:kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)',
-    reason:
-      "the finalizer's force-close (javascript/CLAUDE.md rule 4's exception, pinned by " +
-      'test/static/header_conformance.test.js): it runs only while the handle is finalized, where no JS runs',
-  },
-];
+/** The blocking calls allowed: `<file>:<function>:<callee>(<args>)`. None: every call is the `_cb` twin. */
+const ALLOWED = [];
 
 /** The header functions native/ never calls, whatever their form: each prefix with its reason. */
 const FORBIDDEN = [

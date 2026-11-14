@@ -55,6 +55,21 @@ function delivery(future) {
   });
 }
 
+/**
+ * Runs `body` with the event loop held by a timer: a closed producer no longer
+ * keeps Node running (javascript/CLAUDE.md, "Threads and liveness"), so a test
+ * awaiting a call made after close() holds the loop itself, as an app's own
+ * work would.
+ */
+async function holdingTheLoop(body) {
+  const hold = setInterval(() => {}, 1000);
+  try {
+    return await body();
+  } finally {
+    clearInterval(hold);
+  }
+}
+
 const FLUSH_IN_CALLBACK =
   'KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.';
 
@@ -265,8 +280,9 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
   release();
   await closing;
   await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: 'v' })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
-  // Disposing again resolves, as close() again does.
-  await producer[Symbol.asyncDispose]();
+  // Disposing again resolves, as close() again does: the core's second
+  // close, whose completion a closed producer no longer holds Node for.
+  await holdingTheLoop(() => producer[Symbol.asyncDispose]());
 });
 
 test('flush inside a callback rejects with the core error', async () => {
@@ -357,7 +373,7 @@ test('send() rejects a record whose field was reassigned to a value the construc
   }
 });
 
-test('after close: send and flush reject, close is idempotent', async () => {
+test("after close every call goes to the core: send rejects with its closed error, flush and close resolve", async () => {
   const closedError = (e) => {
     // Java's IllegalStateException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalStateError);
@@ -366,24 +382,27 @@ test('after close: send and flush reject, close is idempotent', async () => {
     assert.equal(e.message, CLOSED_MESSAGE);
     return true;
   };
-  const producer = new KafkaProducer({ configs: UNREACHABLE });
-  const first = producer.close();
-  // While closing too.
-  assert.equal(producer.close(), first);
-  const whileClosing = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
-  assert.ok(whileClosing instanceof Promise);
-  await assert.rejects(whileClosing, closedError);
-  // flush() is refused from the moment close() is called, as the Python
-  // client's: the native producer is released by the close.
-  await assert.rejects(producer.flush(), closedError);
-  await first;
-  await producer.close();
-  await producer.close({ timeout: 0 });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), closedError);
-  await assert.rejects(producer.flush(), closedError);
+  await holdingTheLoop(async () => {
+    const producer = new KafkaProducer({ configs: UNREACHABLE });
+    const first = producer.close();
+    // A second close while the first runs is a close of its own, in the core.
+    const second = producer.close();
+    assert.notEqual(second, first);
+    const whileClosing = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
+    assert.ok(whileClosing instanceof Promise);
+    await assert.rejects(whileClosing, closedError);
+    // Java's flush() has no closed check: the core's flush resolves.
+    await producer.flush();
+    await first;
+    await second;
+    await producer.close();
+    await producer.close({ timeout: 0 });
+    await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), closedError);
+    await producer.flush();
+  });
 });
 
-test('close checks the closed producer first, then its timeout', async () => {
+test('close checks its timeout, open or closed: the closed state is the core\'s', async () => {
   const negative = (e) => {
     // Java's IllegalArgumentException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalArgumentError);
@@ -394,55 +413,51 @@ test('close checks the closed producer first, then its timeout', async () => {
     return true;
   };
   const notADuration = { name: 'TypeError', message: 'timeout must be a number of milliseconds or a Temporal.Duration' };
-  // On an open producer, each refused timeout changes nothing.
-  const producer = new KafkaProducer({ configs: UNREACHABLE });
-  await assert.rejects(producer.close({ timeout: -1 }), negative);
-  await assert.rejects(producer.close(-1), negative);
-  await assert.rejects(producer.close(-0.5), negative);
-  await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ milliseconds: -1 }) }), negative);
-  await assert.rejects(producer.close(Temporal.Duration.from({ milliseconds: -1 })), negative);
-  await assert.rejects(producer.close({ timeout: '5' }), notADuration);
-  // A bare value that is neither a number nor a Temporal.Duration fits no form.
-  await assert.rejects(producer.close('5'), {
-    name: 'IllegalArgumentError',
-    message: 'close() takes one of (), (timeout); got a string',
+  // Each refused timeout changes nothing.
+  const checks = async (producer) => {
+    await assert.rejects(producer.close({ timeout: -1 }), negative);
+    await assert.rejects(producer.close(-1), negative);
+    await assert.rejects(producer.close(-0.5), negative);
+    await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ milliseconds: -1 }) }), negative);
+    await assert.rejects(producer.close(Temporal.Duration.from({ milliseconds: -1 })), negative);
+    await assert.rejects(producer.close({ timeout: '5' }), notADuration);
+    // A bare value that is neither a number nor a Temporal.Duration fits no form.
+    await assert.rejects(producer.close('5'), {
+      name: 'IllegalArgumentError',
+      message: 'close() takes one of (), (timeout); got a string',
+    });
+    await assert.rejects(producer.close({ timeout: null }), { name: 'TypeError', message: 'timeout must not be null' });
+    await assert.rejects(producer.close(null), { name: 'TypeError', message: 'timeout must not be null' });
+    await assert.rejects(producer.close({ timeout: undefined }), {
+      name: 'TypeError',
+      message: "timeout must not be undefined. Leave the key out, or pass null for Java's null",
+    });
+    await assert.rejects(producer.close(undefined), {
+      name: 'TypeError',
+      message: "timeout must not be undefined. Leave the argument out, or pass null for Java's null",
+    });
+    for (const value of [NaN, -Infinity]) {
+      await assert.rejects(producer.close(value), { name: 'RangeError', message: `timeout must be a number of milliseconds, not ${value}` });
+    }
+    await assert.rejects(producer.close({ timeout: 2 ** 53 }), {
+      name: 'RangeError',
+      message: 'timeout of 9007199254740992 ms is above Number.MAX_SAFE_INTEGER ms; pass Infinity for no limit',
+    });
+    await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ months: 1 }) }), (e) => {
+      assert.equal(e.constructor, RangeError);
+      assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
+      return true;
+    });
+  };
+  await holdingTheLoop(async () => {
+    const producer = new KafkaProducer({ configs: UNREACHABLE });
+    await checks(producer);
+    // The producer is still open.
+    await producer.flush();
+    await producer.close();
+    // Closed: the same checks, the same errors.
+    await checks(producer);
   });
-  await assert.rejects(producer.close({ timeout: null }), { name: 'TypeError', message: 'timeout must not be null' });
-  await assert.rejects(producer.close(null), { name: 'TypeError', message: 'timeout must not be null' });
-  await assert.rejects(producer.close({ timeout: undefined }), {
-    name: 'TypeError',
-    message: "timeout must not be undefined. Leave the key out, or pass null for Java's null",
-  });
-  await assert.rejects(producer.close(undefined), {
-    name: 'TypeError',
-    message: "timeout must not be undefined. Leave the argument out, or pass null for Java's null",
-  });
-  for (const value of [NaN, -Infinity]) {
-    await assert.rejects(producer.close(value), { name: 'RangeError', message: `timeout must be a number of milliseconds, not ${value}` });
-  }
-  await assert.rejects(producer.close({ timeout: 2 ** 53 }), {
-    name: 'RangeError',
-    message: 'timeout of 9007199254740992 ms is above Number.MAX_SAFE_INTEGER ms; pass Infinity for no limit',
-  });
-  await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ months: 1 }) }), (e) => {
-    assert.equal(e.constructor, RangeError);
-    assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
-    return true;
-  });
-  // The producer is still open.
-  await producer.flush();
-  // While a close is in progress, and once closed, a timeout is not read: the
-  // call is the close in progress, or a harmless second close.
-  const first = producer.close();
-  assert.equal(producer.close({ timeout: -1 }), first);
-  assert.equal(producer.close(Temporal.Duration.from({ months: 1 })), first);
-  await first;
-  await producer.close({ timeout: -1 });
-  await producer.close({ timeout: null });
-  await producer.close({ timeout: '5' });
-  // The form is still checked first.
-  await assert.rejects(producer.close('5'), { name: 'IllegalArgumentError' });
-  await assert.rejects(producer.close(undefined), { name: 'TypeError' });
   // Accepted: a whole or fractional number, Infinity, a Temporal.Duration, bare or named.
   for (const timeout of [{ timeout: 0 }, 1.5, Infinity, { timeout: Temporal.Duration.from({ seconds: 1 }) }, Temporal.Duration.from({ seconds: 1 })]) {
     await new KafkaProducer({ configs: UNREACHABLE }).close(timeout);
@@ -609,14 +624,20 @@ test('send reads only the parameters the form check saw: own enumerable keys', a
   }
 });
 
-test('a closed producer rejects a send as closed before it checks the record or the callback', async () => {
-  // Java's doSend checks the closed producer before it reads the record;
-  // the Python client's send checks it right after the form.
+test('a closed producer checks a send\'s record and callback before the core reports it closed', async () => {
+  // The binding keeps no closed state: the record is checked and converted
+  // in JavaScript, then the core refuses it, where Java's doSend checks the
+  // closed producer first (a deviation, documented on send()).
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   await producer.close();
-  for (const args of [{ record: null }, { record: {} }, null, { record: new ProducerRecord({ topic: 't', value: 'v' }), callback: 'cb' }]) {
-    await assert.rejects(producer.send(args), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
-  }
+  await assert.rejects(producer.send({ record: null }), { name: 'TypeError', message: 'record must not be null' });
+  await assert.rejects(producer.send(null), { name: 'TypeError', message: 'record must not be null' });
+  await assert.rejects(producer.send({ record: {} }), { name: 'TypeError', message: 'record must be a ProducerRecord' });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }), callback: 'cb' }), {
+    name: 'TypeError',
+    message: 'callback must be a function ({ metadata, exception }) => void',
+  });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
   // The form is checked first: a bare value that fits no form included.
   await assert.rejects(producer.send({}), { name: 'IllegalArgumentError', message: 'send() takes one of (record), (record, callback); got ()' });
   await assert.rejects(producer.send(42), { name: 'IllegalArgumentError', message: 'send() takes one of (record), (record, callback); got a number' });
@@ -822,7 +843,7 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
   assert.deepEqual(calls, []);
 });
 
-test('a refused NUL-holding send leaves an unclosed producer idle', () => {
+test('a refused NUL-holding send leaves nothing pending: the producer then closes at once', () => {
   const r = runNode(`
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     const { Header } = require('@confluentinc/kafka-javascript/common/header');
@@ -834,6 +855,7 @@ test('a refused NUL-holding send leaves an unclosed producer idle', () => {
       ]) {
         await p.send({ record, callback: () => console.log('callback ran') }).catch((e) => console.log(e.name, e.message));
       }
+      await p.close();
     })();
   `);
   assert.equal(r.status, 0, r.stderr);
@@ -928,22 +950,42 @@ function runNode(script, timeout = 30000, flags = [], env = undefined) {
   return { ...r, ms: Number((process.hrtime.bigint() - started) / 1000000n) };
 }
 
-test('an idle producer lets the process exit', () => {
+test('an open producer keeps the process running until close() closes it', () => {
   const r = runNode(`
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+    console.log('created');
+    // Nothing else holds the event loop: the producer does, until closed.
+    setTimeout(() => p.close().then(() => console.log('closed')), 1000).unref();
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'created\nclosed\n');
+  assert.ok(r.ms >= 900, `exited after ${r.ms} ms`);
+});
+
+test('a producer never closed keeps the process running', () => {
+  // As KafkaJS and 1.x from connect() to disconnect(): a script that forgets
+  // close() never exits on its own (javascript/CLAUDE.md, "Threads and liveness").
+  const r = runNode(
+    `
     const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
     new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
     console.log('created');
-  `);
-  assert.equal(r.status, 0, r.stderr);
+  `,
+    3000,
+  );
   assert.equal(r.stdout, 'created\n');
-  assert.ok(r.ms < 10000, `took ${r.ms} ms`);
+  assert.equal(r.signal, 'SIGTERM', `the process exited on its own: status ${r.status}`);
 });
 
-test('a pending send keeps the process alive until it completes', () => {
+test('a pending send keeps the process alive until it completes and the producer is closed', () => {
   const r = runNode(`
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 1500 } });
-    p.send({ record: new ProducerRecord({ topic: 'alive', value: 'v' }), callback: ({ exception }) => console.log('callback:', exception.message) });
+    p.send({
+      record: new ProducerRecord({ topic: 'alive', value: 'v' }),
+      callback: ({ exception }) => console.log('callback:', exception.message),
+    }).then(() => p.close());
   `);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'callback: Topic alive not present in metadata after 1500 ms.\n');
@@ -979,122 +1021,55 @@ test('terminating a worker with records in flight tears its producer down cleanl
   assert.equal(r.stdout, 'done\n');
 });
 
-test('terminating a worker whose unclosed producer holds an unsent record is prompt', () => {
-  // The environment teardown finalizes a producer close() was never called
-  // on. Its destroy would close it gracefully first, waiting up to
-  // max.block.ms + delivery.timeout.ms (3 min by default) for a record no
-  // broker will take; the finalizer force-closes it (timeout 0) instead, so
-  // the record fails promptly (the connection to 127.0.0.1:1 is refused, so
-  // the I/O task is in no long wait).
-  const r = runNode(
-    `
-    const { Worker } = require('node:worker_threads');
-    const body = \`
-      const { parentPort } = require('node:worker_threads');
-      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-      const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
-      p.send({ record: new ProducerRecord({ topic: 'unclosed', value: 'v' }), callback: () => {} }).catch(() => {});
-      parentPort.postMessage('sent');
-    \`;
-    (async () => {
-      const w = new Worker(body, { eval: true });
-      await new Promise((res, rej) => { w.once('message', res); w.once('error', rej); });
-      const started = Date.now();
-      await w.terminate();
-      const ms = Date.now() - started;
-      console.log(ms < 2000 ? 'terminated promptly' : \`terminated after \${ms} ms\`);
-    })().catch((e) => { console.error(e); process.exit(1); });
-  `,
-    15000,
-  );
-  assert.equal(r.error, undefined, `the process did not exit: ${r.error}`);
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'terminated promptly\n');
-});
-
-test('terminating a worker whose callback Promise never settles is prompt', () => {
-  // The teardown reports a pending callback as returned before its
-  // force-close, which waits for every report.
-  const r = runNode(
-    `
-    const { Worker } = require('node:worker_threads');
-    const body = \`
-      const { parentPort } = require('node:worker_threads');
-      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-      const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 50 } });
-      p.send({
-        record: new ProducerRecord({ topic: 'never', value: 'v' }),
-        callback: () => {
-          parentPort.postMessage('called');
-          return new Promise(() => {});
-        },
-      }).catch(() => {});
-    \`;
-    (async () => {
-      const w = new Worker(body, { eval: true });
-      await new Promise((res, rej) => { w.once('message', res); w.once('error', rej); });
-      const started = Date.now();
-      await w.terminate();
-      const ms = Date.now() - started;
-      console.log(ms < 2000 ? 'terminated promptly' : \`terminated after \${ms} ms\`);
-    })().catch((e) => { console.error(e); process.exit(1); });
-  `,
-    15000,
-  );
-  assert.equal(r.error, undefined, `the process did not exit: ${r.error}`);
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'terminated promptly\n');
-});
-
-test('a producer dropped while its record is pending keeps running, and is counted at exit, once', () => {
+test('a producer dropped while open keeps running: no garbage collection closes it', () => {
+  // The core logs each close at INFO. A producer dropped while its record is
+  // pending, and collected, still delivers the record's callback, is never
+  // closed, and keeps the process running.
   const r = runNode(
     `
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     let p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 300 } });
-    new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } }).close();
     p.send({ record: new ProducerRecord({ topic: 'dropped', value: 'v' }), callback: ({ exception }) => console.log('callback:', exception.name) });
-    // Dropped and collected while its record waits: it keeps running.
-    p = null;
-    global.gc();
-    setTimeout(() => global.gc(), 50);
-  `,
-    30000,
-    ['--expose-gc'],
-  );
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'callback: TimeoutError\n');
-  const warnings = r.stderr.split('\n').filter((l) => l.includes('never closed'));
-  assert.equal(warnings.length, 1, r.stderr);
-  assert.match(warnings[0], /\[CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED\] Warning: 1 KafkaProducer was never closed\. Call close\(\)/);
-});
-
-test('no garbage collection closes an idle producer: it is closed only by the teardown', () => {
-  // The core logs each close at INFO. A producer dropped while idle and then
-  // collected must still be open at the marker, and be closed once, by the
-  // environment teardown's close(Duration.ZERO).
-  const r = runNode(
-    `
-    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
-    let p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
     p = null;
     global.gc();
     setTimeout(() => {
       global.gc();
-      setTimeout(() => console.error('MARK idle producer collected'), 100);
-    }, 100);
+      setTimeout(() => console.error('MARK dropped producer collected'), 100);
+    }, 1000);
+  `,
+    4000,
+    ['--expose-gc', '--no-warnings'],
+    { RUST_LOG: 'info' },
+  );
+  assert.equal(r.stdout, 'callback: TimeoutError\n');
+  assert.equal(r.signal, 'SIGTERM', `the process exited on its own: status ${r.status}`);
+  assert.ok(r.stderr.includes('MARK dropped producer collected'), r.stderr);
+  assert.equal(r.stderr.split('\n').filter((l) => l.includes('Closing the Kafka producer')).length, 0, r.stderr);
+});
+
+test('a closed producer lets the process exit, and is destroyed when garbage collected', () => {
+  // Closed once, by the app's close(): the garbage collection that follows
+  // destroys the native producer and closes nothing more.
+  const r = runNode(
+    `
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    let p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+    p.close().then(() => {
+      p = null;
+      global.gc();
+      setTimeout(() => {
+        global.gc();
+        console.log('collected');
+      }, 100);
+    });
   `,
     30000,
     ['--expose-gc', '--no-warnings'],
     { RUST_LOG: 'info' },
   );
   assert.equal(r.status, 0, r.stderr);
-  const lines = r.stderr.split('\n');
-  const mark = lines.findIndex((l) => l.includes('MARK idle producer collected'));
-  const closes = lines.flatMap((l, i) => (l.includes('Closing the Kafka producer') ? [i] : []));
-  assert.ok(mark >= 0, r.stderr);
-  assert.equal(closes.length, 1, r.stderr);
-  assert.ok(closes[0] > mark, `closed before the marker:\n${r.stderr}`);
-  assert.match(lines[closes[0]], /timeoutMillis = 0 ms/);
+  assert.equal(r.stdout, 'collected\n');
+  assert.equal(r.stderr.split('\n').filter((l) => l.includes('Closing the Kafka producer')).length, 1, r.stderr);
 });
 
 test('the preview notice is one ExperimentalWarning per process, which --no-warnings silences', () => {

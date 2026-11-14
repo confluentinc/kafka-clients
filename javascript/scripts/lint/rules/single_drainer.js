@@ -15,7 +15,8 @@
 'use strict';
 
 // N4 check-single-drainer (javascript/CLAUDE.md boundary rules 3 and 10: one
-// drainer per client, never a destroy inside a drain):
+// drainer per client, never a destroy inside a drain, a destroy only from the
+// handle object's finalizer, and only for a closed client):
 //   - a client's `__execute_callbacks_err` is called only from the queue's
 //     executor, the `cbq_execute_fn` a client hands to `cbq_init`, which only
 //     `cbq_drain` calls (`q->execute(...)`);
@@ -26,9 +27,16 @@
 //   - no function that runs inside the drain (a completion native/ hands to a
 //     `_cb` twin or to an interface's constructor) reaches a client's
 //     destroy (`<Class>_destroy` of a class with `__execute_callbacks`,
-//     directly or through an `__as_` view) through the C call graph.
-// The executors and drain callers are listed with their reasons; an entry
-// that matches nothing is a finding.
+//     directly or through an `__as_` view) through the C call graph;
+//   - a client's destroy is called only from a function the handle object's
+//     finalizer (the finalize callback handed to `napi_wrap`) reaches, or
+//     from a listed function (the constructor's failure paths, before the
+//     handle exists);
+//   - a finalizer that reaches a client's destroy asks the queue whether the
+//     core reported the client closed (`cbq_is_closed`) in its own body: no
+//     finalizer closes or destroys an open client.
+// The executors, drain callers and destroy callers are listed with their
+// reasons; an entry that matches nothing is a finding.
 
 const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { scan, matching } = require('../c_source');
@@ -44,6 +52,14 @@ const DRAIN_CALLERS = [
   { key: 'js_producer_pump', reason: "send()'s pump (javascript/CLAUDE.md rule 3)" },
 ];
 
+/** The functions allowed to call a client's destroy outside the finalizer. */
+const DESTROY_CALLERS = [
+  {
+    key: 'js_producer_create',
+    reason: 'the constructor\'s failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists',
+  },
+];
+
 module.exports = {
   name: 'check-single-drainer',
   kinds: [
@@ -52,16 +68,18 @@ module.exports = {
     'drain-caller',
     'destroy-in-drain',
     'destroy-in-completion',
-    'after-drain-in-loop',
+    'destroy-outside-finalizer',
+    'destroy-of-open-client',
     'drain-missing',
     'drain-unused-allowance',
   ],
   needs: ['native', 'header'],
   EXECUTORS,
   DRAIN_CALLERS,
+  DESTROY_CALLERS,
   hint:
-    "Run a client's __execute_callbacks only through cbq_drain, from call_js or the pump, and destroy after " +
-    'the drain loop (javascript/CLAUDE.md boundary rules 3 and 10).',
+    "Run a client's __execute_callbacks only through cbq_drain, from call_js or the pump, and destroy a closed " +
+    "client only from its handle object's finalizer (javascript/CLAUDE.md boundary rules 3 and 10).",
   check(ctx) {
     const { calls, header, resolve } = cModel(ctx);
     const raw = [];
@@ -122,9 +140,6 @@ module.exports = {
         checked += 1;
         if (/_destroy(_err)?$/.test(c.name) && header.has(c.name)) {
           raw.push({ kind: 'destroy-in-drain', subject: `${c.file}:${c.line}`, message: `cbq_drain's loop calls ${c.name}: destroy after the loop` });
-        } else if (c.name === 'after_drain') {
-          // The client's after-drain hook destroys what a close completion marked: only once the loop ended.
-          raw.push({ kind: 'after-drain-in-loop', subject: `${c.file}:${c.line}`, message: "cbq_drain calls the queue's after_drain inside its loop: call it after the loop" });
         } else if (resolve(c.name, c.file)) {
           loopCalls.push(c);
         }
@@ -133,8 +148,8 @@ module.exports = {
     // What runs inside the drain: every function native/ hands to a `_cb` twin
     // (its completion) or to an interface's constructor (`..._new` /
     // `..._new_err`, as an `_fn_t`), and what they call. None reaches a
-    // client's destroy: a close completion only marks the client, and the
-    // drain's after-hook destroys it (rule 3).
+    // client's destroy: only the handle object's finalizer destroys one
+    // (rule 10).
     const clientDestroys = new Set();
     for (const name of header.keys()) {
       const m = /^(kafka_\w+?)_(\w+?)_destroy(_err)?$/.exec(name);
@@ -165,8 +180,7 @@ module.exports = {
     }
     // The executor each client hands to cbq_init (its `cbq_execute_fn`
     // parameter): the loop calls it through `q->execute`, so it runs inside the
-    // drain and must not reach a destroy either. The after-drain hook is not a
-    // root: it runs after the loop, where the destroy belongs.
+    // drain and must not reach a destroy either.
     const init = resolve('cbq_init');
     const executeAt = init ? init.params.findIndex((p) => p.type === 'cbq_execute_fn') : -1;
     let handed = 0;
@@ -208,10 +222,85 @@ module.exports = {
         }
       }
     }
+    // Every destroy of a client: the functions that reach one, through the C
+    // call graph, are reached only from the handle object's finalizer (the
+    // finalize callback handed to napi_wrap, its 4th argument), which asks
+    // cbq_is_closed first, or from a listed function. A function of that set
+    // no native function calls (one JavaScript calls, a completion, a
+    // finalizer) is where a destroy starts: it must be one of those.
+    const finalizers = new Set();
+    for (const c of calls.filter((x) => x.name === 'napi_wrap' && !x.directive)) {
+      const body = c.args.length > 3 ? resolve(c.args[3].trim(), c.file) : undefined;
+      if (body) finalizers.add(bodyKey(body));
+    }
+    const callers = new Map();
+    for (const c of calls) {
+      if (c.directive || !c.function) continue;
+      const callee = resolve(c.name, c.file);
+      if (!callee) continue;
+      if (!callers.has(bodyKey(callee))) callers.set(bodyKey(callee), new Set());
+      callers.get(bodyKey(callee)).add(`${c.file}:${c.function}`);
+    }
+    // Each function reaching a destroy, with the first destroy call it reaches.
+    const reaching = new Map();
+    const work = [];
+    for (const c of calls) {
+      if (c.directive || !c.function || !clientDestroys.has(c.name)) continue;
+      checked += 1;
+      const k = `${c.file}:${c.function}`;
+      if (!reaching.has(k)) {
+        reaching.set(k, c);
+        work.push(k);
+      }
+    }
+    while (work.length > 0) {
+      const k = work.shift();
+      for (const caller of callers.get(k) || []) {
+        if (!reaching.has(caller)) {
+          reaching.set(caller, reaching.get(k));
+          work.push(caller);
+        }
+      }
+    }
+    for (const [k, c] of [...reaching].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      if ((callers.get(k) || new Set()).size > 0) continue;
+      const name = k.slice(k.lastIndexOf(':') + 1);
+      if (finalizers.has(k)) {
+        const file = k.slice(0, k.lastIndexOf(':'));
+        const asked = calls.some((x) => x.file === file && x.function === name && x.name === 'cbq_is_closed');
+        if (!asked) {
+          raw.push({
+            kind: 'destroy-of-open-client',
+            subject: name,
+            message: `reaches ${c.name} (${c.file}:${c.line}) without asking cbq_is_closed: a finalizer destroys a closed client only, never an open one`,
+          });
+        }
+        continue;
+      }
+      raw.push({
+        kind: 'destroy-outside-finalizer',
+        subject: name,
+        message: `reaches ${c.name} (${c.file}:${c.line}), which only the handle object's finalizer (napi_wrap's) may: no close, completion or call destroys a client`,
+        allow: name,
+        list: 'destroy',
+      });
+    }
+    const destroys = applyAllowlist(raw.filter((f) => f.list === 'destroy'), this.DESTROY_CALLERS, 'drain-unused-allowance');
     const executors = applyAllowlist(raw.filter((f) => f.list === 'executors'), this.EXECUTORS, 'drain-unused-allowance');
     const drains = applyAllowlist(raw.filter((f) => f.list === 'drain'), this.DRAIN_CALLERS, 'drain-unused-allowance');
     const other = raw.filter((f) => !f.list);
     const strip = (fs) => fs.map(({ list, allow, ...f }) => f);
-    return { findings: [...strip(other), ...executors.kept, ...executors.unused, ...strip(drains.kept), ...drains.unused].map(({ list, ...f }) => f), checked };
+    return {
+      findings: [
+        ...strip(other),
+        ...executors.kept,
+        ...executors.unused,
+        ...strip(drains.kept),
+        ...drains.unused,
+        ...strip(destroys.kept),
+        ...destroys.unused,
+      ].map(({ list, ...f }) => f),
+      checked,
+    };
   },
 };

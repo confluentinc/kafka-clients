@@ -72,24 +72,13 @@ test('the producer uses the functions of the plan', () => {
   // kafka_common_KafkaFuture_get* call, the `_cb` forms included.
 });
 
-test('the one blocking close is the finalizer force-close (rule 4 exception)', () => {
-  const name = 'kafka_producer_Producer_close_with_timeout';
-  for (const source of sources) {
-    const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
-    const calls = [...code.matchAll(new RegExp(`\\b${name}\\s*\\(`, 'g'))];
-    if (source !== 'producer.c') {
-      assert.equal(calls.length, 0, `${source} calls ${name}`);
-      continue;
+test('no blocking close: every close is a _cb twin, and no finalizer closes a producer (rule 4)', () => {
+  for (const name of ['kafka_producer_Producer_close', 'kafka_producer_Producer_close_with_timeout']) {
+    for (const source of sources) {
+      const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
+      const calls = [...code.matchAll(new RegExp(`\\b${name}(_err)?\\s*\\(`, 'g'))];
+      assert.equal(calls.length, 0, `${source} calls ${name}, the blocking form`);
     }
-    assert.equal(calls.length, 1, `producer.c calls ${name} ${calls.length} times`);
-    // Inside producer_force_close, with a zero timeout, and that function is
-    // called only from the finalizing branch of producer_destroy.
-    const body = /static void producer_force_close\(Producer\* p\) \{([\s\S]*?)\n\}/.exec(code);
-    assert.ok(body !== null, 'producer_force_close is missing');
-    assert.match(body[1], new RegExp(`${name}\\(p->view, 0, &ffi_err\\)`));
-    const uses = [...code.matchAll(/\bproducer_force_close\s*\(/g)].length;
-    assert.equal(uses, 2, 'producer_force_close is defined once and called once');
-    assert.match(code, /if \(p->queue\.finalizing\) \{[^}]*producer_force_close\(p\);/);
   }
 });
 

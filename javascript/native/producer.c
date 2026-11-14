@@ -26,10 +26,10 @@
 // taken or refused at once), so a send's whole state is in place before that
 // call.
 //
-// Each request has its own context (SendCtx, FlushCtx), whose pointer is what
-// the core receives as the completion's opaque; the queue's pending counter
-// tracks the requests in flight. A send that fails at hand-over parks its
-// context on the orphan list, freed only after destroy.
+// Each request has its own context (SendCtx, FlushCtx, CloseCtx), whose
+// pointer is what the core receives as the completion's opaque. A send that
+// fails at hand-over parks its context on the orphan list, freed only after
+// destroy.
 //
 // A delivery callback that returns a Promise is awaited: its report through
 // `__set_callback_result` waits until the Promise settled (send_on_settled),
@@ -38,11 +38,18 @@
 // context and the producer struct stay allocated until the function the
 // Promise calls back is finalized.
 //
-// Teardown: close's completion only marks the producer; the drain that ran it
-// destroys it after its loop (never inside a drain), on the JS thread, then
-// releases the threadsafe function, whose finalizer frees this struct together
-// with the handle object's finalizer (two owners). `KafkaProducer_destroy_err`
-// runs the callbacks still pending, inline, exactly once each.
+// Closed state and teardown (javascript/CLAUDE.md, rules 1 and 10): the
+// binding keeps no closed flag and refuses no call; a call after close() goes
+// to the FFI, whose error is the core's. close() does not free the native
+// handle: its completion only lets Node exit and lets the handle object be
+// collected (cbq_closed). The handle object's finalizer then destroys the
+// closed producer (outside any drain, running no JS), and releases the
+// threadsafe function, whose finalizer frees this struct together with the
+// handle object's finalizer (two owners). `KafkaProducer_destroy_err` runs the
+// callbacks still pending, inline, exactly once each. No finalizer closes or
+// destroys a producer still open: one finalized open (only an environment
+// teardown can, as the handle object is held strongly until the close) is
+// left to the core, and its memory to the process.
 
 #include <stdlib.h>
 #include <string.h>
@@ -56,11 +63,7 @@ typedef struct {
     kafka_producer_KafkaProducer_t* kp;        // owned class handle, NULL once destroyed
     const kafka_producer_Producer_t* view;     // borrowed __as_Producer view of kp
     CallbackQueue queue;                       // notify hook, tsfn, drain, liveness
-    int closing;                               // a close is in progress
-    int destroy_requested;                     // close completed: destroy after the drain
-    int destroying;                            // KafkaProducer_destroy_err began
-    napi_ref close_done;                       // close's JS completion
-    kafka_common_Error_t* close_error;         // close's owned error, until reported
+    int destroying;                            // KafkaProducer_destroy_err began: no report from now on
     SendCtx* orphans;                          // contexts of sends that failed at hand-over
     SendCtx* awaiting;                         // contexts whose callback's Promise has not settled
     int owners;                                // the handle object, the tsfn, each awaited callback's function
@@ -76,7 +79,6 @@ struct SendCtx {
     napi_ref on_handover;                      // JS (error | null) => void
     napi_ref on_complete;                      // JS (metadata, error | null) => string | undefined
     int refs;                                  // owners left
-    int counted;                               // holds one unit of the queue's pending count
     int handed_over;
     int handover_failed;
     int delivered;
@@ -94,6 +96,11 @@ typedef struct {
     Producer* p;
     napi_ref done;                             // JS (error | null) => void
 } FlushCtx;
+
+typedef struct {
+    Producer* p;
+    napi_ref done;                             // JS (error | null, closedNow) => void
+} CloseCtx;
 
 static void producer_release(Producer* p) {
     if (--p->owners != 0) return;
@@ -167,21 +174,9 @@ static void send_ctx_free(napi_env env, SendCtx* ctx) {
     free(ctx);
 }
 
-// Gives back the record's unit of `pending` once it needs nothing more: the
-// hand-over failed (a later delivery callback is not waited for), or it was
-// handed over and its delivery callback ran.
-static void send_maybe_idle(napi_env env, SendCtx* ctx) {
-    if (!ctx->counted) return;
-    if (ctx->handover_failed || (ctx->handed_over && ctx->delivered)) {
-        ctx->counted = 0;
-        cbq_pending_add(env, &ctx->p->queue, -1);
-    }
-}
-
 // Drops one owner; the last one frees the context unless it is an orphan,
 // which destroy frees.
 static void send_ctx_release(napi_env env, SendCtx* ctx) {
-    send_maybe_idle(env, ctx);
     if (--ctx->refs != 0 || ctx->orphaned) return;
     send_ctx_free(env, ctx);
 }
@@ -213,14 +208,12 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
     if (ctx->handover_failed && --ctx->refs > 0) {
         // The delivery callback may still fire, once (the record had reached
         // the accumulator): keep the context until destroy.
-        send_maybe_idle(env, ctx);
         ctx->orphaned = 1;
         ctx->next = p->orphans;
         p->orphans = ctx;
         return;
     }
     if (ctx->handover_failed) {
-        send_maybe_idle(env, ctx);
         send_ctx_free(env, ctx);
         return;
     }
@@ -284,12 +277,11 @@ static void send_awaited_report(napi_env env, SendCtx* ctx, const char* thrown) 
         napi_delete_reference(env, ctx->settle_ref);
         ctx->settle_ref = NULL;
     }
-    send_maybe_idle(env, ctx);
 }
 
-// Reports every awaited callback as returned, before the producer is closed
-// or destroyed by its end (producer_destroy): the blocking close of an
-// environment teardown waits for each report and no JS will settle them.
+// Reports every awaited callback as returned, before the producer is
+// destroyed (producer_destroy, from the handle object's finalizer): no JS
+// will settle them, and destroy refuses a report once it began.
 static void send_report_awaiting(napi_env env, Producer* p) {
     while (p->awaiting != NULL) send_awaited_report(env, p->awaiting, NULL);
 }
@@ -319,8 +311,8 @@ static napi_value js_send_on_settled(napi_env env, napi_callback_info info) {
 // That function's finalizer: it owned the context and one unit of the
 // producer struct. It is held strongly until the report (settle_ref), so it
 // runs before one only at an environment teardown, when no JS will settle the
-// Promise: it is then reported as returned first, so a close waiting for it
-// ends. The reference itself is the runtime's to drop then.
+// Promise: it is then reported as returned first, so a flush or close
+// waiting for it ends. The reference itself is the runtime's to drop then.
 static void send_on_settled_finalize(napi_env env, void* data, void* hint) {
     (void)hint;
     SendCtx* ctx = (SendCtx*)data;
@@ -449,7 +441,10 @@ static Producer* unwrap_producer(napi_env env, napi_value handle) {
         return NULL;
     }
     Producer* p = (Producer*)data;
-    if (p->kp == NULL || p->destroying) {
+    // Unreachable from JS: destroy runs only from the handle object's
+    // finalizer, once nothing can call through it (a failed creation never
+    // hands the handle out). A guard of memory, not of the closed state.
+    if (p->kp == NULL) {
         napi_throw_error(env, NULL, "the producer has been destroyed");
         return NULL;
     }
@@ -533,8 +528,6 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
     }
     // Everything the completions read is in place: the hand-over completion can
     // fire inside this call.
-    ctx->counted = 1;
-    cbq_pending_add(env, &p->queue, 1);
     kafka_producer_Producer_send_with_callback_cb(p->view, record, callback, send_on_handover, ctx);
     // The call consumed the callback and copied the record; the key and value
     // stay borrowed until the hand-over completion (send_on_handover).
@@ -556,7 +549,6 @@ static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_discard(error);
     delete_ref(env, &ctx->done);
     free(ctx);
-    cbq_pending_add(env, &p->queue, -1);
 }
 
 // producerFlush(handle, done): Producer.flush() through flush_cb;
@@ -583,7 +575,6 @@ napi_value js_producer_flush(napi_env env, napi_callback_info info) {
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
-    cbq_pending_add(env, &p->queue, 1);
     kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);
     return NULL;
 }
@@ -604,47 +595,16 @@ static void noop_notify(void* opaque) {
     (void)opaque;
 }
 
-// The environment teardown's close of a producer close() never completed on:
-// Producer.close(Duration.ZERO), blocking, on the JS thread, from the
-// handle object's finalizer, which only a teardown runs on a producer not
-// destroyed (callback_queue.c holds the handle strongly until destroy). Destroy would
-// otherwise close it gracefully itself, waiting up to max.block.ms +
-// delivery.timeout.ms for records no broker may ever take (60 s + 120 s, three
-// minutes by default), with the JS thread blocked in a finalizer and a
-// terminating worker stalled. A zero timeout fails the unsent and
-// unacknowledged records instead, as Java's close(Duration.ZERO) does: as soon
-// as the I/O task leaves a wait it is in (for a node's connection, up to
-// socket.connection.setup.timeout.max.ms), as Java's Sender does in
-// NetworkClientUtils.awaitReady.
-//
-// This is the binding's one blocking producer call (rule 4's exception): it
-// runs only here, while the handle is finalized, when no JS can run and no
-// event loop turn will come. It runs the queued callbacks on this thread
-// meanwhile, inline; with `finalizing` set they run no JS, and since
-// `destroying` is not set yet each delivery callback still reports through
-// __set_callback_result, which the close waits for. The close completion of a
-// close() in progress may fire inside it too.
-static void producer_force_close(Producer* p) {
-    kafka_common_Error_t* ffi_err = NULL;
-    // kafka_producer_Producer_close_with_timeout takes an out_err of its own.
-    FFI_DISCARD(kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err));
-}
-
-// Destroys the class handle on the JS thread, outside any drain: the core runs
-// the still-pending callbacks here, inline, once each. Then releases the tsfn.
+// Destroys the class handle of a closed producer, on the JS thread, from the
+// handle object's finalizer, outside any drain: the core runs the
+// still-pending callbacks here, inline, once each, running no JS. Then
+// releases the tsfn.
 static void producer_destroy(napi_env env, Producer* p) {
     kafka_common_Error_t* ffi_err = NULL;
     p->queue.stopped = 1;
-    // A callback's Promise still pending is reported as returned before the
-    // close below waits for it (an environment teardown: no JS will settle
-    // it) and before destroy begins, after which no report may be made.
+    // A callback's Promise still pending is reported as returned before
+    // destroy begins, after which no report may be made: no JS will settle it.
     send_report_awaiting(env, p);
-    if (p->queue.finalizing) {
-        // The tsfn may already be finalized (environment teardown): the hook
-        // must not reach it.
-        FFI_DISCARD(kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err));
-        producer_force_close(p);
-    }
     p->destroying = 1;
     error_warn(env, !p->queue.finalizing, FFI_ERR(kafka_producer_KafkaProducer_destroy_err(p->kp, &ffi_err)));
     p->kp = NULL;
@@ -656,10 +616,13 @@ static void producer_destroy(napi_env env, Producer* p) {
 
 // The close completion (close_cb / close_with_timeout_cb), on the JS thread.
 // A timeout the core rejected (Java's IllegalArgumentException) closed
-// nothing: the producer stays usable. Otherwise the producer is destroyed
-// after the drain this runs in, and `done` runs then.
+// nothing: the producer stays open and keeps Node running. Any other outcome
+// closed it: Node may exit and the handle object be collected (cbq_closed).
+// `done(error | null, closedNow)`, closedNow true for the close that closed
+// the producer, false for a rejected one or a later close.
 static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
-    Producer* p = (Producer*)opaque;
+    CloseCtx* ctx = (CloseCtx*)opaque;
+    Producer* p = ctx->p;
     napi_env env = p->env;
     kafka_common_Error_t* ffi_err = NULL;
     int rejected = 0;
@@ -668,49 +631,25 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
         error_warn(env, !p->queue.finalizing, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
         rejected = code == kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT;
     }
-    if (rejected) {
-        p->closing = 0;
-        if (!p->queue.finalizing) {
-            napi_value argv[2];
-            argv[0] = error_take_to_js(env, error);
-            if (argv[0] != NULL && napi_get_boolean(env, false, &argv[1]) == napi_ok)
-                call_ref(env, p->close_done, 2, argv, NULL);
-        } else {
-            error_discard(error);
-        }
-        delete_ref(env, &p->close_done);
-        cbq_pending_add(env, &p->queue, -1);
-        return;
+    int closed_now = rejected || p->queue.finalizing ? 0 : cbq_closed(env, &p->queue);
+    if (!p->queue.finalizing) {
+        napi_value argv[2];
+        argv[0] = error_take_to_js(env, error);
+        error = NULL;
+        if (argv[0] != NULL && napi_get_boolean(env, closed_now != 0, &argv[1]) == napi_ok)
+            call_ref(env, ctx->done, 2, argv, NULL);
     }
-    p->close_error = error;
-    p->destroy_requested = 1;
-    // The drain destroys it once its loop ended (producer_after_drain); this
-    // may also have fired outside a drain, so schedule one.
-    cbq_schedule(&p->queue);
-}
-
-// The queue's after_drain: runs the destroy a close completion requested,
-// outside the drain loop, then reports the close.
-static void producer_after_drain(napi_env env, void* client) {
-    Producer* p = (Producer*)client;
-    if (!p->destroy_requested || p->destroying) return;
-    producer_destroy(env, p);
-    napi_value argv[2];
-    argv[0] = error_take_to_js(env, p->close_error);
-    p->close_error = NULL;
-    if (argv[0] != NULL && napi_get_boolean(env, true, &argv[1]) == napi_ok && p->close_done != NULL)
-        call_ref(env, p->close_done, 2, argv, NULL);
-    delete_ref(env, &p->close_done);
-    p->closing = 0;
-    cbq_pending_add(env, &p->queue, -1);
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
 }
 
 // producerClose(handle, timeoutMs, done): Producer.close() for a timeoutMs of
 // -1 (the timeout left out), else close(Duration.ofMillis(timeoutMs)), through the `_cb`
 // twins. timeoutMs is a number, or a bigint for a value a number does not
-// hold exactly (Long.MAX_VALUE, the no-limit timeout of src/internal/duration.ts). `done(error | null, destroyed)` runs once the close completed and,
-// unless the timeout was rejected (`destroyed` false), the native producer was
-// destroyed.
+// hold exactly (Long.MAX_VALUE, the no-limit timeout of src/internal/duration.ts).
+// `done(error | null, closedNow)` runs once the close completed (close_on_complete).
+// A close of a producer already closed goes to the core too.
 napi_value js_producer_close(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value argv[3];
@@ -721,10 +660,6 @@ napi_value js_producer_close(napi_env env, napi_callback_info info) {
     }
     Producer* p = unwrap_producer(env, argv[0]);
     if (p == NULL) return NULL;
-    if (p->closing) {
-        napi_throw_error(env, NULL, "a close is already in progress");
-        return NULL;
-    }
     napi_valuetype type;
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
     int64_t timeout = 0;
@@ -738,13 +673,21 @@ napi_value js_producer_close(napi_env env, napi_callback_info info) {
     } else {
         NAPI_CHECK(env, napi_get_value_int64(env, argv[1], &timeout), NULL);
     }
-    NAPI_CHECK(env, napi_create_reference(env, argv[2], 1, &p->close_done), NULL);
-    p->closing = 1;
-    cbq_pending_add(env, &p->queue, 1);
+    CloseCtx* ctx = (CloseCtx*)calloc(1, sizeof(CloseCtx));
+    if (ctx == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    ctx->p = p;
+    if (napi_create_reference(env, argv[2], 1, &ctx->done) != napi_ok) {
+        free(ctx);
+        js_throw_last_napi_error(env, "napi_create_reference");
+        return NULL;
+    }
     // -1: the timeout was left out, Java's close() (src/ refuses a negative
     // timeout before this call).
-    if (timeout == -1) kafka_producer_Producer_close_cb(p->view, close_on_complete, p);
-    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, p);
+    if (timeout == -1) kafka_producer_Producer_close_cb(p->view, close_on_complete, ctx);
+    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);
     return NULL;
 }
 
@@ -758,8 +701,7 @@ static int32_t producer_execute(void* client, kafka_common_Error_t** out_err) {
 // producerPump(handle): the queue's drain, run by send() on entry every so
 // many sends the producer took at once in a row (javascript/CLAUDE.md, rule
 // 3): such sends never return to the event loop, so the tsfn's call_js could
-// not run between them. A no-op inside a drain, during destroy, or on a
-// destroyed handle.
+// not run between them. A no-op inside a drain.
 napi_value js_producer_pump(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
@@ -789,21 +731,21 @@ static void producer_tsfn_finalized(napi_env env, void* client) {
     producer_release(p);
 }
 
-// The handle object's finalizer: the environment's teardown (a worker ending,
-// the process exiting its event loop) of a producer not destroyed, which it
-// destroys without running JS, or the garbage collection of a destroyed one.
-// No garbage collection reaches a producer still running: the queue holds its
-// handle object strongly until destroy, so one never closed keeps running.
+// The handle object's finalizer: the garbage collection of a closed
+// producer, or the environment's teardown (a worker ending, the process
+// exiting its event loop). A closed producer is destroyed here, running no
+// JS. An open one is never closed or destroyed by a finalizer
+// (javascript/CLAUDE.md, rule 10): only a teardown finalizes one, since the
+// handle object is held strongly until the close, and it is left to the core,
+// with this struct, which the core's callbacks may still reach.
 static void producer_finalize(napi_env env, void* data, void* hint) {
     (void)hint;
     Producer* p = (Producer*)data;
     p->queue.finalizing = 1;
-    if (p->kp != NULL && !p->destroying) producer_destroy(env, p);
-    error_discard(p->close_error);
-    p->close_error = NULL;
-    delete_ref(env, &p->close_done);
+    int open = p->kp != NULL && !cbq_is_closed(&p->queue);
+    if (p->kp != NULL && cbq_is_closed(&p->queue)) producer_destroy(env, p);
     cbq_detach(env, &p->queue);
-    producer_release(p);
+    if (!open) producer_release(p);
 }
 
 // ---- construction -----------------------------------------------------------
@@ -887,8 +829,8 @@ napi_value js_producer_create(napi_env env, napi_callback_info info) {
     p->kp = kp;
     kafka_common_Error_t* err = FFI_SET(p->view, kafka_producer_KafkaProducer__as_Producer_err(kp, &ffi_err));
     if (err == NULL
-        && cbq_init(env, &p->queue, "confluent-kafka producer callbacks", p, producer_execute, producer_after_drain,
-                    producer_tsfn_finalized) != 0) {
+        && cbq_init(env, &p->queue, "confluent-kafka producer callbacks", p, producer_execute, producer_tsfn_finalized)
+               != 0) {
         error_warn(env, 1, FFI_ERR(kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err)));
         free(p);
         return NULL;
