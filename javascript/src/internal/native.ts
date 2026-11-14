@@ -39,7 +39,6 @@ interface NativeMetric {
   measurable: boolean;
 }
 
-/** The fields the native layer reads a delivered record's metadata into (native/producer.c). */
 /** A node's fields, as the addon reads them (native/producer.c, node_to_js). */
 interface NativeNode {
   id: number;
@@ -59,6 +58,7 @@ interface NativePartitionInfo {
   offlineReplicas: NativeNode[] | null;
 }
 
+/** The fields the native layer reads a delivered record's metadata into (native/producer.c). */
 interface RecordMetadataFields {
   topic: string;
   partition: number;
@@ -110,12 +110,12 @@ interface Native {
     onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
   ): void;
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
-  // Java's partitionsFor through partitions_for_cb; the partitions' fields
-  // as src/common/partition_info.ts's constructor takes them, each node as
-  // src/common/node.ts's does. A null topic goes to the core as NULL.
   // Java's metrics() through kafka_producer_Producer_metrics (no _cb twin):
   // every metric, read now.
   producerMetrics(handle: ProducerHandle): NativeMetric[];
+  // Java's partitionsFor through partitions_for_cb; the partitions' fields
+  // as src/common/partition_info.ts's constructor takes them, each node as
+  // src/common/node.ts's does. A null topic goes to the core as NULL.
   producerPartitionsFor(
     handle: ProducerHandle,
     topic: string | null,
