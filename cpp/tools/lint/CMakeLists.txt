@@ -37,8 +37,8 @@ set(CK_LINT_WARNINGS
 
 include(cmake/Antlr4.cmake)
 
-# The Java model. Its headers carry no ANTLR type (javamodel/java_syntax.hpp).
-add_library(ck_java_model STATIC javamodel/java_syntax.cpp)
+# The Java model. Its headers carry no ANTLR type (javamodel/java_model.hpp).
+add_library(ck_java_model STATIC javamodel/java_syntax.cpp javamodel/java_model.cpp)
 target_include_directories(ck_java_model PUBLIC javamodel)
 target_link_libraries(ck_java_model PRIVATE ck_java_grammar)
 target_compile_options(ck_java_model PRIVATE ${CK_LINT_WARNINGS})
@@ -49,8 +49,38 @@ set_target_properties(ck_java_model_cli PROPERTIES OUTPUT_NAME ck_java_model)
 target_link_libraries(ck_java_model_cli PRIVATE ck_java_model)
 target_compile_options(ck_java_model_cli PRIVATE ${CK_LINT_WARNINGS})
 
+set(CK_LINT_DESIGN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../design/current" CACHE PATH
+    "The repository's design/current: the public-audience and deprecated-API lists")
+
 if(BUILD_TESTING)
-    # Every source of the Java client parses with no syntax error.
-    add_test(NAME java_parse_kafka_clients
-        COMMAND ck_java_model_cli parse "${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java")
+    # GoogleTest from the system, else the pin of cpp/test/unit/CMakeLists.txt.
+    find_package(GTest CONFIG QUIET)
+    if(NOT GTest_FOUND AND NOT TARGET GTest::gtest_main)
+        include(FetchContent)
+        FetchContent_Declare(googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.tar.gz
+            URL_HASH SHA256=65fab701d9829d38cb77c14acdc431d2108bfdbf8979e40eb8ae567edf10b27c
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+    endif()
+    include(GoogleTest)
+
+    function(ck_lint_test name)
+        add_executable(${name} test/${name}.cpp)
+        target_link_libraries(${name} PRIVATE ck_java_model GTest::gtest_main)
+        target_compile_options(${name} PRIVATE ${CK_LINT_WARNINGS})
+        target_compile_definitions(${name} PRIVATE
+            CK_LINT_KAFKA_JAVA_ROOT="${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java"
+            CK_LINT_DESIGN_DIR="${CK_LINT_DESIGN_DIR}")
+    endfunction()
+
+    # The model on small sources.
+    ck_lint_test(javamodel_test)
+    gtest_discover_tests(javamodel_test TEST_PREFIX "javamodel_test." DISCOVERY_MODE PRE_TEST)
+    # The model of kafka/clients: every source parses and resolves, and it
+    # agrees with design/current's public-audience and deprecated-API lists.
+    # One process, so the tree is parsed once.
+    ck_lint_test(javamodel_kafka_test)
+    add_test(NAME javamodel_kafka_test COMMAND javamodel_kafka_test)
 endif()

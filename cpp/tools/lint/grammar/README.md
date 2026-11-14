@@ -25,5 +25,5 @@ files stay byte-identical to upstream:
 - `this.` becomes `this->` (the two semantic predicates of `JavaParser.g4`).
 
 To update: copy the four files from a newer commit, change the commit above, and rebuild with
-`-DCONFLUENT_KAFKA_CPP_LINT=ON`; the whole-tree parse test (`java_parse_kafka_clients`) shows
-whether the new grammar still parses every Kafka source.
+`-DCONFLUENT_KAFKA_CPP_LINT=ON`; the test `javamodel_kafka_test` shows whether the new
+grammar still parses every Kafka source.

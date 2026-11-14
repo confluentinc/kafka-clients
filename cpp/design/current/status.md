@@ -25,10 +25,14 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
 
 - (c) **Yes**: the grammars-v4 Java grammar (`tools/lint/grammar`, pinned) with ANTLR 4.13.2
   parses all 1340 files of `kafka/clients/src/main/java` with no syntax error
-  (`java_parse_kafka_clients`). 9.7 s on one thread, 5.3 s on four and no faster beyond; the
+  (`javamodel_kafka_test`). 9.7 s on one thread, 5.3 s on four and no faster beyond; the
   slowest file is `KafkaAdminClient.java` (0.7 s). Full LL from the start: SLL-first gains
   nothing, as SLL fails on three files in four with this grammar. A prediction cache per thread
   is slower than the shared one. ThreadSanitizer finds nothing with 8 threads.
+- Step 1 done: the Java model (`javamodel/java_model.hpp`) and `ck_java_model dump`. Every name
+  of the 1340 files resolves, the `@InterfaceAudience.Public` types equal
+  `design/current/interface-audience-public-4.4.txt`, and every `@Deprecated` item is in
+  `design/current/java-deprecated.txt` (`javamodel_kafka_test`).
 - (a) the plugin loading into `clang-tidy-21` and reading comments on template members, and
   (b) `clang-tidy-21` parsing libstdc++ 15's `<chrono> <span> <compare> <functional>`: open,
   waiting for LLVM 21 (`clang-21 clang-tidy-21 libclang-21-dev libclang-cpp21-dev llvm-21-dev`).

@@ -16,7 +16,12 @@
 //
 //   ck_java_model parse [-j <threads>] <dir>...
 //       parse every .java file under each <dir> and report syntax errors and
-//       timing; -j defaults to the number of hardware threads
+//       timing
+//   ck_java_model dump [-j <threads>] <source-root>
+//       print the Java model of a source root (kafka/clients/src/main/java),
+//       one declaration per line; exits 1 if the model has diagnostics
+//
+// -j defaults to the number of hardware threads.
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +36,7 @@
 #include <thread>
 #include <vector>
 
+#include "java_model.hpp"
 #include "java_syntax.hpp"
 
 namespace {
@@ -119,8 +125,15 @@ int run_parse(const std::vector<std::string>& roots, unsigned jobs) {
     return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+int run_dump(const std::string& root, unsigned jobs) {
+    const auto model = cklint::java::load_model(root, jobs);
+    std::cout << cklint::java::dump(model);
+    return model.diagnostics.empty() ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 int usage() {
-    std::cerr << "usage: ck_java_model parse [-j <threads>] <dir>...\n";
+    std::cerr << "usage: ck_java_model parse [-j <threads>] <dir>...\n"
+                 "       ck_java_model dump [-j <threads>] <source-root>\n";
     return 2;
 }
 
@@ -128,17 +141,21 @@ int usage() {
 
 int main(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
-    if (args.empty() || args.front() != "parse") {
+    if (args.empty()) {
         return usage();
     }
+    const auto command = args.front();
     args.erase(args.begin());
     unsigned jobs = std::max(1U, std::thread::hardware_concurrency());
     if (args.size() >= 2 && args.front() == "-j") {
         jobs = static_cast<unsigned>(std::max(1, std::atoi(args[1].c_str())));
         args.erase(args.begin(), args.begin() + 2);
     }
-    if (args.empty()) {
-        return usage();
+    if (command == "parse" && !args.empty()) {
+        return run_parse(args, jobs);
     }
-    return run_parse(args, jobs);
+    if (command == "dump" && args.size() == 1) {
+        return run_dump(args.front(), jobs);
+    }
+    return usage();
 }
