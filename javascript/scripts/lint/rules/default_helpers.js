@@ -20,7 +20,9 @@
 // `ConsumerRebalanceListenerDefaults`, holding Java's default bodies
 // translated from the Java source"; "The helper classes are in
 // `src/internal/`"): for each interface the user implements whose Java
-// interface has a `default` method (the Java index's `default` flag), the
+// interface has a `default` method (the Java index's `default` flag) that
+// the TypeScript interface keeps as an optional member (`name?`: a default
+// the root drops or merges, such as a serde's `configure`, needs none), the
 // class `<Interface>Defaults` is declared in
 // `src/internal/<interface>_defaults.ts`, with a method of each default
 // method's name (`defaults-missing`, `defaults-method-missing`). A
@@ -35,6 +37,23 @@
 // lacks.
 
 const { javaIndexOf, mappedItems, exportedItems, snakeCase } = require('../java_ts');
+
+/**
+ * The names of the optional members (`name?`) of interface or object type
+ * `node`: the Java `default` methods the TypeScript interface keeps. A Java
+ * default the root drops or merges (a serde's `configure`, its second
+ * `serialize`) is no member, so it needs no helper.
+ */
+function optionalMembers(ts, node) {
+  let members = [];
+  if (ts.isInterfaceDeclaration(node)) members = node.members;
+  else if (ts.isTypeAliasDeclaration(node) && ts.isTypeLiteralNode(node.type)) members = node.type.members;
+  const out = new Set();
+  for (const m of members) {
+    if (m.questionToken && m.name && (ts.isIdentifier(m.name) || ts.isStringLiteral(m.name))) out.add(m.name.text);
+  }
+  return out;
+}
 
 module.exports = {
   name: 'check-default-helpers',
@@ -72,7 +91,10 @@ module.exports = {
       if (item.kind !== 'interface' && item.kind !== 'type') continue;
       if (java === null || !java.cls || java.cls.kind !== 'interface' || implemented.has(item.name)) continue;
       checked++;
-      const defaults = [...new Set(java.cls.overloads.filter((o) => o.default && o.visibility !== 'private').map((o) => o.name))];
+      const optional = optionalMembers(ts, item.node);
+      const defaults = [
+        ...new Set(java.cls.overloads.filter((o) => o.default && o.visibility !== 'private' && optional.has(o.name)).map((o) => o.name)),
+      ];
       if (defaults.length === 0) continue;
       const name = `${item.name}Defaults`;
       const rel = `src/internal/${snakeCase(item.name)}_defaults.ts`;
