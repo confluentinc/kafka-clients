@@ -255,6 +255,20 @@ test('more than one argument is refused with the form error, never dropped', () 
   assert.throws(() => CLOSE.match(5, 3), illegal('close() takes one of (), (timeout); got 3 arguments, not one object of named parameters'));
 });
 
+test("callShapes lists an error constructor's forms as JavaScript calls them", () => {
+  // Java order: (message, cause), (message), (cause), (); listed by count.
+  const E = new JavaForms('E', [['message', 'cause'], ['message'], ['cause'], []], {
+    order: ['message', 'cause'],
+    callShapes: true,
+    bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error },
+  });
+  assert.throws(() => E.match('m', 2), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments'));
+  assert.throws(() => E.match({ reason: 1 }, 1), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got (reason)'));
+  // Ties keep Java's order.
+  const F = new JavaForms('F', [['cause'], ['message']], { callShapes: true, bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error } });
+  assert.throws(() => F.match(5, 1), illegal('F() takes one of (cause), (message); got a number'));
+});
+
 test('a bare undefined is a TypeError naming the parameter', () => {
   const SEND = new JavaForms('send', [['record'], ['record', 'callback']]);
   assert.throws(() => SEND.match(undefined, 1), {

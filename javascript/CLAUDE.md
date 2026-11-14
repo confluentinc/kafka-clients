@@ -595,11 +595,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   key documented on the options type. Each form's message is the one Java's
   constructor chain gives: the cause's `String()` for `(cause)`, as Java's is
   `cause.toString()`, or Java's own fixed text. A second argument (ES2022's
-  `new Error(message, { cause })`) is the form check's error for more than
-  one argument (Signatures, above), listing the class's forms:
-  `KafkaError() takes one of (message, cause), (message), (cause), (); got 2
-  arguments, not one object of named parameters`; its class,
-  `IllegalArgumentError` today, is not decided yet in the root conventions. Java's abstract bases (`RetriableError`, ...)
+  `new Error(message, { cause })`) throws `IllegalArgumentError` in the form
+  check's format (root conventions, Errors, Q39), listing the class's forms
+  as JavaScript calls them, by number of parameters, ties in Java's
+  declaration order: `()`, a one-parameter form's value on its own,
+  `(message)` or `(cause)`, and a longer form's options object,
+  `({ message, cause })`, as in `KafkaError() takes one of (), (message),
+  (cause), ({ message, cause }); got 2 arguments` (the `callShapes` option of
+  `src/internal/args.ts`, which every error class's matcher sets, so its
+  other form errors list the forms the same way). A method's form error
+  keeps its own format (Signatures, above). Java's abstract bases (`RetriableError`, ...)
   are catch-only, `abstract` classes without an FFI id: constructing one
   throws `TypeError` (root conventions, Class family, Q16, Q32). A user's
   subclass takes the forms of its nearest generated class. The constructors

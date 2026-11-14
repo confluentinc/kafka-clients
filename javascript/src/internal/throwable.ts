@@ -136,9 +136,11 @@ function matcherOf(r: Registered): JavaForms {
     {
       order: ['message', 'cause'].filter((p) => r.forms.some(([params]) => params.includes(p))),
       bareTypes,
-      // The ES2022 `new Error(message, { cause })` is the form check's error
-      // for more than one argument (root CLAUDE.md, JavaScript Binding
-      // Conventions, Errors, Q39), listing the class's forms.
+      // The forms as JavaScript calls them, so the ES2022
+      // `new Error(message, { cause })` throws `KafkaError() takes one of (),
+      // (message), (cause), ({ message, cause }); got 2 arguments` (root
+      // CLAUDE.md, JavaScript Binding Conventions, Errors, Q39).
+      callShapes: true,
     },
   );
   return r.matcher;
