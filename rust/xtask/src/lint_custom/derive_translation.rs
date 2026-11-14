@@ -627,7 +627,9 @@ mod tests {
             is_static,
             is_default: false,
             param_names: params.iter().map(|_| "o".to_string()).collect(),
+            param_types: params.iter().map(|p| p.to_string()).collect(),
             returns_class: false,
+            return_type: None,
             javadoc: None,
         };
         java::JavaClass {
@@ -652,6 +654,7 @@ mod tests {
             supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         }
     }
 
