@@ -356,9 +356,12 @@ const producer = new KafkaProducer({ configs, keySerializer: stringSerializer(),
 const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
 ```
 
-`stringSerializer()` supports UTF-8 only: a `key.serializer.encoding`,
-`value.serializer.encoding` or `serializer.encoding` naming another encoding
-throws `SerializationError` "Unsupported encoding <name>". A class name, a
+`stringSerializer()` writes Java's six standard charsets (`US-ASCII`,
+`ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE` and `UTF-16`, under Java's names
+and aliases) byte for byte as Java does, UTF-8 by default: a
+`key.serializer.encoding`, `value.serializer.encoding` or
+`serializer.encoding` naming another charset throws `SerializationError`
+"Unsupported encoding <name>", as Node has no Java charset providers. A class name, a
 serializer object or a function that returns a Promise in a config key
 throws `ConfigError`.
 

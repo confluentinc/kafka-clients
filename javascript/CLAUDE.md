@@ -487,10 +487,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (`src/common/serialization/string_serializer.ts`) is Java's
   `StringSerializer` through `encodeLikeJava`; it takes an optional
   `{ configs, isKey }`, Java's `configure`, so it goes in a serde config key
-  without `()`, and supports only UTF-8 (Java's names `UTF-8`, `UTF8` and
-  `unicode-1-1-utf-8`, ignoring case), since Node's other encoders don't
-  write Java's bytes; another encoding is Java's `SerializationError`
-  "Unsupported encoding <name>" *(deviation)*. The rest of the factory list
+  without `()`, and writes Java's six standard charsets (`US-ASCII`,
+  `ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE`, `UTF-16`) byte for byte,
+  under their canonical names and the JDK's aliases, ignoring case, as
+  `Charset.forName` matches them. `encodeLikeJava(s, charset)` writes them by
+  hand where Node's encoders differ: a character US-ASCII or ISO-8859-1
+  cannot map is `?`, a lone surrogate in UTF-16 is U+FFFD, and `UTF-16` is
+  big-endian after the BOM `FE FF`. Any other name is Java's
+  `SerializationError` "Unsupported encoding <name>" *(deviation. Why: Node
+  has no Java charset providers. Goes when: never needed for the standard
+  set)*. The rest of the factory list
   is not decided yet in the root conventions. `close()` closes both serializers once
   the core reports the producer closed; a construction the core fails with
   Java's relabelled "Failed to construct kafka producer" closes them too.

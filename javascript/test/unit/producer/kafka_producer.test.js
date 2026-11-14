@@ -1596,17 +1596,17 @@ test('a serde config function that throws is a construction failure, and the ser
 });
 
 test('stringSerializer goes in a serde config key without (), configured by its encoding keys', () => {
-  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-16' }), (e) => {
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-32' }), (e) => {
     assert.equal(e.constructor, KafkaError);
     assert.equal(e.message, 'Failed to construct kafka producer');
     assert.equal(e.cause.name, 'SerializationError');
-    assert.equal(e.cause.message, 'Unsupported encoding UTF-16');
+    assert.equal(e.cause.message, 'Unsupported encoding UTF-32');
     return true;
   });
   // The key serializer reads key.serializer.encoding, the value one falls back to serializer.encoding.
   assert.throws(
-    () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-8', 'serializer.encoding': 'latin1' }),
-    (e) => e.cause.message === 'Unsupported encoding latin1',
+    () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-8', 'serializer.encoding': 'windows-1252' }),
+    (e) => e.cause.message === 'Unsupported encoding windows-1252',
   );
   const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
   void producer.close();
