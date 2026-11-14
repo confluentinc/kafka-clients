@@ -15,11 +15,9 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.common.config.ConfigException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `ConfigException(String, Object)`, `ConfigException(String,
-// Object, String)`.
 
+import { javaString } from '../../internal/java_string';
+import * as P from '../../internal/payload';
 import { setForms } from '../../internal/throwable';
 import { KafkaError } from '../kafka_error';
 
@@ -56,6 +54,20 @@ export class ConfigError extends KafkaError {
    * @param message - the message; `null` reads as `''`
    */
   constructor(message: string | null);
+  /**
+   * Java's `(String name, Object value)` constructor. The message is the one
+   * Java's constructor builds from the payload.
+   *
+   * @param options - the `name` and the `value`
+   */
+  constructor(options: { /** Java's `String name`. */ name: string; /** Java's `Object value`. */ value: unknown });
+  /**
+   * Java's `(String name, Object value, String message)` constructor. The
+   * message is the one Java's constructor builds from the payload.
+   *
+   * @param options - the `name` and the `value` and the message
+   */
+  constructor(options: { /** Java's `String name`. */ name: string; /** Java's `Object value`. */ value: unknown; /** The message; `null` reads as `''`. */ message: string | null });
   constructor(...args: unknown[]) {
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));
   }
@@ -63,4 +75,9 @@ export class ConfigError extends KafkaError {
 
 setForms(ConfigError, [
   [['message'], 'message'],
-]);
+  [['name', 'value'], (v) => 'Invalid value ' + javaString(v.value) + ' for configuration ' + javaString(v.name)],
+  [['name', 'value', 'message'], (v) => 'Invalid value ' + javaString(v.value) + ' for configuration ' + javaString(v.name) + (v.message === null ? '' : ': ' + javaString(v.message))],
+], {
+  order: ['name', 'value', 'message'],
+  params: { name: P.string, value: P.object },
+});

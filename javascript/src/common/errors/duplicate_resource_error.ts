@@ -15,12 +15,9 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.common.errors.DuplicateResourceException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `DuplicateResourceException(String, String)`,
-// `DuplicateResourceException(String, String, Throwable)`.
 
-import { setForms } from '../../internal/throwable';
+import * as P from '../../internal/payload';
+import { payloadOf, setForms } from '../../internal/throwable';
 import { ApiError } from './api_error';
 
 /**
@@ -36,6 +33,11 @@ export class DuplicateResourceError extends ApiError {
    * by shape. It holds no state.
    */
   readonly #brand = true;
+
+  /**
+   * Java's field `String resource`.
+   */
+  readonly #resource: string | null;
 
   /**
    * The FFI id of the class, `kafka_common_Error_DUPLICATE_RESOURCE`, for the
@@ -64,12 +66,43 @@ export class DuplicateResourceError extends ApiError {
    * @param options - the message and the cause
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
+  /**
+   * Java's `(String resource, String message)` constructor.
+   *
+   * @param options - the `resource` and the message
+   */
+  constructor(options: { /** Java's `String resource`. */ resource: string | null; /** The message; `null` reads as `''`. */ message: string | null; name?: never });
+  /**
+   * Java's `(String resource, String message, Throwable cause)` constructor.
+   *
+   * @param options - the `resource` and the message and the cause
+   */
+  constructor(options: { /** Java's `String resource`. */ resource: string | null; /** The message; `null` reads as `''`. */ message: string | null; /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   constructor(...args: unknown[]) {
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));
+    const fields = payloadOf(this);
+    this.#resource = fields.resource as string | null;
+  }
+
+  /**
+   * Java's `resource()`.
+   *
+   * @returns Java's `resource` @throws `TypeError` when it is given an
+   * argument: it only reads
+   */
+  resource(): string | null {
+    P.readOnly('resource', arguments.length);
+    return this.#resource;
   }
 }
 
 setForms(DuplicateResourceError, [
-  [['message'], 'message'],
-  [['message', 'cause'], 'message'],
-]);
+  [['message'], 'message', () => ({ resource: null })],
+  [['message', 'cause'], 'message', () => ({ resource: null })],
+  [['resource', 'message'], 'message', (v) => ({ resource: v.resource })],
+  [['resource', 'message', 'cause'], 'message', (v) => ({ resource: v.resource })],
+], {
+  order: ['resource', 'message', 'cause'],
+  params: { resource: P.string },
+  fields: { resource: [P.string, null] },
+});

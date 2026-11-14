@@ -745,18 +745,48 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   are catch-only, `abstract` classes without an FFI id: constructing one
   throws `TypeError` (root conventions, Class family, Q16, Q32). A user's
   subclass takes the forms of its nearest generated class. The constructors
-  that take a payload, the payload getters (`TopicAuthorizationError`'s
-  topics, ...) and
-  `RecordDeserializationError.DeserializationExceptionOrigin` are not
-  generated yet. Java's `public static final` instances are: `INSTANCE` on
+  that take a payload are generated too (root conventions, Errors, Q39), in
+  the same one-object shape, Java's other parameters by their Java names
+  (`new TopicAuthorizationError({ message, unauthorizedTopics })`); a payload
+  is given by name only, never as a bare value, so a form error lists such a
+  one-parameter form as its options object, `({ unauthorizedTopics })`. Each
+  form's message and the fields it sets are Java's constructor chain, which
+  the generator evaluates as JavaScript (Java's `String.valueOf` and
+  `Double.toString` for a message it builds, `src/internal/java_string.ts`),
+  and each payload parameter is taken by its kind (`src/internal/payload.ts`:
+  a `Set<String>` an iterable of strings, a string refused; a
+  `Map<TopicPartition, Long>` a `TopicPartitionMap` only, a `Map` refused with
+  a hint; a `long` a `bigint` or a whole number). The payload getters are
+  methods over private fields (`unauthorizedTopics()`, `partitions()`), which
+  only read and return a new collection the caller may change
+  (`Set<String>` a `Set`, `Set<TopicPartition>` a `TopicPartitionSet`,
+  `Map<TopicPartition, Long>` a `TopicPartitionMap<bigint>`), with Java's
+  static factory (`GroupAuthorizationError.forGroupId`) and Java's
+  `toString()` override (`QuotaViolationError`'s, its class name written as
+  the error's `name`). An error the core reports carries its payload: the
+  addon reads it through the FFI's view of the class and its accessors
+  (`native/error_payload.c`, generated from the table in
+  `rust/xtask/src/error_hierarchy/js.rs`), and `create` runs the class's
+  constructors with a private token so each class sets its fields; a field
+  the view has no accessor for keeps its default (`QuotaViolationError`'s
+  `metric()` is null; `CorrelationIdMismatchError`'s ids are `-1`, as
+  Python's), listed in its module's header comment. Left out, and listed in
+  their modules' header comments, are the forms and getters of a type the
+  client does not translate before the consumer: `LogTruncationError`'s
+  constructors and `divergentOffsets()` (`OffsetAndMetadata`), and
+  `RecordDeserializationError`'s payload (`TimestampType`, its nested
+  `DeserializationExceptionOrigin`), so those two classes cannot be
+  constructed. A `TopicPartitionSet` holds `TopicPartition`s only, so
+  `new NoOffsetForPartitionError({ partition: null })` throws `TypeError`
+  *(deviation: Java's `Collections.singleton(null)` holds a null. Why: the set
+  keys its members by value. Goes when: never)*. Java's `public static final` instances are: `INSTANCE` on
   `DisconnectError` and `CoordinatorNotAvailableError`, a static property of
   the class that is not writable, built by Java's no-argument chain (an empty
   message, no cause) whatever that constructor's visibility
   (`CoordinatorNotAvailableException`'s is private), as Python's
   `_throwable.singleton` (each module's header comment says so); a class whose every
-  Java constructor takes a payload (`QuotaViolationError`, ...) has a
-  `protected` constructor that throws `TypeError` until then, and no payload is
-  read across the FFI.
+  Java constructor takes a type the client does not translate has a
+  `protected` constructor that throws `TypeError` until then.
 - The closed producer (root conventions, Implementation over the FFI, Q61):
   the binding keeps no closed flag. A call after `close()` goes to the core:
   `send` rejects with its `IllegalStateError` "Cannot perform operation after

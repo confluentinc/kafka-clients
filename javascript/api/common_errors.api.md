@@ -308,6 +308,18 @@ export class DuplicateResourceError extends ApiError {
         cause: unknown;
         name?: never;
     });
+    constructor(options: {
+        resource: string | null; /** The message; `null` reads as `''`. */
+        message: string | null;
+        name?: never;
+    });
+    constructor(options: {
+        resource: string | null; /** The message; `null` reads as `''`. */
+        message: string | null; /** The cause (`Error`'s `cause`). */
+        cause: unknown;
+        name?: never;
+    });
+    resource(): string | null;
 }
 
 // @public
@@ -443,10 +455,20 @@ export class FetchSessionTopicIdError extends RetriableError {
 // @public
 export class GroupAuthorizationError extends AuthorizationError {
     constructor(options: {
+        message: string | null; /** Java's `String groupId`. */
+        groupId: string | null;
+        name?: never;
+    });
+    constructor(options: {
         message: string | null;
         name?: never;
     });
     constructor(message: string | null);
+    static forGroupId(groupId: string | null): GroupAuthorizationError;
+    static forGroupId(options: {
+        groupId: string | null;
+    }): GroupAuthorizationError;
+    groupId(): string | null;
 }
 
 // @public
@@ -876,6 +898,16 @@ export class InvalidTopicError extends InvalidConfigurationError {
         name?: never;
     });
     constructor(cause: Error);
+    constructor(options: {
+        invalidTopics: Iterable<string>;
+        name?: never;
+    });
+    constructor(options: {
+        message: string | null; /** Java's `Set<String> invalidTopics`. */
+        invalidTopics: Iterable<string>;
+        name?: never;
+    });
+    invalidTopics(): Set<string>;
 }
 
 // @public
@@ -1360,6 +1392,12 @@ export class RecordTooLargeError extends ApiError {
         name?: never;
     });
     constructor(cause: Error);
+    constructor(options: {
+        message: string | null; /** Java's `Map<TopicPartition, Long> recordTooLargePartitions`. */
+        recordTooLargePartitions: TopicPartitionMap<bigint | number> | null;
+        name?: never;
+    });
+    recordTooLargePartitions(): TopicPartitionMap<bigint> | null;
 }
 
 // @public
@@ -1413,6 +1451,18 @@ export class ResourceNotFoundError extends ApiError {
         cause: unknown;
         name?: never;
     });
+    constructor(options: {
+        resource: string | null; /** The message; `null` reads as `''`. */
+        message: string | null;
+        name?: never;
+    });
+    constructor(options: {
+        resource: string | null; /** The message; `null` reads as `''`. */
+        message: string | null; /** The cause (`Error`'s `cause`). */
+        cause: unknown;
+        name?: never;
+    });
+    resource(): string | null;
 }
 
 // @public
@@ -1588,6 +1638,12 @@ export class ThrottlingQuotaExceededError extends RetriableError {
         name?: never;
     });
     constructor(message: string | null);
+    constructor(options: {
+        throttleTimeMs: number; /** The message; `null` reads as `''`. */
+        message: string | null;
+        name?: never;
+    });
+    throttleTimeMs(): number;
 }
 
 // @public
@@ -1613,10 +1669,20 @@ export class TimeoutError extends RetriableError {
 // @public
 export class TopicAuthorizationError extends AuthorizationError {
     constructor(options: {
+        message: string | null; /** Java's `Set<String> unauthorizedTopics`. */
+        unauthorizedTopics: Iterable<string>;
+        name?: never;
+    });
+    constructor(options: {
+        unauthorizedTopics: Iterable<string>;
+        name?: never;
+    });
+    constructor(options: {
         message: string | null;
         name?: never;
     });
     constructor(message: string | null);
+    unauthorizedTopics(): Set<string>;
 }
 
 // @public

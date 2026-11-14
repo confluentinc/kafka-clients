@@ -16,7 +16,7 @@
 // the Java source of `org.apache.kafka.common.errors.ApplicationRecoverableException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../../internal/throwable';
+import { isCreate, setForms } from '../../internal/throwable';
 import { ApiError } from './api_error';
 
 /**
@@ -75,7 +75,7 @@ export abstract class ApplicationRecoverableError extends ApiError {
    */
   constructor();
   constructor(...args: unknown[]) {
-    if (new.target === ApplicationRecoverableError) {
+    if (new.target === ApplicationRecoverableError && !isCreate(args)) {
       throw new TypeError('ApplicationRecoverableError is an abstract catch-only base; it is never thrown directly');
     }
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));

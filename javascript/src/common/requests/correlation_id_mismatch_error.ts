@@ -16,20 +16,21 @@
 // the Java source of `org.apache.kafka.common.requests.CorrelationIdMismatchException`;
 // `cargo xtask check-generated` checks it is up to date.
 //
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `CorrelationIdMismatchException(String, int, int)`.
+// An error the core reports has no payload for `requestCorrelationId` (it is
+// -1, a value Java's counter never assigns, as the Python client reads it) and
+// `responseCorrelationId` (it is -1, a value Java's counter never assigns, as
+// the Python client reads it): the FFI's view of the class has no accessor for
+// it.
 
-import { setForms } from '../../internal/throwable';
 import { IllegalStateError } from '../../illegal_state_error';
+import * as P from '../../internal/payload';
+import { payloadOf, setForms } from '../../internal/throwable';
 
 /**
  * Raised if the correlationId in a response header does not match the expected
  * value from the request header.
  *
  * Java: `org.apache.kafka.common.requests.CorrelationIdMismatchException`.
- *
- * Not constructible yet: Java's constructors take a payload the client does not
- * translate yet; the client builds this error when the core reports it.
  */
 export class CorrelationIdMismatchError extends IllegalStateError {
   /**
@@ -37,6 +38,16 @@ export class CorrelationIdMismatchError extends IllegalStateError {
    * not by shape. It holds no state.
    */
   readonly #brand = true;
+
+  /**
+   * Java's field `int requestCorrelationId`.
+   */
+  readonly #requestCorrelationId: number;
+
+  /**
+   * Java's field `int responseCorrelationId`.
+   */
+  readonly #responseCorrelationId: number;
 
   /**
    * The FFI id of the class, `kafka_common_Error_CORRELATION_ID_MISMATCH`, for
@@ -47,14 +58,47 @@ export class CorrelationIdMismatchError extends IllegalStateError {
   static override readonly _ffiId: number = -24;
 
   /**
-   * Not constructible yet: Java's constructors take a payload the client does
-   * not translate yet.
+   * Java's `(String message, int requestCorrelationId, int
+   * responseCorrelationId)` constructor.
    *
-   * @param args - refused: constructing the error throws `TypeError`
+   * @param options - the message and the `requestCorrelationId` and the
+   * `responseCorrelationId`
    */
-  protected constructor(...args: unknown[]) {
+  constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** Java's `int requestCorrelationId`. */ requestCorrelationId: number; /** Java's `int responseCorrelationId`. */ responseCorrelationId: number; name?: never });
+  constructor(...args: unknown[]) {
     super(...(args as []));
+    const fields = payloadOf(this);
+    this.#requestCorrelationId = fields.requestCorrelationId as number;
+    this.#responseCorrelationId = fields.responseCorrelationId as number;
+  }
+
+  /**
+   * Java's `requestCorrelationId()`.
+   *
+   * @returns Java's `requestCorrelationId` @throws `TypeError` when it is given
+   * an argument: it only reads
+   */
+  requestCorrelationId(): number {
+    P.readOnly('requestCorrelationId', arguments.length);
+    return this.#requestCorrelationId;
+  }
+
+  /**
+   * Java's `responseCorrelationId()`.
+   *
+   * @returns Java's `responseCorrelationId` @throws `TypeError` when it is
+   * given an argument: it only reads
+   */
+  responseCorrelationId(): number {
+    P.readOnly('responseCorrelationId', arguments.length);
+    return this.#responseCorrelationId;
   }
 }
 
-setForms(CorrelationIdMismatchError, []);
+setForms(CorrelationIdMismatchError, [
+  [['message', 'requestCorrelationId', 'responseCorrelationId'], 'message', (v) => ({ requestCorrelationId: v.requestCorrelationId, responseCorrelationId: v.responseCorrelationId })],
+], {
+  order: ['message', 'requestCorrelationId', 'responseCorrelationId'],
+  params: { requestCorrelationId: P.int, responseCorrelationId: P.int },
+  fields: { requestCorrelationId: [P.int, -1], responseCorrelationId: [P.int, -1] },
+});

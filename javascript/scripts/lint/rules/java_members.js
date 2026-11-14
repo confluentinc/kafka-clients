@@ -24,8 +24,9 @@
 // mapped to a Java class is checked as a class is. A member on the list of
 // invented names (lint-mapping.json's `invented`) is exempt, one in its
 // `javaTargets` maps to the `<fqn>#<member>` listed. An error class keeps the
-// fields javascript/CLAUDE.md "Errors" lists instead of Java's members; a
-// function type (`Callback`) has none to map.
+// fields javascript/CLAUDE.md "Errors" lists, its Java singletons and the
+// methods translating its payload (Q39), and no other member; a function type
+// (`Callback`) has none to map.
 
 const { atNode } = require('../location');
 const {
@@ -138,7 +139,13 @@ module.exports = {
         // (`DisconnectException.INSTANCE`), static properties of the class.
         const jm = java && java.cls && m.isStatic && m.kind === 'property' ? javaMember(index, java.cls, m) : null;
         const singleton = jm !== null && jm.kind === 'field' && jm.owner === java.cls && jm.field.static && jm.field.final;
-        if (!singleton && !ERROR_ALLOWANCE.members.has(m.name)) {
+        // The payload (root CLAUDE.md, JavaScript Binding Conventions,
+        // Errors, Q39): a method translating a Java method of the class's
+        // chain of its own static-ness (a payload getter, a static factory,
+        // a toString() override).
+        const method = java && java.cls && m.kind === 'method' ? javaMember(index, java.cls, m) : null;
+        const payload = method !== null && method.kind === 'methods';
+        if (!singleton && !payload && !ERROR_ALLOWANCE.members.has(m.name)) {
           findings.push({
             kind: 'error-member',
             subject: memberName(item, m), at: atNode(ctx, m.node),

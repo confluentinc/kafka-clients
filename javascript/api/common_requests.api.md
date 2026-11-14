@@ -9,7 +9,14 @@ export const __esModule: true;
 
 // @public
 export class CorrelationIdMismatchError extends IllegalStateError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        message: string | null; /** Java's `int requestCorrelationId`. */
+        requestCorrelationId: number; /** Java's `int responseCorrelationId`. */
+        responseCorrelationId: number;
+        name?: never;
+    });
+    requestCorrelationId(): number;
+    responseCorrelationId(): number;
 }
 
 // (No @packageDocumentation comment for this package)

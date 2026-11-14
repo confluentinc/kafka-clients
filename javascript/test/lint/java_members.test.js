@@ -20,7 +20,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
-const { CLASSES, LIB, javaIndex, mapping, INVENTED } = require('./_java_fixture');
+const { CLASSES, LIB, javaIndex, mapping, method, INVENTED } = require('./_java_fixture');
 
 const RULE = 'check-java-members';
 
@@ -64,6 +64,16 @@ test('each finding kind, with its exact text', () => {
     'Rec.counter: is static, but clients.producer.Rec#counter is not a static final field',
     'FooError.payload: is not one of the error fields (constructor, name, message, cause): an error class keeps the fields javascript/CLAUDE.md "Errors" lists (classify with instanceof), not Java\'s members',
     'FooError.code: is not one of the error fields (constructor, name, message, cause): an error class keeps the fields javascript/CLAUDE.md "Errors" lists (classify with instanceof), not Java\'s members',
+  ]);
+});
+
+test("an error's methods translating a Java method of its class pass: its payload getters (Q39)", () => {
+  const index = javaIndex(
+    CLASSES.map((c) => (c.fqn.endsWith('.FooException') ? { ...c, overloads: [method('topics', [], { return_type: 'Set<String>' })] } : c)),
+  );
+  const error = 'export class FooError extends Error {\n  topics(): Set<string> { return new Set(); }\n  extraPayload(): number { return 0; }\n}\n';
+  assert.deepEqual(findings(lint(fixture({ 'java-index.json': index, 'src/common/errors/foo_error.ts': error }), [RULE])), [
+    'FooError.extraPayload: is not one of the error fields (constructor, name, message, cause): an error class keeps the fields javascript/CLAUDE.md "Errors" lists (classify with instanceof), not Java\'s members',
   ]);
 });
 

@@ -24,6 +24,7 @@ export abstract class InvalidOffsetError extends KafkaError {
         name?: never;
     });
     constructor(message: string | null);
+    abstract partitions(): TopicPartitionSet;
 }
 
 // @public
@@ -33,12 +34,30 @@ export class LogTruncationError extends OffsetOutOfRangeError {
 
 // @public
 export class NoOffsetForPartitionError extends InvalidOffsetError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        partition: TopicPartition;
+        name?: never;
+    });
+    constructor(options: {
+        partitions: Iterable<TopicPartition>;
+        name?: never;
+    });
+    partitions(): TopicPartitionSet;
 }
 
 // @public
 export class OffsetOutOfRangeError extends InvalidOffsetError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>;
+        name?: never;
+    });
+    constructor(options: {
+        message: string | null; /** Java's `Map<TopicPartition, Long> offsetOutOfRangePartitions`. */
+        offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>;
+        name?: never;
+    });
+    offsetOutOfRangePartitions(): TopicPartitionMap<bigint>;
+    partitions(): TopicPartitionSet;
 }
 
 // @public

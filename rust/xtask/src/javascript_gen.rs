@@ -400,8 +400,8 @@ fn splice(current: &str, begin: &str, end: &str, block: &str, path: &Path) -> Re
 /// Every generated file of the Node.js client: `(path, content)`.
 pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let lib = repo_root.join(JS_SRC);
-    let (mut modules, registry) = crate::error_hierarchy::js::outputs(repo_root)?;
-    let mut out = vec![registry];
+    let (mut modules, files) = crate::error_hierarchy::js::outputs(repo_root)?;
+    let mut out = files;
     modules.extend(crate::config_consts::js::modules(repo_root)?);
     out.extend(crate::config_types::js::outputs(repo_root)?);
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();

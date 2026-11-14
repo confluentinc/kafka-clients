@@ -16,7 +16,7 @@
 // the Java source of `org.apache.kafka.common.errors.RefreshRetriableException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../../internal/throwable';
+import { isCreate, setForms } from '../../internal/throwable';
 import { RetriableError } from './retriable_error';
 
 /**
@@ -75,7 +75,7 @@ export abstract class RefreshRetriableError extends RetriableError {
    */
   constructor();
   constructor(...args: unknown[]) {
-    if (new.target === RefreshRetriableError) {
+    if (new.target === RefreshRetriableError && !isCreate(args)) {
       throw new TypeError('RefreshRetriableError is an abstract catch-only base; it is never thrown directly');
     }
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));
