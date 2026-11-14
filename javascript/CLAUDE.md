@@ -223,14 +223,14 @@ These decide every question, in this order:
    table): one function, `encodeLikeJava(s)` in `src/internal/encode.ts`, is
    the only place the binding turns a string into bytes, writing each lone
    surrogate as `?` as Java's `String.getBytes(UTF_8)` does (Node and
-   Node-API write U+FFFD). A key or value given as a string, the headers code
-   for header keys, and the config code once per client, for the config keys
-   and values (group IDs among them), call it, and the addon reads those
-   bytes into C strings (`native/record.c` `js_bytes_cstring`); topic names
-   skip it and cross as JS strings. The root conventions decide that a string
+   Node-API write U+FFFD). `stringSerializer()` for keys and values, the
+   headers code for header keys, and the config code once per client, for the
+   config keys and values (group IDs among them), call it, and the addon reads
+   the header and config bytes into C strings (`native/record.c`
+   `js_bytes_cstring`); topic names skip it and cross as JS strings. A string
    key or value given without a serializer throws `TypeError` pointing to
-   `stringSerializer()` (Class family, Q24, Q27); that comes with the
-   serializers, and until then the producer encodes it through the same rule.
+   `stringSerializer()` (root conventions, Class family, Q24, Q27), checked at
+   `send()` (`src/producer/producer_record.ts` `rawBytes`).
    `check-zero-copy` and `check-string-encoding` partly enforce this (The rule
    linter, below), and an integration test checks that an accepted record's
    Buffers are collectable once its `send()` resolved, before delivery. Not
@@ -479,10 +479,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   awaited. The binding keeps no closed state, so a serializer runs on a
   closed producer too, and the core reports the closed producer at the
   hand-over (rule 1). What a serializer returns is borrowed until the
-  hand-over, as the app's bytes are (rule 8). A null serializer, or none,
-  sends the record's own bytes (a string encoded by `encodeLikeJava`, checked
+  hand-over, as the app's bytes are (rule 8). With no serializer (a null
+  one, or none, and no config key) the record's own bytes are sent, checked
   at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
-  type TypeScript cannot enforce). `stringSerializer()`
+  type TypeScript cannot enforce, and a string throws `TypeError` pointing to
+  `stringSerializer()`. `stringSerializer()`
   (`src/common/serialization/string_serializer.ts`) is Java's
   `StringSerializer` through `encodeLikeJava`; it takes an optional
   `{ configs, isKey }`, Java's `configure`, so it goes in a serde config key
@@ -1090,10 +1091,8 @@ The rules, each named in its finding:
 - `check-encode-callers`: only the string serializer (`src/common/serialization/`),
   the headers code (`src/common/header/`) and the config code
   (`src/internal/config.ts`) use `encodeLikeJava` (root conventions, Types,
-  Q24). `src/producer/producer_record.ts` has an allowance, for a string key
-  or value given without a serializer, which the serializers replace with a
-  `TypeError` (Class family, Q27); the allowance fails as unused once that
-  call goes.
+  Q24); a string key or value given without a serializer is a `TypeError`
+  (Class family, Q27), never encoded.
 - `check-commonjs-pin`: `package.json` has no `"type": "module"` (none, or `"commonjs"`), `tsconfig.json`'s
   `module` and `moduleResolution` are `nodenext`, and each `exports` entry
   has exactly the conditions `types` then `default` (root conventions,

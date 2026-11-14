@@ -354,7 +354,8 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * @throws `TypeError` rejects with it when `record` is null or not a
    *   ProducerRecord, `callback` not a function, a parameter is `undefined`,
    *   a serializer returns neither a Uint8Array nor null, a key or value
-   *   sent without a serializer is neither bytes, a string nor null, or the
+   *   sent without a serializer is neither bytes nor null (a string
+   *   included: it needs `stringSerializer()`), or the
    *   topic or a header key holds a null byte, which the C ABI would
    *   read as the end of the string
    * @throws `InterruptError` rejects with it if the thread is interrupted while
@@ -410,11 +411,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * return a new Buffer for each record. If other workers share the Buffer's
    * memory, they mustn't write to it until then either. What a serializer
    * returns is read the same way, until the Promise from `send()` settles.
-   * *(deviation: Java
-   * copies the bytes inside `send()`. Why: it saves a memory copy of each
-   * Buffer, as the Python binding does.)* Header values are copied during
-   * the call. Without a serializer, a string key or value is encoded to UTF-8 as Java's
-   * `StringSerializer` encodes it (a lone surrogate as `?`). The record's
+   * *(deviation: Java copies the bytes inside `send()`. Why: it saves a
+   * memory copy of each Buffer, as the Python binding does.)* Header values
+   * are copied during the call. Without a serializer, a key or value is
+   * bytes or null: a string rejects with a `TypeError` pointing to
+   * `stringSerializer()`. The record's
    * headers become read-only once its fields are checked: a later `add` or
    * `remove` throws `IllegalStateError` "RecordHeaders has been closed.".
    * *(deviation: Java's `send()` seals them only after its metadata wait;

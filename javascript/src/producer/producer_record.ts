@@ -14,13 +14,12 @@
 
 // Java's ProducerRecord<K, V>: the key and the value are what the producer's
 // serializers take. A producer without a serializer takes a Buffer, a
-// Uint8Array, a string (encoded as UTF-8 at send, as Java's StringSerializer
-// encodes it: src/internal/encode.ts) or null, checked at send. The headers
-// are a Headers (common/header), sealed by send().
+// Uint8Array or null, checked at send: a string needs stringSerializer()
+// (root CLAUDE.md, JavaScript Binding Conventions, Class family, Q24, Q27).
+// The headers are a Headers (common/header), sealed by send().
 
 import { JavaForms } from '../internal/args';
 import { bytesToString } from '../internal/bytes';
-import { encodeLikeJava } from '../internal/encode';
 import { illegalArgument } from '../internal/errors';
 import { objectHashCode, objectsEquals } from '../internal/java_object';
 import type { Header } from '../common/header/header';
@@ -61,13 +60,21 @@ function isBytes(value: unknown): value is Uint8Array {
 }
 
 // The bytes of a key or value a producer without a serializer sends: bytes as
-// they are, a string as Java's StringSerializer encodes it. The run-time type
-// TypeScript cannot enforce on a ProducerRecord<K, V> (javascript/CLAUDE.md).
-function rawBytes(value: unknown, what: string): Uint8Array | null {
+// they are. The run-time type TypeScript cannot enforce on a
+// ProducerRecord<K, V> (javascript/CLAUDE.md); a string can't reach the FFI
+// as bytes, so it points to stringSerializer() (root CLAUDE.md, JavaScript
+// Binding Conventions, Class family, Q24, Q27).
+function rawBytes(value: unknown, what: 'key' | 'value'): Uint8Array | null {
   if (value === null) return null;
-  if (typeof value === 'string') return encodeLikeJava(value);
   if (isBytes(value)) return value;
-  throw new TypeError(`${what} must be a Buffer, a Uint8Array, a string or null when the producer has no ${what} serializer`);
+  if (typeof value === 'string') {
+    throw new TypeError(
+      `${what} is a string, and the producer has no ${what} serializer: give the producer ` +
+        `${what}Serializer: stringSerializer() (or '${what}.serializer': stringSerializer in its configuration), ` +
+        'from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+    );
+  }
+  throw new TypeError(`${what} must be a Buffer, a Uint8Array or null when the producer has no ${what} serializer`);
 }
 
 // Java's `new RecordHeaders(headers)`: new headers holding the given ones.
@@ -433,9 +440,9 @@ export class ProducerRecord<out K = never, out V = never> {
    * allocates nothing more for them.
    *
    * `key` and `value` are what a serializer returned; one left out is the
-   * record's own field, sent without a serializer: bytes as they are, a
-   * string encoded as Java's StringSerializer encodes it, anything else a
-   * `TypeError` (the headers are then left writable).
+   * record's own field, sent without a serializer: bytes as they are,
+   * anything else a `TypeError`, a string's pointing to `stringSerializer()`
+   * (the headers are then left writable).
    *
    * @internal
    */

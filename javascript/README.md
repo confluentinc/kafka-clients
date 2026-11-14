@@ -239,9 +239,14 @@ first and falls back to that development build; installing the package runs no b
 ## Example
 
 ```js
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
-const producer = new KafkaProducer({ 'bootstrap.servers': 'localhost:9092' });  // or { configs: {...} }
+const producer = new KafkaProducer({
+  configs: { 'bootstrap.servers': 'localhost:9092' },
+  keySerializer: stringSerializer(),     // string keys and values; without serializers they are bytes
+  valueSerializer: stringSerializer(),
+});
 const future = await producer.send({                   // resolves at hand-over
   record: new ProducerRecord({ topic: 'demo', key: 'k1', value: 'hello' }),
   // Optional, Java's Callback.onCompletion(metadata, exception): runs before the future completes.
@@ -491,11 +496,13 @@ over a `SharedArrayBuffer` is borrowed the same way: if other workers share
 the Buffer's memory, they mustn't write to it until then either. Header
 values are copied during `send()`.
 
-**Strings are encoded as Java encodes them.** A string key or value is
-encoded to UTF-8 as Java's `StringSerializer` does (`String.getBytes(UTF_8)`):
-a lone surrogate, which UTF-8 cannot hold, becomes `?`, where Node's own
-`Buffer.from` writes U+FFFD. Header keys and config keys and values are
-encoded the same way; topic names are not.
+**Strings are encoded as Java encodes them.** A string key or value needs a
+serializer: `stringSerializer()` encodes it to UTF-8 as Java's
+`StringSerializer` does (`String.getBytes(UTF_8)`), and without one a string
+key or value throws `TypeError` pointing to it. A lone surrogate, which UTF-8
+cannot hold, becomes `?`, where Node's own `Buffer.from` writes U+FFFD.
+Header keys and config keys and values are encoded the same way; topic names
+are not.
 
 **Close every producer.** A producer keeps Node running from the moment it's
 created until `close()` closes it, as KafkaJS and 1.x do from `connect()` to
@@ -578,6 +585,7 @@ code relying on them keeps running with another meaning: check each.
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
 | an argument to `flush()` | it is refused: Java's `flush()` takes none |
 | a lone surrogate in a string was written as U+FFFD | it is written as `?`, as Java's `StringSerializer` writes it |
+| a string key or value was sent as UTF-8 without a serializer | it throws `TypeError` pointing to `stringSerializer()`: pass `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()`, or bytes |
 | an idle producer let the process exit | a producer keeps Node running until `close()` closes it, and no garbage collection closes one: close every producer (or `await using` it) |
 | `KafkaFuture` had `get()`, `isDone()`, `isCompletedExceptionally()`, `isCancelled()`, `cancel()` | Java's whole `KafkaFuture`: also `get(timeout)`, `getNow`, `thenApply`, `whenComplete`, `toCompletionStage()`, `completedFuture` and `allOf`; `cancel(mayInterruptIfRunning)` takes a boolean |
 | the enums guarded their constructors with a run-time token (`RecordMetadata`'s was TypeScript `private` only) | their constructors are TypeScript `private`, with no run-time guard |

@@ -199,7 +199,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | positional arguments, `send(record, callback)` | one object of Java's names, `send({ record, callback })`, or the value on its own for a one-parameter form, `send(record)`, `close(5000)` | A second argument is refused with `IllegalArgumentError`, never dropped |
 | `undefined` for "not given" | leave the key or the argument out; `null` is Java's null | `undefined` as a value throws `TypeError` naming the parameter (`"value must not be undefined. Pass null for Java's null, which sends a tombstone."`), except in a configuration, where it leaves the key out |
 | timeouts in milliseconds, `-1` for "forever" | milliseconds or a `Temporal.Duration`; `Infinity` for no limit, `0` for "don't wait" | A negative timeout throws `IllegalArgumentError` |
-| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one) or a string | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
+| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one), or a string with `stringSerializer()` | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
 
 ## 2. Not offered, by design
 
@@ -295,7 +295,7 @@ behaves otherwise.
 | A callback Promise that never settles | — | has no time limit, as in Java: it holds its record's future, `flush()` and `close()`, `close({ timeout })` included | Make every callback settle |
 | A Rust panic in the core | — | reaches the caller unchanged, as the error of the call it happened in | Close that client and create a new one |
 | `TimeoutError` | one class | two: the root's (Java's `java.util.concurrent.TimeoutException`), which a timed `future.get(timeout)` rejects with, and `common/errors`' Kafka `TimeoutError`, which a delivery or `max.block.ms` timeout fails a record with (the `cause` of `get()`'s `ExecutionError`, and the callback's `exception`) | Check the class you mean; neither is the `DOMException` of `AbortSignal.timeout()` |
-| String keys and values without a serializer | strings sent as UTF-8 | the preview encodes them as Java's `StringSerializer` does; with the serdes, a string will need `stringSerializer()` | Pass `Uint8Array`s, or plan for `stringSerializer()` (Section 3) |
+| String keys and values without a serializer | strings sent as UTF-8 | a string key or value throws `TypeError` pointing to `stringSerializer()`, which encodes it as Java's `StringSerializer` does | Pass `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()` (or the config keys), or `Uint8Array`s |
 
 `README.md` is the reference for the rest of the producer's API, and
 `CHANGELOG.md` lists each change in the release where it lands.
