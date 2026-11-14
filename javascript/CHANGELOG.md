@@ -155,13 +155,15 @@ newer.
 - `ProducerConfig`, `SslConfigs`, `SaslConfigs` and `SecurityConfig` constants,
   generated from the Java sources (a constant `Set` a read-only set, a
   constant `List` a frozen array); `SslClientAuth` and `SecurityProtocol`.
-- A config value is checked against its key's Java `ConfigDef` type, and a
-  `null` against its key's validator, before the core sees the configuration
-  (`ConfigError` with Java's message; a password's value is never shown). An
-  unknown key's value is a string, a number or a boolean; `key.serializer`
-  and `value.serializer` throw `ConfigError` pointing to the constructor
-  arguments, and a `kafkaJS` block one pointing to the migration guide.
-  Numbers are written in decimal.
+- The client has no `ConfigDef` table and checks no config value: every
+  value is written as a string (`true` as `"true"`, numbers and bigints in
+  decimal, arrays joined with `,`, anything else by `String()`), `null` and
+  `undefined` leave the key unset, and the core checks the keys and values
+  with Java's messages naming the key. Unknown keys, a `kafkaJS` block
+  included, reach the core, which lists the ones it does not use;
+  `key.serializer` and `value.serializer` throw `ConfigError` pointing to the
+  constructor arguments. The `ProducerConfigs` type lists Java's producer keys
+  for autocompletion and takes any other string.
 - A second argument to an error constructor throws an `IllegalArgumentError`
   pointing to `{ message, cause }`. An error the client has nowhere else to
   report goes to `process.emitWarning`.

@@ -25,7 +25,8 @@
 // takes a TopicPartition.
 
 export { KafkaProducer } from './kafka_producer';
-export type { CloseArgs, ProducerConfigs } from './kafka_producer';
+export type { CloseArgs } from './kafka_producer';
+export type { ProducerConfigs } from './producer_configs';
 export type { Callback } from './callback';
 export { ProducerRecord } from './producer_record';
 export type { Data } from './producer_record';

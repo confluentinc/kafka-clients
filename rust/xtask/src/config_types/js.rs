@@ -12,74 +12,56 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The Node.js client's `src/internal/config_types.ts`: the `ConfigDef` type of every
-//! producer config key and what its validator does with `null`, as the Python
-//! client's `_config_types.py` (the producer table only: the Node.js client
-//! has no consumer or admin client yet).
+//! The Node.js client's `src/producer/producer_configs.ts`: the type of a
+//! producer's configuration, which lists every config key Java's
+//! `ProducerConfig` defines (with its SSL and SASL keys) for autocompletion and
+//! still takes any string, through `(string & {})`. The binding has no
+//! `ConfigDef` table and checks no value (root CLAUDE.md, JavaScript Binding
+//! Conventions, Configuration): only the key names are read from Java, a type
+//! with no run-time part.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::{client_types, null_rule, NullRule, Reader};
-use crate::config_consts;
+use super::{client_types, Reader};
 use crate::javascript_gen::{header, js_str, JS_SRC};
 
 type Res<T> = anyhow::Result<T>;
 
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
-/// `src/internal/config_types.ts` and its content.
+/// `src/producer/producer_configs.ts` and its content.
 pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
-    let mut consts = config_consts::Reader::new(repo_root);
-    let mut types = Vec::new();
-    let mut nulls = Vec::new();
-    for (key, def) in client_types(&mut reader, PRODUCER_CONFIG)? {
-        // Java's null is JavaScript's null, spelled `null` in a message.
-        let rule = null_rule(&mut reader, &mut consts, &key, &def, "null")?;
-        types.push(format!("  [{}, {}],", js_str(&key), js_str(&def.ty)));
-        let (form, kind, message) = match rule {
-            NullRule::Allowed => continue,
-            NullRule::Named { kind, message } => ("named", kind, message),
-            NullRule::Plain { kind, message } => ("plain", kind, message),
-        };
-        nulls.push(format!(
-            "  [{}, [{}, {}]], // {kind}",
-            js_str(&key),
-            js_str(form),
-            js_str(&message)
-        ));
-    }
+    let keys: Vec<String> = client_types(&mut reader, PRODUCER_CONFIG)?.into_keys().collect();
     let mut text = header("Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`)");
     text.push_str(
-        "\n// The `ConfigDef` type of every producer config key (Java's `ProducerConfig`,\n\
-         // with `withClientSslSupport()` / `withClientSaslSupport()`), and what its\n\
-         // validator does with `null` (private; python/confluent_kafka/_config_types.py's\n\
-         // PRODUCER / PRODUCER_NULL). `internal/config` checks a value's JavaScript type\n\
-         // against its key's type and passes every other key to the core as given.\n\
-         //\n\
-         // PRODUCER_NULL maps each key whose `ConfigDef` validator rejects an explicit\n\
-         // `null` (`ConfigDef.parseValue` runs the validator on it) to the\n\
-         // `ConfigException` Java throws: ['named', message] for\n\
-         // `ConfigException(name, null, message)`, ['plain', message] for\n\
-         // `ConfigException(message)`. A key that is not there holds `null` in Java.\n\n",
+        "\n/**\n \
+         * A producer's configuration: Java's `ProducerConfig` keys, as a plain object\n \
+         * (a `Map` is refused). Each value is written as the string the core parses\n \
+         * (`true` as `\"true\"`, numbers and bigints in decimal, arrays joined with\n \
+         * `,`, anything else by `String()`); `null` and `undefined` leave the key\n \
+         * out. The core checks every key and value, with Java's messages.\n \
+         *\n \
+         * @remarks *(js-only)* The type of the configuration the constructor takes,\n \
+         * Java's `Map<String, Object>` and `Properties` as one. It lists the keys\n \
+         * Java's `ProducerConfig` defines, for autocompletion, and takes any other\n \
+         * string too, through `(string & {})`, since an unknown key goes to the\n \
+         * core.\n \
+         */\n\
+         export type ProducerConfigs = {\n  \
+         [key in\n",
     );
-    text.push_str("export const PRODUCER: ReadonlyMap<string, string> = new Map<string, string>([\n");
-    for t in &types {
-        text.push_str(t);
-        text.push('\n');
+    for k in &keys {
+        text.push_str(&format!("    | {}\n", js_str(k)));
     }
     text.push_str(
-        "]);\n\n/** The `ConfigException` a key's validator throws for `null`: its form and message. */\n\
-         type NullRule = readonly ['named' | 'plain', string];\n\n\
-         export const PRODUCER_NULL: ReadonlyMap<string, NullRule> = new Map<string, NullRule>([\n",
+        "    // Any other key, keeping the known keys' autocompletion: the core\n    \
+         // lists the keys it does not use.\n    \
+         | (string & {})]?: string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n\
+         };\n",
     );
-    for n in &nulls {
-        text.push_str(n);
-        text.push('\n');
-    }
-    text.push_str("]);\n");
-    Ok((repo_root.join(JS_SRC).join("internal").join("config_types.ts"), text))
+    Ok((repo_root.join(JS_SRC).join("producer").join("producer_configs.ts"), text))
 }
 
 #[cfg(test)]
@@ -95,24 +77,21 @@ mod tests {
     }
 
     #[test]
-    fn test_producer_table() {
+    fn test_producer_keys() {
         let (path, text) = output(&repo_root()).unwrap();
-        assert!(path.ends_with("javascript/src/internal/config_types.ts"));
-        assert!(text.contains("export const PRODUCER: ReadonlyMap<string, string> = new Map<string, string>([\n"));
-        assert!(
-            text.contains("export const PRODUCER_NULL: ReadonlyMap<string, NullRule> = new Map<string, NullRule>([\n")
-        );
-        assert!(!text.contains("module.exports"));
+        assert!(path.ends_with("javascript/src/producer/producer_configs.ts"));
+        assert!(text.contains("export type ProducerConfigs = {\n  [key in\n"));
         for line in [
-            "  ['bootstrap.servers', 'LIST'],",
-            "  ['ssl.keystore.password', 'PASSWORD'],",
-            "  ['sasl.jaas.config', 'PASSWORD'],",
-            "  ['sasl.login.refresh.window.factor', 'DOUBLE'],",
-            "  ['security.protocol', ['named', 'String must be one of (case insensitive): SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT']], // CaseInsensitiveValidString",
-            "  ['bootstrap.servers', ['plain', 'Configuration \\'bootstrap.servers\\' values must not be null.']], // ValidList",
+            "    | 'bootstrap.servers'\n",
+            "    | 'ssl.keystore.password'\n",
+            "    | 'sasl.jaas.config'\n",
+            "    | 'linger.ms'\n",
+            "    | (string & {})]?: string | number | boolean | bigint",
         ] {
             assert!(text.contains(line), "missing {line}");
         }
+        // No ConfigDef table: the type names keys only.
+        assert!(!text.contains("'LIST'"));
         assert!(!text.contains("max.poll.records"));
     }
 }

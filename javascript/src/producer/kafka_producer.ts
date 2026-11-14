@@ -25,24 +25,9 @@ import { producerClosed, producerOpened, warnPreview } from '../internal/lifecyc
 import { KafkaFuture } from '../common/kafka_future';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
+import type { ProducerConfigs } from './producer_configs';
 import { ProducerRecord } from './producer_record';
 import type { RecordMetadata } from './record_metadata';
-
-/**
- * A producer's configuration: Java's ProducerConfig keys, as a plain object
- * (a `Map` is refused). Values are written as the strings the core parses
- * (`true` as `"true"`, numbers in decimal, arrays joined with `,`); an
- * `undefined` value leaves the key out, and so does `null` unless the key's
- * validator rejects `null`, which throws `ConfigError`. The value of a key
- * Java's `ProducerConfig` does not define is a string, a number or a boolean.
- *
- * @remarks *(js-only)* The type of the configuration the constructor takes,
- * Java's `Map<String, Object>` and `Properties` as one.
- */
-export type ProducerConfigs = Record<
-  string,
-  string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined
->;
 
 /**
  * The parameters of {@link KafkaProducer.close}'s timed form, Java's
@@ -192,9 +177,9 @@ export class KafkaProducer {
    *
    * @param options - the producer configs
    * @throws `KafkaError` when the configuration is invalid (`ConfigError`,
-   *   also for a value of the wrong type for its key, for `key.serializer`
-   *   and `value.serializer` and for a `kafkaJS` block) or the producer
-   *   cannot be built
+   *   the core's, with Java's message naming the key; also for
+   *   `key.serializer` and `value.serializer`) or the producer cannot be
+   *   built
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{configs}`, or the configs are not an object
    * @throws `TypeError` when `configs` is null, `undefined` or not a plain

@@ -14,11 +14,10 @@
 
 'use strict';
 
-// src/internal/config.ts, as python/test/unit/test_config.py, test_config_matrix.py
-// and test_config_null.py check python/confluent_kafka/_config.py: every key of
-// the generated producer table with a value of its ConfigDef type and of a
-// wrong one, null against the key's validator, and the security checks the
-// core makes.
+// src/internal/config.ts: the binding has no ConfigDef table and checks no
+// value (root CLAUDE.md, JavaScript Binding Conventions, Configuration). It
+// writes every value as the string the FFI takes, drops null and undefined,
+// and passes every key to the core, which checks them with Java's messages.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -26,7 +25,6 @@ const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
 const { configEntries: entriesAsBytes, decimal } = require('../../../dist/internal/config');
-const { PRODUCER, PRODUCER_NULL } = require('../../../dist/internal/config_types');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
@@ -39,43 +37,56 @@ function configEntries(configs) {
   });
 }
 
-/** The serializer keys, refused whatever their value. */
-const SERIALIZER_KEYS = new Set(['key.serializer', 'value.serializer']);
-
-test('config values are stringified', () => {
+test('every value is written as a string: booleans, numbers, bigints, arrays and anything else', () => {
   assert.deepEqual(
     configEntries({
       'bootstrap.servers': 'localhost:9092',
       'enable.idempotence': true,
       'linger.ms': 5,
       'buffer.memory': 33554432n,
+      // A long above 2^53 goes as its exact digits, for the core to check.
+      'metadata.max.age.ms': 2n ** 62n,
       'compression.type': 'lz4',
       'interceptor.classes': ['a', 'b'],
       'batch.size': '16384',
       'not.a.producer.key': false,
       'another.unknown': 7,
+      'a.bigint': 5n,
+      'an.array': [1, 2n, 'x'],
+      'an.object': {},
+      'a.function': () => 1,
+      kafkaJS: { brokers: ['localhost:9092'] },
     }),
     [
       ['bootstrap.servers', 'localhost:9092'],
       ['enable.idempotence', 'true'],
       ['linger.ms', '5'],
       ['buffer.memory', '33554432'],
+      ['metadata.max.age.ms', '4611686018427387904'],
       ['compression.type', 'lz4'],
       ['interceptor.classes', 'a,b'],
       ['batch.size', '16384'],
       ['not.a.producer.key', 'false'],
       ['another.unknown', '7'],
+      ['a.bigint', '5'],
+      ['an.array', '1,2,x'],
+      ['an.object', '[object Object]'],
+      ['a.function', '() => 1'],
+      ['kafkaJS', '[object Object]'],
     ],
   );
 });
 
-test('undefined values, and null ones the validator accepts, are dropped', () => {
-  assert.deepEqual(configEntries({ 'client.id': null, acks: undefined, 'linger.ms': 0 }), [['linger.ms', '0']]);
+test('null and undefined leave the key unset, whatever its validator', () => {
+  assert.deepEqual(
+    configEntries({ 'client.id': null, acks: undefined, 'bootstrap.servers': null, 'compression.type': null, 'linger.ms': 0 }),
+    [['linger.ms', '0']],
+  );
 });
 
-test('configs is a plain object: a Map is refused, and a symbol key rejected with Java\'s ConfigError', () => {
-  // Java's Map and Properties forms are one plain object (Python's dict): a
-  // Map would otherwise be read as an object with no keys.
+test("configs is a plain object: a Map is refused, and a symbol key rejected with Java's ConfigError", () => {
+  // Java's Map and Properties forms are one plain object: a Map's entries
+  // aren't object keys, so it would otherwise be read as an object with none.
   for (const configs of [new Map([['acks', 'all']]), new Map()]) {
     assert.throws(() => configEntries(configs), { name: 'TypeError', message: 'configs must be a plain object, not a Map' });
   }
@@ -91,8 +102,8 @@ test('configs is a plain object: a Map is refused, and a symbol key rejected wit
   const bare = Object.create(null);
   bare.acks = 'all';
   assert.deepEqual(configEntries(bare), [['acks', 'all']]);
-  // Java's Utils.castToStringObjectMap, Python's prepare: a key that is not a
-  // string (a symbol) is a ConfigError, checked before any value.
+  // Java's Utils.castToStringObjectMap: a key that is not a string (a symbol)
+  // is a ConfigError, checked before any value.
   assert.throws(() => configEntries({ [Symbol('k')]: 'x' }), {
     name: 'ConfigError',
     message: 'Invalid value x for configuration Symbol(k): Key must be a string.',
@@ -102,54 +113,9 @@ test('configs is a plain object: a Map is refused, and a symbol key rejected wit
     assert.equal(e.message, 'Invalid value x for configuration Symbol(k): Key must be a string.');
     return true;
   });
-});
-
-test("an unknown key's value is a string, a number or a boolean: any other is a ConfigError", () => {
-  for (const [value, shown, type] of [
-    [{}, '[object Object]', 'object'],
-    [[1, 2], '[1, 2]', 'array'],
-    [5n, '5', 'bigint'],
-    [() => 1, '() => 1', 'function'],
-  ]) {
-    assert.throws(() => configEntries({ 'not.a.key': value }), (e) => {
-      assert.ok(e instanceof ConfigError);
-      assert.equal(
-        e.message,
-        `Invalid value ${shown} for configuration not.a.key: Expected value to be a string, a number or a boolean, but it was a ${type}`,
-      );
-      return true;
-    });
-  }
   assert.throws(() => configEntries(null), { name: 'TypeError', message: 'configs must not be null' });
   assert.throws(() => configEntries([]), { name: 'TypeError', message: 'configs must be a plain object, not array' });
 });
-
-// A value of each ConfigDef type, and the text the core parses for it.
-const GOOD = {
-  INT: [7, '7'],
-  LONG: [7n, '7'],
-  SHORT: [7, '7'],
-  DOUBLE: [1.5, '1.5'],
-  STRING: ['x', 'x'],
-  PASSWORD: ['secret', 'secret'],
-  BOOLEAN: [true, 'true'],
-  LIST: [['a', 'b'], 'a,b'],
-  CLASS: ['org.example.Cls', 'org.example.Cls'],
-};
-
-// A value of the wrong JavaScript type for each type, as Java's message shows
-// it, and Java's ConfigDef.parseType message. A password is never shown.
-const BAD = {
-  INT: [42.5, '42.5', 'Expected value to be a 32-bit integer, but it was a number'],
-  LONG: [{}, '[object Object]', 'Expected value to be a 64-bit integer (long), but it was a object'],
-  SHORT: [1.5, '1.5', 'Expected value to be a 16-bit integer (short), but it was a number'],
-  DOUBLE: [true, 'true', 'Expected value to be a double, but it was a boolean'],
-  STRING: [5, '5', 'Expected value to be a string, but it was a number'],
-  PASSWORD: [5, '[hidden]', 'Expected value to be a string, but it was a number'],
-  BOOLEAN: [1, '1', 'Expected value to be either true or false'],
-  LIST: [53, '53', 'Expected a comma separated list.'],
-  CLASS: [5, '5', 'Expected a Class instance or class name.'],
-};
 
 test('numbers are written in decimal, never in exponent form', () => {
   assert.deepEqual(configEntries({ 'metadata.max.age.ms': 1e21, 'not.a.key': 1e-7, 'other.key': -2.5e-8 }), [
@@ -189,148 +155,40 @@ test('key.serializer and value.serializer are refused, whatever their value, poi
   }
 });
 
-test('a kafkaJS block fails the value check, pointing to the migration guide', () => {
-  assert.throws(() => configEntries({ kafkaJS: { brokers: ['localhost:9092'] } }), (e) => {
-    assert.ok(e instanceof ConfigError);
-    assert.equal(
-      e.message,
-      'Invalid value [object Object] for configuration kafkaJS: a kafkaJS block configures the KafkaJS-compatible ' +
-        "API, which this client does not have: it takes Java's configuration keys (see MIGRATION.md, the guide to " +
-        'migrating from 1.x and KafkaJS)',
-    );
-    return true;
-  });
-});
-
-test('the producer table covers every type here, SSL and SASL keys included', () => {
-  const types = new Set(PRODUCER.values());
-  assert.deepEqual([...types].sort(), Object.keys(GOOD).sort());
-  assert.ok(PRODUCER.size > 100);
-  for (const key of ['ssl.keystore.password', 'ssl.key.password', 'ssl.truststore.password', 'ssl.keystore.key', 'sasl.jaas.config']) {
-    assert.equal(PRODUCER.get(key), 'PASSWORD', key);
-  }
-  assert.equal(PRODUCER.get('security.protocol'), 'STRING');
-  assert.equal(PRODUCER.get('ssl.enabled.protocols'), 'LIST');
-  assert.ok(!PRODUCER.has('max.poll.records'));
-});
-
-test('a value of the key type reaches the core, for every producer key', () => {
-  for (const [key, type] of PRODUCER) {
-    if (SERIALIZER_KEYS.has(key)) continue;
-    const [value, text] = GOOD[type];
-    assert.deepEqual(configEntries({ [key]: value }), [[key, text]], key);
-    // A string is the core's to parse, for every type.
-    assert.deepEqual(configEntries({ [key]: 'text' }), [[key, 'text']], key);
-  }
-});
-
-test('a value of the wrong type is a ConfigError with Java\'s message, for every producer key', () => {
-  for (const [key, type] of PRODUCER) {
-    if (SERIALIZER_KEYS.has(key)) continue;
-    const [value, shown, message] = BAD[type];
+test("the core checks the values, with Java's messages naming the key", () => {
+  for (const [configs, message] of [
+    [{ 'linger.ms': true }, 'Invalid value true for configuration linger.ms: Not a number of type LONG'],
+    [{ 'batch.size': 42.5 }, 'Invalid value 42.5 for configuration batch.size: Not a number of type INT'],
+    [{ 'linger.ms': {} }, 'Invalid value [object Object] for configuration linger.ms: Not a number of type LONG'],
+    [{ 'linger.ms': 2n ** 63n }, 'Invalid value 9223372036854775808 for configuration linger.ms: Not a number of type LONG'],
+    [{ 'enable.idempotence': 1 }, 'Invalid value 1 for configuration enable.idempotence: Expected value to be either true or false'],
+    [{ acks: 5 }, 'Invalid value 5 for configuration acks: String must be one of: all, -1, 0, 1'],
+  ]) {
     assert.throws(
-      () => configEntries({ [key]: value }),
+      () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', ...configs } }),
       (e) => {
-        assert.ok(e instanceof ConfigError, key);
-        assert.ok(e instanceof KafkaError, key);
-        assert.equal(e.message, `Invalid value ${shown} for configuration ${key}: ${message}`, key);
-        assert.equal(e.cause, undefined);
+        assert.ok(e instanceof ConfigError);
+        assert.ok(e instanceof KafkaError);
+        assert.equal(e.message, message);
         return true;
       },
-      key,
+      message,
     );
   }
 });
 
-test('a password of the wrong type is not echoed', () => {
-  assert.throws(() => configEntries({ 'sasl.jaas.config': ['user', 'pass-word'] }), (e) => {
-    assert.equal(
-      e.message,
-      'Invalid value [hidden] for configuration sasl.jaas.config: Expected value to be a string, but it was a array',
-    );
-    assert.ok(!e.message.includes('pass-word'));
-    return true;
+test('an unknown key, a kafkaJS block included, reaches the core, which builds the producer', async () => {
+  const producer = new KafkaProducer({
+    configs: { 'bootstrap.servers': 'localhost:1', 'not.a.key': 'x', kafkaJS: { brokers: ['localhost:9092'] } },
   });
-});
-
-test('null follows the key validator, for every producer key', () => {
-  for (const key of PRODUCER.keys()) {
-    if (SERIALIZER_KEYS.has(key)) continue;
-    const refused = PRODUCER_NULL.get(key);
-    if (refused === undefined) {
-      assert.deepEqual(configEntries({ [key]: null }), [], key);
-      continue;
-    }
-    const [form, message] = refused;
-    assert.throws(
-      () => configEntries({ [key]: null }),
-      { name: 'ConfigError', message: form === 'named' ? `Invalid value null for configuration ${key}: ${message}` : message },
-      key,
-    );
-  }
-});
-
-const refused = (key) => {
-  try {
-    configEntries({ [key]: null });
-  } catch (e) {
-    assert.ok(e instanceof ConfigError);
-    return e.message;
-  }
-  assert.fail(`${key}: null was accepted`);
-};
-
-test('null: a Range validator, the security keys included', () => {
-  for (const key of ['linger.ms', 'max.in.flight.requests.per.connection', 'sasl.login.refresh.window.factor',
-    'compression.gzip.level', 'compression.zstd.level']) {
-    assert.equal(refused(key), `Invalid value null for configuration ${key}: Value must be non-null`);
-  }
-});
-
-test('null: a ValidString validator', () => {
-  assert.equal(refused('acks'), 'Invalid value null for configuration acks: String must be one of: all, -1, 0, 1');
-  assert.equal(
-    refused('compression.type'),
-    'Invalid value null for configuration compression.type: String must be one of: none, gzip, snappy, lz4, zstd',
-  );
-});
-
-test('null: a CaseInsensitiveValidString validator, security.protocol included', () => {
-  // Java joins the upper-cased values of a HashSet, in its iteration order.
-  for (const [key, valid] of [
-    ['security.protocol', 'SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT'],
-    ['metadata.recovery.strategy', 'REBOOTSTRAP, NONE'],
-    ['buffer.memory.allocation.strategy', 'FULL, INCREMENTAL'],
-  ]) {
-    assert.equal(
-      refused(key),
-      `Invalid value null for configuration ${key}: String must be one of (case insensitive): ${valid}`,
-    );
-  }
-});
-
-test('null: a ValidList refusing null', () => {
-  assert.equal(refused('bootstrap.servers'), "Configuration 'bootstrap.servers' values must not be null.");
-});
-
-test('null allowed: the key is not set', () => {
-  for (const key of ['transactional.id', 'client.id', 'sasl.jaas.config', 'ssl.keystore.password']) {
-    assert.deepEqual(configEntries({ [key]: null }), [], key);
-  }
-});
-
-test('the producer refuses a null its validator rejects before the core sees the configs', () => {
-  assert.throws(() => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', acks: null } }), {
-    name: 'ConfigError',
-    message: 'Invalid value null for configuration acks: String must be one of: all, -1, 0, 1',
-  });
+  await producer.close();
 });
 
 // One key of every type, SSL and SASL keys included; the values are in Java's
 // validators' ranges.
 const TYPED_KEYS = {
   'request.timeout.ms': 30000, // INT
-  'metadata.max.age.ms': 300000, // LONG
+  'metadata.max.age.ms': 300000n, // LONG
   'sasl.login.refresh.min.period.seconds': 60, // SHORT
   'sasl.login.refresh.window.factor': 0.8, // DOUBLE
   'sasl.mechanism': 'GSSAPI', // STRING
