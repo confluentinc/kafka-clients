@@ -99,6 +99,7 @@ const ORDER = [
   'check-no-closed-flag',
   'check-no-repeated-precondition',
   'check-tsfn-lifetime',
+  'check-default-helpers',
   'check-directives',
   'check-config',
 ];

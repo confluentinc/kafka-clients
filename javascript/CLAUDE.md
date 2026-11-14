@@ -997,6 +997,17 @@ The rules, each named in its finding:
   `cbq_closed`, which must call it, so a client keeps Node running until the
   core reports it closed (root conventions, Lifetime, Q21; "Threads and
   liveness").
+- `check-default-helpers`: each interface the user implements (an
+  exported interface or function type translating a Java interface that no
+  exported class implements: `Callback`, not `Producer`) whose Java
+  interface has a `default` method (the Java index's flag) has its helper
+  class, holding Java's default bodies (root conventions, Class family,
+  Q28). The root names its example, `ConsumerRebalanceListenerDefaults`,
+  and leaves the scheme open; this binding fixes it: the class
+  `<Interface>Defaults`, in `src/internal/<interface>_defaults.ts`, with a
+  method of each default method's name. A `...Defaults` class nothing asks
+  for is a finding too. `Callback` has no default method, so no helper
+  exists yet.
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
