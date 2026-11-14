@@ -986,6 +986,12 @@ The rules, each named in its finding:
   one of Java's closed-client messages ("Cannot perform operation after
   producer has been closed", ...), which only the core reports (root
   conventions, Implementation over the FFI, Q61; boundary rules 1 and 10).
+- `check-no-repeated-precondition`: no string literal of `src/` or
+  `native/` holds the message of a precondition the FFI or the core checks
+  ("The timeout cannot be negative.", "Invalid negative timeout", "Timeout
+  must not be negative", the busy message, ...), so the binding cannot raise
+  it itself (root conventions, Errors, Q35, Q58, Q60). The binding's own
+  listed checks write their own messages.
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
