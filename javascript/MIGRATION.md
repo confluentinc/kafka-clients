@@ -189,7 +189,7 @@ keeps working with any release:
 
 ```js
 const value = await serializer.serialize(topic, { fullName: 'John Doe' });
-await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get();
+await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), value }))).get();
 ```
 
 ### Calls and arguments
