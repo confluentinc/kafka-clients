@@ -50,12 +50,14 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
     assert.ok('value' in d && d.enumerable, `${name} is an own enumerable data property`);
   }
   for (const name of names) assert.equal(Object.getOwnPropertyDescriptor(ProducerRecord.prototype, name), undefined);
-  const fields = { topic: 't', partition: 1, timestamp: 5, key: 'k', value: 'v' };
+  // Java's long timestamp: a bigint, also when given as a number.
+  const fields = { topic: 't', partition: 1, timestamp: 5n, key: 'k', value: 'v' };
   assert.deepEqual({ ...r }, { ...fields, headers: r.headers });
-  // JSON writes the headers as their array (Headers' toJSON), each a {key,
-  // value} data object; structuredClone keeps the fields, and the headers'
-  // own (none: Headers holds its list in a private field).
-  assert.deepEqual(JSON.parse(JSON.stringify(r)), { ...fields, headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }] });
+  // JSON writes the timestamp as a decimal string (toJSON), the headers as
+  // their array (Headers' toJSON), each a {key, value} data object;
+  // structuredClone keeps the fields, and the headers' own (none: Headers
+  // holds its list in a private field).
+  assert.deepEqual(JSON.parse(JSON.stringify(r)), { ...fields, timestamp: '5', headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }] });
   assert.deepEqual(structuredClone(r), { ...fields, headers: {} });
   // Not frozen (readonly is TypeScript's); the headers are the record's own
   // Headers, holding the given Header objects, as Java's new RecordHeaders(headers).
@@ -140,8 +142,8 @@ test("Java's constructor checks keep Java's messages", () => {
 test("Java's six constructors each build the record they name", () => {
   const h = [new Header({ key: 'h', value: bytes('x') })];
   const cases = [
-    [{ topic: 't', partition: 1, timestamp: 2, key: 'k', value: 'v', headers: h }, [1, 2, 'k', 'v', 1]],
-    [{ topic: 't', partition: 1, timestamp: 2, key: 'k', value: 'v' }, [1, 2, 'k', 'v', 0]],
+    [{ topic: 't', partition: 1, timestamp: 2, key: 'k', value: 'v', headers: h }, [1, 2n, 'k', 'v', 1]],
+    [{ topic: 't', partition: 1, timestamp: 2n, key: 'k', value: 'v' }, [1, 2n, 'k', 'v', 0]],
     [{ topic: 't', partition: 1, key: 'k', value: 'v', headers: h }, [1, null, 'k', 'v', 1]],
     [{ topic: 't', partition: 1, key: 'k', value: 'v' }, [1, null, 'k', 'v', 0]],
     [{ topic: 't', key: 'k', value: 'v' }, [null, null, 'k', 'v', 0]],
@@ -269,13 +271,28 @@ test('values of the wrong type are TypeErrors', () => {
     name: 'TypeError',
     message: 'partition must be an integer or null',
   });
-  assert.throws(() => new ProducerRecord({ topic: 't', partition: 2 ** 31, key: null, value: 'v' }), {
-    name: 'RangeError',
-    message: 'partition must be at most 2147483647',
-  });
+  // Java's int range: a RangeError beyond it, Java's own check below zero.
+  for (const partition of [2 ** 31, -(2 ** 31) - 1]) {
+    assert.throws(() => new ProducerRecord({ topic: 't', partition, key: null, value: 'v' }), {
+      name: 'RangeError',
+      message: 'partition must be from -2147483648 to 2147483647',
+    });
+  }
+  // Java's long: a number above 2^53 - 1 throws rather than rounding, and a
+  // bigint holds every long exactly.
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, timestamp: 2 ** 53, key: null, value: 'v' }), {
     name: 'RangeError',
-    message: 'timestamp must be at most 9007199254740991',
+    message: 'timestamp must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly',
+  });
+  assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: 2n ** 63n - 1n, key: null, value: 'v' }).timestamp, 2n ** 63n - 1n);
+  assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: Number.MAX_SAFE_INTEGER, key: null, value: 'v' }).timestamp, 9007199254740991n);
+  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, timestamp: 2n ** 63n, key: null, value: 'v' }), {
+    name: 'RangeError',
+    message: 'timestamp must be from -9223372036854775808 to 9223372036854775807',
+  });
+  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, timestamp: 1.5, key: null, value: 'v' }), {
+    name: 'TypeError',
+    message: 'timestamp must be a bigint, an integer or null',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: 'x' }), {
     name: 'TypeError',
@@ -295,7 +312,7 @@ test("the caller's key and value bytes cross as they are, for the addon to borro
   const [topic, partition, timestamp, k, v, headers] = r.internalToNative();
   assert.equal(topic, 't');
   assert.equal(partition, 3);
-  assert.equal(timestamp, 1000);
+  assert.equal(timestamp, 1000n);
   assert.equal(k, key);
   assert.equal(v, value);
   assert.equal(headers, null);
@@ -311,7 +328,7 @@ test('strings are encoded as UTF-8 and null stays null', () => {
   });
   const [, partition, timestamp, k, v, headers] = r.internalToNative();
   assert.equal(partition, -1);
-  assert.equal(timestamp, -1);
+  assert.equal(timestamp, -1n);
   assert.deepEqual(k, Buffer.from('clé', 'utf8'));
   assert.equal(v, null);
   assert.deepEqual(keysAsText(headers), [['h', bytes('é')], ['n', null]]);
@@ -349,13 +366,13 @@ const REASSIGNED = [
   ['headers', [null], { name: 'TypeError', message: 'Header cannot be null.' }],
   ['headers', 'x', { name: 'TypeError', message: 'headers must be a Headers, or an iterable of Header' }],
   ['headers', undefined, { name: 'TypeError', message: "headers must not be undefined. Leave the key out, or pass null for Java's null" }],
-  ['timestamp', NaN, { name: 'TypeError', message: 'timestamp must be an integer or null' }],
+  ['timestamp', NaN, { name: 'TypeError', message: 'timestamp must be a bigint, an integer or null' }],
   ['timestamp', -5, { name: 'IllegalArgumentError', message: 'Invalid timestamp: -5. Timestamp should always be non-negative or null.' }],
-  ['timestamp', 2 ** 53, { name: 'RangeError', message: `timestamp must be at most ${Number.MAX_SAFE_INTEGER}` }],
+  ['timestamp', 2 ** 53, { name: 'RangeError', message: 'timestamp must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly' }],
   ['partition', NaN, { name: 'TypeError', message: 'partition must be an integer or null' }],
   ['partition', 0.5, { name: 'TypeError', message: 'partition must be an integer or null' }],
   ['partition', Infinity, { name: 'TypeError', message: 'partition must be an integer or null' }],
-  ['partition', 2 ** 32, { name: 'RangeError', message: 'partition must be at most 2147483647' }],
+  ['partition', 2 ** 32, { name: 'RangeError', message: 'partition must be from -2147483648 to 2147483647' }],
   ['partition', -5, { name: 'IllegalArgumentError', message: 'Invalid partition: -5. Partition number should always be non-negative or null.' }],
   ['topic', null, { name: 'IllegalArgumentError', message: 'Topic cannot be null.' }],
   ['topic', 7, { name: 'TypeError', message: 'topic must be a string' }],

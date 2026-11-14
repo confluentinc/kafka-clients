@@ -80,6 +80,10 @@ const ALLOWED = [
     key: 'src/producer/producer_record.ts:INT32_MAX',
     reason: "the largest partition the C ABI's int32_t carries: a range check of one record, not a cap of records",
   },
+  {
+    key: 'src/producer/producer_record.ts:INT64_MAX',
+    reason: "the largest timestamp Java's long carries: a range check of one record, not a cap of records",
+  },
   { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
   {
     key: 'src/common/header/headers.ts:EMPTY',

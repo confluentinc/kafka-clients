@@ -61,6 +61,8 @@ const key: Data = 'k';
 const record = new ProducerRecord({ topic: 't', partition: 0, timestamp: null, key, value: new Uint8Array(1), headers });
 // One signature per Java constructor.
 new ProducerRecord({ topic: 't', partition: 0, timestamp: 5, key: null, value: 'v' });
+// A long takes a bigint too.
+new ProducerRecord({ topic: 't', partition: 0, timestamp: 5n, key: null, value: 'v' });
 new ProducerRecord({ topic: 't', partition: null, key, value: 'v', headers });
 new ProducerRecord({ topic: 't', partition: null, key: null, value: null });
 new ProducerRecord({ topic: 't', key, value: 'v' });
@@ -106,12 +108,15 @@ new Headers([['k', null]]);
 // @ts-expect-error a {key, value} object is not a Header
 built.add({ header: { key: 'k', value: null } });
 // A data object: its fields spread into a plain object of the same types.
-const { timestamp: recordTimestamp, key: recordKey, value: recordValue }: { timestamp: number | null; key: Data | null; value: Data | null } = { ...record };
+const { timestamp: recordTimestamp, key: recordKey, value: recordValue }: { timestamp: bigint | null; key: Data | null; value: Data | null } = { ...record };
 void [recordTimestamp, recordKey, recordValue];
 
 const callback: Callback = ({ metadata, exception: error }: { metadata: RecordMetadata; exception: Error | null }) => {
+  // Java's long: a bigint.
   const offset = metadata.offset;
-  expectTypeOf(offset).toEqualTypeOf<number>();
+  expectTypeOf(offset).toEqualTypeOf<bigint>();
+  expectTypeOf(metadata.timestamp).toEqualTypeOf<bigint>();
+  expectTypeOf(metadata.partition).toEqualTypeOf<number>();
   const hasOffset = metadata.hasOffset;
   expectTypeOf(hasOffset).toEqualTypeOf<boolean>();
   // Classified with instanceof (or `name`): an error has no code or retriable flag.
@@ -173,8 +178,8 @@ async function produce(): Promise<void> {
   expectTypeOf(now).toEqualTypeOf<RecordMetadata | null>();
   const nowToo = future.getNow({ valueIfAbsent: null });
   expectTypeOf(nowToo).toEqualTypeOf<RecordMetadata | null>();
-  const offset: KafkaFuture<number> = future.thenApply((m) => m.offset);
-  const offsetToo: KafkaFuture<number> = future.thenApply({ function: (m: RecordMetadata) => m.offset });
+  const offset: KafkaFuture<bigint> = future.thenApply((m) => m.offset);
+  const offsetToo: KafkaFuture<bigint> = future.thenApply({ function: (m: RecordMetadata) => m.offset });
   const fn: KafkaFuture.BaseFunction<RecordMetadata, string> = (m) => m.topic;
   const topicFuture = future.thenApply(fn);
   expectTypeOf(topicFuture).toEqualTypeOf<KafkaFuture<string>>();
@@ -283,7 +288,7 @@ async function produce(): Promise<void> {
   // @ts-expect-error cancel's mayInterruptIfRunning is required, as Java's
   future.cancel();
   // @ts-expect-error thenApply's function is called positionally with one value
-  future.thenApply((a: RecordMetadata, b: number) => a.offset + b);
+  future.thenApply((a: RecordMetadata, b: bigint) => a.offset + b);
   // @ts-expect-error get's timeout is a Duration
   await future.get('5000');
   const unknown = RecordMetadata.UNKNOWN_PARTITION;
@@ -425,7 +430,7 @@ new ProducerConfig();
 
 // Made by the client only: the constructors are private, and the library's
 // own factories and methods are left out of the declarations (stripInternal).
-const fields = { topic: 't', partition: 0, hasOffset: true, offset: 0, hasTimestamp: true, timestamp: 0, serializedKeySize: -1, serializedValueSize: -1 };
+const fields = { topic: 't', partition: 0, hasOffset: true, offset: 0n, hasTimestamp: true, timestamp: 0n, serializedKeySize: -1, serializedValueSize: -1 };
 // @ts-expect-error RecordMetadata's constructor is private
 new RecordMetadata(fields);
 // @ts-expect-error KafkaFuture's constructor is private
@@ -500,9 +505,9 @@ import('@confluentinc/kafka-javascript/dist/internal/errors');
 const literalMetadata: RecordMetadata = {
   topic: 't',
   partition: 0,
-  offset: 0,
+  offset: 0n,
   hasOffset: true,
-  timestamp: 0,
+  timestamp: 0n,
   hasTimestamp: true,
   serializedKeySize: -1,
   serializedValueSize: -1,

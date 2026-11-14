@@ -363,7 +363,14 @@ metadata wait)*.
 public `readonly` fields, set once in the constructor (`record.topic`,
 `metadata.offset`, `metadata.hasOffset`), so `{ ...metadata }`,
 `JSON.stringify` and `structuredClone` keep them. Java's `-1` and `null` are
-kept as Java returns them (`offset` is `-1` when `hasOffset` is `false`). The
+kept as Java returns them (`offset` is `-1n` when `hasOffset` is `false`).
+A Java `long` is a `bigint`: `metadata.offset`, `metadata.timestamp` and
+`record.timestamp` read as bigints, exact at every value, and a timestamp
+given to `ProducerRecord` is a bigint or a whole number up to 2^53 - 1 (a
+larger number throws `RangeError` rather than rounding). `JSON.stringify`
+writes a bigint as a decimal string, such as `"42"`, which `BigInt()` reads
+back exactly. A Java `int`, such as a partition, stays a number, and one
+outside Java's range throws `RangeError`. The
 objects are not frozen: `readonly` is checked by TypeScript, and a field
 reassigned from plain JavaScript is checked again at `send()`, which rejects
 with the constructor's error for that value (`record.value = undefined`
@@ -515,6 +522,7 @@ code relying on them keeps running with another meaning: check each.
 | `SslClientAuth.REQUIRED.toString()` was `'required'` | **silent**: it is `'REQUIRED'`, the name, as for every enum |
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
 | `key.serializer` / `value.serializer` reached the core | they throw `ConfigError`: a serializer is a constructor argument |
+| `metadata.offset` / `metadata.timestamp` / `record.timestamp` numbers | bigints, Java's `long`; a timestamp is given as a bigint or a whole number up to 2^53 - 1 |
 | an unknown config key took an array or a bigint | it takes a string, a number or a boolean (`ConfigError` otherwise) |
 | the preview warning had the code `CONFLUENT_KAFKA_PREVIEW` | it has no code: filter on its type, `ExperimentalWarning` |
 | `record.headers` an array | `record.headers` a `Headers` (Java's methods: `add`, `remove`, `lastHeader`, `headers(key)`, `toArray()`, iteration), made read-only by `send()` |

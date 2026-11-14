@@ -118,10 +118,12 @@ fn constant_doc(
     Ok(format!("Java's `{java}.{name}`."))
 }
 
-/// A constant's TypeScript value and its type.
-fn js_value(v: &Value) -> Res<(String, String)> {
+/// A constant's TypeScript value and its type: a `long` constant (`long`
+/// true) is a `bigint`, as the root conventions' Types table maps Java's long.
+fn js_value(v: &Value, long: bool) -> Res<(String, String)> {
     Ok(match v {
         Value::Str(s) => (js_str(s), "string".into()),
+        Value::Int(n) if long => (format!("{n}n"), "bigint".into()),
         Value::Int(n) => {
             if n.unsigned_abs() > (1u64 << 53) {
                 anyhow::bail!("config constants: {n} does not fit a JavaScript number");
@@ -137,7 +139,7 @@ fn js_value(v: &Value) -> Res<(String, String)> {
             let mut parts = Vec::new();
             let mut ty: Option<String> = None;
             for i in items {
-                let (p, t) = js_value(i)?;
+                let (p, t) = js_value(i, false)?;
                 if ty.as_ref().is_some_and(|x| *x != t) {
                     anyhow::bail!("config constants: a collection of mixed types {items:?}");
                 }
@@ -232,7 +234,12 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         text.push_str(&tsdoc(&about, ""));
         text.push_str(&format!("\nexport class {name} {{\n"));
         for (n, v, owner) in &consts {
-            let (val, ty) = js_value(v)?;
+            let long = reader
+                .class(owner)?
+                .fields
+                .iter()
+                .any(|f| f.name == *n && matches!(f.ty.as_str(), "long" | "Long"));
+            let (val, ty) = js_value(v, long)?;
             let mut doc = constant_doc(&mut reader, &docs, owner, n, v)?;
             if let Some((_, _, t)) = NOTES.iter().find(|(c, k, _)| c == java && k == n) {
                 doc.push_str("\n\n");
@@ -311,6 +318,13 @@ mod tests {
         assert!(sasl
             .content
             .contains("  static readonly DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR: number = 0.8;\n"));
+        // Java's long is a bigint; an int stays a number.
+        assert!(sasl
+            .content
+            .contains("  static readonly DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN: bigint = 60000n;\n"));
+        assert!(sasl
+            .content
+            .contains("  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS: bigint = 3600000n;\n"));
     }
 
     #[test]

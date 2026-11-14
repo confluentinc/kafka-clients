@@ -97,10 +97,13 @@ test('send resolves at hand-over; the future fails after the callback ran once',
     assert.equal(metadata.topic, 'unit-t');
     assert.equal(metadata.partition, RecordMetadata.UNKNOWN_PARTITION);
     assert.equal(metadata.hasOffset, false);
-    assert.equal(metadata.offset, -1);
+    // Java's longs: bigints.
+    assert.equal(metadata.offset, -1n);
+    assert.equal(metadata.timestamp, -1n);
     assert.equal(metadata.toString(), 'unit-t--1@-1');
-    // The fields are data: a spread or JSON copy keeps every one.
-    assert.deepEqual(JSON.parse(JSON.stringify(metadata)), { ...metadata });
+    // The fields are data: a spread or JSON copy keeps every one, the longs
+    // as decimal strings in JSON.
+    assert.deepEqual(JSON.parse(JSON.stringify(metadata)), { ...metadata, offset: '-1', timestamp: '-1' });
     assert.equal(Object.keys(metadata).length, 8);
     assert.equal(error.message, TIMEOUT_MESSAGE('unit-t'));
     assert.equal(calls.length, 1);
@@ -333,11 +336,11 @@ test('send() rejects a record whose field was reassigned to a value the construc
     for (const [field, value, expected] of [
       ['value', undefined, { name: 'TypeError', message: "value must not be undefined. Pass null for Java's null, which sends a tombstone." }],
       ['headers', [['h', null]], { name: 'TypeError', message: 'a header must be a Header' }],
-      ['timestamp', NaN, { name: 'TypeError', message: 'timestamp must be an integer or null' }],
+      ['timestamp', NaN, { name: 'TypeError', message: 'timestamp must be a bigint, an integer or null' }],
       ['partition', NaN, { name: 'TypeError', message: 'partition must be an integer or null' }],
       ['partition', 0.5, { name: 'TypeError', message: 'partition must be an integer or null' }],
       ['partition', Infinity, { name: 'TypeError', message: 'partition must be an integer or null' }],
-      ['partition', 2 ** 32, { name: 'RangeError', message: 'partition must be at most 2147483647' }],
+      ['partition', 2 ** 32, { name: 'RangeError', message: 'partition must be from -2147483648 to 2147483647' }],
       ['partition', -5, { name: 'IllegalArgumentError', message: 'Invalid partition: -5. Partition number should always be non-negative or null.' }],
       ['topic', null, { name: 'IllegalArgumentError', message: 'Topic cannot be null.' }],
     ]) {

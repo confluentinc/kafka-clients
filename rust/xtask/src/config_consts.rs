@@ -92,6 +92,8 @@ fn java_double(d: f64) -> Res<String> {
 #[derive(Clone, Debug)]
 pub struct Field {
     pub name: String,
+    /// The declared type as written (`long`, `String`, `List<String>`).
+    pub ty: String,
     pub init: Option<String>,
     pub public: bool,
     pub static_final: bool,
@@ -813,8 +815,14 @@ fn member(head: &str, block: Option<&str>, simple: &str, fqn: &str, c: &mut JCla
         })
         .unwrap_or(mods.len());
     let has = |m: &str| mods[..ty_start].contains(&m);
-    c.fields
-        .push(Field { name, init, public: has("public"), static_final: has("static") && has("final") });
+    let ty = mods[ty_start..].join(" ");
+    c.fields.push(Field {
+        name,
+        ty,
+        init,
+        public: has("public"),
+        static_final: has("static") && has("final"),
+    });
     Ok(())
 }
 

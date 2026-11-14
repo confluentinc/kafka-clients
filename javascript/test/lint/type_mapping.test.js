@@ -44,6 +44,7 @@ const TYPED = javaClass('clients.producer.Typed', {
     method('pick', ['String'], { return_type: 'void', param_names: ['x'] }),
     method('pick', ['int'], { return_type: 'void', param_names: ['x'] }),
     method('widget', [], { return_type: 'Widget' }),
+    method('seek', ['long'], { return_type: 'void', param_names: ['offset'] }),
   ],
   fields: [field('ON', { type: 'Mode' })],
 });
@@ -56,7 +57,7 @@ export type Data = Uint8Array | string;
 declare class Buffer extends Uint8Array {}
 export class Typed {
   static readonly ON: Mode = Mode.ON;
-  get count(): number { return 1; }
+  get count(): bigint { return 1n; }
   get ready(): boolean | null { return null; }
   get label(): string { return ''; }
   get key(): Data | null { return null; }
@@ -69,6 +70,7 @@ export class Typed {
   flush(): void {}
 ${PAUSE}
   pick(options: { x: string | number }): void { void options; }
+  seek(offset: bigint | number): void { void offset; }
 }
 `;
 const FUTURE_TS =
@@ -116,10 +118,22 @@ test('Java byte[] is bytes only: a string, or bytes or a string, is a type-misma
   }
 });
 
+test("Java's long is a bigint returned, and a bigint or a number taken", () => {
+  for (const [from, to, finding] of [
+    ['get count(): bigint { return 1n; }', 'get count(): number { return 1; }', 'Typed.count: type: Java long is not TypeScript number'],
+    ['get count(): bigint { return 1n; }', 'get count(): bigint | number { return 1; }', 'Typed.count: type: Java long is not TypeScript number | bigint'],
+    ['seek(offset: bigint | number)', 'seek(offset: number)', 'Typed.seek: parameter offset: Java long is not TypeScript number'],
+    ['seek(offset: bigint | number)', 'seek(offset: bigint)', 'Typed.seek: parameter offset: Java long is not TypeScript bigint'],
+  ]) {
+    const r = lint(fixture({ 'src/producer/typed.ts': TYPED_TS.replace(from, to) }), [RULE]);
+    assert.deepEqual(findings(r), [finding], to);
+  }
+});
+
 test('a type off the table is a type-mismatch; a Java type with no row is unmapped', () => {
   const r = lint(
     fixture({
-      'src/producer/typed.ts': TYPED_TS.replace('get count(): number', 'get count(): string')
+      'src/producer/typed.ts': TYPED_TS.replace('get count(): bigint { return 1n; }', 'get count(): string { return ""; }')
         .replace('future(): KafkaFuture<Rec>', 'future(): KafkaFuture<string>')
         .replace('wait(timeout: number): void { void timeout; }', 'wait(timeout: string): void { void timeout; }')
         .replace('flush(): void {}', 'widget(): unknown { return null; }\n  flush(): Promise<void> { return Promise.resolve(); }')

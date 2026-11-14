@@ -299,8 +299,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   final` constants are static properties (`RecordMetadata.UNKNOWN_PARTITION`).
   Value classes have `toJSON()` *(js-only)*, whose output is frozen once
   released (`Header`'s writes `{ key, value }`, `Headers`' its array, an
-  enum's its name); how it writes a `long` is not decided yet in the root
-  conventions. `toString()` is Java's but an enum's (a fixed table for
+  enum's its name, `ProducerRecord`'s and `RecordMetadata`'s their fields
+  with each `long` as a decimal string, root conventions, Types).
+  `toString()` is Java's but an enum's (a fixed table for
   `toString()` is not decided yet in the root conventions). A constant Java
   `List` is a frozen array, a constant `Set` a read-only set
   (`src/internal/read_only_set.ts`) whose `add`, `delete` and `clear` throw
@@ -479,10 +480,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   and callbacks: anti-patterns inside a send callback).
 - `KafkaProducer` has `close()` and `[Symbol.asyncDispose]()`, which calls
   `close()`, so `await using` closes it.
-- A Java `long` crosses as a JS `number` (offsets and timestamps stay below
-  2^53); how `long` values are typed is not decided yet in the root
-  conventions, and neither are `boolean`, `int` and the other primitives'
-  rows (the proposal is `boolean` and `number`).
+- A Java `long` is a `bigint` (root conventions, Types): returned always as a
+  `bigint` (`RecordMetadata.offset` and `.timestamp`, `ProducerRecord.timestamp`,
+  a `long` constant such as `SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN`),
+  and taken as a `bigint` or a whole `number` up to 2^53 - 1, a larger number
+  throwing `RangeError` rather than rounding; the addon reads and writes it
+  with `napi_get_value_bigint_int64` / `napi_create_bigint_int64`. A Java
+  `int` is a `number`, and one outside Java's range throws `RangeError`
+  (`ProducerRecord`'s partition). Timeouts stay milliseconds or a
+  `Temporal.Duration` (Q22).
 - Errors (root conventions, Errors): the generated error hierarchy is the
   Python client's: one class per FFI id, Java's name with its `Exception`
   suffix as `Error`, Java's `extends` chain (`SaslAuthenticationError extends

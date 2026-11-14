@@ -59,9 +59,12 @@ type NativeHeader = [Uint8Array, Uint8Array | null];
  * The record arguments of the native send (`internal/native.ts`
  * `producerSend`): topic, partition, timestamp, key, value, headers.
  */
-type NativeRecord = [string, number, number, Uint8Array | null, Uint8Array | null, NativeHeader[] | null];
+type NativeRecord = [string, number, bigint, Uint8Array | null, Uint8Array | null, NativeHeader[] | null];
 
+const INT32_MIN = -(2 ** 31);
 const INT32_MAX = 2 ** 31 - 1;
+const INT64_MIN = -(2n ** 63n);
+const INT64_MAX = 2n ** 63n - 1n;
 
 function isBytes(value: unknown): value is Uint8Array {
   return value instanceof Uint8Array;
@@ -83,12 +86,28 @@ function checkHeaders(headers: unknown): Headers {
   return Headers.internalTaken(headers === undefined ? null : headers);
 }
 
-// Java's Integer / Long argument: null, or an integer number.
-function checkOptionalInteger(value: unknown, what: string, max: number): number | null {
+// Java's Integer argument: null, or a whole number in Java's int range.
+function checkOptionalInt(value: unknown, what: string): number | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be an integer or null`);
-  if (value > max) throw new RangeError(`${what} must be at most ${max}`);
+  if (value < INT32_MIN || value > INT32_MAX) throw new RangeError(`${what} must be from ${INT32_MIN} to ${INT32_MAX}`);
   return value;
+}
+
+// Java's Long argument: null, a bigint in Java's long range, or a whole
+// number a JavaScript number holds exactly, read as a bigint (root CLAUDE.md,
+// JavaScript Binding Conventions, Types).
+function checkOptionalLong(value: unknown, what: string): bigint | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'bigint') {
+    if (value < INT64_MIN || value > INT64_MAX) throw new RangeError(`${what} must be from ${INT64_MIN} to ${INT64_MAX}`);
+    return value;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be a bigint, an integer or null`);
+  if (Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError(`${what} must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly`);
+  }
+  return BigInt(value);
 }
 
 // The constructor's checks of one argument, shared with the send-time
@@ -100,16 +119,16 @@ function checkTopic(topic: unknown): string {
   return topic;
 }
 
-function checkTimestamp(timestamp: unknown): number | null {
-  const checked = checkOptionalInteger(timestamp, 'timestamp', Number.MAX_SAFE_INTEGER);
-  if (checked !== null && checked < 0) {
+function checkTimestamp(timestamp: unknown): bigint | null {
+  const checked = checkOptionalLong(timestamp, 'timestamp');
+  if (checked !== null && checked < 0n) {
     throw illegalArgument(`Invalid timestamp: ${checked}. Timestamp should always be non-negative or null.`);
   }
   return checked;
 }
 
 function checkPartition(partition: unknown): number | null {
-  const checked = checkOptionalInteger(partition, 'partition', INT32_MAX);
+  const checked = checkOptionalInt(partition, 'partition');
   if (checked !== null && checked < 0) {
     throw illegalArgument(`Invalid partition: ${checked}. Partition number should always be non-negative or null.`);
   }
@@ -155,7 +174,7 @@ export class ProducerRecord {
   readonly partition: number | null;
 
   /** The timestamp, which is in milliseconds since epoch. */
-  readonly timestamp: number | null;
+  readonly timestamp: bigint | null;
 
   /** The key (or null if no key is specified) */
   readonly key: Data | null;
@@ -176,9 +195,9 @@ export class ProducerRecord {
    *   Java's constructors, or the topic is null, or the timestamp or the
    *   partition is negative, as Java's IllegalArgumentException
    * @throws `TypeError` when an argument has the wrong type or is `undefined`
-   * @throws `RangeError` when the partition is above 2^31 - 1 or the timestamp
-   *   above 2^53 - 1, beyond Java's `Integer` and the integers a JS number
-   *   holds exactly
+   * @throws `RangeError` when the partition is beyond Java's `Integer`, the
+   *   timestamp a bigint beyond Java's `Long`, or a number beyond 2^53 - 1,
+   *   the integers a JS number holds exactly
    *
    * @remarks The parameters given are one of Java's constructors, each a
    * signature of its own: `{topic, partition, timestamp, key, value,
@@ -195,10 +214,11 @@ export class ProducerRecord {
     /** The partition to which the record should be sent, or null. */
     partition: number | null;
     /**
-     * The timestamp of the record, in milliseconds since epoch. If null, the
-     * producer will assign the timestamp using System.currentTimeMillis().
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
      */
-    timestamp: number | null;
+    timestamp: bigint | number | null;
     /** The key that will be included in the record, or null. */
     key: Data | null;
     /** The record contents, or null (a tombstone). */
@@ -223,10 +243,11 @@ export class ProducerRecord {
     /** The partition to which the record should be sent, or null. */
     partition: number | null;
     /**
-     * The timestamp of the record, in milliseconds since epoch. If null, the
-     * producer will assign the timestamp using System.currentTimeMillis().
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
      */
-    timestamp: number | null;
+    timestamp: bigint | number | null;
     /** The key that will be included in the record, or null. */
     key: Data | null;
     /** The record contents, or null (a tombstone). */
@@ -334,6 +355,34 @@ export class ProducerRecord {
   }
 
   /**
+   * The record as `JSON.stringify` writes it: its fields in their order, the
+   * timestamp a decimal string (or null), which `BigInt()` reads back exactly.
+   * It ignores the key `JSON.stringify` passes.
+   *
+   * @returns the record's fields
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol: `JSON.stringify` throws
+   * on a `bigint`, and a `number` loses digits above 2^53.
+   */
+  toJSON(): {
+    topic: string;
+    partition: number | null;
+    timestamp: string | null;
+    key: Data | null;
+    value: Data | null;
+    headers: Headers;
+  } {
+    return {
+      topic: this.topic,
+      partition: this.partition,
+      timestamp: this.timestamp === null ? null : this.timestamp.toString(),
+      key: this.key,
+      value: this.value,
+      headers: this.headers,
+    };
+  }
+
+  /**
    * The arguments of the native send: topic, partition and timestamp (-1 for
    * null), key and value bytes, header pairs or null; then the record's headers are made read-only, as
    * Java's `doSend` seals them (`setReadOnly`) before handing the record
@@ -356,7 +405,7 @@ export class ProducerRecord {
     if (
       typeof topic === 'string' &&
       (partition === null || (typeof partition === 'number' && Number.isInteger(partition) && partition >= 0 && partition <= INT32_MAX)) &&
-      (timestamp === null || (typeof timestamp === 'number' && Number.isInteger(timestamp) && timestamp >= 0 && timestamp <= Number.MAX_SAFE_INTEGER)) &&
+      (timestamp === null || (typeof timestamp === 'bigint' && timestamp >= 0n && timestamp <= INT64_MAX)) &&
       (key === null || typeof key === 'string' || isBytes(key)) &&
       (value === null || typeof value === 'string' || isBytes(value)) &&
       headers instanceof Headers
@@ -365,7 +414,7 @@ export class ProducerRecord {
       const out: NativeRecord = [
         topic,
         partition === null ? -1 : partition,
-        timestamp === null ? -1 : timestamp,
+        timestamp === null ? -1n : timestamp,
         toBytes(key),
         toBytes(value),
         nativeHeaders,
@@ -390,7 +439,7 @@ export class ProducerRecord {
     const out: NativeRecord = [
       topic,
       partition === null ? -1 : partition,
-      timestamp === null ? -1 : timestamp,
+      timestamp === null ? -1n : timestamp,
       toBytes(key),
       toBytes(value),
       nativeHeaders,

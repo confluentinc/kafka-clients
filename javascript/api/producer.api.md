@@ -128,7 +128,7 @@ export class ProducerRecord {
     constructor(options: {
         topic: string;
         partition: number | null;
-        timestamp: number | null;
+        timestamp: bigint | number | null;
         key: Data | null;
         value: Data | null;
         headers: Iterable<Header> | null;
@@ -136,7 +136,7 @@ export class ProducerRecord {
     constructor(options: {
         topic: string;
         partition: number | null;
-        timestamp: number | null;
+        timestamp: bigint | number | null;
         key: Data | null;
         value: Data | null;
         headers?: never;
@@ -176,7 +176,15 @@ export class ProducerRecord {
     readonly headers: Headers_2;
     readonly key: Data | null;
     readonly partition: number | null;
-    readonly timestamp: number | null;
+    readonly timestamp: bigint | null;
+    toJSON(): {
+        topic: string;
+        partition: number | null;
+        timestamp: string | null;
+        key: Data | null;
+        value: Data | null;
+        headers: Headers_2;
+    };
     readonly topic: string;
     // (undocumented)
     toString(): string;
@@ -187,11 +195,21 @@ export class ProducerRecord {
 export class RecordMetadata {
     readonly hasOffset: boolean;
     readonly hasTimestamp: boolean;
-    readonly offset: number;
+    readonly offset: bigint;
     readonly partition: number;
     readonly serializedKeySize: number;
     readonly serializedValueSize: number;
-    readonly timestamp: number;
+    readonly timestamp: bigint;
+    toJSON(): {
+        topic: string;
+        partition: number;
+        offset: string;
+        hasOffset: boolean;
+        timestamp: string;
+        hasTimestamp: boolean;
+        serializedKeySize: number;
+        serializedValueSize: number;
+    };
     readonly topic: string;
     // (undocumented)
     toString(): string;

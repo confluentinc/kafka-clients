@@ -130,6 +130,21 @@ test('printJson writes one compact line', () => {
   assert.deepEqual(written, [[1, '{"timestamp":1,"name":"x","key":null}\n']]);
 });
 
+test("printJson writes a bigint, Java's long, as the exact JSON number Jackson writes", () => {
+  const written = [];
+  const original = fs.writeSync;
+  fs.writeSync = (fd, buffer) => {
+    written.push(Buffer.from(buffer).toString('utf8'));
+    return buffer.length;
+  };
+  try {
+    printJson({ offset: 9007199254740993n, partition: 0 });
+  } finally {
+    fs.writeSync = original;
+  }
+  assert.deepEqual(written, ['{"offset":9007199254740993,"partition":0}\n']);
+});
+
 test('printJson reports data it cannot write as JSON', () => {
   const written = [];
   const original = fs.writeSync;
@@ -138,7 +153,10 @@ test('printJson reports data it cannot write as JSON', () => {
     return buffer.length;
   };
   try {
-    printJson({ offset: 1n });
+    // A cycle: JSON.stringify throws on it.
+    const data = { offset: 1n };
+    data.self = data;
+    printJson(data);
   } finally {
     fs.writeSync = original;
   }
