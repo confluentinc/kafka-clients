@@ -369,12 +369,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   passes it). `toString()` returns the name, unless Java overrides it:
   `SslClientAuth.REQUIRED.toString()` is `'required'`, Java's
   `super.toString().toLowerCase(Locale.ROOT)`, while its `toJSON()` stays
-  `'REQUIRED'`. This reading follows the rule for the similar case (the
-  root's Class family names `toString()` with `toJSON()` for an enum, the
-  name, but says nothing of Java's override): Rule 1 puts content with Java,
-  root §3 prints a constant's name "unless Java overrides it", and Python
-  reaches Java's `toString()` through `__str__` (a fixed table for
-  `toString()` is still not decided yet in the root conventions). Java's
+  `'REQUIRED'`. The root decides it: its JDK-interfaces row (Class family,
+  Q29) has "`toString()` keeps Java's format, with JavaScript's spelling of
+  values (Q37)"; the Class family's enum sentence, `toString()` and
+  `toJSON()` returning the name, says nothing of Java's override, and Rule 1
+  puts content with Java, as root §3 prints a constant's name "unless Java
+  overrides it" and Python reaches Java's `toString()` through `__str__`. Java's
   `SecurityProtocol.name` field and `name()` are the one method.
 - A `null` key or value binds `never` (root conventions, Class family, Q26),
   through extra TypeScript signatures for the null combinations, as Python's
