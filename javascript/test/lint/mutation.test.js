@@ -428,7 +428,7 @@ MUTATIONS.push(
   {
     rule: 'check-type-mapping',
     what: 'a non-blocking method returning a Promise',
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  isDone(): boolean {\n', '  isDone(): Promise<boolean> {\n'),
+    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  isCancelled(): boolean {\n', '  isCancelled(): Promise<boolean> {\n'),
   },
   {
     rule: 'check-cb-twin-only',
@@ -443,13 +443,13 @@ MUTATIONS.push(
   },
   {
     rule: 'check-cb-twin-only',
-    what: "the hand-over's future read through get_cb",
+    what: "a record's future read through the blocking get",
     apply: (root) =>
       edit(
         root,
         'native/producer.c',
-        '    if (value != NULL) error_warn(p->env, !p->queue.finalizing, FFI_ERR(kafka_common_KafkaFuture_destroy_err(value, &ffi_err)));',
-        '    if (value != NULL) kafka_common_KafkaFuture_get_cb(value, send_on_future, ctx);\n    if (value != NULL) error_warn(p->env, !p->queue.finalizing, FFI_ERR(kafka_common_KafkaFuture_destroy_err(value, &ffi_err)));',
+        '    if (!w->timed) kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_common_KafkaFuture_get(f->future, &ffi_err));\n    }\n    if (!w->timed) kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);',
       ),
   },
   {
@@ -527,14 +527,14 @@ MUTATIONS.push(
   },
   {
     rule: 'check-completion-order',
-    what: 'the future completed before the user callback',
+    what: 'the delivery recorded before the user callback',
     apply: (root) => {
-      edit(root, 'src/producer/kafka_producer.ts', '      let failure: string | undefined;\n', '      let failure: string | undefined;\n      future.internalComplete(metadata, error);\n');
+      edit(root, 'src/producer/kafka_producer.ts', '      let failure: string | undefined;\n', '      let failure: string | undefined;\n      future.internalSetDelivery(metadata, error);\n');
     },
   },
   {
     rule: 'check-completion-order',
-    what: "the delivery callback's body moved into a module function completing the future first",
+    what: "the delivery callback's body moved into a module function recording the delivery first",
     apply: (root) => {
       const file = path.join(root, 'src/producer/kafka_producer.ts');
       const text = fs.readFileSync(file, 'utf8');
@@ -544,7 +544,7 @@ MUTATIONS.push(
         file,
         text.replace(body[0], '    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined =>\n      deliver(future, userCallback, metadata, error);\n') +
           '\nfunction deliver(future: KafkaFuture<RecordMetadata>, userCallback: Callback | null, metadata: RecordMetadata, error: Error | null): string | undefined {\n' +
-          '  future.internalComplete(metadata, error);\n  if (userCallback !== null) userCallback({ metadata, exception: error });\n  return undefined;\n}\n',
+          '  future.internalSetDelivery(metadata, error);\n  if (userCallback !== null) userCallback({ metadata, exception: error });\n  return undefined;\n}\n',
       );
     },
   },

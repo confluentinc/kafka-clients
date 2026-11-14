@@ -29,12 +29,27 @@
 //      functions of native/*.c it calls.
 // A use that leads nowhere (no registration, no C definition) is a finding of
 // its own: an unresolved path never passes. A method with no native use is
-// not checked.
+// not checked. A member that reaches a future's waits only to complete the
+// dependant it returns (`DEPENDANTS`) need not return a Promise.
 
+const { applyAllowlist } = require('../c_model');
 const { atNode } = require('../location');
 const { functionBodies, callSites, propertyDescriptors, prototypes } = require('../c_source');
 const { exportedItems, publicMembers } = require('../java_ts');
 const { nativeUses, reachedBodies } = require('../native_uses');
+
+/**
+ * The members that reach a future's waits (its `_cb` twins
+ * `kafka_common_KafkaFuture_get_cb` / `_get_with_timeout_cb`) only to
+ * complete what they return, a dependant, without waiting themselves: Java's
+ * returns at once, so theirs does. Each with its reason; an entry that
+ * matches nothing is a finding.
+ */
+const DEPENDANTS = [
+  { key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" },
+  { key: 'KafkaFuture.thenApply', reason: "thenApply's dependant, completed by the source's wait" },
+  { key: 'KafkaFuture.whenComplete', reason: "whenComplete's dependant, completed by the source's wait" },
+];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */
 function callGraph(ctx) {
@@ -107,14 +122,20 @@ function analyse(ctx) {
   });
 }
 
-/** The `Class.member` subjects whose native path reaches a `_cb` twin: the blocking methods. */
+/** The `Class.member` subjects whose native path reaches a `_cb` twin: the blocking methods (a dependant's excepted). */
 function waitingMembers(ctx) {
-  return new Set(analyse(ctx).filter((w) => w.unresolved.length === 0 && w.twins.size > 0).map((w) => w.subject));
+  const dependants = new Set(DEPENDANTS.map((d) => d.key));
+  return new Set(
+    analyse(ctx)
+      .filter((w) => w.unresolved.length === 0 && w.twins.size > 0 && !dependants.has(w.subject))
+      .map((w) => w.subject),
+  );
 }
 
 module.exports = {
   name: 'check-waiting-call-promise',
-  kinds: ['not-promise', 'promise-not-waiting', 'unresolved-native'],
+  kinds: ['not-promise', 'promise-not-waiting', 'unresolved-native', 'waiting-unused-allowance'],
+  DEPENDANTS,
   needs: ['program', 'native', 'header'],
   hint:
     'A method whose native call waits on a _cb twin returns a Promise settled by that completion; one ' +
@@ -122,23 +143,26 @@ module.exports = {
   waitingMembers,
   check(ctx) {
     const { checker } = ctx.program();
-    const findings = [];
+    // In order; a not-promise finding of a dependant DEPENDANTS allows is dropped.
+    const raw = [];
     let checked = 0;
     for (const w of analyse(ctx)) {
       checked += 1;
       const { subject, uses, twins, unresolved, returned, promise } = w;
       const at = atNode(ctx, w.m.node);
-      for (const message of unresolved) findings.push({ at, kind: 'unresolved-native', subject, message });
+      for (const message of unresolved) raw.push({ at, kind: 'unresolved-native', subject, message });
       if (unresolved.length > 0) continue;
       if (twins.size > 0 && !promise) {
-        findings.push({
+        raw.push({
           at,
           kind: 'not-promise',
           subject,
           message: `reaches ${[...twins].sort().join(', ')} but returns ${checker.typeToString(returned)}`,
+          // Only a dependant that reaches nothing but a future's waits.
+          allow: [...twins].every((t) => /^kafka_common_KafkaFuture_get(_with_timeout)?_cb$/.test(t)) ? subject : undefined,
         });
       } else if (twins.size === 0 && promise) {
-        findings.push({
+        raw.push({
           at,
           kind: 'promise-not-waiting',
           subject,
@@ -146,6 +170,7 @@ module.exports = {
         });
       }
     }
-    return { findings, checked };
+    const { kept, unused } = applyAllowlist(raw, this.DEPENDANTS, 'waiting-unused-allowance');
+    return { findings: [...kept, ...unused], checked };
   },
 };

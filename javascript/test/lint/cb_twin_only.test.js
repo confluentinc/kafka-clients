@@ -42,20 +42,23 @@ test('the blocking form of a _cb twin is a finding', () => {
   assert.deepEqual(findings(r), ['native/producer.c:36: js_send calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
 });
 
-test('reading the future is a finding in every form, its _cb twins included', () => {
+test("a record's future is read through its _cb twins, never the blocking get", () => {
   const { HEADER } = require('./_c_fixture');
-  const header = `${HEADER}\nvoid *kafka_common_KafkaFuture_get(const kafka_common_KafkaFuture_t *self_, kafka_common_Error_t **out_err);\n\nvoid kafka_common_KafkaFuture_get_cb(const kafka_common_KafkaFuture_t *self_, kafka_common_KafkaFuture_get_cb_t cb, void *opaque);\n\nvoid kafka_common_KafkaFuture_get_with_timeout_cb(const kafka_common_KafkaFuture_t *self_, int64_t timeout_ms, kafka_common_KafkaFuture_get_with_timeout_cb_t cb, void *opaque);\n`;
-  const r = runN(RULE, {
+  const header = `${HEADER}\nvoid *kafka_common_KafkaFuture_get(const kafka_common_KafkaFuture_t *self_, kafka_common_Error_t **out_err);\n\nvoid kafka_common_KafkaFuture_get_cb(const kafka_common_KafkaFuture_t *self_, kafka_common_KafkaFuture_get_cb_t cb, void *opaque);\n\nvoid *kafka_common_KafkaFuture_get_with_timeout(const kafka_common_KafkaFuture_t *self_, int64_t timeout_ms, kafka_common_Error_t **out_err);\n\nvoid kafka_common_KafkaFuture_get_with_timeout_cb(const kafka_common_KafkaFuture_t *self_, int64_t timeout_ms, kafka_common_KafkaFuture_get_with_timeout_cb_t cb, void *opaque);\n`;
+  const twins = '    kafka_common_KafkaFuture_get_cb(value, on_handover, opaque);\n    kafka_common_KafkaFuture_get_with_timeout_cb(value, 0, on_handover, opaque);\n';
+  const destroy = '    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));';
+  let r = runN(RULE, { 'confluent_kafka_bindings.h': header, 'native/producer.c': PRODUCER_C.replace(destroy, `${twins}${destroy}`) });
+  assert.equal(r.status, 0, r.text);
+  r = runN(RULE, {
     'confluent_kafka_bindings.h': header,
     'native/producer.c': PRODUCER_C.replace(
-      '    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));',
-      '    kafka_common_KafkaFuture_get_cb(value, on_handover, opaque);\n    kafka_common_KafkaFuture_get_with_timeout_cb(value, 0, on_handover, opaque);\n    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));',
+      destroy,
+      `    FFI_DISCARD(kafka_common_KafkaFuture_get(value, &ffi_err));\n    FFI_DISCARD(kafka_common_KafkaFuture_get_with_timeout(value, 0, &ffi_err));\n${destroy}`,
     ),
   });
-  const reason = "never read the future (javascript/CLAUDE.md rule 5): a send's future is destroyed unread, the delivery result comes from the record's Callback_t";
   assert.deepEqual(findings(r), [
-    `native/producer.c:22: on_handover calls kafka_common_KafkaFuture_get_cb: ${reason}`,
-    `native/producer.c:23: on_handover calls kafka_common_KafkaFuture_get_with_timeout_cb: ${reason}`,
+    'native/producer.c:22: on_handover calls kafka_common_KafkaFuture_get, the blocking form of kafka_common_KafkaFuture_get_cb: call the _cb twin',
+    'native/producer.c:23: on_handover calls kafka_common_KafkaFuture_get_with_timeout, the blocking form of kafka_common_KafkaFuture_get_with_timeout_cb: call the _cb twin',
   ]);
 });
 

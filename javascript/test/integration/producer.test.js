@@ -22,7 +22,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { ExecutionError } = require('@confluentinc/kafka-javascript');
+const { ExecutionError, TimeoutError: RootTimeoutError } = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const { TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
@@ -157,6 +157,54 @@ test("a record's dependants complete inside the delivery, whatever their functio
     await assert.rejects(failed, (e) => e.constructor === ExecutionError && e.cause === revoked.proxy);
     assert.equal(failing.isCompletedExceptionally(), true);
     assert.deepEqual(seen, [true, true, true, true, true]);
+  } finally {
+    await producer.close();
+  }
+});
+
+test("a record's future waits through the FFI's get_cb and get_with_timeout_cb, completing after its callback", { skip: SKIP, timeout: 120000 }, async () => {
+  const topic = freshTopic('native-future');
+  // A long linger keeps the record undelivered while its future is read.
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 3000 } });
+  try {
+    // The topic's metadata first, so the next record is taken at once.
+    await (await producer.send(new ProducerRecord({ topic, value: 'warm-up' }))).get();
+    const order = [];
+    let future = null;
+    future = await producer.send({
+      record: new ProducerRecord({ topic, value: 'v' }),
+      callback: () => {
+        order.push(`callback done=${future.isDone()}`);
+      },
+    });
+    future.whenComplete(() => order.push('dependant'));
+    assert.equal(future.isDone(), false);
+    assert.equal(future.getNow('absent'), 'absent');
+    // The FFI keeps the time of a timed wait: no JavaScript timer runs.
+    const setTimeoutBefore = globalThis.setTimeout;
+    let timers = 0;
+    globalThis.setTimeout = (...args) => {
+      timers += 1;
+      return setTimeoutBefore(...args);
+    };
+    try {
+      // The root TimeoutError (Java's java.util.concurrent.TimeoutException),
+      // with the core's message; a negative timeout does not wait.
+      await assert.rejects(future.get({ timeout: 100 }), (e) => e.constructor === RootTimeoutError && e.message === 'Timed out waiting for KafkaFuture after 100 ms');
+      await assert.rejects(future.get(-1), (e) => e.constructor === RootTimeoutError && e.message === 'Timed out waiting for KafkaFuture after 0 ms');
+    } finally {
+      globalThis.setTimeout = setTimeoutBefore;
+    }
+    assert.equal(timers, 0);
+    assert.equal(future.isDone(), false);
+    const metadata = await future.get();
+    assert.equal(metadata.topic, topic);
+    // The callback ran before the future completed, then the dependant.
+    assert.deepEqual(order, ['callback done=false', 'dependant']);
+    assert.equal(future.isDone(), true);
+    assert.equal(future.getNow(null), metadata);
+    // A done future answers a timed get at once, with the same metadata.
+    assert.equal(await future.get({ timeout: 0 }), metadata);
   } finally {
     await producer.close();
   }

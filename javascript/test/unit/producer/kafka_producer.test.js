@@ -79,7 +79,10 @@ test('send resolves at hand-over; the future fails after the callback ran once',
     const calls = [];
     const sent = producer.send({
       record: new ProducerRecord({ topic: 'unit-t', key: 'k', value: 'v' }),
-      callback: ({ metadata, exception }) => calls.push({ metadata, error: exception }),
+      // A block body: a callback that returns a value is awaited (rule 6).
+      callback: ({ metadata, exception }) => {
+        calls.push({ metadata, error: exception });
+      },
     });
     assert.ok(sent instanceof Promise);
     // Java's send() returns after max.block.ms with a failed future (its
@@ -711,7 +714,9 @@ test('a negative close timeout on an open producer is rejected first and changes
 test('close() while a send waits for metadata rejects that send with a bare KafkaError', async () => {
   const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'max.block.ms': 60000 } });
   const calls = [];
-  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-close-waiting', value: 'v' }), callback: () => calls.push('callback') });
+  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-close-waiting', value: 'v' }), callback: () => {
+      calls.push('callback');
+    } });
   let settled = false;
   sent.then(
     () => (settled = true),
@@ -739,7 +744,9 @@ test('flush() does not wait for a send still waiting for metadata', async () => 
     const calls = [];
     const sent = producer.send({
       record: new ProducerRecord({ topic: 'unit-flush-waiting', value: 'v' }),
-      callback: ({ exception }) => calls.push(exception),
+      callback: ({ exception }) => {
+        calls.push(exception);
+      },
     });
     let handedOver = false;
     sent.then(
