@@ -102,6 +102,7 @@ const ORDER = [
   'check-default-helpers',
   'check-mock-native',
   'check-encode-callers',
+  'check-commonjs-pin',
   'check-directives',
   'check-config',
 ];

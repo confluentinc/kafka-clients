@@ -33,7 +33,8 @@ const ROOT = path.join(__dirname, '..', '..');
 const LICENSE_END = 'limitations under the License.\n';
 
 /**
- * A copy of the client's src/, native/, tsconfig.json, CLAUDE.md (whose rule
+ * A copy of the client's src/, native/, tsconfig.json, package.json (the
+ * CommonJS pin's), CLAUDE.md (whose rule
  * sentence check-no-todo exempts), both baselines, the mapping lists
  * (lint-mapping.json), the committed Java index (java-index.json) and
  * bindings header, with the findings the rules
@@ -43,7 +44,7 @@ const LICENSE_END = 'limitations under the License.\n';
  */
 function realCopy() {
   const root = project({});
-  for (const rel of ['src', 'native', 'tsconfig.json', 'CLAUDE.md', 'lint-baseline.txt', 'eslint-baseline.txt', 'lint-mapping.json']) copy(ROOT, root, rel);
+  for (const rel of ['src', 'native', 'tsconfig.json', 'package.json', 'CLAUDE.md', 'lint-baseline.txt', 'eslint-baseline.txt', 'lint-mapping.json']) copy(ROOT, root, rel);
   // The test that calls the test-only registration probe (check-native-registry).
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
@@ -801,6 +802,12 @@ MUTATIONS.push(
     rule: 'check-encode-callers',
     what: 'the duration helper turning a string into bytes through encodeLikeJava',
     apply: (root) => edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}import { encodeLikeJava } from './encode';\nvoid encodeLikeJava('x');\n`),
+  },
+  {
+    rule: 'check-commonjs-pin',
+    what: 'an exports entry with an import condition beside types and default',
+    apply: (root) =>
+      edit(root, 'package.json', '"default": "./dist/producer/index.js"\n', '"default": "./dist/producer/index.js",\n      "import": "./dist/producer/index.mjs"\n'),
   },
 );
 
