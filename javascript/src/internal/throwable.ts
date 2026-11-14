@@ -136,9 +136,9 @@ function matcherOf(r: Registered): JavaForms {
     {
       order: ['message', 'cause'].filter((p) => r.forms.some(([params]) => params.includes(p))),
       bareTypes,
-      // The ES2022 `new Error(message, { cause })`: one object instead.
-      manyArguments: (count) =>
-        `${r.name}() takes one object of named parameters, not ${count} arguments: pass the message and the cause as one object, new ${r.name}({ message, cause })`,
+      // The ES2022 `new Error(message, { cause })` is the form check's error
+      // for more than one argument (root CLAUDE.md, JavaScript Binding
+      // Conventions, Errors, Q39), listing the class's forms.
     },
   );
   return r.matcher;

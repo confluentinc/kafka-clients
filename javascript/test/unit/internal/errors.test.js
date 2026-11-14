@@ -450,12 +450,27 @@ test("the constructors are Java's message and cause, by name or bare", () => {
     name: 'IllegalArgumentError',
     message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got (message, reason)',
   });
-  // The ES2022 `new Error(message, { cause })` points to the one object.
+  // The ES2022 `new Error(message, { cause })`, and any second argument, is
+  // the form check's error, listing the class's forms.
   assert.throws(() => new KafkaError('m', { cause }), {
     name: 'IllegalArgumentError',
-    message:
-      'KafkaError() takes one object of named parameters, not 2 arguments: pass the message and the cause as one object, ' +
-      'new KafkaError({ message, cause })',
+    message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got 2 arguments, not one object of named parameters',
+  });
+  assert.throws(() => new KafkaError({ message: 'm' }, undefined), {
+    name: 'IllegalArgumentError',
+    message: 'KafkaError() takes one of (message, cause), (message), (cause), (); got 2 arguments, not one object of named parameters',
+  });
+  assert.throws(() => new TopicAuthorizationError('m', cause, 3), {
+    name: 'IllegalArgumentError',
+    message: 'TopicAuthorizationError() takes one of (message); got 3 arguments, not one object of named parameters',
+  });
+  assert.throws(() => new common.errors.CoordinatorNotAvailableError('m', cause), {
+    name: 'IllegalArgumentError',
+    message: 'CoordinatorNotAvailableError() takes one of (message), (message, cause); got 2 arguments, not one object of named parameters',
+  });
+  assert.throws(() => new IllegalStateError('m', cause), {
+    name: 'IllegalArgumentError',
+    message: 'IllegalStateError() takes one of (), (message), (message, cause), (cause); got 2 arguments, not one object of named parameters',
   });
   // A form Java does not have is refused: TopicAuthorizationException has no
   // (String, Throwable) constructor.

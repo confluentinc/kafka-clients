@@ -583,9 +583,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   key documented on the options type. Each form's message is the one Java's
   constructor chain gives: the cause's `String()` for `(cause)`, as Java's is
   `cause.toString()`, or Java's own fixed text. A second argument (ES2022's
-  `new Error(message, { cause })`) throws an error pointing to
-  `new X({ message, cause })`; its class, `IllegalArgumentError` today, is
-  not decided yet in the root conventions. Java's abstract bases (`RetriableError`, ...)
+  `new Error(message, { cause })`) is the form check's error for more than
+  one argument (Signatures, above), listing the class's forms:
+  `KafkaError() takes one of (message, cause), (message), (cause), (); got 2
+  arguments, not one object of named parameters`; its class,
+  `IllegalArgumentError` today, is not decided yet in the root conventions. Java's abstract bases (`RetriableError`, ...)
   are catch-only: constructing one throws `TypeError` (how a Java abstract
   class is presented: not decided yet in the root conventions). A user's
   subclass takes the forms of its nearest generated class. The constructors

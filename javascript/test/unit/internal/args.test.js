@@ -253,9 +253,6 @@ test('more than one argument is refused with the form error, never dropped', () 
     illegal('send() takes one of (record), (record, callback); got 2 arguments, not one object of named parameters'),
   );
   assert.throws(() => CLOSE.match(5, 3), illegal('close() takes one of (), (timeout); got 3 arguments, not one object of named parameters'));
-  // A method may word it.
-  const ERROR = new JavaForms('E', [['message']], { manyArguments: (count) => `E: ${count}` });
-  assert.throws(() => ERROR.match('m', 2), illegal('E: 2'));
 });
 
 test('a bare undefined is a TypeError naming the parameter', () => {
