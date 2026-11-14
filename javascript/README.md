@@ -342,8 +342,11 @@ is an object `{ serialize({ topic, headers, data }), close?() }` (Java's two
 `serialize` methods as one), given as a constructor argument, or made by a
 synchronous function `({ configs, isKey }) => serializer` in
 `key.serializer` / `value.serializer`, which the producer calls once with the
-whole configuration, in place of Java's class and its `configure()`. The keys
-the function reads don't reach the client's core, as Java marks them used. A
+whole configuration, in place of Java's class and its `configure()`. A key the
+function reads that the client's core doesn't know, such as
+`schema.registry.url`, doesn't reach the core, as Java marks it used; the
+producer's own keys always do. The function gets the configuration as given,
+without Java's computed `client.id`, and runs before the core checks it. A
 constructor argument wins, and its config key is then ignored.
 `stringSerializer()` writes a string as Java's `StringSerializer` does, and
 goes in a config key without `()`:
