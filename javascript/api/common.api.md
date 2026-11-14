@@ -170,7 +170,7 @@ export class Node {
 // @public
 export class PartitionInfo {
     constructor(options: {
-        topic: string;
+        topic: string | null;
         partition: number;
         leader: Node | null;
         replicas: Iterable<Node> | null;
@@ -178,7 +178,7 @@ export class PartitionInfo {
         offlineReplicas?: never;
     });
     constructor(options: {
-        topic: string;
+        topic: string | null;
         partition: number;
         leader: Node | null;
         replicas: Iterable<Node> | null;
@@ -195,7 +195,7 @@ export class PartitionInfo {
     offlineReplicas(): Node[] | null;
     partition(): number;
     replicas(): Node[] | null;
-    topic(): string;
+    topic(): string | null;
     toString(): string;
 }
 

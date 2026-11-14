@@ -606,7 +606,7 @@ expectTypeOf(Node.noNode()).toEqualTypeOf<Node>();
 // @ts-expect-error isFenced needs the rack, as Java's constructors do
 void new Node({ id: 1, host: 'h', port: 9092, isFenced: true });
 declare const info: PartitionInfo;
-expectTypeOf(info.topic()).toEqualTypeOf<string>();
+expectTypeOf(info.topic()).toEqualTypeOf<string | null>();
 expectTypeOf(info.leader()).toEqualTypeOf<Node | null>();
 // @ts-expect-error Java's constructors take the leader and the replicas too
 void new PartitionInfo({ topic: 't' });
