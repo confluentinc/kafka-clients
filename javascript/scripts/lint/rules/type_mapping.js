@@ -57,7 +57,7 @@
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
 // | Map<String, String>, returned                | Map<string, string>                     |
 // | Map<String, String>, taken                   | a Map or ReadonlyMap, or a plain object (Record) of string to string |
-// | Map, Properties (a client's configuration)   | the `...Configs` configuration type     |
+// | Map, Properties (a client's configuration)   | the `...Configs` configuration type (& its serde keys) |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
 //
@@ -297,8 +297,13 @@ module.exports = {
         return elem === undefined ? true : matches(elem, e);
       }
       if (j.name === 'Map' || j.name === 'Properties') {
-        const n = (t0.aliasSymbol && t0.aliasSymbol.name) || symbolName(t);
-        return n.endsWith('Configs') ? true : 'unmapped';
+        const configsType = (x) => ((x.aliasSymbol && x.aliasSymbol.name) || symbolName(x)).endsWith('Configs');
+        // The configuration type, or it intersected with the serde config
+        // keys that bind the client's type arguments (`ProducerConfigs &
+        // SerdeConfigs<K, V>`).
+        if (configsType(t0)) return true;
+        if (t.flags & ts.TypeFlags.Intersection) return t.types.some(configsType) ? true : 'unmapped';
+        return configsType(t) ? true : 'unmapped';
       }
       if (/^[A-Z]$/.test(j.name)) return (t.flags & ts.TypeFlags.TypeParameter) !== 0;
       if (tsNames.has(j.name)) {

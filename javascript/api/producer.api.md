@@ -33,16 +33,16 @@ export type CloseArgs = {
 export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {
     [Symbol.asyncDispose](): Promise<void>;
     constructor(options: {
-        configs: ProducerConfigs;
+        configs: ProducerConfigs & SerdeConfigs<K, V>;
         keySerializer?: never;
         valueSerializer?: never;
     });
     constructor(options: {
-        configs: ProducerConfigs;
+        configs: ProducerConfigs & SerdeConfigs<K, V>;
         keySerializer: Serializer<K> | null;
         valueSerializer: Serializer<V> | null;
     });
-    constructor(configs: ProducerConfigs);
+    constructor(configs: ProducerConfigs & SerdeConfigs<K, V>);
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
