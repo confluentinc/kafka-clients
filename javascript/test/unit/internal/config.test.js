@@ -144,10 +144,19 @@ test("the producer's own serde keys and the keys a serde function read never rea
       ['a', '1'],
     ],
   );
-  const read = new Set(['schema.registry.url']);
+  // A read key the core doesn't know is left out; a producer key of Java's
+  // reaches the core all the same, as Java only marks it used.
+  const read = new Set(['schema.registry.url', 'bootstrap.servers', 'client.id']);
   assert.deepEqual(
-    entriesAsBytes({ 'schema.registry.url': 'http://sr', b: 2 }, read).map(([k, v]) => [k.toString(), v.toString()]),
-    [['b', '2']],
+    entriesAsBytes({ 'schema.registry.url': 'http://sr', 'bootstrap.servers': 'b:1', 'client.id': 'c', b: 2 }, read).map(([k, v]) => [
+      k.toString(),
+      v.toString(),
+    ]),
+    [
+      ['bootstrap.servers', 'b:1'],
+      ['client.id', 'c'],
+      ['b', '2'],
+    ],
   );
 });
 

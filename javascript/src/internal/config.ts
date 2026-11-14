@@ -30,10 +30,13 @@
 //   object as `[object Object]`), for the core to check.
 // - Unknown keys pass, and the core lists the ones it does not use.
 // - The producer's own serde keys, `key.serializer` and `value.serializer`,
-//   never reach the core, and neither do the keys a serde config function
-//   read (src/internal/serde.ts): as Java's `originals()` marks them used, so
-//   the core does not list them as unused (root CLAUDE.md, JavaScript Binding
-//   Conventions, Serialization, Q53). The consumer's serde keys
+//   never reach the core, and neither does a key a serde config function read
+//   (src/internal/serde.ts) that is no producer key of Java's (a
+//   `schema.registry.url`), so the core does not list it as unused, as Java's
+//   `originals()` marks it used (root CLAUDE.md, JavaScript Binding
+//   Conventions, Serialization, Q53). A producer key the function read still
+//   reaches the core, since Java only marks it (javascript/CLAUDE.md, the
+//   serde config keys, a root conflict). The consumer's serde keys
 //   (`key.deserializer`, ...) pass, and the core lists them as unused.
 // - Keys and values cross as bytes, encoded once per client by
 //   `encodeLikeJava` (src/internal/encode.ts): a lone surrogate becomes `?`,
@@ -41,6 +44,7 @@
 
 import { ConfigError } from '../common/config/config_error';
 import { encodeLikeJava } from './encode';
+import { isProducerConfigKey } from './producer_config_keys';
 
 function typeName(value: unknown): string {
   if (value === null) return 'null';
@@ -153,14 +157,16 @@ export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>
  * strings), checked as `checkConfigs` checks them, each value written as a
  * string. `null` and `undefined` values are dropped, as an absent key, and so
  * are the producer's own serde keys and the keys in `leftOut`, those a serde
- * config function read.
+ * config function read, except the producer keys of Java's, which the core
+ * uses.
  */
 export function configEntries(configs: unknown, leftOut: ReadonlySet<string> = NONE): Array<[Buffer, Buffer]> {
   const checked = checkConfigs(configs);
   const out: Array<[Buffer, Buffer]> = [];
   for (const key of Object.keys(checked)) {
     const value = checked[key];
-    if (value === null || value === undefined || isSerializerKey(key) || leftOut.has(key)) continue;
+    if (value === null || value === undefined || isSerializerKey(key)) continue;
+    if (leftOut.has(key) && !isProducerConfigKey(key)) continue;
     // Encoded once per client, as Java encodes a string (src/internal/encode.ts).
     out.push([encodeLikeJava(key), encodeLikeJava(configValue(value))]);
   }

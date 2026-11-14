@@ -72,8 +72,11 @@ function isSerializer(value: unknown): value is Serializer<unknown> {
  * configuration, in place of Java's class and its `configure(configs, isKey)`
  * (root CLAUDE.md, JavaScript Binding Conventions, Serialization, Q53). The
  * configuration it gets records each of its keys the function reads, into
- * `read`, so that the producer leaves them out of the configuration it sends
- * to the core, as Java's `originals()` marks them used.
+ * `read`, so that the producer leaves those the core doesn't know out of the
+ * configuration it sends to the core, as Java's `originals()` marks them
+ * used. The configuration is the user's, without Java's computed
+ * `client.id`, and the function runs before the core checks it
+ * *(deviation: the core doesn't exist yet; javascript/CLAUDE.md)*.
  *
  * @throws `ConfigError` when the value is a class name (a string), a
  *   serializer object, a class or any other value that is no function, or
