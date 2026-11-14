@@ -779,13 +779,10 @@ MUTATIONS.push(
   },
   {
     rule: 'check-default-helpers',
-    what: 'a Java default method on Callback, which then lacks its helper class',
+    what: 'a helper class of Java default methods that no interface asks for',
     apply: (root) => {
-      const file = path.join(root, 'java-index.json');
-      const index = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const callback = index.classes.find((c) => c.package === 'clients.producer' && c.path.join('$') === 'Callback');
-      callback.overloads[0].default = true;
-      fs.writeFileSync(file, JSON.stringify(index));
+      const header = fs.readFileSync(path.join(root, 'src/internal/encode.ts'), 'utf8').split(LICENSE_END)[0] + LICENSE_END;
+      add(root, 'src/internal/callback_defaults.ts', `${header}\nexport class CallbackDefaults {}\n`);
     },
   },
   {

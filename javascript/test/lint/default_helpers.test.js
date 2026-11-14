@@ -69,6 +69,36 @@ test('a missing helper, a missing default method and a helper nothing asks for a
   ]);
 });
 
+// A root-shaped Serializer (root CLAUDE.md, JavaScript Binding Conventions,
+// Serialization): one serialize for Java's two, no configure, close optional.
+// Only close, the one default it keeps, asks for a helper method.
+test("only the Java defaults the TypeScript interface keeps as optional members need a helper method", () => {
+  const serializer = javaClass('common.serialization.Serializer', {
+    kind: 'interface',
+    overloads: [
+      method('configure', ['Map', 'boolean'], { default: true }),
+      method('serialize', ['String', 'Object']),
+      method('serialize', ['String', 'Headers', 'Object'], { default: true }),
+      method('close', [], { default: true }),
+    ],
+  });
+  const files = (helper) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...CLASSES, serializer]),
+      ...LIB,
+      'src/common/serialization/serializer.ts':
+        'export interface Serializer {\n  serialize(options: { topic: string; headers: unknown; data: unknown }): Uint8Array | null;\n  close?(): void;\n}\n',
+      'src/internal/serializer_defaults.ts': helper,
+    });
+  let r = lint(files('export class SerializerDefaults {\n  close(): void {}\n}\n'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(files('export class SerializerDefaults {}\n'), [RULE]);
+  assert.deepEqual(findings(r), [
+    "SerializerDefaults.close: src/internal/serializer_defaults.ts does not translate Java's default org.apache.kafka.common.serialization.Serializer#close",
+  ]);
+});
+
 test('an interface an exported class implements is the client\'s, not the user\'s: it needs no helper', () => {
   const r = lint(
     fixture({ 'src/consumer/listener_impl.ts': "import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';\nexport class ListenerImpl implements ConsumerRebalanceListener {\n  onPartitionsRevoked(): void {}\n}\n" }),

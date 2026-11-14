@@ -1000,9 +1000,11 @@ The rules, each named in its finding:
 - `check-default-helpers`: each interface the user implements (an
   exported interface or function type translating a Java interface that no
   exported class implements: `Callback`, not `Producer`) whose Java
-  interface has a `default` method (the Java index's flag) has its helper
-  class, holding Java's default bodies (root conventions, Class family,
-  Q28). The root names its example, `ConsumerRebalanceListenerDefaults`,
+  interface has a `default` method that the TypeScript interface keeps as an
+  optional member (the Java index's flag, and `name?`: a default the root
+  drops or merges, such as a serde's `configure` or second `serialize`,
+  needs none) has its helper class, holding Java's default bodies (root
+  conventions, Class family, Q28). The root names its example, `ConsumerRebalanceListenerDefaults`,
   and leaves the scheme open; this binding fixes it: the class
   `<Interface>Defaults`, in `src/internal/<interface>_defaults.ts`, with a
   method of each default method's name. A `...Defaults` class nothing asks
