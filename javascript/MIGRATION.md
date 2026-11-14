@@ -190,7 +190,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | positional arguments, `send(record, callback)` | one object of Java's names, `send({ record, callback })`, or the value on its own for a one-parameter form, `send(record)`, `close(5000)` | A second argument is refused with `IllegalArgumentError`, never dropped |
 | `undefined` for "not given" | leave the key or the argument out; `null` is Java's null | `undefined` as a value throws `TypeError` naming the parameter (`"value must not be undefined. Pass null for Java's null, which sends a tombstone."`), except in a configuration, where it leaves the key out |
 | timeouts in milliseconds, `-1` for "forever" | milliseconds or a `Temporal.Duration`; `Infinity` for no limit, `0` for "don't wait" | A negative timeout throws `IllegalArgumentError` |
-| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one) or a string | Copied during `send()`: the caller may change or reuse its bytes once `send()` returns. A key or value read back from the client is a `Buffer` |
+| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one) or a string | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
 
 ## 2. Not offered, by design
 

@@ -157,28 +157,29 @@ These decide every question, in this order:
    awaited one by one are concurrent, like Java sends on several threads; this
    is documented on `send`, in its compiled declaration and in the README. The
    binding never holds records back itself.
-8. **One copy of the app's key and value; strings encoded as Java encodes
-   them.** The copy is the root conventions' (Serialization, and the FFI table
-   of Implementation over the FFI): the binding copies each key and value the
-   app hands over as a `Buffer` or `Uint8Array`, one a serializer returns
-   included, and frees the copy when the record completes; bytes the binding
-   makes itself skip the copy; header values are always copied. Here the addon
-   makes the copy (`native/record.c` `js_bytes_copy`, one allocation for
-   both) into memory it owns, which the core reads as a `kafka_Bytes_t`; a
-   string's bytes, the binding's own Buffer, cross without a copy (kept by a
-   `napi_ref` until the record completes; `producerSend`'s `owned` bits say
-   which). The addon frees the copy, and drops those references, when the
-   record completes: in its delivery callback (`send_on_completion`, which
-   also runs at close and at environment teardown), or at a failed hand-over;
-   a record that cannot be built frees it at once; each path frees once
-   (`send_ctx_release_bytes` clears the pointer). **(root conflict)** The
-   core copies at append, so freeing at the hand-over completion would be
-   safe and use less memory (a review verified it); the code follows the root
-   text. The user-facing contract,
-   documented wherever `send` is: the caller may change, reuse or detach its
-   bytes as soon as `send()` returns. `src/` copies no bytes itself (that
-   would be a second copy). Header values are handed over during the call,
-   in which the core copies them: the C API keeps no borrowed header value.
+8. **No copy of the app's key and value; strings encoded as Java encodes
+   them.** The rule is the root conventions' (Serialization, and the FFI table
+   of Implementation over the FFI): the binding doesn't copy a key or value
+   the app hands over as a `Buffer` or `Uint8Array`, one a serializer returns
+   included, nor the Buffer it makes itself for a string. The addon reads
+   each as a `kafka_Bytes_t` over the Buffer's own memory (`native/record.c`
+   `js_bytes`) and holds a `napi_ref` on the Buffer (`SendCtx.key_ref` /
+   `value_ref`, taken in `js_producer_send`), which it drops in the send's
+   hand-over completion (`send_on_handover`, through
+   `send_ctx_release_buffers`), whether the record was taken or refused, on
+   the JS thread: the FFI borrows the bytes only until that completion
+   (`rust/src/ffi/producer/mod.rs`, module docs), and the core copies them
+   when it appends the record. A record that can't be built drops them at
+   once. Header values are handed over during the call, in which the core
+   copies them: the C API keeps no borrowed header value. The user-facing
+   contract, documented on `send`, in its compiled declaration and in the
+   README, is the root conventions' text: "The client reads a `Buffer` or
+   `Uint8Array` key or value after `send()` returns. Don't write to it,
+   transfer it or resize it until the Promise from `send()` settles;
+   awaiting `send()` is enough. A serializer must return a new Buffer for
+   each record.", plus, for a Buffer over a `SharedArrayBuffer`, "If other
+   workers share the Buffer's memory, they mustn't write to it until then
+   either." `src/` copies no bytes itself.
 
    Strings follow the root conventions (Types, the paragraph after the
    table): one function, `encodeLikeJava(s)` in `src/internal/encode.ts`, is
@@ -191,9 +192,9 @@ These decide every question, in this order:
    skip it and cross as JS strings. What plain JavaScript
    gets for a string key or value without a serializer is not decided yet in
    the root conventions; the producer now encodes it through the same rule.
-   `check-one-copy` and `check-string-encoding` partly enforce this (The rule
+   `check-zero-copy` and `check-string-encoding` partly enforce this (The rule
    linter, below). Not checked: which strings go through `encodeLikeJava`,
-   when the copy is freed, and copies in other `native/` files.
+   and copies in other `native/` files.
 9. **Ownership follows the signature.** Errors from `out_err` and from `_cb`
    completions are owned: copied into a JS error (`src/internal/errors.ts`),
    then destroyed, before the Promise settles (root conventions, Errors). An
@@ -590,7 +591,7 @@ The layout is the root conventions' (Layout and modules).
   function; `callback_queue.c` is a client's notify hook, threadsafe
   function, drain, keep-alive and teardown (each client embeds a
   `CallbackQueue` and passes its own `__execute_callbacks`); `error.c`,
-  `record.c` (`ProducerRecord`, the copy of the app's key and value, and
+  `record.c` (`ProducerRecord`, the borrowed key and value, and
   headers), `producer.c` (the `KafkaProducer` handle).
 - `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
   per Java package (`clients` dropped), one public Java type per file,
@@ -837,8 +838,9 @@ The rules, each named in its finding:
 - `check-out-err`, `check-cb-twin-only`, `check-notify-hook`,
   `check-single-drainer`, `check-completion-order`, `check-ownership`,
   `check-no-binding-queue`: boundary rules 1 to 10, in the addon.
-- `check-one-copy`: the one copy of the app's key and value (rule 8), and no
-  copy of bytes in `src/`.
+- `check-zero-copy`: no copy of the app's key and value on the send path, a
+  `napi_ref` on each borrowed Buffer dropped by the hand-over completion
+  (rule 8), and no copy of bytes in `src/`.
 - `check-string-encoding`: `encodeLikeJava` in `src/internal/encode.ts` is the
   only place a string becomes bytes (no `Buffer.from(string)`, `TextEncoder`
   or string write elsewhere).

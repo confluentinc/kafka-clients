@@ -572,20 +572,27 @@ MUTATIONS.push(
       ),
   },
   {
-    rule: 'check-one-copy',
+    rule: 'check-zero-copy',
     what: 'a memcpy of the key',
     apply: (root) =>
       edit(root, 'native/record.c', '    out->bytes.len = (int32_t)length;', '    out->bytes.len = (int32_t)length;\n    memcpy((void*)out->bytes.data, data, length);'),
   },
   {
-    rule: 'check-one-copy',
+    rule: 'check-zero-copy',
     what: 'a Uint8Array key copied by Buffer.from in src/',
     apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.from(value);'),
   },
   {
-    rule: 'check-one-copy',
-    what: "the addon's copy of the key and value gone",
-    apply: (root) => edit(root, 'native/record.c', '        memcpy(bytes, key->bytes.data, key_len);\n', ''),
+    rule: 'check-zero-copy',
+    what: "the key's Buffer released at delivery, not at the hand-over",
+    apply: (root) =>
+      edit(root, 'native/producer.c', '    send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {', '    if (!p->queue.finalizing && ctx->on_handover != NULL) {'),
+  },
+  {
+    rule: 'check-zero-copy',
+    what: "the send's reference on the value's Buffer gone",
+    apply: (root) =>
+      edit(root, 'native/producer.c', '        || (!ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)\n', ''),
   },
   {
     rule: 'check-string-encoding',

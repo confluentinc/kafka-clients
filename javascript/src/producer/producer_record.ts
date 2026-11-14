@@ -57,11 +57,9 @@ type NativeHeader = [Uint8Array, Uint8Array | null];
 
 /**
  * The record arguments of the native send (`internal/native.ts`
- * `producerSend`): topic, partition, timestamp, key, value, which of key (1)
- * and value (2) are the client's own bytes (an encoded string, which the
- * addon need not copy), headers.
+ * `producerSend`): topic, partition, timestamp, key, value, headers.
  */
-type NativeRecord = [string, number, number, Uint8Array | null, Uint8Array | null, number, NativeHeader[] | null];
+type NativeRecord = [string, number, number, Uint8Array | null, Uint8Array | null, NativeHeader[] | null];
 
 const INT32_MAX = 2 ** 31 - 1;
 
@@ -78,11 +76,6 @@ function checkData(value: unknown, what: string): Data | null {
 function toBytes(value: Data | null): Uint8Array | null {
   if (value === null) return null;
   return typeof value === 'string' ? encodeLikeJava(value) : value;
-}
-
-/** Which of `key` (1) and `value` (2) are strings, so their bytes are the client's own. */
-function ownedBytes(key: Data | null, value: Data | null): number {
-  return (typeof key === 'string' ? 1 : 0) | (typeof value === 'string' ? 2 : 0);
 }
 
 // Java's `new RecordHeaders(headers)`: new headers holding the given ones.
@@ -342,8 +335,7 @@ export class ProducerRecord {
 
   /**
    * The arguments of the native send: topic, partition and timestamp (-1 for
-   * null), key and value bytes, which of them are the client's own bytes,
-   * header pairs or null; then the record's headers are made read-only, as
+   * null), key and value bytes, header pairs or null; then the record's headers are made read-only, as
    * Java's `doSend` seals them (`setReadOnly`) before handing the record
    * over. Called by `KafkaProducer`, whose `send()` rejects with what this
    * throws (the headers are then left writable).
@@ -376,7 +368,6 @@ export class ProducerRecord {
         timestamp === null ? -1 : timestamp,
         toBytes(key),
         toBytes(value),
-        ownedBytes(key, value),
         nativeHeaders,
       ];
       headers.internalSetReadOnly();
@@ -402,7 +393,6 @@ export class ProducerRecord {
       timestamp === null ? -1 : timestamp,
       toBytes(key),
       toBytes(value),
-      ownedBytes(key, value),
       nativeHeaders,
     ];
     headers.internalSetReadOnly();

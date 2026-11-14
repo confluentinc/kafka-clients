@@ -62,7 +62,7 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-single-drainer',
     'check-completion-order',
     'check-ownership',
-    'check-one-copy',
+    'check-zero-copy',
     'check-string-encoding',
     'check-no-binding-queue',
   ]);

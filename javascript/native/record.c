@@ -15,15 +15,14 @@
 // JS values -> the C ProducerRecord. src/producer/producer_record.ts has
 // already turned strings into Buffers of the client's own (src/internal/
 // encode.ts), header keys included, and checked the types Java's constructor
-// checks, so this reads Uint8Arrays (a Buffer is one) as kafka_Bytes_t. A key
-// or value the app handed in is copied once into memory the addon owns
-// (js_bytes_copy), freed when the record completes, so the app may change or
-// detach its Buffer as soon as send() returns; the client's own Buffers are
-// read over their memory, kept by a reference until then (javascript/CLAUDE.md,
-// rule 8). Header values are read over their memory during the call, in which
-// the core copies them. The
-// producer was built with NULL serializers, so the record's `void *` key and
-// value are `kafka_Bytes_t *`.
+// checks, so this reads Uint8Arrays (a Buffer is one) as kafka_Bytes_t over
+// their own memory: no key or value is copied, the app's or a serializer's
+// Buffer included. The core reads those bytes until the send's hand-over
+// completion, and producer.c holds a reference to each Buffer until then
+// (javascript/CLAUDE.md, rule 8). Header values are read over their memory
+// during the call, in which the core copies them. The producer was built
+// with NULL serializers, so the record's `void *` key and value are
+// `kafka_Bytes_t *`.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,29 +66,6 @@ int js_bytes(napi_env env, napi_value value, const char* what, JsBytes* out) {
     }
     out->bytes.data = (length == 0 || data == NULL) ? EMPTY_BYTES : (const uint8_t*)data;
     out->bytes.len = (int32_t)length;
-    return 0;
-}
-
-int js_bytes_copy(napi_env env, JsBytes* key, JsBytes* value, int owned, uint8_t** copy) {
-    *copy = NULL;
-    // Only the app's non-empty bytes: an empty array points at EMPTY_BYTES.
-    size_t key_len = (!(owned & 1) && !key->is_null) ? (size_t)key->bytes.len : 0;
-    size_t value_len = (!(owned & 2) && !value->is_null) ? (size_t)value->bytes.len : 0;
-    if (key_len + value_len == 0) return 0;
-    uint8_t* bytes = (uint8_t*)malloc(key_len + value_len);
-    if (bytes == NULL) {
-        napi_throw_error(env, NULL, "out of memory");
-        return -1;
-    }
-    if (key_len > 0) {
-        memcpy(bytes, key->bytes.data, key_len);
-        key->bytes.data = bytes;
-    }
-    if (value_len > 0) {
-        memcpy(bytes + key_len, value->bytes.data, value_len);
-        value->bytes.data = bytes + key_len;
-    }
-    *copy = bytes;
     return 0;
 }
 

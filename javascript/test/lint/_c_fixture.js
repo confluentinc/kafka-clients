@@ -113,16 +113,24 @@ static void send_on_completion(void* self_, const kafka_x_M_t* metadata, const k
     }
 }
 
+static void release_buffers(void* env, SendCtx* ctx) {
+    delete_ref(env, &ctx->key_ref);
+    delete_ref(env, &ctx->value_ref);
+}
+
 static void on_handover(kafka_x_Thing_t* value, kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t* ffi_err = NULL;
     FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));
+    release_buffers(NULL, opaque);
     error_discard(error);
 }
 
-void js_send(void* p) {
+void js_send(void* p, void* env, void* key, void* value) {
     kafka_common_Error_t* ffi_err = NULL;
     kafka_x_Callback_t* cb = NULL;
-    void* ctx = calloc(1, 8);
+    SendCtx* ctx = calloc(1, 8);
+    napi_create_reference(env, key, 1, &ctx->key_ref);
+    napi_create_reference(env, value, 1, &ctx->value_ref);
     error_discard(FFI_SET(cb, kafka_x_Callback_new_err(ctx, send_on_completion, &ffi_err)));
     kafka_x_P_send_cb(p, cb, on_handover, ctx);
     kafka_x_P_flush_cb(p, on_handover, ctx);
@@ -154,14 +162,6 @@ int js_bytes(void* env, void* value, JsBytes* out) {
     napi_get_typedarray_info(env, value, NULL, &length, &data, NULL, NULL);
     out->bytes.data = data;
     out->bytes.len = (int32_t)length;
-    return 0;
-}
-
-int js_bytes_copy(JsBytes* key, JsBytes* value, uint8_t** copy) {
-    uint8_t* bytes = (uint8_t*)malloc(8);
-    memcpy(bytes, key->bytes.data, 4);
-    memcpy(bytes + 4, value->bytes.data, 4);
-    *copy = bytes;
     return 0;
 }
 `;
@@ -225,14 +225,7 @@ const LISTS = {
     ],
   },
   'check-completion-order': { COMPLETIONS: [{ key: 'send_on_completion', reason: 'the record callback' }] },
-  'check-one-copy': {
-    ALLOWED: [
-      { key: 'native/producer.c:js_send:calloc#1', reason: "the send's context" },
-      { key: 'native/record.c:js_bytes_copy:malloc#1', reason: 'the copy' },
-      { key: 'native/record.c:js_bytes_copy:memcpy#1', reason: 'the key' },
-      { key: 'native/record.c:js_bytes_copy:memcpy#2', reason: 'the value' },
-    ],
-  },
+  'check-zero-copy': { ALLOWED: [{ key: 'native/producer.c:js_send:calloc#1', reason: "the send's context" }] },
   'check-no-binding-queue': { ALLOWED: [{ key: 'native/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }] },
 };
 

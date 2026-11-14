@@ -27,7 +27,7 @@ included), a bare value of no overload's type refused with
 `header.value()`, no `[key, value]` pairs), `readonly` data fields, each
 package imported from its own path (the root's namespaces are gone), `ExecutionError` from a failed
 `get()`, errors without `code` / `errorName` / `retriable` / `apiError`,
-copied keys and values, no garbage-collection close, and Node.js 22.14 or
+keys and values borrowed until `send()` settles, no garbage-collection close, and Node.js 22.14 or
 newer.
 
 ### Packaging
@@ -92,9 +92,11 @@ newer.
 - A header value is bytes (`Uint8Array` or `null`), as in Java and Python: a
   string header value throws `TypeError` (encode it first,
   `Buffer.from(value, 'utf8')`), where development builds took a string.
-- The app's `Buffer` / `Uint8Array` key and value are copied during `send()`,
-  so they may be changed, reused or detached as soon as it returns; the copy
-  is freed when the record completes. A string key or value is encoded to
+- The app's `Buffer` / `Uint8Array` key and value are not copied: the client
+  reads them after `send()` returns, so don't write to them, transfer them or
+  resize them until the Promise from `send()` settles (awaiting `send()` is
+  enough), and a serializer must return a new Buffer for each record. The
+  client holds a reference on each until then. A string key or value is encoded to
   UTF-8 as Java's `StringSerializer` encodes it, a lone surrogate as `?` (Node
   writes U+FFFD), and so are the header keys and the config keys and values;
   topic names are not.

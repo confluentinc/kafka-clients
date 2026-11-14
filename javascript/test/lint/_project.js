@@ -93,7 +93,7 @@ const ORDER = [
   'check-single-drainer',
   'check-completion-order',
   'check-ownership',
-  'check-one-copy',
+  'check-zero-copy',
   'check-string-encoding',
   'check-no-binding-queue',
   'check-directives',

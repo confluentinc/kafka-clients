@@ -69,11 +69,10 @@ typedef struct {
 // One send. Two owners: the hand-over completion and the delivery callback.
 struct SendCtx {
     Producer* p;
-    JsBytes key;                               // the bytes the core reads, kept until the record completes
+    JsBytes key;                               // the bytes the core reads, borrowed until the hand-over
     JsBytes value;
-    uint8_t* copy;                             // the app's key and value bytes, copied; freed when the record completes
-    napi_ref key_ref;                          // keeps the client's own key Buffer alive until the record completes
-    napi_ref value_ref;
+    napi_ref key_ref;                          // keeps the key's Buffer alive until the hand-over
+    napi_ref value_ref;                        // keeps the value's Buffer alive until the hand-over
     napi_ref on_handover;                      // JS (error | null) => void
     napi_ref on_complete;                      // JS (metadata, error | null) => string | undefined
     int refs;                                  // owners left
@@ -152,17 +151,16 @@ static napi_value metadata_to_js(napi_env env, const kafka_producer_RecordMetada
 
 // ---- send -------------------------------------------------------------------
 
-// The record completed: the copy of the app's key and value is freed (once:
-// the pointer is cleared) and the client's own Buffers released.
-static void send_ctx_release_bytes(napi_env env, SendCtx* ctx) {
-    free(ctx->copy);
-    ctx->copy = NULL;
+// The core no longer reads the key and value (the hand-over completion, or a
+// record never handed over): the references on their Buffers are dropped,
+// once (delete_ref clears each).
+static void send_ctx_release_buffers(napi_env env, SendCtx* ctx) {
     delete_ref(env, &ctx->key_ref);
     delete_ref(env, &ctx->value_ref);
 }
 
 static void send_ctx_free(napi_env env, SendCtx* ctx) {
-    send_ctx_release_bytes(env, ctx);
+    send_ctx_release_buffers(env, ctx);
     delete_ref(env, &ctx->on_handover);
     delete_ref(env, &ctx->on_complete);
     free(ctx);
@@ -199,10 +197,10 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
     napi_env env = p->env;
     ctx->handed_over = 1;
     ctx->handover_failed = error != NULL;
-    // A record refused at hand-over is complete: its copy is freed now. A
-    // record handed over keeps it until its delivery callback
-    // (send_on_completion), when the record completes.
-    if (ctx->handover_failed) send_ctx_release_bytes(env, ctx);
+    // The FFI borrows the key and value only until this completion
+    // (rust/src/ffi/producer/mod.rs, module docs): the Buffers are released
+    // now, whether the record was taken or refused.
+    send_ctx_release_buffers(env, ctx);
     if (!p->queue.finalizing && ctx->on_handover != NULL) {
         napi_value arg = error_take_to_js(env, error);
         error = NULL;
@@ -405,9 +403,6 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_Error_t* report = NULL;
     int deferred = 0;
-    // The record completes: its copy of the app's key and value is freed
-    // (once: a no-op if a failed hand-over already freed it).
-    send_ctx_release_bytes(env, ctx);
     if (!p->queue.finalizing && ctx->on_complete != NULL) {
         napi_value argv[2];
         argv[0] = metadata_to_js(env, metadata);
@@ -465,29 +460,28 @@ static int is_function(napi_env env, napi_value v) {
     return napi_typeof(env, v, &type) == napi_ok && type == napi_function;
 }
 
-// producerSend(handle, topic, partition, timestamp, key, value, owned, headers,
+// producerSend(handle, topic, partition, timestamp, key, value, headers,
 // onHandover, onComplete): partition and timestamp -1 for Java's null; key and
-// value a Uint8Array or null; owned the bits of the key (1) and value (2) that
-// are the client's own bytes (an encoded string), kept by a reference, the
-// others, the app's, being copied (record.c, js_bytes_copy); headers null or an
+// value a Uint8Array or null, the app's (a serializer's included) or the
+// client's own (an encoded string), never copied: each is kept by a reference
+// until the hand-over (javascript/CLAUDE.md, rule 8); headers null or an
 // array of [key, Uint8Array | null]. Throws the core's error when the record
 // cannot be built (nothing is sent then).
 napi_value js_producer_send(napi_env env, napi_callback_info info) {
-    size_t argc = 10;
-    napi_value argv[10];
+    size_t argc = 9;
+    napi_value argv[9];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    if (argc != 10 || !is_function(env, argv[8]) || !is_function(env, argv[9])) {
+    if (argc != 9 || !is_function(env, argv[7]) || !is_function(env, argv[8])) {
         napi_throw_type_error(
-            env, NULL, "send(handle, topic, partition, timestamp, key, value, owned, headers, onHandover, onComplete)");
+            env, NULL, "send(handle, topic, partition, timestamp, key, value, headers, onHandover, onComplete)");
         return NULL;
     }
     Producer* p = unwrap_producer(env, argv[0]);
     if (p == NULL) return NULL;
-    int32_t partition = -1, owned = 0;
+    int32_t partition = -1;
     int64_t timestamp = -1;
     NAPI_CHECK(env, napi_get_value_int32(env, argv[2], &partition), NULL);
     NAPI_CHECK(env, napi_get_value_int64(env, argv[3], &timestamp), NULL);
-    NAPI_CHECK(env, napi_get_value_int32(env, argv[6], &owned), NULL);
     char* topic = js_string_dup(env, argv[1], "topic must be a string");
     if (topic == NULL) return NULL;
 
@@ -500,24 +494,25 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
     ctx->p = p;
     ctx->refs = 2;
     if (js_bytes(env, argv[4], "key must be a Buffer, a Uint8Array, a string or null", &ctx->key)
-        || js_bytes(env, argv[5], "value must be a Buffer, a Uint8Array, a string or null", &ctx->value)
-        || js_bytes_copy(env, &ctx->key, &ctx->value, owned, &ctx->copy)) {
+        || js_bytes(env, argv[5], "value must be a Buffer, a Uint8Array, a string or null", &ctx->value)) {
         free(topic);
         free(ctx);
         return NULL;
     }
     kafka_producer_ProducerRecord_t* record =
-        record_build(env, topic, partition, timestamp, &ctx->key, &ctx->value, argv[7]);
+        record_build(env, topic, partition, timestamp, &ctx->key, &ctx->value, argv[6]);
     free(topic);
     if (record == NULL) {
         send_ctx_free(env, ctx);
         return NULL;
     }
     kafka_common_Error_t* ffi_err = NULL;
-    if (((owned & 1) && !ctx->key.is_null && napi_create_reference(env, argv[4], 1, &ctx->key_ref) != napi_ok)
-        || ((owned & 2) && !ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)
-        || napi_create_reference(env, argv[8], 1, &ctx->on_handover) != napi_ok
-        || napi_create_reference(env, argv[9], 1, &ctx->on_complete) != napi_ok) {
+    // The core reads the key's and value's own memory until the hand-over:
+    // a reference keeps each Buffer, and so its memory, alive until then.
+    if ((!ctx->key.is_null && napi_create_reference(env, argv[4], 1, &ctx->key_ref) != napi_ok)
+        || (!ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)
+        || napi_create_reference(env, argv[7], 1, &ctx->on_handover) != napi_ok
+        || napi_create_reference(env, argv[8], 1, &ctx->on_complete) != napi_ok) {
         error_warn(env, 1, FFI_ERR(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err)));
         send_ctx_free(env, ctx);
         js_throw_last_napi_error(env, "napi_create_reference");
@@ -537,8 +532,8 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
     ctx->counted = 1;
     cbq_pending_add(env, &p->queue, 1);
     kafka_producer_Producer_send_with_callback_cb(p->view, record, callback, send_on_handover, ctx);
-    // The call consumed the callback and copied the record; ctx->copy is freed
-    // when the record completes (send_on_completion, or a failed hand-over).
+    // The call consumed the callback and copied the record; the key and value
+    // stay borrowed until the hand-over completion (send_on_handover).
     error_warn(env, 1, FFI_ERR(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err)));
     return NULL;
 }

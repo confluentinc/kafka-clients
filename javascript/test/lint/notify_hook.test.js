@@ -126,5 +126,5 @@ test('a hook that does not signal does nothing but (void) its opaque', () => {
       'static int fired;\n\nstatic void noop_notify(void* opaque) {\n    (void)opaque;\n    fired = 1;\n}\n\nvoid js_teardown(void* p) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_P__set_callbacks_notify_err(p, noop_notify, NULL, &ffi_err));\n}\n\nvoid js_setup(void* p) {',
     ),
   });
-  assert.deepEqual(findings(r), ['native/producer.c:38: noop_notify runs `fired = 1;`: a hook that does not signal does nothing']);
+  assert.deepEqual(findings(r), ['native/producer.c:46: noop_notify runs `fired = 1;`: a hook that does not signal does nothing']);
 });
