@@ -274,6 +274,8 @@ is decided for them already:
   `SecurityConfig`) with Java's documentation strings.
 - A delivery callback that returns a Promise, which the producer awaits before
   the record's future completes.
+- Java's `MockProducer`, the client's own mock, for tests: `history()`,
+  `completeNext()`, `errorNext()` and an error to throw from each call.
 
 ## 5. Same code, different result
 

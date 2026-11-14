@@ -44,6 +44,7 @@
 // | CompletionStage<T>                           | Promise<T>                              |
 // | KafkaFuture.BaseFunction<A, B>, BiConsumer   | the alias of the same name: KafkaFuture.BaseFunction<A, B> |
 // | Throwable                                    | unknown (anything a function may throw)  |
+// | RuntimeException, Exception, taken           | Error                                    |
 // | MetricValueProvider, MetricConfig, Measurable, Partitioner (placeholders) | unknown    |
 // | Time (not a public Java type)                | unknown                                 |
 // | ? (an unbounded wildcard)                    | any type                                 |
@@ -244,6 +245,9 @@ module.exports = {
         );
       }
       if (j.name === 'Throwable') return (t.flags & ts.TypeFlags.Unknown) !== 0;
+      // An error the user gives the client (MockProducer's error fields,
+      // errorNext): a JavaScript Error.
+      if (j.name === 'RuntimeException' || j.name === 'Exception') return symbolName(t) === 'Error';
       // The types the client does not translate, and those Java does not make
       // public, typed unknown (root CLAUDE.md, JavaScript Binding
       // Conventions, Scope). A placeholder is an alias of unknown.

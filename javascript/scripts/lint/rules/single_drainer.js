@@ -58,6 +58,10 @@ const DESTROY_CALLERS = [
     key: 'js_producer_create',
     reason: 'the constructor\'s failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists',
   },
+  {
+    key: 'js_mock_producer_create',
+    reason: "the mock's constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
+  },
 ];
 
 module.exports = {

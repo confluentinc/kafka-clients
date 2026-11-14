@@ -134,6 +134,10 @@ const ALLOWED = [
     key: 'KafkaProducer.#deferred',
     reason: "the settlements waiting for the event-loop turn (javascript/CLAUDE.md rule 3); the records are handed over at once",
   },
+  {
+    key: 'MockProducer.#deferred',
+    reason: "the mock's settlements waiting for the event-loop turn, as KafkaProducer's; the records are handed over at once",
+  },
 ];
 
 module.exports = {

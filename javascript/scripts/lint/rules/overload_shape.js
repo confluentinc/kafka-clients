@@ -75,6 +75,10 @@ const MERGED_FORMS = new Map([
  */
 const LEFT_OUT = new Map([
   [
+    'org.apache.kafka.clients.producer.MockProducer#MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)',
+    "root CLAUDE.md, JavaScript Binding Conventions, Scope (Q30): the form's only extra parameter over the next one is cluster, so the mock's cluster is always Java's Cluster.empty()",
+  ],
+  [
     'org.apache.kafka.common.metrics.KafkaMetric#config(MetricConfig)',
     "root CLAUDE.md, JavaScript Binding Conventions, Scope (Q30): the setter's only extra parameter over the getter is config, and Java says it is for the server only",
   ],

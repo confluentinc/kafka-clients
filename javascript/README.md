@@ -403,6 +403,36 @@ during `send()`, before the core waits for metadata, and the binding cannot see
 when that wait ends. Goes when: the core seals the headers itself, after its
 metadata wait)*.
 
+### MockProducer
+
+`MockProducer` is Java's mock of the producer, for testing code that uses
+Kafka. It implements `Producer`, and it is the client core's own mock, so it
+answers as the real client does, with Promises and futures. Its records are
+the app's own: `history()` returns the very `ProducerRecord`s sent, key and
+value as given, which the mock holds until `clear()`. Its serializers run on
+every send, as Java's mock runs them. A callback runs inside the mock call that
+completes its record (`send()` with `autoComplete`, `completeNext()`,
+`errorNext()` or `flush()`). Java's public error fields are setters, and each
+call throws the very error it was given:
+
+```js
+const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+
+const mock = new MockProducer({ autoComplete: false, partitioner: null, keySerializer: null, valueSerializer: null });
+const record = new ProducerRecord({ topic: 'orders', key: 'k', value: { id: 1 } });
+const future = await mock.send(record);
+mock.completeNext();
+console.log((await future.get()).offset, mock.history()[0] === record); // 0n true
+mock.setSendException(new Error('broker down')); // send() now rejects with this error
+await mock.close();
+```
+
+A mock keeps Node running until it is closed, as a producer does. Left out:
+Java's constructor taking a `Cluster` (the mock's cluster is always empty, so
+the partitioner is never called), the transaction calls, `setMockMetrics`, and
+the telemetry and metric-subscription calls (the producer package's
+documentation lists them).
+
 ### Data objects, enums and constructors
 
 `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` are data objects: Java's getters are
