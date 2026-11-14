@@ -20,11 +20,11 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
-import { configEntries } from '../internal/config';
+import { checkConfigs, configEntries } from '../internal/config';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { producerClosed, producerOpened, warnPreview } from '../internal/lifecycle';
-import { checkSerializer, closeSerializer, isThenable, serializedBytes } from '../internal/serde';
+import { checkSerializer, closeSerializer, configuredSerializer, isThenable, serializedBytes } from '../internal/serde';
 import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Metric } from '../common/metric';
@@ -221,9 +221,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *
    * @param options - the producer configs
    * @throws `KafkaError` when the configuration is invalid (`ConfigError`,
-   *   the core's, with Java's message naming the key; also for
-   *   `key.serializer` and `value.serializer`) or the producer cannot be
-   *   built
+   *   the core's, with Java's message naming the key; the client's own for
+   *   a `key.serializer` or `value.serializer` that is no serializer
+   *   function) or the producer cannot be built ("Failed to construct kafka
+   *   producer", also when a serializer function throws)
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{configs}` or `{configs, keySerializer, valueSerializer}`, the configs
    *   are not an object, or a serializer is a function that makes one
@@ -234,10 +235,18 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *   neither null nor an object with a `serialize` method
    *
    * @remarks Java's `Map` and `Properties` constructors are the one
-   * `configs`. Without serializers a key or value is sent as the bytes the
+   * `configs`. A serializer can come through `key.serializer` and
+   * `value.serializer`: each takes a synchronous function `({ configs, isKey
+   * }) => serializer`, such as `stringSerializer`, which the producer calls
+   * once with the whole configuration, in place of Java's class and its
+   * `configure(configs, isKey)` *(deviation: Java takes a class or a class
+   * name. Why: JavaScript can't load a class by name synchronously)*. The
+   * keys a function reads, and these two, don't reach the core, as Java marks
+   * them used. Without serializers a key or value is sent as the bytes the
    * record holds, and the producer is a `KafkaProducer<Uint8Array,
-   * Uint8Array>`. The first client a process builds emits one
-   * `ExperimentalWarning` while the client is in preview.
+   * Uint8Array>`, a serializer from the configuration included. The first
+   * client a process builds emits one `ExperimentalWarning` while the client
+   * is in preview.
    */
   constructor(options: {
     /** The producer configs: a plain object of Java's ProducerConfig keys. */
@@ -254,8 +263,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *
    * @remarks The serializers run in JavaScript, inside `send()`; a serializer
    * whose `serialize` returns a Promise is awaited before the record is handed
-   * over. A null serializer sends the record's bytes as they are, binding
-   * `Uint8Array`. The producer closes both serializers when it closes.
+   * over. A null serializer is the one its config key makes, as in Java, or,
+   * with no such key, sends the record's bytes as they are, binding
+   * `Uint8Array`; a serializer given wins, and its config key is then
+   * ignored. The producer closes both serializers when it closes.
    */
   constructor(options: {
     /** The producer configs: a plain object of Java's ProducerConfig keys. */
@@ -283,17 +294,32 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
   constructor(configs: ProducerConfigs);
   constructor(options: unknown) {
     const form = CONSTRUCTOR_FORMS.match(options, arguments.length);
-    const entries = configEntries(CONSTRUCTOR_FORMS.value(options, 'configs'));
-    this.#keySerializer = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'keySerializer'), 'keySerializer');
-    this.#valueSerializer = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'valueSerializer'), 'valueSerializer');
+    const configs = checkConfigs(CONSTRUCTOR_FORMS.value(options, 'configs'));
+    const keyArgument = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'keySerializer'), 'keySerializer');
+    const valueArgument = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'valueSerializer'), 'valueSerializer');
+    // A serializer given wins, and its config key is ignored; a null one (or
+    // none) is the config key's, as Java's `if (keySerializer == null)`. The
+    // keys the config functions read stay out of the core's configuration.
+    const read = new Set<string>();
+    let keyConfigured: Serializer<unknown> | null = null;
+    let valueConfigured: Serializer<unknown> | null = null;
     try {
-      this.#handle = native.producerCreate(entries);
+      if (keyArgument === null) keyConfigured = configuredSerializer(configs, 'key.serializer', read);
+      if (valueArgument === null) valueConfigured = configuredSerializer(configs, 'value.serializer', read);
+      this.#keySerializer = keyArgument ?? keyConfigured;
+      this.#valueSerializer = valueArgument ?? valueConfigured;
+      this.#handle = native.producerCreate(configEntries(configs, read));
     } catch (error) {
       // Java's constructor closes the serializers in the catch around its
       // body, whose failure it relabels "Failed to construct kafka producer"
-      // (the core's KafkaError). A ConfigError of the configuration's check
-      // is thrown before that catch: the serializers stay open, as in Java.
-      if (isConstructionFailure(error)) this.#closeSerializers();
+      // (the core's KafkaError, or the config function's failure). A
+      // ConfigError of the configuration's check is thrown before that catch:
+      // the serializers given stay open, as in Java. Those the config
+      // functions made are the producer's own, and nobody else can close
+      // them.
+      const construction = isConstructionFailure(error);
+      closeSerializer(construction ? (keyArgument ?? keyConfigured) : keyConfigured, 'keySerializer');
+      closeSerializer(construction ? (valueArgument ?? valueConfigured) : valueConfigured, 'valueSerializer');
       throw error;
     }
     producerOpened();

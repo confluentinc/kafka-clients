@@ -18,7 +18,9 @@
 //! still takes any string, through `(string & {})`. The binding has no
 //! `ConfigDef` table and checks no value (root CLAUDE.md, JavaScript Binding
 //! Conventions, Configuration): only the key names are read from Java, a type
-//! with no run-time part.
+//! with no run-time part. The producer's serde keys, `key.serializer` and
+//! `value.serializer`, take a synchronous function `({ configs, isKey }) =>
+//! serializer` instead (Serialization, Q53), and so may an unknown key.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +37,7 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let keys: Vec<String> = client_types(&mut reader, PRODUCER_CONFIG)?.into_keys().collect();
     let mut text = header("Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`)");
+    text.push_str("\nimport type { Serializer } from '../common/serialization/serializer';\n");
     text.push_str(
         "\n/**\n \
          * A producer's configuration: Java's `ProducerConfig` keys, as a plain object\n \
@@ -42,6 +45,9 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
          * (`true` as `\"true\"`, numbers and bigints in decimal, arrays joined with\n \
          * `,`, anything else by `String()`); `null` and `undefined` leave the key\n \
          * out. The core checks every key and value, with Java's messages.\n \
+         * `key.serializer` and `value.serializer` take a synchronous function\n \
+         * `({ configs, isKey }) => serializer`, such as `stringSerializer`, and\n \
+         * never reach the core.\n \
          *\n \
          * @remarks *(js-only)* The type of the configuration the constructor takes,\n \
          * Java's `Map<String, Object>` and `Properties` as one. It lists the keys\n \
@@ -58,8 +64,21 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
     text.push_str(
         "    // Any other key, keeping the known keys' autocompletion: the core\n    \
          // lists the keys it does not use.\n    \
-         | (string & {})]?: string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n\
-         };\n",
+         | (string & {})]?: key extends 'key.serializer' | 'value.serializer'\n    \
+         ? SerializerConfig\n    \
+         : string extends key\n      \
+         ? ConfigValue | SerializerConfig\n      \
+         : ConfigValue;\n\
+         };\n\
+         \n\
+         // A value the core parses.\n\
+         type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n\
+         \n\
+         // A serde config key's value: the function that makes the serializer.\n\
+         type SerializerConfig =\n  \
+         | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<never>)\n  \
+         | null\n  \
+         | undefined;\n",
     );
     Ok((repo_root.join(JS_SRC).join("producer").join("producer_configs.ts"), text))
 }
@@ -86,7 +105,9 @@ mod tests {
             "    | 'ssl.keystore.password'\n",
             "    | 'sasl.jaas.config'\n",
             "    | 'linger.ms'\n",
-            "    | (string & {})]?: string | number | boolean | bigint",
+            "    | (string & {})]?: key extends 'key.serializer' | 'value.serializer'\n",
+            "type ConfigValue = string | number | boolean | bigint",
+            "=> Serializer<never>)",
         ] {
             assert!(text.contains(line), "missing {line}");
         }

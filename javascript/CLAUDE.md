@@ -53,12 +53,16 @@ These decide every question, in this order:
      read a negative value as Java's `null`, so the core cannot see it. Goes
      when: the FFI carries "absent" separately from the value.
    - **The configuration's shape**: a `Map` or another non-plain object is a
-     `TypeError`, a symbol key a `ConfigError`, and the serde config keys
-     are refused. Why: a `Map`'s entries and a symbol have no string to
-     cross as, and the serde keys' config route (a synchronous
-     `({ configs, isKey }) => serde`, root conventions, Serialization, Q53)
-     is not built yet. Goes when: never for the shape; the serde keys when
-     their route is built. No config value is checked (root conventions, Configuration).
+     `TypeError`, and a symbol key a `ConfigError`. Why: a `Map`'s entries
+     and a symbol have no string to cross as. Goes when: never. No config
+     value is checked (root conventions, Configuration), except the
+     producer's serde keys, which never reach the core: `key.serializer` and
+     `value.serializer` take a synchronous `({ configs, isKey }) => serde`
+     (root conventions, Serialization, Q53), and a class name, a serde
+     object, a class or a function that returns a Promise or no serializer
+     is a `ConfigError` saying what to pass (`src/internal/serde.ts`
+     `configuredSerializer`). Why: the binding runs the serdes, so only it
+     reads these keys. Goes when: never.
    - **A NUL byte in a string or bytes that cross as a C string** (the topic,
      the header keys, the config keys and values: `js_string_dup` and
      `js_bytes_cstring` in `native/record.c`), a `TypeError` "... without null
@@ -712,9 +716,20 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   included, pass, and the core lists the ones it does not use. The keys and
   values cross as `encodeLikeJava`'s bytes, and the core checks types,
   ranges, enums, unknown keys and cross-key rules with Java's messages naming
-  the key. `key.serializer` and `value.serializer` throw `ConfigError`
-  pointing to the constructor arguments, whatever their value, until their
-  config route is built. The `ProducerConfigs` type, generated into
+  the key. `key.serializer` and `value.serializer` take a synchronous
+  function `({ configs, isKey }) => serializer`, which the producer calls
+  once, key then value, with a frozen copy of the whole configuration, each
+  value as given, through a `Proxy` that records each of its keys the
+  function reads; those keys and the two serde keys are left out of the
+  configuration the core gets, as Java's `originals()` marks them used, while
+  the consumer's serde keys reach the core, which lists them as unused
+  (root conventions, Serialization, Q53). A serializer given as a
+  constructor argument wins, and its config key is then ignored; a null one
+  is the config key's, as Java's `if (keySerializer == null)`. A function
+  that throws is Java's "Failed to construct kafka producer" `KafkaError`,
+  with the error as its `cause`, and the serializers made so far are closed;
+  those the config functions made are closed on any construction failure,
+  since only the producer holds them. The `ProducerConfigs` type, generated into
   `src/producer/producer_configs.ts` by the `config_types` emitter
   (`rust/xtask/src/config_types/js.rs`), lists the keys Java's
   `ProducerConfig` defines (with its SSL and SASL keys) for autocompletion

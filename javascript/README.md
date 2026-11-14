@@ -535,7 +535,7 @@ code relying on them keeps running with another meaning: check each.
 | a bare value of the wrong type threw `TypeError` | it fits no overload: `IllegalArgumentError` "… takes one of (…); got a number" |
 | a Temporal.Duration with years, months or weeks was an `IllegalArgumentError` | **silent** for `instanceof RangeError`: it is a plain `RangeError` |
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
-| `key.serializer` / `value.serializer` reached the core | they throw `ConfigError`: a serializer is a constructor argument |
+| `key.serializer` / `value.serializer` reached the core | they take a synchronous function `({ configs, isKey }) => serializer`, which the producer calls once and keeps from the core; a class name, a serializer object or a function returning a Promise throws `ConfigError` |
 | `metadata.offset` / `metadata.timestamp` / `record.timestamp` numbers | bigints, Java's `long`; a timestamp is given as a bigint or a whole number up to 2^53 - 1 |
 | a config value was checked against its key's type, and an unknown key's value had to be a string, a number or a boolean | every value is written as a string (`true` as `"true"`, numbers and bigints in decimal, arrays joined with `,`, anything else by `String()`) and the core checks it; `null` and `undefined` leave the key unset |
 | the preview warning had the code `CONFLUENT_KAFKA_PREVIEW` | it has no code: filter on its type, `ExperimentalWarning` |
@@ -700,8 +700,9 @@ whose every Java constructor takes one (`QuotaViolationError`, ...) cannot be
 constructed: the client builds it when the core reports it. The
 configuration is checked by the client's core, which throws a `ConfigError`
 with Java's message naming the key (`{ 'linger.ms': true }` fails with "Not a
-number of type LONG"); `key.serializer` and `value.serializer` throw a
-`ConfigError` too (a serializer is a constructor argument). Any other value
+number of type LONG"); a `key.serializer` or `value.serializer` that is no
+synchronous function `({ configs, isKey }) => serializer` throws a
+`ConfigError` from the client, saying what to pass. Any other value
 of the wrong JavaScript type throws a `TypeError`, and so does a topic, header key or config key or value holding a
 null byte (`"topic must be a string without null bytes"`), which C would read
 as the end of the string; keys, values and header values are bytes and may

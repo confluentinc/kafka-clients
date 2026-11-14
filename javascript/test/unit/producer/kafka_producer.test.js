@@ -1453,6 +1453,158 @@ test("a producer whose construction fails closes the serializers; a ConfigError 
   assert.deepEqual(closed, []);
 });
 
+// The serde config keys (root CLAUDE.md, JavaScript Binding Conventions,
+// Serialization, Q53): a synchronous function ({ configs, isKey }) =>
+// serializer, called once with the whole configuration, in place of Java's
+// class and its configure(configs, isKey).
+test('key.serializer and value.serializer take a function the producer calls once with the configuration', async () => {
+  const made = [];
+  const calls = [];
+  const factory = (prefix) => (options) => {
+    made.push({ isKey: options.isKey, configs: options.configs });
+    return recording((data) => (data === null ? null : Buffer.from(`${prefix}${data}`)), calls);
+  };
+  const configs = { ...UNREACHABLE, 'key.serializer': factory('k:'), 'value.serializer': factory('v:'), 'some.key': 5 };
+  const producer = new KafkaProducer(configs);
+  try {
+    assert.deepEqual(made.map((m) => m.isKey), [true, false]);
+    // The whole configuration, each value as it was given, read-only.
+    assert.equal(made[0].configs['some.key'], 5);
+    assert.equal(made[0].configs['key.serializer'], configs['key.serializer']);
+    assert.deepEqual(Object.keys(made[0].configs), Object.keys(configs));
+    assert.ok(Object.isFrozen(made[0].configs));
+    await producer.send(new ProducerRecord({ topic: 'unit-serde-c', key: 1, value: 2 }));
+    assert.deepEqual(calls.map((c) => c.data), [1, 2]);
+  } finally {
+    await producer.close();
+  }
+  // Called once: not again at send() or close().
+  assert.equal(made.length, 2);
+});
+
+test('a serializer argument wins over its config key, which is then ignored; a null one is the config key\'s', async () => {
+  let called = 0;
+  const make = () => {
+    called++;
+    return { serialize: () => null };
+  };
+  const p1 = new KafkaProducer({
+    configs: { ...UNREACHABLE, 'key.serializer': make, 'value.serializer': 'not even a function' },
+    keySerializer: { serialize: () => null },
+    valueSerializer: { serialize: () => null },
+  });
+  await p1.close();
+  assert.equal(called, 0);
+  const p2 = new KafkaProducer({ configs: { ...UNREACHABLE, 'key.serializer': make }, keySerializer: null, valueSerializer: null });
+  await p2.close();
+  assert.equal(called, 1);
+});
+
+test("a serde config key that is no synchronous function throws ConfigError, saying what to pass", () => {
+  const pass = (argument) =>
+    `pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, or the serializer itself as the ${argument} argument of the constructor`;
+  class StringSerializer {
+    serialize() {
+      return null;
+    }
+  }
+  for (const [key, argument] of [
+    ['key.serializer', 'keySerializer'],
+    ['value.serializer', 'valueSerializer'],
+  ]) {
+    for (const [value, message] of [
+      [
+        'org.apache.kafka.common.serialization.StringSerializer',
+        `Invalid value org.apache.kafka.common.serialization.StringSerializer for configuration ${key}: a class name cannot be loaded in JavaScript; ${pass(argument)}`,
+      ],
+      [{ serialize: () => null }, `Invalid value an object for configuration ${key}: a serializer object is not a configuration value; ${pass(argument)}`],
+      [5, `Invalid value a number for configuration ${key}: ${pass(argument)}`],
+      [StringSerializer, `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`],
+      [
+        async () => ({ serialize: () => null }),
+        `Invalid value a function for configuration ${key}: the function returned a Promise; it must return the serializer itself, synchronously`,
+      ],
+      [
+        () => 'org.example.Serializer',
+        `Invalid value a function for configuration ${key}: the function returned a string, not a serializer: an object with a serialize({ topic, headers, data }) method`,
+      ],
+    ]) {
+      assert.throws(() => new KafkaProducer({ ...UNREACHABLE, [key]: value }), (e) => {
+        assert.equal(e.constructor.name, 'ConfigError', key);
+        assert.equal(e.message, message);
+        return true;
+      });
+    }
+    // null and undefined leave the key unset: no serializer.
+    for (const value of [null, undefined]) {
+      const producer = new KafkaProducer({ ...UNREACHABLE, [key]: value });
+      void producer.close();
+    }
+  }
+});
+
+test('a serde config function that throws is a construction failure, and the serializers made so far are closed', async () => {
+  const closed = [];
+  const cause = new Error('cannot build');
+  assert.throws(
+    () =>
+      new KafkaProducer({
+        ...UNREACHABLE,
+        'key.serializer': () => ({ serialize: () => null, close: () => closed.push('key') }),
+        'value.serializer': () => {
+          throw cause;
+        },
+      }),
+    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
+  );
+  assert.deepEqual(closed, ['key']);
+  // One the core's configuration check refuses afterwards is closed too: only
+  // the producer holds it.
+  closed.length = 0;
+  assert.throws(
+    () =>
+      new KafkaProducer({
+        configs: {
+          'bootstrap.servers': '127.0.0.1:1',
+          acks: 'sometimes',
+          'key.serializer': () => ({ serialize: () => null, close: () => closed.push('key') }),
+        },
+        keySerializer: null,
+        valueSerializer: { serialize: () => null, close: () => closed.push('value argument') },
+      }),
+    { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
+  );
+  assert.deepEqual(closed, ['key']);
+  // close() closes a configured serializer as it closes a given one.
+  closed.length = 0;
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'value.serializer': () => ({ serialize: () => null, close: () => closed.push('value') }) });
+  await producer.close();
+  assert.deepEqual(closed, ['value']);
+});
+
+test("the keys a serde config function reads don't reach the core, nor do the serde keys; the consumer's serde keys do", () => {
+  // The core lists the keys it does not use in one INFO line, at the RUST_LOG
+  // level read when its first client is built, so a fresh process builds it.
+  const script = `
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    new KafkaProducer({
+      'bootstrap.servers': 'localhost:1',
+      'schema.registry.url': 'http://sr',
+      'key.deserializer': 'org.example.Deserializer',
+      'key.serializer': ({ configs }) => {
+        if (configs['schema.registry.url'] !== 'http://sr') throw new Error('not read');
+        return { serialize: () => null };
+      },
+    })
+      .close()
+      .then(() => console.log('closed'));
+  `;
+  const r = runNode(script, 120000, [], { RUST_LOG: 'info' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'closed\n');
+  assert.ok(r.stderr.includes("These configurations '[key.deserializer]' were supplied but are not used yet."), r.stderr);
+});
+
 // partitionsFor (Java's partitionsFor(String topic)): a Promise through the
 // _cb twin, resolving to an array of PartitionInfo.
 test("partitionsFor rejects with the core's errors: a metadata timeout, Java's null topic, and its forms", async () => {

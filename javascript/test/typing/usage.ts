@@ -57,6 +57,26 @@ const configs: ProducerConfigs = {
 // @ts-expect-error a configuration is a plain object, not a Map
 const fromMap: ProducerConfigs = new Map<string, unknown>([['bootstrap.servers', 'localhost:9092']]);
 void fromMap;
+// The serde config keys take a synchronous function ({ configs, isKey }) => serializer.
+const viaConfig: ProducerConfigs = {
+  'bootstrap.servers': 'localhost:9092',
+  'key.serializer': ({ configs: given, isKey }) => {
+    expectTypeOf(given).toEqualTypeOf<Readonly<Record<string, unknown>>>();
+    expectTypeOf(isKey).toEqualTypeOf<boolean>();
+    return { serialize: () => null };
+  },
+  'value.serializer': null,
+};
+void viaConfig;
+// @ts-expect-error a class name cannot be loaded in JavaScript
+const byClassName: ProducerConfigs = { 'key.serializer': 'org.apache.kafka.common.serialization.StringSerializer' };
+void byClassName;
+// @ts-expect-error the function returns the serializer synchronously, not a Promise
+const asyncFactory: ProducerConfigs = { 'value.serializer': async () => ({ serialize: () => null }) };
+void asyncFactory;
+// @ts-expect-error a known key that is no serde key takes no function
+const lingerFunction: ProducerConfigs = { 'linger.ms': () => ({ serialize: () => null }) };
+void lingerFunction;
 
 const headers: Header[] = [new Header({ key: 'h', value: Buffer.from('v') }), new Header({ key: 'n', value: null })];
 // A producer without serializers is a KafkaProducer<Uint8Array, Uint8Array>:
