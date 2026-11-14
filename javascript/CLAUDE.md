@@ -51,10 +51,12 @@ These decide every question, in this order:
    - **A negative partition or timestamp.** Why: the C record constructors
      read a negative value as Java's `null`, so the core cannot see it. Goes
      when: the FFI carries "absent" separately from the value.
-   - **Config key and value types**, and the refusal of the serde config
-     keys. Why: the FFI takes every config value as a C string, so only the
-     binding sees the value's type; the serde keys name classes (root §2).
-     Goes when: the FFI takes typed values.
+   - **The configuration's shape**: a `Map` or another non-plain object is a
+     `TypeError`, a symbol key a `ConfigError`, and the serde config keys
+     are refused. Why: a `Map`'s entries and a symbol have no string to
+     cross as, and the serde keys name classes (root §2) until their route is
+     built. Goes when: never for the shape; the serde keys when their route
+     is built. No config value is checked (root conventions, Configuration).
    - **A NUL byte in a string or bytes that cross as a C string** (the topic,
      the header keys, the config keys and values: `js_string_dup` and
      `js_bytes_cstring` in `native/record.c`), a `TypeError` "... without null
