@@ -245,6 +245,12 @@ function checkFunction(value: unknown, name: string, shape: string): (...args: n
  */
 export abstract class KafkaFuture<T> {
   /**
+   * Makes `KafkaFuture` nominal: TypeScript checks it by name, not by shape.
+   * Declared only, it holds no state.
+   */
+  private declare readonly kafkaFutureBrand: never;
+
+  /**
    * A future is made by the client, `completedFuture` and `allOf`; a subclass
    * may call this constructor.
    *

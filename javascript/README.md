@@ -539,7 +539,8 @@ code relying on them keeps running with another meaning: check each.
 | a lone surrogate in a string was written as U+FFFD | it is written as `?`, as Java's `StringSerializer` writes it |
 | an idle producer let the process exit | a producer keeps Node running until `close()` closes it, and no garbage collection closes one: close every producer (or `await using` it) |
 | `KafkaFuture` had `get()`, `isDone()`, `isCompletedExceptionally()`, `isCancelled()`, `cancel()` | Java's whole `KafkaFuture`: also `get(timeout)`, `getNow`, `thenApply`, `whenComplete`, `toCompletionStage()`, `completedFuture` and `allOf`; `cancel(mayInterruptIfRunning)` takes a boolean |
-| `KafkaFuture` and the enums guarded their constructors with a run-time token (`RecordMetadata`'s was TypeScript `private` only) | their constructors are TypeScript `private`, with no run-time guard |
+| the enums guarded their constructors with a run-time token (`RecordMetadata`'s was TypeScript `private` only) | their constructors are TypeScript `private`, with no run-time guard |
+| `KafkaFuture` guarded its constructor with a run-time token | it is an abstract class, as Java's is: `new KafkaFuture()` throws `TypeError`, and a subclass may be built |
 | Node.js 18 | Node.js 22.14 or newer |
 
 The entry points (`@confluentinc/kafka-javascript`, `/producer`, `/common`,
