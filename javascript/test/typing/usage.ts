@@ -348,7 +348,11 @@ async function produce(): Promise<void> {
     expectTypeOf(metric.metricValue()).toEqualTypeOf<unknown>();
   }
   const metricName = new MetricName({ name: 'n', group: 'g', description: '', tags: new Map([['client-id', 'c']]) });
-  expectTypeOf(metrics.get(metricName)).toEqualTypeOf<Metric | undefined>();
+  expectTypeOf(metrics.get(metricName)).toEqualTypeOf<Metric | null>();
+  expectTypeOf(new MetricNameMap<number>()).toEqualTypeOf<MetricNameMap<number>>();
+  const maybeEntries: Array<[MetricName, number]> | undefined = undefined as Array<[MetricName, number]> | undefined;
+  // @ts-expect-error undefined is no entries: leave the argument out
+  void new MetricNameMap<number>(maybeEntries);
   const kafkaMetric = new KafkaMetric({ lock: null, metricName, valueProvider: { value: () => 1 }, config: null, time: { milliseconds: () => 0 } });
   const asMetric: Metric = kafkaMetric;
   void asMetric;

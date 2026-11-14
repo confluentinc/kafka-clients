@@ -109,7 +109,7 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   assert.equal(map.size(), 2);
   assert.equal(map.get(tagged('another description')), 1);
   assert.equal(map.has(tagged()), true);
-  assert.equal(map.get(new MetricName({ name: 'y', group: 'g', description: '', tags: new Map() })), undefined);
+  assert.equal(map.get(new MetricName({ name: 'y', group: 'g', description: '', tags: new Map() })), null);
   assert.equal([...map.keys()][0], first);
   assert.deepEqual([...map.values()], [1, 2]);
   assert.deepEqual([...map].map(([k, v]) => [k.name(), v]), [['request-latency-avg', 1], ['x', 2]]);
@@ -126,5 +126,6 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   assert.equal(new MetricNameMap().size(), 0);
   assert.throws(() => map.get('x'), { constructor: IllegalArgumentError, message: 'get() takes one of (key); got a string' });
   assert.throws(() => map.has({ key: 'x' }), { constructor: TypeError, message: 'key must be a MetricName' });
+  assert.throws(() => new MetricNameMap(undefined), { constructor: TypeError, message: "entries must not be undefined. Leave the argument out, or pass null for Java's null" });
   assert.throws(() => new MetricNameMap([[1, 2]]), { constructor: TypeError, message: 'an entry must be a [MetricName, value] pair' });
 });

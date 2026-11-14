@@ -54,14 +54,21 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   readonly #entries = new Map<string, [MetricName, V]>();
 
   /**
-   * Creates a map, empty or holding the given entries (a later entry with an
-   * equal key replaces an earlier one).
+   * Creates an empty map.
+   *
+   * @throws `IllegalArgumentError` when it is given more than one argument
+   */
+  constructor();
+  /**
+   * Creates a map holding the given entries (a later entry with an equal key
+   * replaces an earlier one).
    *
    * @param entries - the `[MetricName, value]` entries
    * @throws `IllegalArgumentError` when it is given more than one argument
-   * @throws `TypeError` when an entry is not a `[MetricName, value]` pair
+   * @throws `TypeError` when `entries` is `undefined` or not an iterable, or
+   *   an entry is not a `[MetricName, value]` pair
    */
-  constructor(entries?: Iterable<readonly [MetricName, V]>);
+  constructor(entries: Iterable<readonly [MetricName, V]>);
   constructor(entries?: unknown) {
     const form = FORMS.match(entries, arguments.length);
     if (form === 0) return;
@@ -91,14 +98,15 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    * The value of the entry whose key equals `key`.
    *
    * @param key - the metric name
-   * @returns the value, or undefined when there is none
+   * @returns the value, or null when there is none, as Java's `Map.get`
+   *   returns
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    * @throws `TypeError` when the key is not a MetricName
    */
-  get(key: MetricName): V | undefined {
+  get(key: MetricName): V | null {
     GET_FORMS.match(key, arguments.length);
     const entry = this.#entries.get(keyOf(GET_FORMS.value(key, 'key')));
-    return entry === undefined ? undefined : entry[1];
+    return entry === undefined ? null : entry[1];
   }
 
   /**

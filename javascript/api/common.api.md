@@ -115,10 +115,11 @@ export class MetricName {
 // @public
 export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
     [Symbol.iterator](): IterableIterator<[MetricName, V]>;
-    constructor(entries?: Iterable<readonly [MetricName, V]>);
+    constructor();
+    constructor(entries: Iterable<readonly [MetricName, V]>);
     entries(): IterableIterator<[MetricName, V]>;
     forEach(callback: (value: V, key: MetricName, map: MetricNameMap<V>) => void): void;
-    get(key: MetricName): V | undefined;
+    get(key: MetricName): V | null;
     has(key: MetricName): boolean;
     keys(): IterableIterator<MetricName>;
     size(): number;
