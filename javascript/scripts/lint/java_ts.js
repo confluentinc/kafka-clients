@@ -47,7 +47,9 @@ const PREFIX = 'org.apache.kafka.';
  * The error classes javascript/CLAUDE.md "Errors" describes, which the Java
  * members rules do not map member by member: what they keep on every class
  * instead of Java's members (`getMessage()` and `getCause()` as `message` and
- * `cause`; the payload getters and `INSTANCE` singletons are not generated).
+ * `cause`; the payload getters are not generated), and Java's `public static
+ * final` instances (`INSTANCE`), which check-java-members asks of the Java
+ * class.
  * No other public member: the FFI id is private, and an error is classified
  * with `instanceof`, so there is no `code`, `retriable` or `apiError`.
  */
@@ -57,16 +59,17 @@ const ERROR_ALLOWANCE = {
 };
 
 /**
- * The config classes, translated for their constants only (javascript/CLAUDE.md
- * "Generated files"; root CLAUDE.md "Scope", the config classes).
+ * The client config classes, translated for their constants only
+ * (javascript/CLAUDE.md "Generated files"; root CLAUDE.md, JavaScript Binding
+ * Conventions, Scope, Q55, as the Python client's Scope: their `ConfigDef`
+ * machinery is not translated). The key-name classes (`SslConfigs`,
+ * `SaslConfigs`, `SecurityConfig`) are translated in full, but a method that
+ * takes a `ConfigDef`.
  */
 const CONSTANTS_ONLY = new Set([
   'org.apache.kafka.clients.producer.ProducerConfig',
   'org.apache.kafka.clients.consumer.ConsumerConfig',
   'org.apache.kafka.clients.admin.AdminClientConfig',
-  'org.apache.kafka.common.config.SslConfigs',
-  'org.apache.kafka.common.config.SaslConfigs',
-  'org.apache.kafka.common.config.SecurityConfig',
 ]);
 
 /**
@@ -311,14 +314,15 @@ function publicMembers(ts, cls) {
 
 /**
  * The signatures of the function `node` is the first declaration of: its
- * overload signatures, or the implementation when it has none.
+ * overload signatures (an interface's method signatures), or the
+ * implementation when it has none.
  */
 function signaturesOf(ts, node) {
   const members = node.parent && node.parent.members ? [...node.parent.members] : [node];
   const same = members.filter((o) =>
     ts.isConstructorDeclaration(node)
       ? ts.isConstructorDeclaration(o)
-      : ts.isMethodDeclaration(o) && o.name && node.name && o.name.getText() === node.name.getText() && (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
+      : (ts.isMethodDeclaration(o) || ts.isMethodSignature(o)) && o.name && node.name && o.name.getText() === node.name.getText() && (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
   );
   const overloads = same.filter((o) => o.body === undefined);
   return overloads.length > 0 ? overloads : same.length > 0 ? same : [node];

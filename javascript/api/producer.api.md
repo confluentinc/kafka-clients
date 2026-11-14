@@ -33,12 +33,30 @@ export type CloseArgs = {
 export type Data = Buffer | Uint8Array | string;
 
 // @public
-export class KafkaProducer {
+export class KafkaProducer implements Producer {
     [Symbol.asyncDispose](): Promise<void>;
     constructor(options: {
         configs: ProducerConfigs;
     });
     constructor(configs: ProducerConfigs);
+    close(): Promise<void>;
+    close(options: CloseArgs): Promise<void>;
+    close(timeout: Duration): Promise<void>;
+    flush(): Promise<void>;
+    send(options: {
+        record: ProducerRecord;
+        callback: Callback | null;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(options: {
+        record: ProducerRecord;
+        callback?: never;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+}
+
+// @public
+export interface Producer {
+    [Symbol.asyncDispose](): Promise<void>;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;

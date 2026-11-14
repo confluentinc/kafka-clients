@@ -5,7 +5,6 @@
     "src/producer/producer_configs.ts:ProducerConfigs": "the type of the configuration map the constructor takes, Java's Map and Properties as one, its known keys generated from Java's ProducerConfig",
     "src/producer/kafka_producer.ts:CloseArgs": "the options object of Java's close(Duration), the timed form of the close() overload set",
     "src/producer/producer_record.ts:Data": "the JavaScript types a key or value takes",
-    "KafkaFuture.toString": "Java's KafkaFuture declares no toString(); its implementation's is kept",
     "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "SecurityProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "Headers.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",

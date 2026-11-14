@@ -14,9 +14,10 @@
 
 'use strict';
 
-// J7 check-type-mapping (javascript/CLAUDE.md "Java shape, JS idiom": Java
-// `null` is `null`, a `long` is a `bigint`, `send` returns a
-// `KafkaFuture`, a blocking method returns a Promise): every parameter,
+// J7 check-type-mapping (root CLAUDE.md, JavaScript Binding Conventions,
+// Types, and javascript/CLAUDE.md "Java shape, JS idiom": Java `null` is
+// `null`, a `long` is a `bigint`, `send` returns a `KafkaFuture`, a blocking
+// method returns a Promise): every parameter,
 // return and property type of a translated member is the TypeScript type the
 // table below gives its Java type (`return_type` and field `type` of the Java
 // index; the TypeScript type as the checker resolves it). `null` and
@@ -39,7 +40,7 @@
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
-// | a key or value type variable K / V           | Data (bytes, or a string as UTF-8)      |
+// | a key or value type variable K / V           | Data (bytes, or a string encodeLikeJava encodes) |
 // | Future<T>, KafkaFuture<T>                    | KafkaFuture<T>                          |
 // | CompletionStage<T>                           | Promise<T>                              |
 // | KafkaFuture.BaseFunction<A, B>, BiConsumer   | the alias of the same name: KafkaFuture.BaseFunction<A, B> |

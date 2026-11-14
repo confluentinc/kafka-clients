@@ -1094,3 +1094,38 @@ test("completing a million record futures, each with a get() waiting, runs no mi
   t.diagnostic(`${ns.toFixed(1)} ns per completion`);
   assert.equal(minor, 0, `${minor} minor GC(s) while completing; ${ns.toFixed(1)} ns per completion`);
 });
+
+test('KafkaFuture is abstract, as Java\'s: constructing it throws; a subclass may be built', async () => {
+  assert.throws(() => new KafkaFuture(), {
+    name: 'TypeError',
+    message: 'KafkaFuture cannot be constructed directly; use KafkaFuture.completedFuture(...) or KafkaFuture.allOf(...)',
+  });
+  // The client's futures are of its private subclass, named as the public class.
+  const made = KafkaFuture.completedFuture(1);
+  assert.ok(made instanceof KafkaFuture);
+  assert.equal(made.constructor.name, 'KafkaFuture');
+  assert.notEqual(made.constructor, KafkaFuture);
+  // A caller's own subclass: allOf reads it through its whenComplete.
+  class Own extends KafkaFuture {
+    constructor() {
+      super();
+      this.action = null;
+    }
+    whenComplete(action) {
+      this.action = action;
+      return this;
+    }
+  }
+  const own = new Own();
+  assert.ok(own instanceof KafkaFuture);
+  const all = KafkaFuture.allOf([made, own]);
+  assert.equal(all.isDone(), false);
+  own.action('v', null);
+  assert.equal(all.isDone(), true);
+  assert.equal(await all.get(), null);
+  const failing = new Own();
+  const allFailed = KafkaFuture.allOf([failing]);
+  const error = new Error('own');
+  failing.action(null, error);
+  await assert.rejects(allFailed.get(), (e) => e instanceof ExecutionError && e.cause === error);
+});

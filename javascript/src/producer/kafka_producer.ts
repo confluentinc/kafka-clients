@@ -25,6 +25,7 @@ import { producerClosed, producerOpened, warnPreview } from '../internal/lifecyc
 import { KafkaFuture } from '../common/kafka_future';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
+import type { Producer } from './producer';
 import type { ProducerConfigs } from './producer_configs';
 import { ProducerRecord } from './producer_record';
 import type { RecordMetadata } from './record_metadata';
@@ -157,7 +158,7 @@ function thrownMessage(thrown: unknown): string {
  * exit with a client still open. Why: Node exits in the middle of an `await`
  * when nothing holds it, so this way no pending send is cut off.)*
  */
-export class KafkaProducer {
+export class KafkaProducer implements Producer {
   #handle: ProducerHandle;
   // Sends whose hand-over completed inside the call since the event loop last
   // turned (as far as this producer saw: the deferral's setImmediate).

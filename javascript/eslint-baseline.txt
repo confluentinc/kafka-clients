@@ -18,6 +18,17 @@ missing clients.producer.KafkaProducer#partitionsFor
 missing clients.producer.KafkaProducer#registerMetricForSubscription
 missing clients.producer.KafkaProducer#sendOffsetsToTransaction
 missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# Producer, the interface: the same members as KafkaProducer's.
+missing clients.producer.Producer#abortTransaction
+missing clients.producer.Producer#beginTransaction
+missing clients.producer.Producer#clientInstanceId
+missing clients.producer.Producer#commitTransaction
+missing clients.producer.Producer#initTransactions
+missing clients.producer.Producer#metrics
+missing clients.producer.Producer#partitionsFor
+missing clients.producer.Producer#registerMetricForSubscription
+missing clients.producer.Producer#sendOffsetsToTransaction
+missing clients.producer.Producer#unregisterMetricFromSubscription
 # KafkaProducer's public metric and thread-name constants.
 missing clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
 missing clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME

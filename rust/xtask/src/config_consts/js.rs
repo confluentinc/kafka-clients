@@ -258,6 +258,15 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
                  'translated; a configuration is a plain object of its keys');\n  }}\n"
             ));
         }
+        if spec.kind != Kind::ConstantsOnly {
+            // A key-name class is translated in full (root CLAUDE.md,
+            // JavaScript Binding Conventions, Scope): Java's implicit public
+            // constructor too.
+            text.push_str(
+                "\n  /**\n   * Java's default constructor. The class holds only its constants, which are static.\n   */\n  \
+                 constructor() {}\n",
+            );
+        }
         for (c, k, _) in NOTES {
             if c == java && !consts.iter().any(|(n, _, _)| n == k) {
                 anyhow::bail!("config constants: the note on `{c}.{k}` names no constant");
@@ -314,6 +323,8 @@ mod tests {
             .content
             .contains("throw new TypeError('ProducerConfig is not instantiable"));
         assert!(producer.content.contains("  private constructor(...args: unknown[]) {\n"));
+        assert!(!producer.content.contains("  constructor() {}\n"));
+        assert!(ssl.content.contains("  constructor() {}\n"));
         let sasl = modules.iter().find(|m| m.name == "SaslConfigs").unwrap();
         assert!(sasl
             .content

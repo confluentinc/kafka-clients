@@ -178,6 +178,7 @@ export class CoordinatorNotAvailableError extends RefreshRetriableError {
         cause: unknown;
         name?: never;
     });
+    static readonly INSTANCE: CoordinatorNotAvailableError;
 }
 
 // @public
@@ -278,6 +279,7 @@ export class DisconnectError extends RetriableError {
         name?: never;
     });
     constructor(cause: Error);
+    static readonly INSTANCE: DisconnectError;
 }
 
 // @public

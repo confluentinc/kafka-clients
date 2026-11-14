@@ -47,8 +47,6 @@ const { nativeUses, reachedBodies } = require('../native_uses');
  */
 const DEPENDANTS = [
   { key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" },
-  { key: 'KafkaFuture.thenApply', reason: "thenApply's dependant, completed by the source's wait" },
-  { key: 'KafkaFuture.whenComplete', reason: "whenComplete's dependant, completed by the source's wait" },
 ];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */
@@ -122,14 +120,32 @@ function analyse(ctx) {
   });
 }
 
-/** The `Class.member` subjects whose native path reaches a `_cb` twin: the blocking methods (a dependant's excepted). */
+/**
+ * The `Class.member` subjects whose native path reaches a `_cb` twin: the
+ * blocking methods (a dependant's excepted), and the members of the
+ * interfaces a class implements (`implements Producer`) that one of them is.
+ */
 function waitingMembers(ctx) {
+  const { ts } = ctx.program();
   const dependants = new Set(DEPENDANTS.map((d) => d.key));
-  return new Set(
+  const out = new Set(
     analyse(ctx)
       .filter((w) => w.unresolved.length === 0 && w.twins.size > 0 && !dependants.has(w.subject))
       .map((w) => w.subject),
   );
+  for (const item of exportedItems(ctx)) {
+    if (item.kind !== 'class') continue;
+    for (const clause of item.node.heritageClauses || []) {
+      if (clause.token !== ts.SyntaxKind.ImplementsKeyword) continue;
+      for (const t of clause.types) {
+        const iface = t.expression.getText();
+        for (const subject of [...out]) {
+          if (subject.startsWith(`${item.name}.`)) out.add(`${iface}.${subject.slice(item.name.length + 1)}`);
+        }
+      }
+    }
+  }
+  return out;
 }
 
 module.exports = {

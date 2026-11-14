@@ -18,6 +18,7 @@ export class ConfigError extends KafkaError {
 
 // @public
 export class SaslConfigs {
+    constructor();
     static readonly DEFAULT_KERBEROS_KINIT_CMD: string;
     static readonly DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN: bigint;
     static readonly DEFAULT_KERBEROS_TICKET_RENEW_JITTER: number;
@@ -141,6 +142,7 @@ export class SaslConfigs {
 
 // @public
 export class SecurityConfig {
+    constructor();
     static readonly SECURITY_PROVIDERS_CONFIG: string;
     static readonly SECURITY_PROVIDERS_DOC: string;
 }
@@ -171,6 +173,7 @@ export class SslClientAuth {
 
 // @public
 export class SslConfigs {
+    constructor();
     static readonly DEFAULT_SSL_ENABLED_PROTOCOLS: string;
     static readonly DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: string;
     static readonly DEFAULT_SSL_KEYMANGER_ALGORITHM: string;

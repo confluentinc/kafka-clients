@@ -116,12 +116,12 @@ test('no method with a native call fails: 0 items checked', () => {
   assert.ok(r.err.includes('❌ check-waiting-call-promise: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
 
-test('a DEPENDANTS entry that matches nothing is a finding; the real tree lists the three dependants', () => {
+test('a DEPENDANTS entry that matches nothing is a finding; the real tree lists allOf', () => {
   const r = lintAll(fixture(), [RULE], { rules: [withLists(WAITING, { DEPENDANTS: [{ key: 'Producer.nothing', reason: 'the test' }] })] });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), ['Producer.nothing: is allowed as the test, but nothing matches it any more: delete the entry']);
   assert.deepEqual(
     WAITING.DEPENDANTS.map((d) => d.key),
-    ['KafkaFuture.allOf', 'KafkaFuture.thenApply', 'KafkaFuture.whenComplete'],
+    ['KafkaFuture.allOf'],
   );
 });

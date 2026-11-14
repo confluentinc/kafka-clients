@@ -96,7 +96,7 @@ const MUTATIONS = [
   {
     rule: 'check-internal-members',
     what: 'an `@internal` member made private',
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  internalComplete(value: T', '  private internalComplete(value: T'),
+    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  abstract internalComplete(value: T', '  protected abstract internalComplete(value: T'),
   },
   {
     rule: 'check-java-line',
@@ -204,7 +204,9 @@ MUTATIONS.push(
   {
     rule: 'check-java-completeness',
     what: 'a translated method dropped',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', '  flush(): Promise<void>;\n  flush(options?: unknown): Promise<void> {', '  private flushAll(options?: unknown): Promise<void> {'),
+    // On the Producer interface: dropped from KafkaProducer, the interface's
+    // flush would also wait on nothing (check-type-mapping).
+    apply: (root) => edit(root, 'src/producer/producer.ts', '  flush(): Promise<void>;\n', ''),
   },
   {
     rule: 'check-java-name',
@@ -229,8 +231,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/common/kafka_future.ts',
-        '  isDone(): boolean {\n    if (arguments.length !== 0) IS_DONE_FORMS.match(undefined, arguments.length);\n',
-        '  get done(): boolean {\n    void IS_DONE_FORMS;\n',
+        '  abstract isDone(): boolean;\n',
+        '  abstract get done(): boolean;\n',
       );
     },
   },
@@ -293,7 +295,7 @@ MUTATIONS.push(
     what: 'KafkaFuture.get taking a positional timeout',
     apply: (root) => {
       edit(root, 'src/common/kafka_future.ts', '   * @param options - the timeout\n   * @returns resolving to the result value', '   * @param timeoutMs - the timeout\n   * @returns resolving to the result value');
-      edit(root, 'src/common/kafka_future.ts', '  get(options: {\n    /**', '  get(timeoutMs: number): Promise<T>;\n  get(unused: {\n    /**');
+      edit(root, 'src/common/kafka_future.ts', '  abstract get(options: {\n    /**', '  abstract get(timeoutMs: number): Promise<T>;\n  abstract get(unused: {\n    /**');
     },
   },
   {
@@ -347,8 +349,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/common/kafka_future.ts',
-        '  whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;',
-        '  whenComplete(action: KafkaFuture.BiConsumer<T | null, Error | null>): KafkaFuture<T>;',
+        '  abstract whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;',
+        '  abstract whenComplete(action: KafkaFuture.BiConsumer<T | null, Error | null>): KafkaFuture<T>;',
       ),
   },
   {
@@ -361,8 +363,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/common/kafka_future.ts',
-        '   * @param timeout - The maximum time to wait\n   * @returns resolving to the result value, rejecting with an\n   *   `ExecutionError` whose `cause` is the failure\n   */\n  get(timeout: Duration): Promise<T>;',
-        '   * @param timeout - The maximum time to wait\n   * @param check - Extra values\n   * @returns resolving to the result value, rejecting with an\n   *   `ExecutionError` whose `cause` is the failure\n   */\n  get(timeout: Duration, ...check: string[]): Promise<T>;',
+        '   * @param timeout - The maximum time to wait\n   * @returns resolving to the result value, rejecting with an\n   *   `ExecutionError` whose `cause` is the failure\n   */\n  abstract get(timeout: Duration): Promise<T>;',
+        '   * @param timeout - The maximum time to wait\n   * @param check - Extra values\n   * @returns resolving to the result value, rejecting with an\n   *   `ExecutionError` whose `cause` is the failure\n   */\n  abstract get(timeout: Duration, ...check: string[]): Promise<T>;',
       ),
   },
   {
@@ -428,7 +430,7 @@ MUTATIONS.push(
   {
     rule: 'check-type-mapping',
     what: 'a non-blocking method returning a Promise',
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  isCancelled(): boolean {\n', '  isCancelled(): Promise<boolean> {\n'),
+    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  abstract isCancelled(): boolean;\n', '  abstract isCancelled(): Promise<boolean>;\n'),
   },
   {
     rule: 'check-cb-twin-only',

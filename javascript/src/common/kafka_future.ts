@@ -243,32 +243,18 @@ function checkFunction(value: unknown, name: string, shape: string): (...args: n
  *
  * @typeParam T - the result type
  */
-export class KafkaFuture<T> {
-  #state: number = PENDING;
-  // The value, or the failure (a CancellationError once cancelled).
-  #outcome: unknown = null;
-  // While pending, what runs at completion, in pairs: a waiting Promise's
-  // resolve and reject, or a dependant's listener and null.
-  #waiters: Array<((value: never, outcome: never) => void) | null> | null = null;
-  // Java's FutureRecordMetadata (a record's future) rather than KafkaFutureImpl.
-  readonly #record: boolean;
-  // A record's future: the native future of its hand-over, set at the
-  // hand-over (null for every other future, and for a record's future the
-  // tests build).
-  #native: RecordFutureHandle | null = null;
-  // The untimed native wait (`get_cb`) is in flight: one serves every waiter.
-  #nativeWaiting = false;
-  // A record's delivery as its callback saw it, set before the native future
-  // completes: SUCCEEDED or FAILED, its value or error held in `#outcome`
-  // meanwhile; the outcome once the native future is done, so the callback
-  // and `get()` see the same objects, as in Java. PENDING until then.
-  #delivery: number = PENDING;
-
+export abstract class KafkaFuture<T> {
   /**
-   * Futures are made by the client, `completedFuture` and `allOf`.
+   * A future is made by the client, `completedFuture` and `allOf`; a subclass
+   * may call this constructor.
+   *
+   * @throws `TypeError` when called for `KafkaFuture` itself, which is
+   *   abstract, as Java's is
    */
-  private constructor(record: boolean) {
-    this.#record = record;
+  constructor() {
+    if (new.target === KafkaFuture) {
+      throw new TypeError('KafkaFuture cannot be constructed directly; use KafkaFuture.completedFuture(...) or KafkaFuture.allOf(...)');
+    }
   }
 
   /**
@@ -292,6 +278,7 @@ export class KafkaFuture<T> {
     /** The value. */
     value: U;
   }): KafkaFuture<U>;
+
   /**
    * Returns a new KafkaFuture that is already completed with the given value:
    * the value on its own, the same as `completedFuture({value})`: anything
@@ -305,10 +292,11 @@ export class KafkaFuture<T> {
    * @returns the completed future
    */
   static completedFuture<U>(value: U, ...check: BareCheck<U>): KafkaFuture<U>;
+
   static completedFuture<U>(options: unknown): KafkaFuture<U> {
     COMPLETED_FUTURE_FORMS.match(options, arguments.length);
-    const future = new KafkaFuture<U>(false);
-    future.#settle(SUCCEEDED, COMPLETED_FUTURE_FORMS.value(options, 'value'), false);
+    const future = new KafkaFutureImpl<U>(false);
+    future.internalComplete(COMPLETED_FUTURE_FORMS.value(options, 'value') as U, null);
     return future;
   }
 
@@ -329,6 +317,7 @@ export class KafkaFuture<T> {
     /** The futures, an array (Java's varargs). */
     futures: ReadonlyArray<KafkaFuture<unknown>>;
   }): KafkaFuture<void>;
+
   /**
    * Returns a new KafkaFuture that is completed when all the given futures
    * have completed: the array on its own, the same as `allOf({futures})`.
@@ -337,6 +326,7 @@ export class KafkaFuture<T> {
    * @returns the future completed with `null` once all have completed
    */
   static allOf(futures: ReadonlyArray<KafkaFuture<unknown>>): KafkaFuture<void>;
+
   static allOf(options: unknown): KafkaFuture<void> {
     ALL_OF_FORMS.match(options, arguments.length);
     const futures = ALL_OF_FORMS.value(options, 'futures');
@@ -350,7 +340,462 @@ export class KafkaFuture<T> {
       if (!(future instanceof KafkaFuture)) throw new TypeError(`futures must contain only KafkaFutures, not ${kind(future)}`);
       sources.push(future as KafkaFuture<unknown>);
     }
-    const result = new KafkaFuture<void>(false);
+    return KafkaFutureImpl.internalAllOf(sources);
+  }
+
+  /**
+   * Gets a `Promise` with the same completion properties as this
+   * `KafkaFuture`. The returned Promise will settle when this future
+   * completes and in the same way (with the same result or error, a
+   * `CancellationError` once cancelled). Every call returns the same Promise.
+   *
+   * If you want to wait on the completion of a KafkaFuture you should use
+   * `get()` or `getNow()`, rather than the Promise.
+   *
+   * @returns the Promise settling with this future, rejecting with the
+   *   failure itself
+   * @throws `IllegalArgumentError` rejects with it when it is given an
+   *   argument: Java's toCompletionStage() takes none
+   */
+  abstract toCompletionStage(): Promise<T>;
+
+  /**
+   * Returns a new KafkaFuture that, when this future completes normally, is
+   * executed with this futures's result as the argument to the supplied
+   * function.
+   *
+   * The function may be invoked by the call to `thenApply` or it may be
+   * invoked by the code that completes the future.
+   *
+   * @param options - the function
+   * @returns the dependant future: completed with the function's result,
+   *   failed with what the function throws, or with this future's failure
+   * @throws `IllegalArgumentError` when the given parameters are not
+   *   `{function}`
+   * @throws `TypeError` when `function` is `null`, `undefined` or not a
+   *   function
+   */
+  abstract thenApply<R>(options: {
+    /** The function, called as `function(value)`. */
+    function: KafkaFuture.BaseFunction<T, R>;
+  }): KafkaFuture<R>;
+
+  /**
+   * Returns a new KafkaFuture that, when this future completes normally, is
+   * executed with this futures's result as the argument to the supplied
+   * function: the function on its own, the same as `thenApply({function})`.
+   *
+   * @param fn - The function, called as `fn(value)`
+   * @returns the dependant future
+   */
+  abstract thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;
+
+  /**
+   * Returns a new KafkaFuture with the same result or error as this future,
+   * that executes the given action when this future completes.
+   *
+   * When this future is done, the given action is invoked with the result
+   * (or null if none) and the error (or null if none) of this future as
+   * arguments.
+   *
+   * The returned future is completed when the action returns. The supplied
+   * action should not throw an error. However, if it does, the following
+   * rules apply: if this future completed normally but the supplied action
+   * throws an error, then the returned future completes with the supplied
+   * action's error. Or, if this future completed with an error and the
+   * supplied action throws an error, then the returned future completes with
+   * this future's error.
+   *
+   * The action may be invoked by the call to `whenComplete` or it may be
+   * invoked by the code that completes the future.
+   *
+   * @param options - the action
+   * @returns the new future
+   * @throws `IllegalArgumentError` when the given parameters are not
+   *   `{action}`
+   * @throws `TypeError` when `action` is `null`, `undefined` or not a
+   *   function
+   */
+  abstract whenComplete(options: {
+    /** The action to perform, called as `action(value, error)`. */
+    action: KafkaFuture.BiConsumer<T | null, unknown>;
+  }): KafkaFuture<T>;
+
+  /**
+   * Returns a new KafkaFuture with the same result or error as this future,
+   * that executes the given action when this future completes: the action on
+   * its own, the same as `whenComplete({action})`.
+   *
+   * @param action - The action to perform, called as `action(value, error)`
+   * @returns the new future
+   */
+  abstract whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;
+
+  /**
+   * If not already completed, completes this future with a
+   * `CancellationError`. Dependent futures that have not already completed
+   * will also complete with it.
+   *
+   * @param options - the flag
+   * @returns true if this call cancelled the future, or it was cancelled on
+   *   its own before (Java's `CompletableFuture.cancel`); false once done
+   *   otherwise, a dependant cancelled through its source included, and
+   *   always for a record's future, which is never cancelled
+   * @throws `IllegalArgumentError` when the given parameters are not
+   *   `{mayInterruptIfRunning}`
+   * @throws `TypeError` when `mayInterruptIfRunning` is not a boolean
+   */
+  abstract cancel(options: {
+    /** Ignored, as Java's `CompletableFuture` ignores it. */
+    mayInterruptIfRunning: boolean;
+  }): boolean;
+
+  /**
+   * If not already completed, completes this future with a
+   * `CancellationError`: the flag on its own, the same as
+   * `cancel({mayInterruptIfRunning})`.
+   *
+   * @param mayInterruptIfRunning - Ignored, as Java's `CompletableFuture`
+   *   ignores it
+   * @returns true if this call cancelled the future, or it was cancelled on
+   *   its own before
+   */
+  abstract cancel(mayInterruptIfRunning: boolean): boolean;
+
+  /**
+   * Waits if necessary for this future to complete, and then returns its
+   * result.
+   *
+   * Every failure rejects the returned Promise: `get()` never throws.
+   *
+   * @returns resolving to the result value, rejecting with an
+   *   `ExecutionError` whose `cause` is the failure
+   * @throws `ExecutionError` rejects with it when this future completed with
+   *   an error, its `cause`
+   * @throws `CancellationError` rejects with it when this future was
+   *   cancelled
+   */
+  abstract get(): Promise<T>;
+
+  /**
+   * Waits if necessary for at most the given time for this future to
+   * complete, and then returns its result, if available (Java's
+   * `get(long, TimeUnit)`).
+   *
+   * Every failure rejects the returned Promise, an argument check's
+   * included: `get()` never throws.
+   *
+   * @param options - the timeout
+   * @returns resolving to the result value, rejecting with an
+   *   `ExecutionError` whose `cause` is the failure
+   * @throws `ExecutionError` rejects with it when this future completed with
+   *   an error, its `cause`
+   * @throws `CancellationError` rejects with it when this future was
+   *   cancelled
+   * @throws `TimeoutError` rejects with it if the wait timed out: the root
+   *   package's `TimeoutError`, Java's `java.util.concurrent.TimeoutException`
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *   are not `{}` or `{timeout}`
+   * @throws `TypeError` rejects with it when `timeout` is `null`, `undefined`
+   *   or neither a number nor a `Temporal.Duration`
+   * @throws `RangeError` rejects with it when `timeout` is `NaN`, `-Infinity`,
+   *   holds years, months or weeks, or is beyond `Number.MAX_SAFE_INTEGER`
+   *   milliseconds
+   */
+  abstract get(options: {
+    /**
+     * The maximum time to wait, a number of milliseconds (`Infinity`: no
+     * limit) or a `Temporal.Duration`, rounded down to whole milliseconds; a
+     * negative or zero timeout does not wait.
+     */
+    timeout: Duration;
+  }): Promise<T>;
+
+  /**
+   * Waits if necessary for at most the given time for this future to
+   * complete: the timeout on its own, the same as `get({ timeout })`, Java's
+   * `get(long, TimeUnit)`.
+   *
+   * @param timeout - The maximum time to wait
+   * @returns resolving to the result value, rejecting with an
+   *   `ExecutionError` whose `cause` is the failure
+   */
+  abstract get(timeout: Duration): Promise<T>;
+
+  /**
+   * Returns the result value (or throws any encountered error) if completed,
+   * else returns the given valueIfAbsent.
+   *
+   * @param options - the value returned while this future is not done
+   * @returns the result value, or `valueIfAbsent` while not done
+   * @throws `ExecutionError` when this future completed with an error, its
+   *   `cause`
+   * @throws `CancellationError` when this future was cancelled
+   * @throws `IllegalArgumentError` when the given parameters are not
+   *   `{valueIfAbsent}` (a bare plain object included)
+   * @throws `TypeError` when `valueIfAbsent` is `undefined`
+   */
+  abstract getNow(options: {
+    /**
+     * The value returned while this future is not done. A plain object is
+     * always the options object, so it is passed by name.
+     */
+    valueIfAbsent: T | null;
+  }): T | null;
+
+  /**
+   * Returns the result value (or throws any encountered error) if completed,
+   * else returns the given valueIfAbsent: the value on its own, the same as
+   * `getNow({valueIfAbsent})`: anything but a plain object; in TypeScript a
+   * primitive, `null`, an array, a function, a `Map`, `Set`, `Date`,
+   * `ArrayBuffer`, `DataView` or typed array (any other object by name).
+   *
+   * @param valueIfAbsent - The value returned while this future is not done
+   * @returns the result value, or `valueIfAbsent` while not done
+   */
+  abstract getNow(valueIfAbsent: Bare<T | null>): T | null;
+
+  /**
+   * Returns true if this future was cancelled before it completed normally.
+   *
+   * @returns whether this future was cancelled; always false for a record's
+   *   future
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  abstract isCancelled(): boolean;
+
+  /**
+   * Returns true if this future completed with an error, in any way.
+   *
+   * @returns whether this future failed or was cancelled
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  abstract isCompletedExceptionally(): boolean;
+
+  /**
+   * Returns true if completed in any fashion: normally, exceptionally, or
+   * via cancellation.
+   *
+   * @returns whether this future is done
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  abstract isDone(): boolean;
+
+  /**
+   * Completes the future: `error` null for success with `value`; a
+   * `CancellationError` cancels it. Only the first completion counts. Called
+   * by `KafkaProducer` (and the tests, as Java's `complete` /
+   * `completeExceptionally`).
+   *
+   * @returns whether this call completed the future
+   * @internal
+   */
+  abstract internalComplete(value: T, error: unknown): boolean;
+
+  /**
+   * Sets a record's future's native handle: the future of the record's
+   * hand-over, which the record's waits read. Called by `KafkaProducer` at
+   * the hand-over, before the future is handed out.
+   *
+   * @internal
+   */
+  abstract internalSetNative(handle: RecordFutureHandle): void;
+
+  /**
+   * Records a record's delivery, as its callback saw it, once the callback
+   * ran: the future's outcome once its native future is done. A future with
+   * no native handle completes with it now. Called by `KafkaProducer`.
+   *
+   * @internal
+   */
+  abstract internalSetDelivery(value: T, error: unknown): void;
+
+  /**
+   * A pending future: a record's (Java's `FutureRecordMetadata`, never
+   * cancelled) when `record` is true, else Java's `KafkaFutureImpl`. Called
+   * by `KafkaProducer` and the tests.
+   *
+   * @internal
+   */
+  static internalCreate<T>(record: boolean): KafkaFuture<T> {
+    return new KafkaFutureImpl<T>(record);
+  }
+}
+
+/**
+ * Java's `KafkaFutureImpl`, the class of every future the client makes, and
+ * a record's future (Java's `FutureRecordMetadata`) over the native future
+ * of its hand-over.
+ */
+class KafkaFutureImpl<T> extends KafkaFuture<T> {
+  #state: number = PENDING;
+
+  // The value, or the failure (a CancellationError once cancelled).
+  #outcome: unknown = null;
+
+  // While pending, what runs at completion, in pairs: a waiting Promise's
+  // resolve and reject, or a dependant's listener and null.
+  #waiters: Array<((value: never, outcome: never) => void) | null> | null = null;
+
+  // Java's FutureRecordMetadata (a record's future) rather than KafkaFutureImpl.
+  readonly #record: boolean;
+
+  // A record's future: the native future of its hand-over, set at the
+  // hand-over (null for every other future, and for a record's future the
+  // tests build).
+  #native: RecordFutureHandle | null = null;
+
+  // The untimed native wait (`get_cb`) is in flight: one serves every waiter.
+  #nativeWaiting = false;
+
+  // A record's delivery as its callback saw it, set before the native future
+  // completes: SUCCEEDED or FAILED, its value or error held in `#outcome`
+  // meanwhile; the outcome once the native future is done, so the callback
+  // and `get()` see the same objects, as in Java. PENDING until then.
+  #delivery: number = PENDING;
+
+  // A record's future (Java's FutureRecordMetadata) when `record` is true.
+  constructor(record: boolean) {
+    super();
+    this.#record = record;
+  }
+
+  override toCompletionStage(args?: unknown): Promise<T> {
+    if (arguments.length !== 0) {
+      try {
+        TO_COMPLETION_STAGE_FORMS.match(args, arguments.length);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's (typed unknown by catch)
+        return Promise.reject(error);
+      }
+    }
+    let stage = STAGES.get(this) as Promise<T> | undefined;
+    if (stage === undefined) {
+      stage = new Promise<T>((resolve, reject) => {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the future's failure, as Java's completion stage fails with it (an Error of the client's or of the caller's own function)
+        this.#listen((state, outcome) => (state === SUCCEEDED ? resolve(outcome as T) : reject(outcome)));
+      });
+      STAGES.set(this, stage);
+    }
+    return stage;
+  }
+
+  override thenApply<R>(options: unknown): KafkaFuture<R> {
+    THEN_APPLY_FORMS.match(options, arguments.length);
+    const fn = checkFunction(THEN_APPLY_FORMS.value(options, 'function'), 'function', '(value) => result') as KafkaFuture.BaseFunction<
+      T,
+      R
+    >;
+    const dependant = new KafkaFutureImpl<R>(false);
+    this.#listen((state, outcome) => {
+      if (state !== SUCCEEDED) {
+        dependant.#settleAsDependant(state, outcome);
+        return;
+      }
+      let result: R;
+      try {
+        result = fn(outcome as T);
+      } catch (error) {
+        dependant.#completeWithError(error, true);
+        return;
+      }
+      dependant.#settle(SUCCEEDED, result, true);
+    });
+    return dependant;
+  }
+
+  override whenComplete(options: unknown): KafkaFuture<T> {
+    WHEN_COMPLETE_FORMS.match(options, arguments.length);
+    const action = checkFunction(WHEN_COMPLETE_FORMS.value(options, 'action'), 'action', '(value, error) => void') as KafkaFuture.BiConsumer<
+      T | null,
+      unknown
+    >;
+    const dependant = new KafkaFutureImpl<T>(false);
+    this.#listen((state, outcome) => {
+      try {
+        if (state === SUCCEEDED) action(outcome as T, null);
+        else action(null, outcome);
+      } catch (error) {
+        if (state === SUCCEEDED) dependant.#completeWithError(error, true);
+        else dependant.#settleAsDependant(state, outcome);
+        return;
+      }
+      dependant.#settleAsDependant(state, outcome);
+    });
+    return dependant;
+  }
+
+  override cancel(options: unknown): boolean {
+    CANCEL_FORMS.match(options, arguments.length);
+    const mayInterruptIfRunning = CANCEL_FORMS.value(options, 'mayInterruptIfRunning');
+    if (typeof mayInterruptIfRunning !== 'boolean') {
+      throw new TypeError(`mayInterruptIfRunning must be a boolean, not ${kind(mayInterruptIfRunning)}`);
+    }
+    // Java's FutureRecordMetadata.cancel.
+    if (this.#record) return false;
+    if (this.#state === PENDING) this.#settle(CANCELLED, new CancellationError(), false);
+    return this.#state === CANCELLED;
+  }
+
+  override get(options?: unknown): Promise<T> {
+    if (arguments.length === 0) return this.#get();
+    let millis: number | bigint;
+    try {
+      if (GET_FORMS.match(options, arguments.length) === 0) return this.#get();
+      millis = durationToMillis(GET_FORMS.value(options, 'timeout'), 'timeout');
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
+      return Promise.reject(error);
+    }
+    // Infinity: no limit.
+    if (typeof millis === 'bigint') return this.#get();
+    return this.#timedGet(millis);
+  }
+
+  override getNow(options: unknown): T | null {
+    GET_NOW_FORMS.match(options, arguments.length);
+    const valueIfAbsent = GET_NOW_FORMS.value(options, 'valueIfAbsent') as T | null;
+    if (this.#state === PENDING && !this.#readNative()) return valueIfAbsent;
+    if (this.#state === SUCCEEDED) return this.#outcome as T;
+    throw this.#failure();
+  }
+
+  override isCancelled(): boolean {
+    if (arguments.length !== 0) IS_CANCELLED_FORMS.match(undefined, arguments.length);
+    return cancelled(this.#state);
+  }
+
+  override isCompletedExceptionally(): boolean {
+    if (arguments.length !== 0) COMPLETED_WITH_ERROR_FORMS.match(undefined, arguments.length);
+    if (this.#state === PENDING) this.#readNative();
+    return this.#state >= FAILED;
+  }
+
+  override isDone(): boolean {
+    if (arguments.length !== 0) IS_DONE_FORMS.match(undefined, arguments.length);
+    return this.#state !== PENDING || this.#nativeDone();
+  }
+
+  // Java's KafkaFutureImpl.toString():
+  // `KafkaFuture{value=<value>,exception=<error>,done=<done>}`, `done` being
+  // whether the value or the error is not null, as Java's.
+  override toString(): string {
+    if (this.#state === PENDING) this.#readNative();
+    const value = this.#state === SUCCEEDED ? this.#outcome : null;
+    const error = this.#state >= FAILED ? this.#outcome : null;
+    return `KafkaFuture{value=${text(value)},exception=${text(error)},done=${String(error !== null || value !== null)}}`;
+  }
+
+  /**
+   * `allOf`'s future over `sources`, checked by `KafkaFuture.allOf`. A
+   * source of another class (a caller's own subclass) is read through its
+   * `whenComplete`.
+   *
+   * @internal
+   */
+  static internalAllOf(futures: ReadonlyArray<KafkaFuture<unknown>>): KafkaFuture<void> {
+    const sources = futures.map((f) => (f instanceof KafkaFutureImpl ? f : KafkaFutureImpl.#adopt(f)));
+    const result = new KafkaFutureImpl<void>(false);
     if (sources.length === 0) {
       result.#settle(SUCCEEDED, null, false);
       return result;
@@ -382,357 +827,15 @@ export class KafkaFuture<T> {
     return result;
   }
 
-  /**
-   * Gets a `Promise` with the same completion properties as this
-   * `KafkaFuture`. The returned Promise will settle when this future
-   * completes and in the same way (with the same result or error, a
-   * `CancellationError` once cancelled). Every call returns the same Promise.
-   *
-   * If you want to wait on the completion of a KafkaFuture you should use
-   * `get()` or `getNow()`, rather than the Promise.
-   *
-   * @returns the Promise settling with this future, rejecting with the
-   *   failure itself
-   * @throws `IllegalArgumentError` rejects with it when it is given an
-   *   argument: Java's toCompletionStage() takes none
-   */
-  toCompletionStage(): Promise<T>;
-  toCompletionStage(args?: unknown): Promise<T> {
-    if (arguments.length !== 0) {
-      try {
-        TO_COMPLETION_STAGE_FORMS.match(args, arguments.length);
-      } catch (error) {
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's (typed unknown by catch)
-        return Promise.reject(error);
-      }
-    }
-    let stage = STAGES.get(this) as Promise<T> | undefined;
-    if (stage === undefined) {
-      stage = new Promise<T>((resolve, reject) => {
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the future's failure, as Java's completion stage fails with it (an Error of the client's or of the caller's own function)
-        this.#listen((state, outcome) => (state === SUCCEEDED ? resolve(outcome as T) : reject(outcome)));
-      });
-      STAGES.set(this, stage);
-    }
-    return stage;
-  }
-
-  /**
-   * Returns a new KafkaFuture that, when this future completes normally, is
-   * executed with this futures's result as the argument to the supplied
-   * function.
-   *
-   * The function may be invoked by the call to `thenApply` or it may be
-   * invoked by the code that completes the future.
-   *
-   * @param options - the function
-   * @returns the dependant future: completed with the function's result,
-   *   failed with what the function throws, or with this future's failure
-   * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{function}`
-   * @throws `TypeError` when `function` is `null`, `undefined` or not a
-   *   function
-   */
-  thenApply<R>(options: {
-    /** The function, called as `function(value)`. */
-    function: KafkaFuture.BaseFunction<T, R>;
-  }): KafkaFuture<R>;
-  /**
-   * Returns a new KafkaFuture that, when this future completes normally, is
-   * executed with this futures's result as the argument to the supplied
-   * function: the function on its own, the same as `thenApply({function})`.
-   *
-   * @param fn - The function, called as `fn(value)`
-   * @returns the dependant future
-   */
-  thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;
-  thenApply<R>(options: unknown): KafkaFuture<R> {
-    THEN_APPLY_FORMS.match(options, arguments.length);
-    const fn = checkFunction(THEN_APPLY_FORMS.value(options, 'function'), 'function', '(value) => result') as KafkaFuture.BaseFunction<
-      T,
-      R
-    >;
-    const dependant = new KafkaFuture<R>(false);
-    this.#listen((state, outcome) => {
-      if (state !== SUCCEEDED) {
-        dependant.#settleAsDependant(state, outcome);
-        return;
-      }
-      let result: R;
-      try {
-        result = fn(outcome as T);
-      } catch (error) {
-        dependant.#completeWithError(error, true);
-        return;
-      }
-      dependant.#settle(SUCCEEDED, result, true);
+  // A future of another class, as a KafkaFutureImpl completed by its
+  // whenComplete: `action(value, error)`, the error null on success.
+  static #adopt(future: KafkaFuture<unknown>): KafkaFutureImpl<unknown> {
+    const adopted = new KafkaFutureImpl<unknown>(false);
+    future.whenComplete((value, error) => {
+      if (error === null) adopted.#settle(SUCCEEDED, value, false);
+      else adopted.#completeWithError(error, false);
     });
-    return dependant;
-  }
-
-  /**
-   * Returns a new KafkaFuture with the same result or error as this future,
-   * that executes the given action when this future completes.
-   *
-   * When this future is done, the given action is invoked with the result
-   * (or null if none) and the error (or null if none) of this future as
-   * arguments.
-   *
-   * The returned future is completed when the action returns. The supplied
-   * action should not throw an error. However, if it does, the following
-   * rules apply: if this future completed normally but the supplied action
-   * throws an error, then the returned future completes with the supplied
-   * action's error. Or, if this future completed with an error and the
-   * supplied action throws an error, then the returned future completes with
-   * this future's error.
-   *
-   * The action may be invoked by the call to `whenComplete` or it may be
-   * invoked by the code that completes the future.
-   *
-   * @param options - the action
-   * @returns the new future
-   * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{action}`
-   * @throws `TypeError` when `action` is `null`, `undefined` or not a
-   *   function
-   */
-  whenComplete(options: {
-    /** The action to perform, called as `action(value, error)`. */
-    action: KafkaFuture.BiConsumer<T | null, unknown>;
-  }): KafkaFuture<T>;
-  /**
-   * Returns a new KafkaFuture with the same result or error as this future,
-   * that executes the given action when this future completes: the action on
-   * its own, the same as `whenComplete({action})`.
-   *
-   * @param action - The action to perform, called as `action(value, error)`
-   * @returns the new future
-   */
-  whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;
-  whenComplete(options: unknown): KafkaFuture<T> {
-    WHEN_COMPLETE_FORMS.match(options, arguments.length);
-    const action = checkFunction(WHEN_COMPLETE_FORMS.value(options, 'action'), 'action', '(value, error) => void') as KafkaFuture.BiConsumer<
-      T | null,
-      unknown
-    >;
-    const dependant = new KafkaFuture<T>(false);
-    this.#listen((state, outcome) => {
-      try {
-        if (state === SUCCEEDED) action(outcome as T, null);
-        else action(null, outcome);
-      } catch (error) {
-        if (state === SUCCEEDED) dependant.#completeWithError(error, true);
-        else dependant.#settleAsDependant(state, outcome);
-        return;
-      }
-      dependant.#settleAsDependant(state, outcome);
-    });
-    return dependant;
-  }
-
-  /**
-   * If not already completed, completes this future with a
-   * `CancellationError`. Dependent futures that have not already completed
-   * will also complete with it.
-   *
-   * @param options - the flag
-   * @returns true if this call cancelled the future, or it was cancelled on
-   *   its own before (Java's `CompletableFuture.cancel`); false once done
-   *   otherwise, a dependant cancelled through its source included, and
-   *   always for a record's future, which is never cancelled
-   * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{mayInterruptIfRunning}`
-   * @throws `TypeError` when `mayInterruptIfRunning` is not a boolean
-   */
-  cancel(options: {
-    /** Ignored, as Java's `CompletableFuture` ignores it. */
-    mayInterruptIfRunning: boolean;
-  }): boolean;
-  /**
-   * If not already completed, completes this future with a
-   * `CancellationError`: the flag on its own, the same as
-   * `cancel({mayInterruptIfRunning})`.
-   *
-   * @param mayInterruptIfRunning - Ignored, as Java's `CompletableFuture`
-   *   ignores it
-   * @returns true if this call cancelled the future, or it was cancelled on
-   *   its own before
-   */
-  cancel(mayInterruptIfRunning: boolean): boolean;
-  cancel(options: unknown): boolean {
-    CANCEL_FORMS.match(options, arguments.length);
-    const mayInterruptIfRunning = CANCEL_FORMS.value(options, 'mayInterruptIfRunning');
-    if (typeof mayInterruptIfRunning !== 'boolean') {
-      throw new TypeError(`mayInterruptIfRunning must be a boolean, not ${kind(mayInterruptIfRunning)}`);
-    }
-    // Java's FutureRecordMetadata.cancel.
-    if (this.#record) return false;
-    if (this.#state === PENDING) this.#settle(CANCELLED, new CancellationError(), false);
-    return this.#state === CANCELLED;
-  }
-
-  /**
-   * Waits if necessary for this future to complete, and then returns its
-   * result.
-   *
-   * Every failure rejects the returned Promise: `get()` never throws.
-   *
-   * @returns resolving to the result value, rejecting with an
-   *   `ExecutionError` whose `cause` is the failure
-   * @throws `ExecutionError` rejects with it when this future completed with
-   *   an error, its `cause`
-   * @throws `CancellationError` rejects with it when this future was
-   *   cancelled
-   */
-  get(): Promise<T>;
-  /**
-   * Waits if necessary for at most the given time for this future to
-   * complete, and then returns its result, if available (Java's
-   * `get(long, TimeUnit)`).
-   *
-   * Every failure rejects the returned Promise, an argument check's
-   * included: `get()` never throws.
-   *
-   * @param options - the timeout
-   * @returns resolving to the result value, rejecting with an
-   *   `ExecutionError` whose `cause` is the failure
-   * @throws `ExecutionError` rejects with it when this future completed with
-   *   an error, its `cause`
-   * @throws `CancellationError` rejects with it when this future was
-   *   cancelled
-   * @throws `TimeoutError` rejects with it if the wait timed out: the root
-   *   package's `TimeoutError`, Java's `java.util.concurrent.TimeoutException`
-   * @throws `IllegalArgumentError` rejects with it when the given parameters
-   *   are not `{}` or `{timeout}`
-   * @throws `TypeError` rejects with it when `timeout` is `null`, `undefined`
-   *   or neither a number nor a `Temporal.Duration`
-   * @throws `RangeError` rejects with it when `timeout` is `NaN`, `-Infinity`,
-   *   holds years, months or weeks, or is beyond `Number.MAX_SAFE_INTEGER`
-   *   milliseconds
-   */
-  get(options: {
-    /**
-     * The maximum time to wait, a number of milliseconds (`Infinity`: no
-     * limit) or a `Temporal.Duration`, rounded down to whole milliseconds; a
-     * negative or zero timeout does not wait.
-     */
-    timeout: Duration;
-  }): Promise<T>;
-  /**
-   * Waits if necessary for at most the given time for this future to
-   * complete: the timeout on its own, the same as `get({ timeout })`, Java's
-   * `get(long, TimeUnit)`.
-   *
-   * @param timeout - The maximum time to wait
-   * @returns resolving to the result value, rejecting with an
-   *   `ExecutionError` whose `cause` is the failure
-   */
-  get(timeout: Duration): Promise<T>;
-  get(options?: unknown): Promise<T> {
-    if (arguments.length === 0) return this.#get();
-    let millis: number | bigint;
-    try {
-      if (GET_FORMS.match(options, arguments.length) === 0) return this.#get();
-      millis = durationToMillis(GET_FORMS.value(options, 'timeout'), 'timeout');
-    } catch (error) {
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
-      return Promise.reject(error);
-    }
-    // Infinity: no limit.
-    if (typeof millis === 'bigint') return this.#get();
-    return this.#timedGet(millis);
-  }
-
-  /**
-   * Returns the result value (or throws any encountered error) if completed,
-   * else returns the given valueIfAbsent.
-   *
-   * @param options - the value returned while this future is not done
-   * @returns the result value, or `valueIfAbsent` while not done
-   * @throws `ExecutionError` when this future completed with an error, its
-   *   `cause`
-   * @throws `CancellationError` when this future was cancelled
-   * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{valueIfAbsent}` (a bare plain object included)
-   * @throws `TypeError` when `valueIfAbsent` is `undefined`
-   */
-  getNow(options: {
-    /**
-     * The value returned while this future is not done. A plain object is
-     * always the options object, so it is passed by name.
-     */
-    valueIfAbsent: T | null;
-  }): T | null;
-  /**
-   * Returns the result value (or throws any encountered error) if completed,
-   * else returns the given valueIfAbsent: the value on its own, the same as
-   * `getNow({valueIfAbsent})`: anything but a plain object; in TypeScript a
-   * primitive, `null`, an array, a function, a `Map`, `Set`, `Date`,
-   * `ArrayBuffer`, `DataView` or typed array (any other object by name).
-   *
-   * @param valueIfAbsent - The value returned while this future is not done
-   * @returns the result value, or `valueIfAbsent` while not done
-   */
-  getNow(valueIfAbsent: Bare<T | null>): T | null;
-  getNow(options: unknown): T | null {
-    GET_NOW_FORMS.match(options, arguments.length);
-    const valueIfAbsent = GET_NOW_FORMS.value(options, 'valueIfAbsent') as T | null;
-    if (this.#state === PENDING && !this.#readNative()) return valueIfAbsent;
-    if (this.#state === SUCCEEDED) return this.#outcome as T;
-    throw this.#failure();
-  }
-
-  /**
-   * Returns true if this future was cancelled before it completed normally.
-   *
-   * @returns whether this future was cancelled; always false for a record's
-   *   future
-   * @throws `TypeError` when it is given an argument: it only reads
-   */
-  isCancelled(): boolean {
-    if (arguments.length !== 0) IS_CANCELLED_FORMS.match(undefined, arguments.length);
-    return cancelled(this.#state);
-  }
-
-  /**
-   * Returns true if this future completed with an error, in any way.
-   *
-   * @returns whether this future failed or was cancelled
-   * @throws `TypeError` when it is given an argument: it only reads
-   */
-  isCompletedExceptionally(): boolean {
-    if (arguments.length !== 0) COMPLETED_WITH_ERROR_FORMS.match(undefined, arguments.length);
-    if (this.#state === PENDING) this.#readNative();
-    return this.#state >= FAILED;
-  }
-
-  /**
-   * Returns true if completed in any fashion: normally, exceptionally, or
-   * via cancellation.
-   *
-   * @returns whether this future is done
-   * @throws `TypeError` when it is given an argument: it only reads
-   */
-  isDone(): boolean {
-    if (arguments.length !== 0) IS_DONE_FORMS.match(undefined, arguments.length);
-    return this.#state !== PENDING || this.#nativeDone();
-  }
-
-  /**
-   * Java's `KafkaFutureImpl.toString()`:
-   * `KafkaFuture{value=<value>,exception=<error>,done=<done>}`, `done` being
-   * whether the value or the error is not null, as Java's.
-   *
-   * @returns the future as text
-   *
-   * @remarks Java's `KafkaFuture` declares no `toString()`; its
-   * `KafkaFutureImpl`, the class of every future but a record's, does.
-   */
-  toString(): string {
-    if (this.#state === PENDING) this.#readNative();
-    const value = this.#state === SUCCEEDED ? this.#outcome : null;
-    const error = this.#state >= FAILED ? this.#outcome : null;
-    return `KafkaFuture{value=${text(value)},exception=${text(error)},done=${String(error !== null || value !== null)}}`;
+    return adopted;
   }
 
   // An untimed wait: the settled answer, or a Promise settled at completion.
@@ -911,7 +1014,7 @@ export class KafkaFuture<T> {
     const start = queued;
     COMPLETIONS[queued++] = this;
     COMPLETIONS[queued++] = waiters;
-    if (!nested || !draining) KafkaFuture.#drain(start);
+    if (!nested || !draining) KafkaFutureImpl.#drain(start);
     return true;
   }
 
@@ -925,7 +1028,7 @@ export class KafkaFuture<T> {
     let first: unknown = null;
     try {
       for (let n = start; n < queued; n += 2) {
-        const future = COMPLETIONS[n] as KafkaFuture<unknown>;
+        const future = COMPLETIONS[n] as KafkaFutureImpl<unknown>;
         const waiters = COMPLETIONS[n + 1] as Array<((value: never, outcome: never) => void) | null>;
         COMPLETIONS[n] = null;
         COMPLETIONS[n + 1] = null;
@@ -960,39 +1063,22 @@ export class KafkaFuture<T> {
     if (thrown) throw first;
   }
 
-  /**
-   * Completes the future: `error` null for success with `value`; a
-   * `CancellationError` cancels it. Only the first completion counts. Called
-   * by `KafkaProducer` (and the tests, as Java's `complete` /
-   * `completeExceptionally`).
-   *
-   * @returns whether this call completed the future
-   * @internal
-   */
-  internalComplete(value: T, error: unknown): boolean {
+  // Java's complete / completeExceptionally.
+  /** @internal */
+  override internalComplete(value: T, error: unknown): boolean {
     if (error === null) return this.#settle(SUCCEEDED, value, false);
     return this.#completeWithError(error, false);
   }
 
-  /**
-   * Sets a record's future's native handle: the future of the record's
-   * hand-over, which the record's waits read. Called by `KafkaProducer` at
-   * the hand-over, before the future is handed out.
-   *
-   * @internal
-   */
-  internalSetNative(handle: RecordFutureHandle): void {
+  // The record's native future.
+  /** @internal */
+  override internalSetNative(handle: RecordFutureHandle): void {
     this.#native = handle;
   }
 
-  /**
-   * Records a record's delivery, as its callback saw it, once the callback
-   * ran: the future's outcome once its native future is done. A future with
-   * no native handle completes with it now. Called by `KafkaProducer`.
-   *
-   * @internal
-   */
-  internalSetDelivery(value: T, error: unknown): void {
+  // The record's delivery, as its callback saw it.
+  /** @internal */
+  override internalSetDelivery(value: T, error: unknown): void {
     if (this.#native === null) {
       this.internalComplete(value, error);
       return;
@@ -1001,18 +1087,11 @@ export class KafkaFuture<T> {
     this.#delivery = error === null ? SUCCEEDED : FAILED;
     this.#outcome = error === null ? value : error;
   }
-
-  /**
-   * A pending future: a record's (Java's `FutureRecordMetadata`, never
-   * cancelled) when `record` is true, else Java's `KafkaFutureImpl`. Called
-   * by `KafkaProducer` and the tests.
-   *
-   * @internal
-   */
-  static internalCreate<T>(record: boolean): KafkaFuture<T> {
-    return new KafkaFuture<T>(record);
-  }
 }
+
+// The public class's name, which a message naming an argument's class
+// ("got a KafkaFuture") and the console show: the implementation is private.
+Object.defineProperty(KafkaFutureImpl, 'name', { value: 'KafkaFuture' });
 
 // Java's nested functional interfaces of KafkaFuture, as function types.
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested types KafkaFuture.BaseFunction and KafkaFuture.BiConsumer, reached through the class name as in Java; types only, it emits nothing

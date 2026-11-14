@@ -73,6 +73,11 @@ newer.
 
 - `KafkaProducer`, `ProducerRecord`, `RecordMetadata`, Java's `Callback` and,
   from `common`, `KafkaFuture` and `KafkaError`, over the Rust client's C FFI.
+- Java's `Producer` interface, a TypeScript interface that `KafkaProducer`
+  implements. `KafkaFuture` is an abstract class, as Java's is: constructing
+  it throws `TypeError`, and a subclass may be built. `DisconnectError` and
+  `CoordinatorNotAvailableError` have Java's `INSTANCE`. `SslConfigs`,
+  `SaslConfigs` and `SecurityConfig` keep Java's public constructor.
 - `ProducerRecord` and `RecordMetadata` are data objects: Java's getters are
   public `readonly` fields (`metadata.offset`, `metadata.hasOffset`), which a
   spread and `JSON.stringify` keep (`structuredClone` / `postMessage` keep
@@ -82,7 +87,7 @@ newer.
   `values()` and `valueOf()`; `toString()` and `toJSON()` return the name
   (`SslClientAuth`'s too, where Java's writes it in lower case). A method that
   only reads throws `TypeError` when it is given an argument.
-  `RecordMetadata`, `KafkaFuture` and the enums have private constructors.
+  `RecordMetadata` and the enums have private constructors.
 - `Header` and `Headers`, in `common/header`, with Java's members: `Header`
   with Java's methods (`new Header({ key, value })`, `header.key()`,
   `header.value()`, a `Buffer`) and a `toJSON()`, `Headers` with `add`,

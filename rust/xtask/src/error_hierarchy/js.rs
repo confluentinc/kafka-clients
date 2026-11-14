@@ -31,8 +31,12 @@
 //! Java's constructor chain gives (`super::build_model`). *(Deviation from the
 //! Python classes, recorded in `javascript/CLAUDE.md` and in each module's
 //! header comment:)* the constructors that take a payload are not generated
-//! (they come with the payload getters), nor are the `INSTANCE` singletons and
-//! `RecordDeserializationError.DeserializationExceptionOrigin`; a class with
+//! (they come with the payload getters), nor is
+//! `RecordDeserializationError.DeserializationExceptionOrigin`. Java's
+//! `public static final` instances (`DisconnectException.INSTANCE`) are
+//! static properties of their class, built by Java's no-argument chain
+//! whatever its constructors' visibility, not writable, as Java's `final`
+//! field; a class with
 //! no other constructor cannot be constructed (a `protected` constructor that
 //! throws `TypeError`), and the addon reads no payload across the FFI.
 
@@ -411,6 +415,9 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
         helpers.extend(["errorArgs", "init"]);
     }
     helpers.push("setForms");
+    if !info.java.singletons.is_empty() {
+        helpers.push("create");
+    }
     helpers.sort_unstable();
     text.push_str(&format!(
         "import {{ {} }} from '{}';\n",
@@ -491,6 +498,17 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
             )
         ));
     }
+    for single in &info.java.singletons {
+        body.push(format!(
+            "{}
+  declare static readonly {}: {name};",
+            tsdoc(
+                &format!("Java's `public static final {} {}`.", info.java.simple, single.name),
+                "  "
+            ),
+            single.name
+        ));
+    }
     if declares_constructor(own, info) {
         let sigs = class_sigs(forms);
         let mut ctor = Vec::new();
@@ -533,6 +551,24 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
         text.push_str(&format!("{kw} {name} extends {parent} {{\n{}\n}}\n", body.join("\n\n")));
     }
     text.push_str(&format!("\nsetForms({name}, {});\n", forms_literal(forms)));
+    for single in &info.java.singletons {
+        // Built as the core's errors are (`create`), whatever constructors
+        // the class has public (Java's may be private: the no-argument one of
+        // `CoordinatorNotAvailableException`): Java's no-argument chain, an
+        // empty message (Java's null) and no cause. A singleton built with
+        // arguments stops generation until their values are translated.
+        if !single.args.is_empty() {
+            anyhow::bail!(
+                "javascript errors: `{}.{}` is built with arguments, which the generator does not translate",
+                info.java_fqn,
+                single.name
+            );
+        }
+        text.push_str(&format!(
+            "Object.defineProperty({name}, '{0}', {{ value: create({name}, ''), enumerable: true }});\n",
+            single.name
+        ));
+    }
     Ok(JsModule { dir, stem: info.file_stem(), name: info.py_name.clone(), content: text })
 }
 
