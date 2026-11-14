@@ -88,7 +88,9 @@ e.g. a Rust producer feeding a C consumer):
 - **roles**: `producer`, `consumer`
 - **backends**: `rust` (in-process, async-native), `python` (sync binding),
   `python-async` (asyncio binding), `c` (C FFI), `dotnet` (sync .NET binding),
-  `dotnet-async` (async .NET binding). The non-Rust backends run
+  `dotnet-async` (async .NET binding), `javascript` (the Node.js binding,
+  producer role only: it has no consumer yet, so `consumer:javascript` is
+  rejected up front). The non-Rust backends run
   the real binding in its own container over the gRPC bridge; requesting one
   makes `xtask` build with `--features multilanguage-tests` automatically
   (their gRPC-server Docker images must be built first — see

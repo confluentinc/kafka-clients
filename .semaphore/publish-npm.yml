@@ -1,0 +1,70 @@
+version: v1.0
+name: publish-npm
+
+# The manual "Publish to npm" promotion of semaphore.yml. It publishes a release of the Node.js
+# client to npmjs.com from the build of its javascript/v<version> tag, with exactly the tarballs
+# that build's "Release (JavaScript): record" block recorded under npm/release/ (release-npm.sh),
+# the ones every package verification block installed and tested. Run it on that tag build once
+# the record block has passed; its blocks are skipped on any other build.
+#
+# The token is a granular npm access token, loaded from Vault only in the publish job, after every
+# check that needs none (`publish-npm.sh --check`, which reads the registry anonymously). There is
+# no provenance (--provenance=false): npm attests only builds it can verify, which Semaphore's are
+# not. A pre-release goes out under the `beta` dist-tag only, and check-npm.py dist-tag refuses
+# to put one on `latest`; a release goes out under `latest`; fixes of the earlier 1.x client go out
+# under `legacy`, from that client's own repository, never from here (publish-npm.sh).
+#
+# A promotion can be started even from a failed pipeline, so the publish job does not rely on the
+# result of the build it was promoted from: publish-npm.sh refuses unless the recorded tarballs
+# match the recorded SHA256SUMS, which the record block writes only once every verification
+# passed. To resume an interrupted publish, rerun the failed blocks of this pipeline: a package
+# already published with the recorded tarball is skipped.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 1
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - sem-version node 22
+
+blocks:
+  - name: "Release (JavaScript): publish to npm"
+    dependencies: []
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      jobs:
+        - name: "npm publish"
+          commands:
+            # The recorded release, and nothing else.
+            - artifact pull workflow npm/release --destination /tmp/npm-release
+            # Every check that needs no token, before the token is loaded: the tag, the version
+            # floor, SHA256SUMS, the dist-tag and the registry comparison, read anonymously.
+            - bash .semaphore/publish-npm.sh --check /tmp/npm-release
+            - . vault-get-secret --secret-key=NPM_TOKEN npm/kafka-javascript
+            - test -n "${NPM_TOKEN:-}" || { echo "Vault returned no NPM_TOKEN for npm/kafka-javascript" >&2; exit 1; }
+            - bash .semaphore/publish-npm.sh /tmp/npm-release
+
+  - name: "Release (JavaScript): post-publish check"
+    # The registry as a user reads it, anonymously: the packages at the version, their dist-tags,
+    # the main package's pins and each tarball against the registry's integrity and
+    # check-npm.py's package checks. A failure means the published version is defective for
+    # users: release a fixed version, and deprecate this one if it is unusable. The
+    # javascript-post-install task then installs it on every distribution and Node.js version.
+    dependencies: ["Release (JavaScript): publish to npm"]
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 15
+    task:
+      jobs:
+        - name: "Published packages match the registry"
+          commands:
+            - /usr/bin/python3 .semaphore/check-published-npm.py check "${SEMAPHORE_GIT_TAG_NAME#javascript/v}"

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: The npm 1.x releases (librdkafka-based client)
+    url: https://github.com/confluentinc/confluent-kafka-javascript/tree/2.x
+    about: The npm 1.x releases are built from the 2.x branch of this repository.

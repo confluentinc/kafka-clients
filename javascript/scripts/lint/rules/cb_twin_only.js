@@ -1,0 +1,73 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+'use strict';
+
+// N2 check-cb-twin-only (javascript/CLAUDE.md boundary rule 4: waiting calls
+// use the `_cb` twin): for every header function `f` with an `f_cb` twin,
+// native/ calls `f_cb`, never `f` or its `_err` twin, which would block the
+// event loop and run callbacks on the caller's thread. This generalises
+// test/static/header_conformance.test.js's fixed producer list to every
+// client, in function bodies and in the bodies of `#define`s (native/*.c and
+// native/*.h), a macro's call checked once, at its definition. There is no
+// exception (no blocking call at a teardown either: no finalizer closes a
+// client); an entry, if one is ever listed, names the exact call it allows,
+// and one that allows nothing is a finding.
+//
+// It also owns javascript/CLAUDE.md boundary rule 5 (a record's future is
+// waited on through `kafka_common_KafkaFuture_get_cb` and
+// `kafka_common_KafkaFuture_get_with_timeout_cb`): those are the `_cb` twins
+// of the future's blocking `get` and `get_with_timeout`, which the check above
+// refuses like any blocking form.
+
+const { cModel, applyAllowlist } = require('../c_model');
+
+/** The blocking calls allowed: `<file>:<function>:<callee>(<args>)`. None: every call is the `_cb` twin. */
+const ALLOWED = [];
+
+module.exports = {
+  name: 'check-cb-twin-only',
+  kinds: ['blocking-call', 'cb-unused-allowance'],
+  needs: ['native', 'header'],
+  hint: 'Call the _cb twin and complete in its callback (javascript/CLAUDE.md boundary rule 4).',
+  ALLOWED,
+  check(ctx) {
+    const { calls, header } = cModel(ctx);
+    const blocking = new Map();
+    for (const name of header.keys()) {
+      if (!name.endsWith('_cb')) continue;
+      const base = name.slice(0, -'_cb'.length);
+      if (header.has(base)) blocking.set(base, name);
+      if (header.has(`${base}_err`)) blocking.set(`${base}_err`, name);
+    }
+    const raw = [];
+    let checked = 0;
+    for (const c of calls) {
+      // A macro's body is checked at its definition: every use of the macro makes the call.
+      if (!header.has(c.name) || (c.directive && !c.macro)) continue;
+      checked += 1;
+      const caller = c.macro ? `the macro ${c.macro}` : c.function;
+      const twin = blocking.get(c.name);
+      if (!twin) continue;
+      raw.push({
+        kind: 'blocking-call',
+        subject: `${c.file}:${c.line}`,
+        message: `${caller} calls ${c.name}, the blocking form of ${twin}: call the _cb twin`,
+        allow: `${c.file}:${c.macro ? `#define ${c.macro}` : c.function}:${c.name}(${c.args.join(', ')})`,
+      });
+    }
+    const { kept, unused } = applyAllowlist(raw, this.ALLOWED, 'cb-unused-allowance');
+    return { findings: [...kept, ...unused], checked };
+  },
+};

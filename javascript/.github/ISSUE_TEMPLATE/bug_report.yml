@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a bug in the 4.x client, the Rust-based @confluentinc/kafka-javascript.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is for the **4.x** client (version 4.0.0 or higher, published under
+        npm's `beta` dist-tag while it is in preview).
+
+        The npm **1.x** releases, the librdkafka-based client, are built from the
+        [`2.x` branch](https://github.com/confluentinc/confluent-kafka-javascript/tree/2.x)
+        of this repository. For a 1.x release, say so in the version field below.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: The output of `npm ls @confluentinc/kafka-javascript`.
+      placeholder: "@confluentinc/kafka-javascript@4.4.0-beta.1"
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version and platform
+      description: The output of `node -p "process.version + ' ' + process.platform + ' ' + process.arch"`.
+      placeholder: v22.14.0 linux x64
+    validations:
+      required: true
+  - type: input
+    id: broker
+    attributes:
+      label: Kafka broker version
+      placeholder: "4.1.0"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest code and configuration that shows the bug.
+      render: js
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `NODE_DEBUG=confluent_kafka` and `RUST_LOG=debug` for the binding's and the core's lines.
+      render: text

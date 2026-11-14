@@ -745,6 +745,40 @@ forbidden side. What stays out is ckd's *term of art*: a `DeliveryReport<K,V>`
 is being added. If a future phase is tempted to rename toward ckd's vocabulary,
 that is what this bullet forbids.
 
+### Java names (CKRDA0013)
+
+`analyzers/Confluent.Kafka.Analyzers/JavaNameAnalyzer.cs` checks every public type and member of
+`Confluent.Kafka` against Java's, read from `analyzers/java-api.txt`, which
+`cargo xtask java-api ../dotnet/analyzers/java-api.txt` writes from `kafka/` (`--check` fails when it is
+out of date). The rule:
+
+1. A type has Java's simple name. An interface adds `I`, an async peer `Async` (`IAsyncProducer`,
+   `AsyncKafkaProducer`). A Java nested type C# cannot nest under its name (CS0102) sits beside its outer
+   type with its bare name.
+2. A method is the PascalCase of Java's exact name, `get`, `is`, `has` and `should` kept; never a property.
+3. A getter and a setter of one name are overloads.
+4. A Java static method keeps its name and stays a static method, a static factory (a static method that
+   builds an object of its type) included: never a constructor, `Parse` or a property.
+5. Fields and constants keep Java's spelling (ledger 285).
+6. Parameters keep Java's names, the interface's declaration first. In an exception's constructor a
+   `Throwable` is `innerException`, and a `String` Java names `s` or `msg` is `message`. A Java `long` and
+   the `TimeUnit` that qualifies it are one `TimeSpan`.
+7. .NET's own forms: `ToString`, `Equals` (with `==` and `!=`), `GetHashCode`; `CompareTo`;
+   `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
+   `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`. A
+   member that overrides or implements a `System` member keeps its parameter names. A method may end with an
+   optional `CancellationToken cancellationToken`.
+8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
+   `Map` overload, and an overload taking a `java.util.regex.Pattern` is not translated. A Java abstract
+   class's constructors are `protected`; a struct or sealed class has none.
+
+A difference is fixed or listed, in `analyzers/`: `java-name-allowlist.txt` (kept on purpose, each group
+under a comment saying why), `java-name-pairs.txt` (a renamed type and the Java type it translates, so its
+members are compared) or `java-name-baseline.txt` (gaps still to fix). The lists only shrink: a line that
+matches nothing is CKRDA0014, and `cargo xtask dotnet-java-name-baseline` rewrites the baseline from a
+build, refusing a finding it does not hold unless `--add` is given. The analyzer and the lists are not in the
+package.
+
 ---
 
 ## 4 · Design decisions
