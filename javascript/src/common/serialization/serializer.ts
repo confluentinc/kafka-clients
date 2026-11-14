@@ -29,8 +29,9 @@ import type { Headers } from '../header/headers';
  * methods of one name, and with positions a serializer written like Java's
  * two-argument form would get the headers as its data. *(js-only)*
  * `serialize` may return a Promise, which the producer awaits before it
- * hands the record over. There is no `configure()`: a serializer is given
- * only as a constructor argument, for which Java does not call it either.
+ * hands the record over. There is no `configure()`: a constructor argument
+ * comes ready, and Java does not call it for those either, while a function
+ * in a serde config key gets the configuration as its argument.
  *
  * @typeParam T - Type to be serialized from.
  */

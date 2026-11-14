@@ -42,7 +42,7 @@ import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metri
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
 import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
 import { Header, Headers } from '@confluentinc/kafka-javascript/common/header';
-import type { Serializer } from '@confluentinc/kafka-javascript/common/serialization';
+import { type Serializer, stringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
 
 void producer;
 
@@ -648,9 +648,16 @@ expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
 interface Order {
   id: number;
 }
-const stringSerializer: Serializer<string> = {
-  serialize: ({ data }) => (data === null ? null : Buffer.from(data, 'utf8')),
-};
+// The built-in factory: called as a constructor argument, or without () in a
+// serde config key, its configure(configs, isKey) form.
+expectTypeOf(stringSerializer()).toEqualTypeOf<Serializer<string>>();
+expectTypeOf(stringSerializer({ configs: { 'serializer.encoding': 'UTF-8' }, isKey: true })).toEqualTypeOf<Serializer<string>>();
+// @ts-expect-error configure takes the configuration and isKey together
+stringSerializer({ configs: {} });
+const viaFactory: ProducerConfigs = { 'key.serializer': stringSerializer, 'value.serializer': stringSerializer };
+void viaFactory;
+// A serializer from the configuration leaves the producer typed as bytes.
+expectTypeOf(new KafkaProducer(viaFactory)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
 const orderSerializer: Serializer<Order> = {
   // A serializer may return a Promise, which send() awaits.
   serialize: async ({ topic, headers, data }) => {
@@ -665,7 +672,7 @@ const orderSerializer: Serializer<Order> = {
 const textSerializer: Serializer<string> = { serialize: ({ data }) => data };
 void textSerializer;
 async function serializers(): Promise<void> {
-  const typed = new KafkaProducer({ configs, keySerializer: stringSerializer, valueSerializer: orderSerializer });
+  const typed = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: orderSerializer });
   expectTypeOf(typed).toEqualTypeOf<KafkaProducer<string, Order>>();
   await typed.send(new ProducerRecord({ topic: 't', key: 'k', value: { id: 1 } }));
   await typed.send({ record: new ProducerRecord({ topic: 't', key: null, value: null }), callback: null });
@@ -675,12 +682,14 @@ async function serializers(): Promise<void> {
   expectTypeOf(bytes).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
   expectTypeOf(new KafkaProducer(configs)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
   await bytes.send(new ProducerRecord({ topic: 't', key: Buffer.from('k'), value: null }));
-  const half = new KafkaProducer({ configs, keySerializer: null, valueSerializer: stringSerializer });
+  const half = new KafkaProducer({ configs, keySerializer: null, valueSerializer: stringSerializer() });
   expectTypeOf(half).toEqualTypeOf<KafkaProducer<Uint8Array, string>>();
   // @ts-expect-error Java's forms take both serializers or neither
-  void new KafkaProducer({ configs, keySerializer: stringSerializer });
+  void new KafkaProducer({ configs, keySerializer: stringSerializer() });
+  // @ts-expect-error a constructor argument is the serializer, not the factory (did you forget '()'?)
+  void new KafkaProducer({ configs, keySerializer: stringSerializer, valueSerializer: null });
   // @ts-expect-error a serializer is an object, not the function that makes one
-  void new KafkaProducer({ configs, keySerializer: () => stringSerializer, valueSerializer: null });
+  void new KafkaProducer({ configs, keySerializer: () => stringSerializer(), valueSerializer: null });
   await Promise.all([typed.close(), bytes.close(), half.close()]);
 }
 void serializers;
