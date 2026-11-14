@@ -769,6 +769,12 @@ MUTATIONS.push(
     what: "Java's negative-timeout message in the duration helper",
     apply: (root) => edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}export const NEGATIVE = 'The timeout cannot be negative.';\n`),
   },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: 'the thread-safe function referenced again when the drain starts',
+    apply: (root) =>
+      edit(root, 'native/callback_queue.c', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n    napi_ref_threadsafe_function(env, q->tsfn);\n'),
+  },
 );
 
 for (const m of MUTATIONS) {

@@ -69,6 +69,7 @@ const RUNNER_CHECKS = [
   require('./rules/no_binding_queue'),
   require('./rules/no_closed_flag'),
   require('./rules/no_repeated_precondition'),
+  require('./rules/tsfn_lifetime'),
 ];
 
 /** The ESLint rule name of check `check`: `check-java-name` -> `java-name`. */
