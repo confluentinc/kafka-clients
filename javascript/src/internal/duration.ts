@@ -25,13 +25,11 @@
 // `Duration` has no such units. A number, or the total, is rounded down, as Java's `toMillis()`.
 // `Infinity` is no limit: Java's `Long.MAX_VALUE` milliseconds, exactly, as a
 // bigint (a number cannot hold it). `NaN`, `-Infinity` and a count of
-// milliseconds a number does not hold exactly (above
-// `Number.MAX_SAFE_INTEGER`) are `RangeError`s.
-
-import { illegalArgument } from './errors';
-
-/** Java's message for a negative timeout (`KafkaProducer.close(Duration)`). */
-export const NEGATIVE_TIMEOUT_MESSAGE = 'The timeout cannot be negative.';
+// milliseconds a number does not hold exactly (beyond
+// `Number.MAX_SAFE_INTEGER` either way) are `RangeError`s. A negative duration
+// is no error here: it goes to the FFI as it is, which checks it (root
+// CLAUDE.md, JavaScript Binding Conventions, Signatures: the binding repeats
+// no precondition).
 
 /**
  * Java's `Long.MAX_VALUE` milliseconds, what `Infinity` (no limit) crosses as:
@@ -65,30 +63,8 @@ export function isDurationOrNull(value: unknown): boolean {
 
 /**
  * A `Duration` parameter in whole milliseconds, rounded down as Java's
- * `Duration.toMillis()`.
- *
- * @param value - the parameter: a number of milliseconds (`Infinity`: no
- *   limit) or a `Temporal.Duration`
- * @param name - the parameter's name, for the messages
- * @returns the duration in milliseconds, a number from 0 to
- *   `Number.MAX_SAFE_INTEGER`, or `UNBOUNDED_MILLIS` for `Infinity`
- * @throws `TypeError` when `value` is `null` (Java's `timeout.toMillis()` on a
- *   null), `undefined`, or neither a number nor a `Temporal.Duration`
- * @throws `IllegalArgumentError` when the duration is negative, with Java's
- *   message
- * @throws `RangeError` when `value` is `NaN` or `-Infinity`, holds years,
- *   months or weeks, or the duration is above `Number.MAX_SAFE_INTEGER`
- *   milliseconds, which a number does not hold exactly
- */
-export function durationToMillis(value: unknown, name: string): number | bigint {
-  return toMillis(value, name, false);
-}
-
-/**
- * A wait's `Duration` parameter in whole milliseconds, as `durationToMillis`
- * reads it, except that a negative duration is no error: it is returned as it
- * is, and the caller waits for no time, as Java's
- * `CompletableFuture.get(timeout, unit)` does.
+ * `Duration.toMillis()`. A negative duration is returned as it is, for the
+ * FFI to check.
  *
  * @param value - the parameter: a number of milliseconds (`Infinity`: no
  *   limit) or a `Temporal.Duration`
@@ -96,19 +72,13 @@ export function durationToMillis(value: unknown, name: string): number | bigint 
  * @returns the duration in milliseconds, a number from
  *   `-Number.MAX_SAFE_INTEGER` to `Number.MAX_SAFE_INTEGER`, or
  *   `UNBOUNDED_MILLIS` for `Infinity`
- * @throws `TypeError` when `value` is `null`, `undefined`, or neither a number
- *   nor a `Temporal.Duration`
+ * @throws `TypeError` when `value` is `null` (Java's `timeout.toMillis()` on a
+ *   null), `undefined`, or neither a number nor a `Temporal.Duration`
  * @throws `RangeError` when `value` is `NaN` or `-Infinity`, holds years,
  *   months or weeks, or the duration is beyond `Number.MAX_SAFE_INTEGER`
- *   milliseconds either way
+ *   milliseconds either way, which a number does not hold exactly
  */
-export function waitDurationToMillis(value: unknown, name: string): number | bigint {
-  return toMillis(value, name, true);
-}
-
-// The conversion both read a Duration with: a negative count is Java's
-// negative-timeout error first, unless `negative` lets it through.
-function toMillis(value: unknown, name: string, negative: boolean): number | bigint {
+export function durationToMillis(value: unknown, name: string): number | bigint {
   let millis: number;
   if (typeof value === 'number') {
     if (value === Infinity) return UNBOUNDED_MILLIS;
@@ -128,7 +98,6 @@ function toMillis(value: unknown, name: string, negative: boolean): number | big
   } else {
     throw new TypeError(`${name} must be a number of milliseconds or a Temporal.Duration`);
   }
-  if (millis < 0 && !negative) throw illegalArgument(NEGATIVE_TIMEOUT_MESSAGE);
   if (millis > Number.MAX_SAFE_INTEGER) {
     throw new RangeError(`${name} of ${millis} ms is above Number.MAX_SAFE_INTEGER ms; pass Infinity for no limit`);
   }

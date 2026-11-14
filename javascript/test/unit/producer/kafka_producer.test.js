@@ -346,33 +346,6 @@ test('KafkaFuture is made by the client, through its library-only factory', () =
 // A ProducerRecord field reassigned from plain JavaScript after the
 // constructor checked it: send() rejects with the constructor's error, and
 // nothing reaches the core.
-test('send() rejects a record whose field was reassigned to a value the constructor refuses', async () => {
-  const producer = new KafkaProducer({ configs: UNREACHABLE });
-  try {
-    for (const [field, value, expected] of [
-      ['value', undefined, { name: 'TypeError', message: "value must not be undefined. Pass null for Java's null, which sends a tombstone." }],
-      ['headers', [['h', null]], { name: 'TypeError', message: 'a header must be a Header' }],
-      ['timestamp', NaN, { name: 'TypeError', message: 'timestamp must be a bigint, an integer or null' }],
-      ['partition', NaN, { name: 'TypeError', message: 'partition must be an integer or null' }],
-      ['partition', 0.5, { name: 'TypeError', message: 'partition must be an integer or null' }],
-      ['partition', Infinity, { name: 'TypeError', message: 'partition must be an integer or null' }],
-      ['partition', 2 ** 32, { name: 'RangeError', message: 'partition must be from -2147483648 to 2147483647' }],
-      ['partition', -5, { name: 'IllegalArgumentError', message: 'Invalid partition: -5. Partition number should always be non-negative or null.' }],
-      ['topic', null, { name: 'IllegalArgumentError', message: 'Topic cannot be null.' }],
-    ]) {
-      const record = new ProducerRecord({ topic: 'unit-r', partition: 0, key: 'k', value: 'v' });
-      record[field] = value;
-      let called = false;
-      const sent = producer.send({ record, callback: () => (called = true) });
-      assert.ok(sent instanceof Promise, `${field}: send() returns a Promise`);
-      await assert.rejects(sent, expected, `${field} = ${String(value)}`);
-      assert.equal(called, false);
-    }
-  } finally {
-    await producer.close();
-  }
-});
-
 test("after close every call goes to the core: send rejects with its closed error, flush and close resolve", async () => {
   const closedError = (e) => {
     // Java's IllegalStateException is a java.lang exception, not a KafkaException.

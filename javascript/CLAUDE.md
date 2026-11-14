@@ -51,9 +51,6 @@ These decide every question, in this order:
    - **A negative partition or timestamp.** Why: the C record constructors
      read a negative value as Java's `null`, so the core cannot see it. Goes
      when: the FFI carries "absent" separately from the value.
-   - **A negative timeout.** Why: the FFI reads a negative `timeout_ms` as
-     the untimed form. Goes when: the FFI carries "no timeout" separately and
-     the core checks the sign.
    - **Config key and value types**, and the refusal of the serde config
      keys. Why: the FFI takes every config value as a C string, so only the
      binding sees the value's type; the serde keys name classes (root §2).
@@ -65,9 +62,15 @@ These decide every question, in this order:
      truncated silently at the ABI. Goes when: these values cross the ABI with
      a length, as `kafka_Bytes_t` does.
 
-   A negative timeout is rejected by the binding before `close()` reaches
-   the core (although the core checks it too), so a rejected close changes
-   nothing.
+   No precondition of Java's is repeated (root conventions, Q35): a negative
+   timeout goes to the FFI as it is, and the form called, not the value,
+   picks `close_cb` or `close_with_timeout_cb`; the producer FFI's close
+   rejects a negative one with Java's `IllegalArgumentError("The timeout
+   cannot be negative.")` and closes nothing. What stays is the conversion a
+   number or a `Temporal.Duration` needs: `NaN`, a count beyond 2^53 - 1 and
+   a calendar unit are `RangeError`s, and `null` is a `TypeError`
+   (`src/internal/duration.ts`). A `ProducerRecord` is frozen, so `send()`
+   checks no field again ("Java shape, JS idiom", the data objects).
 2. **The notify hook only signals.** `cbq_notify` (`native/callback_queue.c`)
    calls `napi_call_threadsafe_function(..., napi_tsfn_nonblocking)` and
    nothing else, under the client queue's `notify_mtx` and only while
@@ -278,11 +281,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
-  The objects are not frozen (but `TopicPartition`, once translated), so
-  `ProducerRecord.internalToNative` runs the constructor's checks again at
-  `send()` on the fields it reads, with the constructor's errors, rejecting
-  the send (a field reassigned from plain JavaScript is never sent
-  unchecked). The data classes are listed in `DATA_CLASSES`
+  A `ProducerRecord` is frozen (`Object.freeze(this)` in its constructor,
+  as `TopicPartition` will be), so `ProducerRecord.internalToNative` reads
+  the fields its constructor checked and checks nothing again at `send()`
+  (root conventions, Q35: no repeated precondition); its `Headers` stays
+  writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
   `ProducerRecord` and `RecordMetadata` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
@@ -323,7 +326,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `Header.internalKeyOf` / `internalValueOf`, never through methods plain
   JavaScript may have reassigned on the instance. `send()` seals the
   record's headers (`internalSetReadOnly`, Java's `setReadOnly`) after the
-  form, closed and field checks and before the hand-over; a later `add` or
+  form and argument checks and before the hand-over; a later `add` or
   `remove` throws `IllegalStateError` "RecordHeaders has been closed.". A null
   header is Java's "Header cannot be null." (`TypeError`), a null key of
   `remove` / `lastHeader` / `headers` Java's "key cannot be null."
@@ -550,7 +553,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   JavaScript before the call reaches the core)*; `flush()` and a second
   `close()` do what the core does (they resolve), with no deviation. A
   negative `timeout` is `IllegalArgumentError` "The timeout cannot be
-  negative.", and such a close changes nothing (rule 1).
+  negative.", from the FFI, and such a close changes nothing (rule 1).
 - Configuration (root conventions, Configuration): a plain object of Java's
   config keys (a `Map`, or another non-plain object, throws `TypeError`),
   checked as Python's `_config.py` checks it (`src/internal/config.ts`): a

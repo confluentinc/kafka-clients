@@ -59,9 +59,9 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
   // holds its list in a private field).
   assert.deepEqual(JSON.parse(JSON.stringify(r)), { ...fields, timestamp: '5', headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }] });
   assert.deepEqual(structuredClone(r), { ...fields, headers: {} });
-  // Not frozen (readonly is TypeScript's); the headers are the record's own
-  // Headers, holding the given Header objects, as Java's new RecordHeaders(headers).
-  assert.equal(Object.isFrozen(r), false);
+  // Frozen; the headers are the record's own Headers, holding the given
+  // Header objects, as Java's new RecordHeaders(headers), and stay writable.
+  assert.equal(Object.isFrozen(r), true);
   assert.equal(r.headers.toArray()[0], headers[0]);
   // A record with no headers has its own, empty and writable, Headers.
   const empty = new ProducerRecord({ topic: 't', value: 'v' });
@@ -345,70 +345,26 @@ test('send seals the headers once the fields are checked, as Java\'s doSend call
   // Reading is unaffected, and so is a second send of the same record.
   assert.equal(r.headers.lastHeader('b').key(), 'b');
   assert.deepEqual(keysAsText(r.internalToNative()[5]), [['a', null], ['b', null]]);
-  // A record whose re-check fails leaves its headers writable.
-  const bad = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: null });
-  bad.value = 42;
-  assert.throws(() => bad.internalToNative(), { name: 'TypeError' });
-  bad.headers.add({ key: 'ok', value: null });
 });
 
-// The fields are not frozen: plain JavaScript can reassign one after the
-// constructor checked it. The send-time re-check (internalToNative, which
-// send() calls) throws what the constructor throws for that value.
-const REASSIGNED = [
-  ['value', undefined, { name: 'TypeError', message: "value must not be undefined. Pass null for Java's null, which sends a tombstone." }],
-  ['key', undefined, { name: 'TypeError', message: "key must not be undefined. Leave the key out, or pass null for Java's null" }],
-  ['key', 42, { name: 'TypeError', message: 'key must be a Buffer, a Uint8Array, a string or null' }],
-  ['value', {}, { name: 'TypeError', message: 'value must be a Buffer, a Uint8Array, a string or null' }],
-  ['headers', [['h', null]], { name: 'TypeError', message: 'a header must be a Header' }],
-  ['headers', [{ key: 'h', value: null }], { name: 'TypeError', message: 'a header must be a Header' }],
-  ['headers', [undefined], { name: 'TypeError', message: 'a header must not be undefined. Pass a Header, or leave it out' }],
-  ['headers', [null], { name: 'TypeError', message: 'Header cannot be null.' }],
-  ['headers', 'x', { name: 'TypeError', message: 'headers must be a Headers, or an iterable of Header' }],
-  ['headers', undefined, { name: 'TypeError', message: "headers must not be undefined. Leave the key out, or pass null for Java's null" }],
-  ['timestamp', NaN, { name: 'TypeError', message: 'timestamp must be a bigint, an integer or null' }],
-  ['timestamp', -5, { name: 'IllegalArgumentError', message: 'Invalid timestamp: -5. Timestamp should always be non-negative or null.' }],
-  ['timestamp', 2 ** 53, { name: 'RangeError', message: 'timestamp must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly' }],
-  ['partition', NaN, { name: 'TypeError', message: 'partition must be an integer or null' }],
-  ['partition', 0.5, { name: 'TypeError', message: 'partition must be an integer or null' }],
-  ['partition', Infinity, { name: 'TypeError', message: 'partition must be an integer or null' }],
-  ['partition', 2 ** 32, { name: 'RangeError', message: 'partition must be from -2147483648 to 2147483647' }],
-  ['partition', -5, { name: 'IllegalArgumentError', message: 'Invalid partition: -5. Partition number should always be non-negative or null.' }],
-  ['topic', null, { name: 'IllegalArgumentError', message: 'Topic cannot be null.' }],
-  ['topic', 7, { name: 'TypeError', message: 'topic must be a string' }],
-  ['topic', undefined, { name: 'TypeError', message: "topic must not be undefined. Leave the key out, or pass null for Java's null" }],
-];
-
-/** A valid record, then `field` reassigned to `value` from plain JavaScript. */
-function reassigned(field, value) {
+// The record is frozen: plain JavaScript cannot reassign a field after the
+// constructor checked it, so send() checks nothing again (root conventions,
+// Q35: the binding repeats no precondition).
+test('the record is frozen: a field cannot be reassigned, so send reads what the constructor checked', () => {
   const r = new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: 'k', value: 'v', headers: [H('h', bytes('x'))] });
-  r[field] = value;
-  return r;
-}
-
-test('a field reassigned after the constructor is checked again at send, with the constructor\'s error', () => {
-  for (const [field, value, expected] of REASSIGNED) {
-    assert.throws(() => reassigned(field, value).internalToNative(), expected, `${field} = ${String(value)}`);
+  assert.equal(Object.isFrozen(r), true);
+  for (const [field, value] of [['value', undefined], ['key', 42], ['partition', -5], ['timestamp', NaN], ['topic', null], ['headers', null]]) {
+    // Test files are strict mode: the assignment throws.
+    assert.throws(() => {
+      r[field] = value;
+    }, TypeError, field);
   }
-  // The constructor gives each value the same error (where it takes the value
-  // as given: it reads a parameter left out as null, and refuses undefined in
-  // its form check, with the same messages).
-  for (const [field, value, expected] of REASSIGNED) {
-    if (value === undefined) continue;
-    const options = { topic: 't', partition: 0, timestamp: 1, key: 'k', value: 'v', headers: [H('h', bytes('x'))], [field]: value };
-    assert.throws(() => new ProducerRecord(options), expected, `new ProducerRecord({${field}: ${String(value)}})`);
-  }
-});
-
-test('a field reassigned to a valid value is sent as reassigned', () => {
-  assert.deepEqual(reassigned('headers', null).internalToNative()[5], null);
-  assert.deepEqual(reassigned('partition', null).internalToNative()[1], -1);
-  assert.deepEqual(reassigned('value', null).internalToNative()[4], null);
-  // An iterable that is not a Headers is read as the constructor reads it.
-  const set = reassigned('headers', new Set([H('a', null)]));
-  assert.deepEqual(keysAsText(set.internalToNative()[5]), [['a', null]]);
-  const other = reassigned('headers', new Headers([H('b', null)]));
-  assert.deepEqual(keysAsText(other.internalToNative()[5]), [['b', null]]);
+  assert.throws(() => {
+    r.extra = 1;
+  }, TypeError);
+  const [topic, partition, timestamp, key, value, headers] = r.internalToNative();
+  assert.deepEqual([topic, partition, timestamp, Buffer.from(key).toString(), Buffer.from(value).toString()], ['t', 0, 1n, 'k', 'v']);
+  assert.deepEqual(keysAsText(headers), [['h', bytes('x')]]);
   // A Header keeps its state in private fields: nothing to reassign.
   const header = H('h', null);
   header.value = 'x';

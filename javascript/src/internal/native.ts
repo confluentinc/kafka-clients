@@ -78,8 +78,9 @@ interface Native {
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
   producerClose(
     handle: ProducerHandle,
-    // -1 when the timeout was left out (Java's close()).
-    timeoutMs: number | bigint,
+    // null when the timeout was left out (Java's close()), else the
+    // timeout as it was given, a negative one included.
+    timeoutMs: number | bigint | null,
     // closedNow: this close closed the producer (a rejected timeout, or a
     // later close, did not).
     onComplete: (error: unknown, closedNow: boolean) => void,

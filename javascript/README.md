@@ -370,12 +370,10 @@ given to `ProducerRecord` is a bigint or a whole number up to 2^53 - 1 (a
 larger number throws `RangeError` rather than rounding). `JSON.stringify`
 writes a bigint as a decimal string, such as `"42"`, which `BigInt()` reads
 back exactly. A Java `int`, such as a partition, stays a number, and one
-outside Java's range throws `RangeError`. The
-objects are not frozen: `readonly` is checked by TypeScript, and a field
-reassigned from plain JavaScript is checked again at `send()`, which rejects
-with the constructor's error for that value (`record.value = undefined`
-rejects with the `undefined` `TypeError`, `record.partition = -5` with
-Java's "Invalid partition" `IllegalArgumentError`). A record's `headers` is
+outside Java's range throws `RangeError`. A `ProducerRecord` is frozen: a
+field cannot be reassigned (in strict mode the assignment throws
+`TypeError`), so `send()` sends what its constructor checked. A record's
+`headers` is
 a `Headers`, a class with methods: `JSON.stringify` writes it as its array of
 headers, and `structuredClone` as an empty object. Every other
 class keeps Java's getters as methods (`future.isDone()`, `header.key()`).
