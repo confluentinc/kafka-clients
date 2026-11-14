@@ -450,8 +450,8 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    if (!w->timed) kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);',
-        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_common_KafkaFuture_get(f->future, &ffi_err));\n    }\n    if (!w->timed) kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);',
+        '    if (!w->timed) kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_common_KafkaFuture_get(ctx->future, &ffi_err));\n    }\n    if (!w->timed) kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);',
       ),
   },
   {
@@ -574,8 +574,8 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    ctx->delivered = 1;\n    send_ctx_release(env, ctx);\n',
-        '    error_discard((kafka_common_Error_t*)error);\n    ctx->delivered = 1;\n    send_ctx_release(env, ctx);\n',
+        '    ctx->delivered = 1;\n    send_ctx_maybe_destroy_future(env, ctx);\n    send_ctx_release(env, ctx);\n',
+        '    error_discard((kafka_common_Error_t*)error);\n    ctx->delivered = 1;\n    send_ctx_maybe_destroy_future(env, ctx);\n    send_ctx_release(env, ctx);\n',
       ),
   },
   {

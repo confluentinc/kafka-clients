@@ -67,6 +67,13 @@ typedef struct {
     SendCtx* orphans;                          // contexts of sends that failed at hand-over
     SendCtx* awaiting;                         // contexts whose callback's Promise has not settled
     int owners;                                // the handle object, the tsfn, each awaited callback's function
+    // The send contexts whose record's future JS may wait on, by the slot
+    // number JS holds (a small integer, so no object is made per record);
+    // a free slot holds NULL and is chained through `free_next`.
+    SendCtx** slots;
+    int32_t* free_next;
+    int32_t slot_count;
+    int32_t free_head;                         // -1: none free
 } Producer;
 
 // One send. Two owners: the hand-over completion and the delivery callback.
@@ -90,6 +97,11 @@ struct SendCtx {
     napi_ref settle_ref;                       // holds that function strongly until the report: no GC reports early
     SendCtx* await_prev;
     SendCtx* await_next;
+    kafka_common_KafkaFuture_t* future;        // the record's future (owned), from the hand-over until destroyed
+    int waits;                                 // the waits on `future` still pending (each one also holds a ref)
+    int js_holds;                              // JS was handed the future's slot number (`slot`)
+    int32_t slot;                              // its slot in p->slots while js_holds, else -1
+    int js_settled;                            // JS recorded the delivery: it reads the future no more
 };
 
 typedef struct {
@@ -105,7 +117,40 @@ typedef struct {
 static void producer_release(Producer* p) {
     if (--p->owners != 0) return;
     cbq_dispose(&p->queue);
+    free(p->slots);
+    free(p->free_next);
     free(p);
+}
+
+// A free slot for `ctx`, growing the table when none is: its number, or -1
+// when out of memory.
+static int32_t slot_take(Producer* p, SendCtx* ctx) {
+    if (p->free_head < 0) {
+        int32_t grown = p->slot_count == 0 ? 64 : p->slot_count * 2;
+        if (grown <= p->slot_count) return -1;
+        SendCtx** slots = (SendCtx**)realloc(p->slots, (size_t)grown * sizeof(SendCtx*));
+        if (slots == NULL) return -1;
+        p->slots = slots;
+        int32_t* next = (int32_t*)realloc(p->free_next, (size_t)grown * sizeof(int32_t));
+        if (next == NULL) return -1;
+        p->free_next = next;
+        for (int32_t i = grown - 1; i >= p->slot_count; i--) {
+            p->slots[i] = NULL;
+            p->free_next[i] = p->free_head;
+            p->free_head = i;
+        }
+        p->slot_count = grown;
+    }
+    int32_t i = p->free_head;
+    p->free_head = p->free_next[i];
+    p->slots[i] = ctx;
+    return i;
+}
+
+static void slot_give_back(Producer* p, int32_t i) {
+    p->slots[i] = NULL;
+    p->free_next[i] = p->free_head;
+    p->free_head = i;
 }
 
 // ---- RecordMetadata ---------------------------------------------------------
@@ -162,86 +207,90 @@ static int is_function(napi_env env, napi_value v) {
     return napi_typeof(env, v, &type) == napi_ok && type == napi_function;
 }
 
+// ---- send -------------------------------------------------------------------
+
+// The core no longer reads the key and value (the hand-over completion, or a
+// record never handed over): the references on their Buffers are dropped,
+// once (delete_ref clears each).
+static void send_ctx_release_buffers(napi_env env, SendCtx* ctx) {
+    delete_ref(env, &ctx->key_ref);
+    delete_ref(env, &ctx->value_ref);
+}
+
+// Destroys the record's future, once (javascript/CLAUDE.md, rule 5): run on
+// the JS thread, it runs no JS.
+static void send_ctx_destroy_future(napi_env env, SendCtx* ctx) {
+    if (ctx->slot >= 0) {
+        slot_give_back(ctx->p, ctx->slot);
+        ctx->slot = -1;
+    }
+    if (ctx->future == NULL) return;
+    kafka_common_Error_t* ffi_err = NULL;
+    error_warn(env, !ctx->p->queue.finalizing, FFI_ERR(kafka_common_KafkaFuture_destroy_err(ctx->future, &ffi_err)));
+    ctx->future = NULL;
+}
+
+// The record's future is no longer needed once its callback reported, no
+// wait on it is pending, and JS reads it no more: JS recorded the delivery,
+// or was never handed it. It is destroyed then, on the JS thread, with no
+// finalizer of its own.
+static void send_ctx_maybe_destroy_future(napi_env env, SendCtx* ctx) {
+    if (ctx->delivered && ctx->waits == 0 && (ctx->js_settled || !ctx->js_holds)) send_ctx_destroy_future(env, ctx);
+}
+
+static void send_ctx_free(napi_env env, SendCtx* ctx) {
+    send_ctx_release_buffers(env, ctx);
+    delete_ref(env, &ctx->on_handover);
+    delete_ref(env, &ctx->on_complete);
+    // A future JS still holds and never recorded the delivery of (its
+    // callback reached no JS: an environment teardown, or a callback Promise
+    // the destroy reported as returned, which a completed close rules out)
+    // stays readable through the handle JS has, so its context is kept.
+    if (ctx->future != NULL && ctx->js_holds && !ctx->js_settled) return;
+    send_ctx_destroy_future(env, ctx);
+    free(ctx);
+}
+
+// Drops one owner; the last one frees the context unless it is an orphan,
+// which destroy frees.
+static void send_ctx_release(napi_env env, SendCtx* ctx) {
+    if (--ctx->refs != 0 || ctx->orphaned) return;
+    send_ctx_free(env, ctx);
+}
+
 // ---- the record's future -----------------------------------------------------
 
 // A record's future (javascript/CLAUDE.md, rule 5): the owned
-// `kafka_common_KafkaFuture_t` of its hand-over, behind the handle object JS
-// keeps on the record's KafkaFuture. The handle object's finalizer destroys
-// it, exactly once; a pending `get_cb` keeps the future readable until its
-// completion, as the FFI documents. Each holds one unit of the producer
-// struct, whose state its waits read.
-typedef struct {
-    Producer* p;
-    kafka_common_KafkaFuture_t* future;
-} RecordFuture;
+// `kafka_common_KafkaFuture_t` of its hand-over, kept on the send's context
+// (`SendCtx.future`) and handed to JS as the number of the context's slot in
+// the producer's table (`Producer.slots`): no object, and no finalizer, is
+// made per record. JS waits
+// on it only until it records the delivery; the context destroys it once
+// the callback reported and the last wait completed
+// (send_ctx_maybe_destroy_future).
 
 // One wait on a record's future: `get_cb` or `get_with_timeout_cb`. It holds
-// one unit of the producer struct until its completion.
+// one reference on the send's context and one unit of the producer struct
+// until its completion.
 typedef struct {
+    SendCtx* ctx;
     Producer* p;
     int timed;
     napi_ref done;                             // JS (metadata | null, error | null, timedOut) => void
 } FutureWait;
-
-static void record_future_finalize(napi_env env, void* data, void* hint) {
-    (void)hint;
-    RecordFuture* f = (RecordFuture*)data;
-    kafka_common_Error_t* ffi_err = NULL;
-    // A finalizer runs no JS: an error freeing the handle is only freed.
-    error_warn(env, 0, FFI_ERR(kafka_common_KafkaFuture_destroy_err(f->future, &ffi_err)));
-    Producer* p = f->p;
-    free(f);
-    producer_release(p);
-}
-
-// The handle object of `future` (OWNED, taken over: destroyed here when the
-// object cannot be made, and `null` returned for NULL), or NULL with a JS
-// exception pending.
-static napi_value record_future_to_js(napi_env env, Producer* p, kafka_common_KafkaFuture_t* future) {
-    kafka_common_Error_t* ffi_err = NULL;
-    napi_value obj = NULL;
-    if (future == NULL) {
-        NAPI_CHECK(env, napi_get_null(env, &obj), NULL);
-        return obj;
-    }
-    RecordFuture* f = (RecordFuture*)calloc(1, sizeof(RecordFuture));
-    if (f == NULL || napi_create_object(env, &obj) != napi_ok) {
-        free(f);
-        error_warn(env, 1, FFI_ERR(kafka_common_KafkaFuture_destroy_err(future, &ffi_err)));
-        js_throw_last_napi_error(env, "napi_create_object");
-        return NULL;
-    }
-    f->p = p;
-    f->future = future;
-    if (napi_wrap(env, obj, f, record_future_finalize, NULL, NULL) != napi_ok) {
-        free(f);
-        error_warn(env, 1, FFI_ERR(kafka_common_KafkaFuture_destroy_err(future, &ffi_err)));
-        js_throw_last_napi_error(env, "napi_wrap");
-        return NULL;
-    }
-    p->owners++;
-    return obj;
-}
-
-static RecordFuture* unwrap_record_future(napi_env env, napi_value handle) {
-    void* data = NULL;
-    if (napi_unwrap(env, handle, &data) != napi_ok || data == NULL) {
-        napi_throw_type_error(env, NULL, "not a record future handle");
-        return NULL;
-    }
-    return (RecordFuture*)data;
-}
 
 // The completion of a wait (kafka_common_KafkaFuture_get_cb_t and
 // kafka_common_KafkaFuture_get_with_timeout_cb_t): run by the producer's
 // drain, inline inside the wait's call once the producer is destroyed, or by
 // its destroy, on the JS thread. `value` is the record's metadata, borrowed;
 // `error` is owned. A completion the destroy runs, from the handle object's
-// finalizer, reaches no JS; the close that let it run had completed every
-// record and the waits on them before.
+// finalizer, reaches no JS, and its JS wait never settles: nothing in the FFI
+// orders it before the close's completion, and no other wait is known to
+// stay pending past a completed close.
 static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaque) {
     FutureWait* w = (FutureWait*)opaque;
     Producer* p = w->p;
+    SendCtx* ctx = w->ctx;
     napi_env env = p->env;
     kafka_common_Error_t* ffi_err = NULL;
     if (!(p->queue.finalizing && p->kp != NULL)) {
@@ -263,126 +312,110 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
     error_discard(error);
     delete_ref(env, &w->done);
     free(w);
+    // The value is borrowed from the future until this returns: only now may
+    // the last wait let the context destroy it.
+    ctx->waits--;
+    send_ctx_maybe_destroy_future(env, ctx);
+    send_ctx_release(env, ctx);
     producer_release(p);
 }
 
-// recordFutureGet(future, timeoutMs, done): a wait on a record's future
+// recordFutureGet(handle, future, timeoutMs, done): a wait on a record's future
 // through its `_cb` twins, never the blocking get (javascript/CLAUDE.md, rule
 // 5): `get_cb` for a timeoutMs of null, else `get_with_timeout_cb`, a
 // negative timeoutMs passed on as it is (the FFI waits no time then).
-// `done(metadata | null, error | null, timedOut)` runs once it completed
-// (future_on_wait), from the drain, or inside this call once the producer is
-// destroyed.
+// `future` is the slot number the hand-over gave JS for the record, which JS
+// calls this with, and the producer's handle, only until it records the
+// delivery. `done(metadata | null, error | null,
+// timedOut)` runs once it completed (future_on_wait), from the drain, or
+// inside this call once the producer is destroyed.
 napi_value js_record_future_get(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3];
+    size_t argc = 4;
+    napi_value argv[4];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    if (argc != 3 || !is_function(env, argv[2])) {
-        napi_throw_type_error(env, NULL, "recordFutureGet(future, timeoutMs, done)");
+    int32_t slot = -1;
+    if (argc != 4 || !is_function(env, argv[3]) || napi_get_value_int32(env, argv[1], &slot) != napi_ok) {
+        napi_throw_type_error(env, NULL, "recordFutureGet(handle, future, timeoutMs, done)");
         return NULL;
     }
-    RecordFuture* f = unwrap_record_future(env, argv[0]);
-    if (f == NULL) return NULL;
+    void* data = NULL;
+    if (napi_unwrap(env, argv[0], &data) != napi_ok || data == NULL) {
+        napi_throw_type_error(env, NULL, "not a producer handle");
+        return NULL;
+    }
+    Producer* p = (Producer*)data;
+    // Unreachable for a slot JS was given: it is given back only once JS
+    // reads the future no more (send_ctx_destroy_future).
+    if (slot < 0 || slot >= p->slot_count || p->slots[slot] == NULL || p->slots[slot]->future == NULL) {
+        napi_throw_error(env, NULL, "no record's future in this slot");
+        return NULL;
+    }
+    SendCtx* ctx = p->slots[slot];
     napi_valuetype type;
-    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
     int64_t timeout = 0;
-    if (type != napi_null) NAPI_CHECK(env, napi_get_value_int64(env, argv[1], &timeout), NULL);
+    if (type != napi_null) NAPI_CHECK(env, napi_get_value_int64(env, argv[2], &timeout), NULL);
     FutureWait* w = (FutureWait*)calloc(1, sizeof(FutureWait));
     if (w == NULL) {
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
-    w->p = f->p;
+    w->ctx = ctx;
+    w->p = p;
     w->timed = type != napi_null;
-    if (napi_create_reference(env, argv[2], 1, &w->done) != napi_ok) {
+    if (napi_create_reference(env, argv[3], 1, &w->done) != napi_ok) {
         free(w);
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
-    f->p->owners++;
-    if (!w->timed) kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);
-    else kafka_common_KafkaFuture_get_with_timeout_cb(f->future, timeout, future_on_wait, w);
+    ctx->refs++;
+    ctx->waits++;
+    p->owners++;
+    if (!w->timed) kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);
+    else kafka_common_KafkaFuture_get_with_timeout_cb(ctx->future, timeout, future_on_wait, w);
     return NULL;
-}
-
-// recordFutureIsDone(future): the FFI's is_done of a record's future.
-napi_value js_record_future_is_done(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
-    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    if (argc != 1) {
-        napi_throw_type_error(env, NULL, "recordFutureIsDone(future)");
-        return NULL;
-    }
-    RecordFuture* f = unwrap_record_future(env, argv[0]);
-    if (f == NULL) return NULL;
-    kafka_common_Error_t* ffi_err = NULL;
-    int8_t done = 0;
-    kafka_common_Error_t* err = FFI_SET(done, kafka_common_KafkaFuture_is_done_err(f->future, &ffi_err));
-    if (err != NULL) {
-        error_throw_owned(env, err);
-        return NULL;
-    }
-    napi_value result;
-    NAPI_CHECK(env, napi_get_boolean(env, done != 0, &result), NULL);
-    return result;
-}
-
-// ---- send -------------------------------------------------------------------
-
-// The core no longer reads the key and value (the hand-over completion, or a
-// record never handed over): the references on their Buffers are dropped,
-// once (delete_ref clears each).
-static void send_ctx_release_buffers(napi_env env, SendCtx* ctx) {
-    delete_ref(env, &ctx->key_ref);
-    delete_ref(env, &ctx->value_ref);
-}
-
-static void send_ctx_free(napi_env env, SendCtx* ctx) {
-    send_ctx_release_buffers(env, ctx);
-    delete_ref(env, &ctx->on_handover);
-    delete_ref(env, &ctx->on_complete);
-    free(ctx);
-}
-
-// Drops one owner; the last one frees the context unless it is an orphan,
-// which destroy frees.
-static void send_ctx_release(napi_env env, SendCtx* ctx) {
-    if (--ctx->refs != 0 || ctx->orphaned) return;
-    send_ctx_free(env, ctx);
 }
 
 // The send's hand-over completion (kafka_producer_Producer_send_with_callback_cb_t):
 // inside send_with_callback_cb for a record taken or refused at once, else from
 // the drain, or from destroy; always on the JS thread. `value`, the record's
-// future, is handed to JS in its own handle object (record_future_to_js),
-// which owns it from then on; it is destroyed here only when no JS can take
-// it.
+// future, is kept on the context, and JS gets the context's slot number to
+// wait on it with (the record's future section above).
 static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Error_t* error, void* opaque) {
     SendCtx* ctx = (SendCtx*)opaque;
     Producer* p = ctx->p;
-    kafka_common_Error_t* ffi_err = NULL;
     napi_env env = p->env;
     ctx->handed_over = 1;
     ctx->handover_failed = error != NULL;
     // The FFI borrows the key and value only until this completion
     // (rust/src/ffi/producer/mod.rs, module docs): the Buffers are released
     // now, whether the record was taken or refused.
+    // The context owns the record's future from now on (NULL for a refused
+    // record).
+    ctx->future = value;
     send_ctx_release_buffers(env, ctx);
     if (!p->queue.finalizing && ctx->on_handover != NULL) {
         napi_value argv[2];
         argv[0] = error_take_to_js(env, error);
         error = NULL;
-        // record_future_to_js takes the future over, even when it fails.
         argv[1] = NULL;
         if (argv[0] != NULL) {
-            argv[1] = record_future_to_js(env, p, value);
-            value = NULL;
+            if (value == NULL) {
+                if (napi_get_null(env, &argv[1]) != napi_ok) argv[1] = NULL;
+            } else {
+                ctx->slot = slot_take(p, ctx);
+                if (ctx->slot < 0 || napi_create_int32(env, ctx->slot, &argv[1]) != napi_ok) argv[1] = NULL;
+            }
         }
-        if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->on_handover, 2, argv, NULL);
-        else js_warn_thrown(env);
+        if (argv[0] != NULL && argv[1] != NULL) {
+            ctx->js_holds = value != NULL;
+            call_ref(env, ctx->on_handover, 2, argv, NULL);
+        } else {
+            js_warn_thrown(env);
+        }
     }
-    if (value != NULL) error_warn(env, !p->queue.finalizing, FFI_ERR(kafka_common_KafkaFuture_destroy_err(value, &ffi_err)));
+    // A delivery that came first has already reported.
+    send_ctx_maybe_destroy_future(env, ctx);
     error_discard(error);
     delete_ref(env, &ctx->on_handover);
     if (ctx->handover_failed && --ctx->refs > 0) {
@@ -458,6 +491,7 @@ static void send_awaited_report(napi_env env, SendCtx* ctx, const char* thrown) 
         error_discard(report);
     }
     ctx->delivered = 1;
+    send_ctx_maybe_destroy_future(env, ctx);
     // The function may be collected from now on; its finalizer releases.
     if (ctx->settle_ref != NULL) {
         napi_delete_reference(env, ctx->settle_ref);
@@ -482,6 +516,8 @@ static napi_value js_send_on_settled(napi_env env, napi_callback_info info) {
     void* data = NULL;
     if (napi_get_cb_info(env, info, &argc, argv, NULL, &data) != napi_ok || data == NULL) return NULL;
     SendCtx* ctx = (SendCtx*)data;
+    // src/ recorded the delivery before its Promise called back.
+    ctx->js_settled = 1;
     napi_valuetype type = napi_undefined;
     if (argc >= 1 && argv[0] != NULL && napi_typeof(env, argv[0], &type) != napi_ok) type = napi_object;
     char* thrown = type == napi_string ? string_or_null(env, argv[0]) : NULL;
@@ -591,6 +627,9 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
             napi_value r = call_ref(env, ctx->on_complete, 2, argv, &thrown);
             napi_valuetype type = napi_undefined;
             if (r != NULL && napi_typeof(env, r, &type) != napi_ok) type = napi_undefined;
+            // JS recorded the delivery unless its callback returned a Promise
+            // (send_defer), which records it once settled (js_send_on_settled).
+            if (r != NULL && type != napi_object) ctx->js_settled = 1;
             if (type == napi_string) {
                 // The user callback threw: src/ returns its message.
                 free(thrown);
@@ -617,6 +656,7 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
         error_discard(report);
     }
     ctx->delivered = 1;
+    send_ctx_maybe_destroy_future(env, ctx);
     send_ctx_release(env, ctx);
 }
 
@@ -673,6 +713,7 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
     }
     ctx->p = p;
     ctx->refs = 2;
+    ctx->slot = -1;
     if (js_bytes(env, argv[4], "key must be a Buffer, a Uint8Array, a string or null", &ctx->key)
         || js_bytes(env, argv[5], "value must be a Buffer, a Uint8Array, a string or null", &ctx->value)) {
         free(topic);
@@ -1018,6 +1059,7 @@ napi_value js_producer_create(napi_env env, napi_callback_info info) {
     }
     p->env = env;
     p->kp = kp;
+    p->free_head = -1;
     kafka_common_Error_t* err = FFI_SET(p->view, kafka_producer_KafkaProducer__as_Producer_err(kp, &ffi_err));
     if (err == NULL
         && cbq_init(env, &p->queue, "confluent-kafka producer callbacks", p, producer_execute, producer_tsfn_finalized)

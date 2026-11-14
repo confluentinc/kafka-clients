@@ -29,8 +29,8 @@
 //     completion (an argument for a native parameter whose function type
 //     takes a `RecordMetadata`, and any function argument of a `native.<fn>`
 //     call that records a delivery on a future,
-//     `future.internalSetDelivery(...)`, the outcome the future completes with
-//     once its native future is done, after the report) runs the user
+//     `future.internalSetDelivery(...)`, which completes the future, as Java
+//     completes it once onCompletion returned) runs the user
 //     callback (a value of the `Callback` type) before it records the
 //     delivery, each once, the functions it calls in src/ followed; a
 //     delivery callback the rule cannot resolve to a function is a finding. A
