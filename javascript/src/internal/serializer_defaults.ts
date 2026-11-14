@@ -18,14 +18,18 @@
 
 import type { Serializer } from '../common/serialization/serializer';
 
-/** Java's `Serializer` default methods, for a serializer that lacks them. */
+/**
+ * Java's `Serializer` default methods, for a serializer that lacks them: the
+ * binding runs each with the user's serializer as `this`
+ * (`SerializerDefaults.prototype.close.call(serializer)`), as Java runs an
+ * interface's default method on the object that implements it.
+ */
 export class SerializerDefaults {
   /**
-   * Java's default `Serializer.close()`, which is intentionally left blank.
-   *
-   * @param serializer - the serializer being closed
+   * Close this serializer: Java's default `Serializer.close()`, which is
+   * intentionally left blank.
    */
-  static close(serializer: Serializer<unknown>): void {
-    void serializer;
+  close(this: Serializer<unknown>): void {
+    // Java's default body is empty.
   }
 }
