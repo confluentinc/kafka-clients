@@ -412,7 +412,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
 - Promises (root conventions, Futures and waiting): a method returns a Promise
   if and only if its entry point has a `_cb` twin, and a method returning a
   Promise never throws: every failure, the argument and form checks and the
-  closed check included, rejects it. `send` returns
+  core's errors included, rejects it. `send` returns
   `Promise<KafkaFuture<RecordMetadata>>` (PLAN D8), resolving at the
   hand-over, and the future's `get()` returns `Promise<RecordMetadata>`,
   settling at delivery. `KafkaFuture` is Java's, with its members in Java's

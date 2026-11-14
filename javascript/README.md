@@ -316,9 +316,10 @@ milliseconds or a `Temporal.Duration` (built into Node 26, from a polyfill
 such as `@js-temporal/polyfill` before), rounded down to whole milliseconds.
 `Infinity` means no limit; `NaN`, `-Infinity`, a number above
 `Number.MAX_SAFE_INTEGER` and a `Temporal.Duration` with years, months or
-weeks throw `RangeError`, a negative one Java's `IllegalArgumentError`, and
-`null` `TypeError('timeout must not be null')`. On a producer already closing
-or closed, `close()` returns that close before it reads its timeout. The
+weeks throw `RangeError`, a negative one Java's `IllegalArgumentError` (from
+the client's core, which closes nothing then), and `null` `TypeError('timeout
+must not be null')`. A `close()` on a producer already closing or closed is a
+close of its own, in the client, and checks its timeout the same way. The
 methods returning a Promise (`send`, `flush`, `close`) never throw: every
 failure rejects their Promise.
 
@@ -467,8 +468,10 @@ longer holds Node, and its native client is released when the producer is
 garbage collected. A call made after `close()` goes to the client, which
 answers as Java's does: `send()` rejects with `IllegalStateError` "Cannot
 perform operation after producer has been closed", and `flush()` and a second
-`close()` resolve. Such a later call does not hold Node either, so await it
-while something else keeps the process running. A `process.exit()` runs no
+`close()` resolve. A call made after `close()` has completed settles only
+while something else keeps the event loop running: a closed producer no
+longer holds Node, so a script whose only pending work is such a call can
+exit before it settles. A `process.exit()` runs no
 cleanup: the process ends at once and the unsent records are lost, as Java's
 daemon I/O thread loses unsent records at JVM exit. The preview doesn't
 support clients in worker threads.
