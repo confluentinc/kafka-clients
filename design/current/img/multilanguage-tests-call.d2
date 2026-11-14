@@ -1,0 +1,124 @@
+# How one call from a gRPC arm reaches the binding, as a sequence.
+#
+# Source of truth for design/current/img/multilanguage-tests-call.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: only the hop from the test to its server is gRPC.
+# The test holds a number; the server keeps the real consumer in a map and
+# calls it in its own process, and only the Rust core under the binding talks
+# to the broker. Orange is gRPC, grey a call inside one process, teal dashed
+# the Kafka protocol, as in the other multilanguage-tests diagrams.
+
+vars: {
+  d2-config: {
+    pad: 24
+  }
+}
+
+classes: {
+  part: {
+    style: {
+      fill: "#eef2f6"
+      stroke: "#9aa7b4"
+      border-radius: 8
+      font-color: "#16202a"
+      font-size: 15
+    }
+  }
+  server: {
+    style: {
+      fill: "#fbeade"
+      stroke: "#b3470e"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#7a2f08"
+      font-size: 15
+    }
+  }
+  core: {
+    style: {
+      fill: "#dcf0ec"
+      stroke: "#0d7368"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#0b4f47"
+      font-size: 15
+    }
+  }
+  note: {
+    style: {
+      fill: "#ffffff"
+      stroke: "#9aa7b4"
+      stroke-dash: 3
+      border-radius: 6
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  grpc: {
+    style: {
+      stroke: "#b3470e"
+      stroke-width: 2
+      font-color: "#b3470e"
+      font-size: 14
+    }
+  }
+  call: {
+    style: {
+      stroke: "#586675"
+      stroke-width: 2
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  kafka: {
+    style: {
+      stroke: "#0d7368"
+      stroke-width: 2
+      stroke-dash: 4
+      font-color: "#0d7368"
+      font-size: 14
+    }
+  }
+}
+
+shape: sequence_diagram
+
+test: "Rust test\nstand-in client" {class: part}
+server: "test server\nin its container" {class: server}
+binding: "binding + Rust core\nin the server's process" {class: core}
+broker: "Kafka broker" {class: part}
+
+create: "create the consumer" {
+  style: {
+    fill: "#e6ecf2"
+    stroke: "#9aa7b4"
+    stroke-dash: 3
+    font-color: "#3d4a57"
+    font-size: 14
+    bold: true
+  }
+
+  test -> server: "CreateConsumer(config)" {class: grpc}
+  server -> binding: "new KafkaConsumer(config)" {class: call}
+  server.keeps: "keeps consumers[7]" {class: note}
+  server -> test: "consumer_id = 7" {class: grpc}
+}
+
+poll: "poll it" {
+  style: {
+    fill: "#e6ecf2"
+    stroke: "#9aa7b4"
+    stroke-dash: 3
+    font-color: "#3d4a57"
+    font-size: 14
+    bold: true
+  }
+
+  test -> server: "Poll(consumer_id = 7, timeout_ms = 5000)" {class: grpc}
+  server -> binding: "consumers[7].poll(5 s)" {class: call}
+  binding -> broker: "Fetch" {class: kafka}
+  broker -> binding: "records" {class: kafka}
+  binding -> server: "ConsumerRecords" {class: call}
+  server -> test: "PollResponse{records}\nor PollResponse{error} on failure" {class: grpc}
+}
