@@ -75,6 +75,17 @@ public enum ClassicGroupState
 /// </summary>
 public static class ClassicGroupStateMethods
 {
+    // Java's values(), written out: Enum.GetValues(Type) is not Native AOT safe.
+    private static readonly ClassicGroupState[] s_values =
+    {
+        ClassicGroupState.UNKNOWN,
+        ClassicGroupState.PREPARING_REBALANCE,
+        ClassicGroupState.COMPLETING_REBALANCE,
+        ClassicGroupState.STABLE,
+        ClassicGroupState.DEAD,
+        ClassicGroupState.EMPTY,
+    };
+
     private static readonly Dictionary<string, ClassicGroupState> s_byUpperCaseText = ByUpperCaseText();
 
     extension(ClassicGroupState)
@@ -117,7 +128,7 @@ public static class ClassicGroupStateMethods
     private static Dictionary<string, ClassicGroupState> ByUpperCaseText()
     {
         var table = new Dictionary<string, ClassicGroupState>(StringComparer.Ordinal);
-        foreach (ClassicGroupState state in (ClassicGroupState[])Enum.GetValues(typeof(ClassicGroupState)))
+        foreach (ClassicGroupState state in s_values)
         {
             table.Add(JavaText.ToUpperRoot(TextOf(state)!), state);
         }
