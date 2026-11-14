@@ -29,9 +29,9 @@ const CTX = '    SendCtx* ctx = calloc(1, 8);';
 test('bytes read into a kafka_Bytes_t, borrowed until the hand-over, and the listed allocations only', () => {
   const r = runN(RULE);
   assert.equal(r.status, 0, r.text);
-  // The C borrow, the context's allocation, the one send, and the 3 calls of
-  // the fixture's src/.
-  assert.ok(r.out.includes('✅ check-zero-copy: 6 item(s) checked'), r.text);
+  // The C borrow, the context's allocation, the one send, its delivery
+  // callback, and the 3 calls of the fixture's src/.
+  assert.ok(r.out.includes('✅ check-zero-copy: 7 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
@@ -59,7 +59,7 @@ test('the send holds a reference on the key and the value', () => {
 test('the hand-over completion drops both references, itself or through a function it calls', () => {
   let r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    delete_ref(env, &ctx->key_ref);\n', '') });
   assert.deepEqual(findings(r), [
-    'native/producer.c:33: on_handover does not drop key_ref: the FFI borrows the key and value only until the hand-over',
+    'native/producer.c:33: on_handover does not always drop key_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
   ]);
   // A release two calls deep (through the context's final free) is not at
   // the hand-over.
@@ -69,8 +69,35 @@ test('the hand-over completion drops both references, itself or through a functi
   );
   r = runN(RULE, { 'native/producer.c': deeper });
   assert.deepEqual(findings(r), [
-    'native/producer.c:38: on_handover does not drop key_ref: the FFI borrows the key and value only until the hand-over',
-    'native/producer.c:38: on_handover does not drop value_ref: the FFI borrows the key and value only until the hand-over',
+    'native/producer.c:38: on_handover does not always drop key_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
+    'native/producer.c:38: on_handover does not always drop value_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
+  ]);
+});
+
+test('the hand-over completion drops the references unconditionally, and the delivery callback never does', () => {
+  // Only on a failed hand-over: an accepted record would keep its Buffers.
+  let r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    release_buffers(NULL, opaque);\n', '    if (error != NULL) release_buffers(NULL, opaque);\n') });
+  assert.deepEqual(findings(r), [
+    'native/producer.c:34: on_handover does not always drop key_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
+    'native/producer.c:34: on_handover does not always drop value_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
+  ]);
+  // In a block, or behind &&: conditional too.
+  r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    release_buffers(NULL, opaque);\n', '    error != NULL && release_buffers(NULL, opaque);\n') });
+  assert.equal(findings(r).length, 2, r.text);
+  r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    delete_ref(env, &ctx->key_ref);\n', '    if (ctx) {\n        delete_ref(env, &ctx->key_ref);\n    }\n') });
+  assert.deepEqual(findings(r), [
+    'native/producer.c:36: on_handover does not always drop key_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
+  ]);
+  // The delivery callback releasing them holds an accepted record's Buffers until delivery.
+  r = runN(RULE, {
+    'native/producer.c': PRODUCER_C.replace('    call_ref(self_, metadata, error);\n', '    call_ref(self_, metadata, error);\n    release_buffers(NULL, self_);\n').replace(
+      'static void send_on_completion(',
+      'static void release_buffers(void* env, SendCtx* ctx);\n\nstatic void send_on_completion(',
+    ),
+  });
+  assert.deepEqual(findings(r), [
+    "native/producer.c:36: send_on_completion, the delivery callback, drops key_ref: an accepted record's Buffers are released at the hand-over, not held until delivery",
+    "native/producer.c:36: send_on_completion, the delivery callback, drops value_ref: an accepted record's Buffers are released at the hand-over, not held until delivery",
   ]);
 });
 
@@ -117,6 +144,9 @@ test("src/ copies none of the caller's bytes; encoding a string is no copy", () 
     '// Node\'s Buffer, as @types/node declares the two calls used here.',
     'declare class Buffer extends Uint8Array {',
     '  static from(data: string | Uint8Array, encoding?: string): Buffer;',
+    '  static alloc(size: number): Buffer;',
+    '  static concat(list: readonly Uint8Array[]): Buffer;',
+    '  copy(target: Uint8Array): number;',
     '}',
     'export type Data = Buffer | Uint8Array | string;',
     'export function toBytes(value: Data | null): Uint8Array | null {',
@@ -126,15 +156,27 @@ test("src/ copies none of the caller's bytes; encoding a string is no copy", () 
     'export function copies(key: Uint8Array, value: Data): Uint8Array[] {',
     '  return [new Uint8Array(key), Uint8Array.from(key), key.slice(), new Uint8Array(key.buffer, 0, 1), key.subarray(0)];',
     '}',
+    'export function more(key: Buffer, keys: Buffer[]): Buffer[] {',
+    '  const out = Buffer.alloc(key.length);',
+    '  out.set(key);',
+    '  key.copy(out);',
+    "  out.set([1, 2]);",
+    '  return [Buffer.concat([key]), Buffer.concat(keys), out];',
+    '}',
     'void copies;',
+    'void more;',
     '',
   ].join('\n');
   const r = runN(RULE, { 'src/producer/record.ts': RECORD_TS });
   const why = 'copies bytes the caller handed over: pass the Buffer or Uint8Array itself (the addon borrows it; a string is encoded once)';
   assert.deepEqual(findings(r), [
-    `src/producer/record.ts:8: Buffer.from(value) ${why}`,
-    `src/producer/record.ts:11: new Uint8Array(key) ${why}`,
-    `src/producer/record.ts:11: Uint8Array.from(key) ${why}`,
-    `src/producer/record.ts:11: key.slice() ${why}`,
+    `src/producer/record.ts:11: Buffer.from(value) ${why}`,
+    `src/producer/record.ts:14: new Uint8Array(key) ${why}`,
+    `src/producer/record.ts:14: Uint8Array.from(key) ${why}`,
+    `src/producer/record.ts:14: key.slice() ${why}`,
+    `src/producer/record.ts:18: out.set(key) ${why}`,
+    `src/producer/record.ts:19: key.copy() ${why}`,
+    `src/producer/record.ts:21: Buffer.concat([key]) ${why}`,
+    `src/producer/record.ts:21: Buffer.concat(keys) ${why}`,
   ]);
 });

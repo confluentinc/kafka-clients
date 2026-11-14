@@ -595,6 +595,51 @@ MUTATIONS.push(
   },
   {
     rule: 'check-zero-copy',
+    what: 'the Buffers released at the hand-over only on failure, otherwise at delivery',
+    apply: (root) => {
+      edit(
+        root,
+        'native/producer.c',
+        '    send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {',
+        '    if (ctx->handover_failed) send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {',
+      );
+      edit(root, 'native/producer.c', '    int deferred = 0;\n', '    int deferred = 0;\n    send_ctx_release_buffers(env, ctx);\n');
+    },
+  },
+  {
+    rule: 'check-zero-copy',
+    what: 'the Buffers released at the hand-over only on failure',
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {',
+        '    if (ctx->handover_failed) send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {',
+      ),
+  },
+  {
+    rule: 'check-zero-copy',
+    what: "an accepted record's Buffers released by its delivery callback too",
+    apply: (root) => edit(root, 'native/producer.c', '    int deferred = 0;\n', '    int deferred = 0;\n    send_ctx_release_buffers(env, ctx);\n'),
+  },
+  {
+    rule: 'check-zero-copy',
+    what: 'a key copied with Buffer.concat in src/',
+    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.concat([value]);'),
+  },
+  {
+    rule: 'check-zero-copy',
+    what: 'a key copied into Buffer.alloc with .set in src/',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/producer_record.ts',
+        'encodeLikeJava(value) : value;',
+        'encodeLikeJava(value) : copyOf(value);\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
+      ),
+  },
+  {
+    rule: 'check-zero-copy',
     what: "the send's reference on the value's Buffer gone",
     apply: (root) =>
       edit(root, 'native/producer.c', '        || (!ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)\n', ''),

@@ -19,6 +19,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
@@ -390,6 +392,51 @@ test('a Buffer changed once send() settled: the broker gets the bytes given', { 
   } finally {
     await producer.close();
   }
+});
+
+// An accepted record's Buffers are released at its hand-over, when send()
+// resolves, and not held until delivery (javascript/CLAUDE.md, rule 8). A
+// record the producer takes needs a broker, hence an integration test; the
+// unit tests cover a record refused at its hand-over. linger.ms holds the
+// batch in the producer while the Buffers are collected; a child process
+// runs with --expose-gc.
+test("an accepted record's key and value Buffers are released when send() resolves, before delivery", { skip: SKIP, timeout: 120000 }, () => {
+  const topic = freshTopic('released');
+  const script = `
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP, 'linger.ms': 5000 } });
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    (async () => {
+      // The topic's metadata first, so the next record is taken at once.
+      await (await producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: null, value: 'warm-up' }))).get();
+      const refs = [];
+      const future = await (async () => {
+        const key = Buffer.from('released-key');
+        const value = Buffer.alloc(65536, 0x61);
+        refs.push(new WeakRef(key), new WeakRef(value));
+        return producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key, value }));
+      })();
+      await settle();
+      console.log('done before delivery', future.isDone());
+      console.log('alive', refs.filter((r) => r.deref() !== undefined).length);
+      const metadata = await future.get();
+      console.log('delivered', metadata.serializedValueSize);
+      await producer.close();
+    })();
+  `;
+  const r = spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', script], {
+    cwd: path.join(__dirname, '..', '..'),
+    encoding: 'utf8',
+    timeout: 90000,
+    env: { ...process.env, BOOTSTRAP, TOPIC: topic },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'done before delivery false\nalive 0\ndelivered 65536\n');
 });
 
 test("strings are encoded as Java's StringSerializer encodes them: a lone surrogate as ?", { skip: SKIP, timeout: 120000 }, async () => {

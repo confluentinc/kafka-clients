@@ -35,16 +35,26 @@
 //     (`delete_ref` / `napi_delete_reference` of `key_ref` and `value_ref`),
 //     in its own body or in a function of native/ it calls directly (a
 //     release reached only through the context's final free would not be at
-//     the hand-over): the FFI borrows the bytes only until that completion;
+//     the hand-over), unconditionally (at the top level of the completion's
+//     body, and of the function it calls, not under an `if`, a loop, `&&`,
+//     `||` or `?`), whether the record was taken or refused: the FFI borrows
+//     the bytes only until that completion;
+//   - the delivery callback (the `_fn_t` handed to a `..._Callback_new`) does
+//     not drop `key_ref` or `value_ref`, in its own body or a function it
+//     calls directly: an accepted record's Buffers are released at the
+//     hand-over, never held until delivery;
 //   - in src/ (every hand-written module: the conversion of a record to the
 //     native arguments, and whatever else hands key, value or header bytes
 //     to the addon), no copy of a value typed as bytes (a `Uint8Array`, a
 //     `Buffer`, or a union holding one, such as `Data`): no `Buffer.from(x)`,
-//     `Buffer.copyBytesFrom(x)`, `new Uint8Array(x)`, `Uint8Array.from(x)` or
-//     `x.slice()`. Encoding a `string` (src/internal/encode.ts) is no copy of
-//     the caller's bytes.
+//     `Buffer.copyBytesFrom(x)`, `new Uint8Array(x)`, `Uint8Array.from(x)`,
+//     `x.slice()`, `Buffer.concat([..., x, ...])` (or of an array of bytes),
+//     `x.copy(...)`, or `target.set(x)` (so `Buffer.alloc(n)` filled with
+//     `.set` or `.copy` is caught at the fill). Encoding a `string`
+//     (src/internal/encode.ts) is no copy of the caller's bytes.
 
 const { cModel, applyAllowlist, siteKey } = require('../c_model');
+const { scan } = require('../c_source');
 
 const SEND_PATH = ['native/record.c', 'native/producer.c'];
 
@@ -78,8 +88,15 @@ function jsCopies(ctx) {
         const first = n.arguments[0];
         if ((named(e, 'Buffer', 'from') || named(e, 'Buffer', 'copyBytesFrom') || named(e, 'Uint8Array', 'from')) && first && isBytes(first)) {
           copied = `${e.getText(sf)}(${first.getText(sf)})`;
-        } else if (ts.isPropertyAccessExpression(e) && e.name.text === 'slice' && isBytes(e.expression)) {
+        } else if (ts.isPropertyAccessExpression(e) && ['slice', 'copy'].includes(e.name.text) && isBytes(e.expression)) {
           copied = `${e.getText(sf)}()`;
+        } else if (ts.isPropertyAccessExpression(e) && e.name.text === 'set' && isBytes(e.expression) && first && isBytes(first)) {
+          copied = `${e.getText(sf)}(${first.getText(sf)})`;
+        } else if (named(e, 'Buffer', 'concat') && first) {
+          const items = ts.isArrayLiteralExpression(first) ? first.elements : [];
+          const elementType = checker.getIndexTypeOfType(checker.getTypeAtLocation(first), ts.IndexKind.Number);
+          const ofBytes = (t) => t !== undefined && (t.isUnion() ? t.types : [t]).some((u) => u.symbol && BYTES.has(u.symbol.name));
+          if (items.some((x) => isBytes(x)) || ofBytes(elementType)) copied = `${e.getText(sf)}(${first.getText(sf)})`;
         }
       } else if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'Uint8Array') {
         checked += 1;
@@ -132,6 +149,43 @@ function touches(calls, fns, names, field) {
   return calls.some((c) => fns.has(`${c.file}:${c.function}`) && names.has(c.name) && (c.args || []).some((a) => re.test(a)));
 }
 
+/**
+ * Whether call `c` runs whenever its function does: at the top level of the
+ * body (no enclosing block), in a statement that does not start with `if`,
+ * `else`, a loop or `switch`, and holds no `&&`, `||` or `?` before it.
+ */
+function unconditional(model, c) {
+  const body = model.bodies.get(`${c.file}:${c.function}`);
+  if (!body) return false;
+  const before = scan(body.body).code.slice(0, c.start - body.bodyStart);
+  let depth = 0;
+  for (const ch of before) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  if (depth !== 0) return false;
+  const statement = before.slice(Math.max(before.lastIndexOf(';'), before.lastIndexOf('{'), before.lastIndexOf('}')) + 1).trim();
+  return !/^(if|else|for|while|do|switch|case)\b/.test(statement) && !/&&|\|\||\?/.test(statement);
+}
+
+/**
+ * Whether function `start` drops `field` unconditionally: a release call of
+ * it at its top level, or a top-level call of a function of native/ that
+ * does so in its own body.
+ */
+function dropsAlways(model, start, field) {
+  if (!start) return false;
+  const re = new RegExp(`\\b${field}\\b`);
+  const own = (b) =>
+    model.calls.filter((c) => c.file === b.file && c.function === b.name && unconditional(model, c));
+  for (const c of own(start)) {
+    if (RELEASES.has(c.name) && (c.args || []).some((a) => re.test(a))) return true;
+    const callee = model.resolve(c.name, c.file);
+    if (callee && own(callee).some((d) => RELEASES.has(d.name) && (d.args || []).some((a) => re.test(a)))) return true;
+  }
+  return false;
+}
+
 /** The functions of native/ `start` reaches, itself included, up to `depth` calls deep (`file:name` keys). */
 function reached(model, start, depth) {
   const out = new Set();
@@ -155,7 +209,7 @@ function reached(model, start, depth) {
 
 module.exports = {
   name: 'check-zero-copy',
-  kinds: ['bytes-not-borrowed', 'copy', 'allocation', 'not-held', 'not-released', 'copy-unused-allowance'],
+  kinds: ['bytes-not-borrowed', 'copy', 'allocation', 'not-held', 'not-released', 'released-at-delivery', 'copy-unused-allowance'],
   needs: ['program', 'native', 'header'],
   hint:
     "Borrow the app's key and value, never copy them: read each as a kafka_Bytes_t over its own memory, hold " +
@@ -204,16 +258,37 @@ module.exports = {
       }
       const args = c.args || [];
       const completion = args.length >= 2 ? args[args.length - 2].trim() : '';
-      const fns = reached(model, model.resolve(completion, c.file), 1);
+      const handover = model.resolve(completion, c.file);
       for (const field of BORROWED) {
-        if (!touches(calls, fns, RELEASES, field)) {
+        if (!dropsAlways(model, handover, field)) {
           raw.push({
             kind: 'not-released',
             subject: `${c.file}:${c.line}`,
-            message: `${completion || 'the hand-over completion'} does not drop ${field}: the FFI borrows the key and value only until the hand-over`,
+            message: `${completion || 'the hand-over completion'} does not always drop ${field}: the FFI borrows the key and value only until the hand-over, taken or refused`,
           });
         }
       }
+    }
+    // The delivery callback: the `_fn_t` argument of a `..._Callback_new`.
+    for (const c of onPath) {
+      if (!/_Callback_new(_err)?$/.test(c.name) || !model.header.has(c.name)) continue;
+      const params = model.header.get(c.name).params;
+      params.forEach((param, i) => {
+        if (!/_fn_t$/.test(param.type) || !c.args[i]) return;
+        const delivery = model.resolve(c.args[i].trim(), c.file);
+        if (!delivery) return;
+        checked += 1;
+        const fns = reached(model, delivery, 1);
+        for (const field of BORROWED) {
+          if (touches(calls, fns, RELEASES, field)) {
+            raw.push({
+              kind: 'released-at-delivery',
+              subject: `${c.file}:${c.line}`,
+              message: `${delivery.name}, the delivery callback, drops ${field}: an accepted record's Buffers are released at the hand-over, not held until delivery`,
+            });
+          }
+        }
+      });
     }
     const js = jsCopies(ctx);
     checked += js.checked;
