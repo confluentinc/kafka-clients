@@ -10,7 +10,11 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <!-- The frameworks checked; a caller can name fewer (-p:AotSmokeFrameworks=net10.0). The Windows x86 job
+         names one per publish: .NET cannot AOT compile net8.0 for x86, and a restore fails on every listed
+         framework it cannot compile, even one the publish does not ask for. -->
+    <AotSmokeFrameworks Condition="'$(AotSmokeFrameworks)' == ''">net8.0;net10.0</AotSmokeFrameworks>
+    <TargetFrameworks>$(AotSmokeFrameworks)</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.AotSmoke</RootNamespace>
     <IsPackable>false</IsPackable>
     <PublishAot>true</PublishAot>
