@@ -113,6 +113,12 @@ export interface JavaFormsOptions {
    * `got <n> arguments`.
    */
   readonly callShapes?: boolean;
+  /**
+   * The one-parameter forms given by name only, never as a bare value (an
+   * error's payload parameter: `{ unauthorizedTopics }`): a form error lists
+   * such a form as its options object, `({ unauthorizedTopics })`.
+   */
+  readonly optionsOnly?: readonly string[];
 }
 
 /** Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null. */
@@ -169,9 +175,10 @@ export class JavaForms {
     this.#forms = table;
     this.#callShapes = options.callShapes === true;
     const listed = this.#callShapes ? [...forms].sort((a, b) => a.length - b.length) : forms;
+    const optionsOnly = new Set(options.optionsOnly ?? []);
     const shape = (form: Form): string => {
       const text = this.#inOrder(this.#mask(form));
-      return this.#callShapes && form.length > 1 ? `({ ${text} })` : `(${text})`;
+      return this.#callShapes && (form.length > 1 || (form.length === 1 && optionsOnly.has(form[0]))) ? `({ ${text} })` : `(${text})`;
     };
     this.#prefix = `${method}() takes one of ${listed.map(shape).join(', ')}; got `;
     // Java's one-parameter forms sharing one name (Map and Properties as
@@ -179,7 +186,7 @@ export class JavaForms {
     // (an error's `(message)` and `(cause)`) are told apart by the value's
     // type when `bareTypes` gives a test for each; without it they take no
     // bare value.
-    const single = [...new Set(forms.filter((form) => form.length === 1).map((form) => form[0]))];
+    const single = [...new Set(forms.filter((form) => form.length === 1 && !optionsOnly.has(form[0])).map((form) => form[0]))];
     const tests = options.bareTypes;
     if (tests !== undefined && single.length > 1 && single.some((name) => tests[name] === undefined)) {
       throw new Error(`JavaForms(${method}): bareTypes has no test for every one-parameter form`);

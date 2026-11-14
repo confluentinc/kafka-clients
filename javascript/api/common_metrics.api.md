@@ -35,7 +35,16 @@ export type MetricValueProvider = unknown;
 
 // @public
 export class QuotaViolationError extends KafkaError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        metric: KafkaMetric; /** Java's `double value`. */
+        value: number; /** Java's `double bound`. */
+        bound: number;
+        name?: never;
+    });
+    bound(): number;
+    metric(): KafkaMetric;
+    toString(): string;
+    value(): number;
 }
 
 // (No @packageDocumentation comment for this package)

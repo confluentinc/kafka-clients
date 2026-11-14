@@ -16,11 +16,17 @@
 // the Java source of `org.apache.kafka.clients.consumer.LogTruncationException`;
 // `cargo xtask check-generated` checks it is up to date.
 //
-// Not generated: Java's constructors that take a payload, which come with the
-// payload getters: `LogTruncationException(Map<TopicPartition, Long>,
-// Map<TopicPartition, OffsetAndMetadata>)`, `LogTruncationException(String,
+// Not generated: Java's constructors that take a type the client does not
+// translate: `LogTruncationException(Map<TopicPartition, Long>,
+// Map<TopicPartition, OffsetAndMetadata>)` and `LogTruncationException(String,
 // Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)`.
+//
+// Not generated, for a type the client does not translate: the field
+// `Map<TopicPartition, OffsetAndMetadata> divergentOffsets` and
+// `divergentOffsets()`.
 
+import type { TopicPartitionMap } from '../common/topic_partition_map';
+import * as P from '../internal/payload';
 import { setForms } from '../internal/throwable';
 import { OffsetOutOfRangeError } from './offset_out_of_range_error';
 
@@ -52,14 +58,16 @@ export class LogTruncationError extends OffsetOutOfRangeError {
   static override readonly _ffiId: number = -20;
 
   /**
-   * Not constructible yet: Java's constructors take a payload the client does
-   * not translate yet.
+   * Not constructible yet: Java's constructors take a type the client does not
+   * translate yet.
    *
    * @param args - refused: constructing the error throws `TypeError`
    */
   protected constructor(...args: unknown[]) {
-    super(...args);
+    super(...(args as [{ offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>; name?: never }]));
   }
 }
 
-setForms(LogTruncationError, []);
+setForms(LogTruncationError, [], {
+  fields: { offsetOutOfRangePartitions: [P.topicPartitionLongMap, null] },
+});

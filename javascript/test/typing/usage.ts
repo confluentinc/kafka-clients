@@ -50,7 +50,16 @@ import {
 } from '@confluentinc/kafka-javascript/common';
 import { KafkaMetric } from '@confluentinc/kafka-javascript/common/metrics';
 import { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateError } from '@confluentinc/kafka-javascript';
-import { AuthenticationError, RetriableError, SaslAuthenticationError, TopicAuthorizationError } from '@confluentinc/kafka-javascript/common/errors';
+import {
+  AuthenticationError,
+  GroupAuthorizationError,
+  RecordTooLargeError,
+  RetriableError,
+  SaslAuthenticationError,
+  ThrottlingQuotaExceededError,
+  TopicAuthorizationError,
+} from '@confluentinc/kafka-javascript/common/errors';
+import { LogTruncationError, NoOffsetForPartitionError, OffsetOutOfRangeError } from '@confluentinc/kafka-javascript/consumer';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
 import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
@@ -468,8 +477,39 @@ new KafkaError(5);
 new TopicAuthorizationError({ message: 'm', cause: sasl });
 // @ts-expect-error ExecutionException has no (String) constructor
 new ExecutionError('failed');
-// @ts-expect-error QuotaViolationException's constructors take a payload, not translated yet
+// @ts-expect-error QuotaViolationException has no (String) constructor: its one form is { metric, value, bound }
 new QuotaViolationError('m');
+// The payload constructors (Q39): Java's other parameters by name, beside message and cause.
+const unauthorized = new TopicAuthorizationError({ unauthorizedTopics: ['a', 'b'] });
+expectTypeOf(unauthorized.unauthorizedTopics()).toEqualTypeOf<Set<string>>();
+void new TopicAuthorizationError({ message: 'm', unauthorizedTopics: new Set(['a']) });
+// @ts-expect-error a payload is given by name only, never on its own
+new TopicAuthorizationError(['a']);
+// @ts-expect-error unauthorizedTopics is an iterable of strings
+new TopicAuthorizationError({ unauthorizedTopics: [1] });
+// A long payload taken is a bigint or a number; returned, a TopicPartitionMap<bigint>.
+const tooLarge = new RecordTooLargeError({
+  message: 'too large',
+  recordTooLargePartitions: new TopicPartitionMap<bigint | number>([[new TopicPartition({ topic: 't', partition: 0 }), 1]]),
+});
+expectTypeOf(tooLarge.recordTooLargePartitions()).toEqualTypeOf<TopicPartitionMap<bigint> | null>();
+// @ts-expect-error only a TopicPartitionMap is taken for a Map<TopicPartition, Long>
+new RecordTooLargeError({ message: 'm', recordTooLargePartitions: new Map<TopicPartition, bigint>() });
+const outOfRange = new OffsetOutOfRangeError({ offsetOutOfRangePartitions: new TopicPartitionMap<bigint>() });
+expectTypeOf(outOfRange.offsetOutOfRangePartitions()).toEqualTypeOf<TopicPartitionMap<bigint>>();
+expectTypeOf(outOfRange.partitions()).toEqualTypeOf<TopicPartitionSet>();
+expectTypeOf(new NoOffsetForPartitionError({ partition: new TopicPartition({ topic: 't', partition: 0 }) }).partitions()).toEqualTypeOf<TopicPartitionSet>();
+expectTypeOf(GroupAuthorizationError.forGroupId('g').groupId()).toEqualTypeOf<string | null>();
+expectTypeOf(GroupAuthorizationError.forGroupId({ groupId: 'g' })).toEqualTypeOf<GroupAuthorizationError>();
+expectTypeOf(new ThrottlingQuotaExceededError({ throttleTimeMs: 5, message: 'm' }).throttleTimeMs()).toEqualTypeOf<number>();
+void new ConfigError({ name: 'linger.ms', value: true });
+void new ConfigError({ name: 'linger.ms', value: 'x', message: 'bad' });
+// @ts-expect-error ConfigException has no (String name) constructor
+new ConfigError({ name: 'linger.ms' });
+// @ts-expect-error a getter only reads
+unauthorized.unauthorizedTopics(1);
+// @ts-expect-error a LogTruncationError's constructors take the consumer's OffsetAndMetadata, not translated
+new LogTruncationError({ message: 'm' });
 // An Error is not an options object: Java's ConfigException(Throwable) does not exist.
 const caught = new Error('caught');
 // @ts-expect-error a ConfigError takes no cause

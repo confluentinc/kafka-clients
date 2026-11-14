@@ -96,6 +96,7 @@ const ALLOWED = [
   { key: 'MetricNameMap.#entries', reason: "one metrics() snapshot's entries (Java's Map<MetricName, ? extends Metric>), not a store of records" },
   { key: 'TopicPartitionMap.#entries', reason: "the entries of Java's Map<TopicPartition, V> the caller builds or a call returns, not a store of records" },
   { key: 'TopicPartitionSet.#members', reason: "the members of Java's Set<TopicPartition> a call returns, not a store of records" },
+  { key: 'src/internal/throwable.ts:fieldsOf', reason: "each error's payload fields, between its root's constructor and its own class's (Q39), not a store of records" },
   { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
   {
     key: 'src/common/header/headers.ts:EMPTY',

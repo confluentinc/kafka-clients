@@ -47,9 +47,9 @@ const PREFIX = 'org.apache.kafka.';
  * The error classes javascript/CLAUDE.md "Errors" describes, which the Java
  * members rules do not map member by member: what they keep on every class
  * instead of Java's members (`getMessage()` and `getCause()` as `message` and
- * `cause`; the payload getters are not generated), and Java's `public static
- * final` instances (`INSTANCE`), which check-java-members asks of the Java
- * class.
+ * `cause`), besides Java's `public static final` instances (`INSTANCE`) and
+ * the methods translating the payload (the getters, a static factory, a
+ * `toString()` override), which check-java-members maps to the Java class.
  * No other public member: the FFI id is private, and an error is classified
  * with `instanceof`, so there is no `code`, `retriable` or `apiError`.
  */

@@ -16,12 +16,13 @@
 // python/confluent_kafka/_errors.py's from_ffi_error / class_for_ffi_id.
 //
 // The native layer reads a kafka_common_Error_t into a plain object {code,
-// message, apiError, cause} (native/error.c) and hands it to `fromNative`,
+// message, apiError, payload, cause} (native/error.c) and hands it to `fromNative`,
 // which builds the class of the error's FFI id (an unknown id builds the base
 // `KafkaError`; a bare KafkaException, reported as UNKNOWN_SERVER_ERROR
 // without being an ApiException, is a `KafkaError` too) with the core's
 // message and its cause chain as `cause`, whatever constructor forms the class
-// has (`throwable.create`). The FFI id is private, as Python's `_ffi_id`:
+// has (`throwable.create`), and the payload fields the FFI's view of its
+// class gives (native/error_payload.c). The FFI id is private, as Python's `_ffi_id`:
 // `errorFfiId` gives it to the gRPC server and the tests, the core's own id
 // when it differs from the class's (an unknown id). LOCAL_NULL_POINTER, the
 // core's Java `NullPointerException` for a NULL mandatory argument, has no
@@ -56,6 +57,8 @@ interface NativeError {
   code: number;
   message?: string | null;
   apiError?: unknown;
+  /** The payload the FFI's view of the class gives, by Java field name (native/error_payload.c). */
+  payload?: Readonly<Record<string, unknown>>;
   cause?: unknown;
 }
 
@@ -126,7 +129,7 @@ export function fromNative(fields: unknown): unknown {
   }
   let cls = classForFfiId(reported.code);
   if (reported.code === UNKNOWN_SERVER_ERROR && reported.apiError !== true) cls = KafkaError;
-  return create(cls, reported.message ?? '', cause, reported.code);
+  return create(cls, reported.message ?? '', cause, reported.code, reported.payload);
 }
 
 /** A binding-side check where Java throws `IllegalArgumentException`. */
