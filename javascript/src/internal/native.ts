@@ -64,10 +64,9 @@ interface Native {
     partition: number,
     timestamp: number,
     key: Uint8Array | null,
+    // Borrowed, not copied: the addon holds a reference on each until the
+    // hand-over (javascript/CLAUDE.md, rule 8).
     value: Uint8Array | null,
-    // Which of key (1) and value (2) are the client's own bytes (an encoded
-    // string): the addon copies the others, the caller's.
-    owned: number,
     headers: NativeHeader[] | null,
     onHandover: (error: unknown) => void,
     // Returns undefined (the callback returned), the text of what it threw,

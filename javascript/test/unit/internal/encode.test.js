@@ -59,10 +59,9 @@ test('a key, a value and a header key are encoded the Java way at send', () => {
       value: s,
       headers: [new Header({ key: s, value: null })],
     });
-    const [, , , key, value, owned, headers] = record.internalToNative();
+    const [, , , key, value, headers] = record.internalToNative();
     assert.equal(Buffer.from(key).toString('hex'), hex, `${what}: key`);
     assert.equal(Buffer.from(value).toString('hex'), hex, `${what}: value`);
-    assert.equal(owned, 3, what);
     // The header key crosses as its bytes, encodeLikeJava's.
     assert.equal(Buffer.from(headers[0][0]).toString('hex'), hex, `${what}: header key`);
   }

@@ -39,7 +39,7 @@ test('only _cb twins are called', () => {
 test('the blocking form of a _cb twin is a finding', () => {
   const r = runN(RULE, { 'native/producer.c': BLOCKING });
   assert.equal(r.status, 1);
-  assert.deepEqual(findings(r), ['native/producer.c:28: js_send calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
+  assert.deepEqual(findings(r), ['native/producer.c:36: js_send calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
 });
 
 test('reading the future is a finding in every form, its _cb twins included', () => {
@@ -54,8 +54,8 @@ test('reading the future is a finding in every form, its _cb twins included', ()
   });
   const reason = "never read the future (javascript/CLAUDE.md rule 5): a send's future is destroyed unread, the delivery result comes from the record's Callback_t";
   assert.deepEqual(findings(r), [
-    `native/producer.c:17: on_handover calls kafka_common_KafkaFuture_get_cb: ${reason}`,
-    `native/producer.c:18: on_handover calls kafka_common_KafkaFuture_get_with_timeout_cb: ${reason}`,
+    `native/producer.c:22: on_handover calls kafka_common_KafkaFuture_get_cb: ${reason}`,
+    `native/producer.c:23: on_handover calls kafka_common_KafkaFuture_get_with_timeout_cb: ${reason}`,
   ]);
 });
 

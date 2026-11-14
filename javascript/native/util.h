@@ -213,13 +213,6 @@ typedef struct {
 // TypeError naming `what` and returns -1 otherwise.
 int js_bytes(napi_env env, napi_value value, const char* what, JsBytes* out);
 
-// Copies the app's key and value bytes, those whose bit `owned` does not set
-// (1 the key, 2 the value: the client's own encoded strings, not copied), into
-// one malloc'ed block, `*copy` (NULL when nothing is copied), and points
-// `key` / `value` at it. The caller frees `*copy` when the record completes
-// (its delivery callback, or a failed hand-over). Throws and returns -1 when out of memory.
-int js_bytes_copy(napi_env env, JsBytes* key, JsBytes* value, int owned, uint8_t** copy);
-
 // Reads a JS string into a malloc'ed NUL-terminated UTF-8 copy, or throws a
 // TypeError and returns NULL: `what` for a value that is not a string, `what`
 // followed by " without null bytes" for a string holding a NUL.

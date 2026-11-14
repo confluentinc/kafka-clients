@@ -64,7 +64,7 @@ const RUNNER_CHECKS = [
   require('./rules/single_drainer'),
   require('./rules/completion_order'),
   require('./rules/ownership'),
-  require('./rules/one_copy'),
+  require('./rules/zero_copy'),
   require('./rules/string_encoding'),
   require('./rules/no_binding_queue'),
 ];

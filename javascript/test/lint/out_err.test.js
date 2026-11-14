@@ -44,8 +44,8 @@ test('a NULL slot and an unread one are findings, a cast inside the macro is not
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     'native/callback_queue.c:error_discard:kafka_common_Error_destroy_err#1: its out_err &ffi_err (line 5) is read by no FFI_ERR / FFI_SET / FFI_DISCARD, nor ffi_take in the next statement',
-    'native/producer.c:js_setup:kafka_x_P__set_callbacks_notify_err#1: gets NULL as its out_err (line 36)',
-    'native/producer.c:js_setup:kafka_x_P__set_callbacks_notify_err#2: its out_err &ffi_err (line 37) is read by no FFI_ERR / FFI_SET / FFI_DISCARD, nor ffi_take in the next statement',
+    'native/producer.c:js_setup:kafka_x_P__set_callbacks_notify_err#1: gets NULL as its out_err (line 44)',
+    'native/producer.c:js_setup:kafka_x_P__set_callbacks_notify_err#2: its out_err &ffi_err (line 45) is read by no FFI_ERR / FFI_SET / FFI_DISCARD, nor ffi_take in the next statement',
   ]);
 });
 
@@ -60,7 +60,7 @@ test("a forwarded slot's callers are checked, through a function pointer too", (
   // A direct call of the forwarder.
   r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('void js_pump(CallbackQueue* q) {\n', 'void js_pump(CallbackQueue* q) {\n    kafka_common_Error_t* e = NULL;\n    producer_execute(q, &e);\n') });
   assert.deepEqual(findings(r), [
-    'native/producer.c:js_pump:producer_execute#1: its out_err &e (line 32) is read by no FFI_ERR / FFI_SET / FFI_DISCARD, nor ffi_take in the next statement',
+    'native/producer.c:js_pump:producer_execute#1: its out_err &e (line 40) is read by no FFI_ERR / FFI_SET / FFI_DISCARD, nor ffi_take in the next statement',
   ]);
 });
 
@@ -72,7 +72,7 @@ test('inside FFI_ERR / FFI_SET / FFI_DISCARD the slot is &ffi_err, the one they 
     ),
   });
   assert.deepEqual(findings(r), [
-    'native/producer.c:js_setup:kafka_x_P__set_callbacks_notify_err#1: its out_err &close_err (line 37) is wrapped in FFI_DISCARD, which reads &ffi_err alone',
+    'native/producer.c:js_setup:kafka_x_P__set_callbacks_notify_err#1: its out_err &close_err (line 45) is wrapped in FFI_DISCARD, which reads &ffi_err alone',
   ]);
 });
 

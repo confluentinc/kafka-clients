@@ -14,29 +14,35 @@
 
 'use strict';
 
-// N7 check-one-copy (javascript/CLAUDE.md boundary rule 8: one copy of the
-// app's key and value, made by the addon). A heuristic (PLAN.md §8 decision
-// 13), on the send path (native/record.c, native/producer.c):
+// N7 check-zero-copy (javascript/CLAUDE.md boundary rule 8: no copy of the
+// app's key and value; the addon borrows each Buffer until the hand-over). A
+// heuristic (PLAN.md §8 decision 13), on the send path (native/record.c,
+// native/producer.c):
 //   - the key and value cross from JavaScript through
 //     `napi_get_typedarray_info` / `napi_get_buffer_info` into a
 //     `kafka_Bytes_t` (a function that reads one of them sets a `.data`
 //     member);
 //   - no copy (`memcpy`, `memmove`, `strdup`, `napi_create_buffer_copy`) and
 //     no allocation (`malloc`, `calloc`, `realloc`) is made there, but those
-//     listed with what they hold: the one copy of the app's key and value
-//     (`js_bytes_copy`, a `memcpy` each), and allocations that never hold a
-//     key or a value. An entry that matches nothing is a finding, so the copy
-//     cannot silently go either;
-//   - `js_bytes_copy` itself is called only from the listed call sites, in
-//     any native/ file (a second call would be a copy of the copy, or of
-//     header values, which the core copies anyway);
+//     listed with what they hold, none of which is a key or a value (a C
+//     string of a header key, a context). An entry that matches nothing is a
+//     finding;
+//   - the function that hands the record over (the call of a header
+//     function `..._send_cb` / `..._send_with_callback_cb`) takes a
+//     reference (`napi_create_reference`) into the context's `key_ref` and
+//     `value_ref`, which keep the borrowed Buffers alive, and the hand-over
+//     completion it passes (its second-to-last argument) drops both
+//     (`delete_ref` / `napi_delete_reference` of `key_ref` and `value_ref`),
+//     in its own body or in a function of native/ it calls directly (a
+//     release reached only through the context's final free would not be at
+//     the hand-over): the FFI borrows the bytes only until that completion;
 //   - in src/ (every hand-written module: the conversion of a record to the
 //     native arguments, and whatever else hands key, value or header bytes
 //     to the addon), no copy of a value typed as bytes (a `Uint8Array`, a
-//     `Buffer`, or a union holding one, such as `Data`), which would be a
-//     second one: no `Buffer.from(x)`, `Buffer.copyBytesFrom(x)`,
-//     `new Uint8Array(x)`, `Uint8Array.from(x)` or `x.slice()`. Encoding a
-//     `string` (src/internal/encode.ts) is no copy of the caller's bytes.
+//     `Buffer`, or a union holding one, such as `Data`): no `Buffer.from(x)`,
+//     `Buffer.copyBytesFrom(x)`, `new Uint8Array(x)`, `Uint8Array.from(x)` or
+//     `x.slice()`. Encoding a `string` (src/internal/encode.ts) is no copy of
+//     the caller's bytes.
 
 const { cModel, applyAllowlist, siteKey } = require('../c_model');
 
@@ -84,7 +90,7 @@ function jsCopies(ctx) {
         findings.push({
           kind: 'copy',
           subject: `${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`,
-          message: `${copied} copies bytes the caller handed over: pass the Buffer or Uint8Array itself (the addon copies it once; a string is encoded once)`,
+          message: `${copied} copies bytes the caller handed over: pass the Buffer or Uint8Array itself (the addon borrows it; a string is encoded once)`,
         });
       }
       ts.forEachChild(n, visit);
@@ -96,13 +102,13 @@ function jsCopies(ctx) {
 const COPIES = new Set(['memcpy', 'memmove', 'strdup', 'strndup', 'napi_create_buffer_copy']);
 const ALLOCATIONS = new Set(['malloc', 'calloc', 'realloc']);
 const BORROWS = new Set(['napi_get_typedarray_info', 'napi_get_buffer_info']);
+/** A header function that hands a record over, with its completion as its second-to-last argument. */
+const SEND = /_send(_with_callback)?_cb$/;
+const RELEASES = new Set(['delete_ref', 'napi_delete_reference']);
+const BORROWED = ['key_ref', 'value_ref'];
 
 /** The copies and allocations allowed on the send path, by call site (`<file>:<function>:<callee>#<n>`). */
 const ALLOWED = [
-  { key: 'native/record.c:js_bytes_copy:malloc#1', reason: "the one copy of the app's key and value, freed when the record completes" },
-  { key: 'native/record.c:js_bytes_copy:memcpy#1', reason: "the one copy of the app's key" },
-  { key: 'native/record.c:js_bytes_copy:memcpy#2', reason: "the one copy of the app's value" },
-  { key: 'native/producer.c:js_producer_send:js_bytes_copy#1', reason: "send()'s one copy of the record's key and value" },
   { key: 'native/record.c:js_string_dup:malloc#1', reason: 'the C string of a topic, which the C API reads as one' },
   {
     key: 'native/record.c:js_bytes_cstring:malloc#1',
@@ -119,16 +125,44 @@ const ALLOWED = [
   { key: 'native/producer.c:js_producer_create:calloc#1', reason: 'the producer struct' },
 ];
 
+/** The text of each argument naming `field` (`&ctx->key_ref`) among the calls of `names` in `fns`. */
+function touches(calls, fns, names, field) {
+  const re = new RegExp(`\\b${field}\\b`);
+  return calls.some((c) => fns.has(`${c.file}:${c.function}`) && names.has(c.name) && (c.args || []).some((a) => re.test(a)));
+}
+
+/** The functions of native/ `start` reaches, itself included, up to `depth` calls deep (`file:name` keys). */
+function reached(model, start, depth) {
+  const out = new Set();
+  let frontier = start ? [start] : [];
+  for (let d = 0; d <= depth && frontier.length > 0; d++) {
+    const next = [];
+    for (const b of frontier) {
+      const key = `${b.file}:${b.name}`;
+      if (out.has(key)) continue;
+      out.add(key);
+      for (const c of model.calls) {
+        if (c.file !== b.file || c.function !== b.name) continue;
+        const callee = model.resolve(c.name, c.file);
+        if (callee) next.push(callee);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
 module.exports = {
-  name: 'check-one-copy',
-  kinds: ['bytes-not-borrowed', 'copy', 'allocation', 'copy-unused-allowance'],
+  name: 'check-zero-copy',
+  kinds: ['bytes-not-borrowed', 'copy', 'allocation', 'not-held', 'not-released', 'copy-unused-allowance'],
   needs: ['program', 'native', 'header'],
   hint:
-    "Copy the app's key and value once, in the addon (js_bytes_copy), and nothing else: read every other " +
-    'byte array as a kafka_Bytes_t over its own memory (javascript/CLAUDE.md boundary rule 8).',
+    "Borrow the app's key and value, never copy them: read each as a kafka_Bytes_t over its own memory, hold " +
+    'a napi_ref on its Buffer and drop it in the hand-over completion (javascript/CLAUDE.md boundary rule 8).',
   ALLOWED,
   check(ctx) {
-    const { bodies, calls } = cModel(ctx);
+    const model = cModel(ctx);
+    const { bodies, calls } = model;
     const raw = [];
     let checked = 0;
     const onPath = calls.filter((c) => SEND_PATH.includes(c.file) && !c.directive);
@@ -149,20 +183,36 @@ module.exports = {
       raw.push({
         kind: copy ? 'copy' : 'allocation',
         subject: `${c.file}:${c.line}`,
-        message: `${c.function} calls ${c.name} on the send path${copy ? ': no copy of a key or value but the listed one' : ', which no entry lists'}`,
-        // A memcpy may be listed (the one copy); another copy never.
+        message: `${c.function} calls ${c.name} on the send path${copy ? ': no key or value is copied' : ', which no entry lists'}`,
+        // A memcpy may be listed (a header key's C string); another copy never.
         allow: copy && c.name !== 'memcpy' ? undefined : siteKey(c),
       });
     }
-    for (const c of calls) {
-      if (c.directive || c.name !== 'js_bytes_copy') continue;
+    for (const c of onPath) {
+      if (!SEND.test(c.name) || !c.function) continue;
       checked += 1;
-      raw.push({
-        kind: 'copy',
-        subject: `${c.file}:${c.line}`,
-        message: `${c.function} calls js_bytes_copy: the key and value are copied once, at the listed call site only`,
-        allow: siteKey(c),
-      });
+      const sender = new Set([`${c.file}:${c.function}`]);
+      for (const field of BORROWED) {
+        if (!touches(calls, sender, new Set(['napi_create_reference']), field)) {
+          raw.push({
+            kind: 'not-held',
+            subject: `${c.file}:${c.line}`,
+            message: `${c.function} hands the record over without a napi_create_reference into ${field}: the borrowed Buffer may be collected while the core reads it`,
+          });
+        }
+      }
+      const args = c.args || [];
+      const completion = args.length >= 2 ? args[args.length - 2].trim() : '';
+      const fns = reached(model, model.resolve(completion, c.file), 1);
+      for (const field of BORROWED) {
+        if (!touches(calls, fns, RELEASES, field)) {
+          raw.push({
+            kind: 'not-released',
+            subject: `${c.file}:${c.line}`,
+            message: `${completion || 'the hand-over completion'} does not drop ${field}: the FFI borrows the key and value only until the hand-over`,
+          });
+        }
+      }
     }
     const js = jsCopies(ctx);
     checked += js.checked;

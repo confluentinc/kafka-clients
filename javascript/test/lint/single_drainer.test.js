@@ -46,10 +46,10 @@ test('each finding kind, with its exact text', () => {
   });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'native/producer.c:34: js_pump calls the executor producer_execute directly',
+    'native/producer.c:42: js_pump calls the executor producer_execute directly',
     "native/callback_queue.c:23: cbq_drain's loop calls kafka_x_Thing_destroy_err: destroy after the loop",
-    "native/producer.c:33: js_pump calls kafka_x_P__execute_callbacks_err, which only the queue's executor may",
-    'native/producer.c:38: js_other calls cbq_drain, which only call_js and the pump may',
+    "native/producer.c:41: js_pump calls kafka_x_P__execute_callbacks_err, which only the queue's executor may",
+    'native/producer.c:46: js_other calls cbq_drain, which only call_js and the pump may',
   ]);
 });
 
@@ -64,7 +64,7 @@ test('a client destroy reached from a completion, and a drain whose loop is a fo
     ).replace('    error_discard(error);\n}', '    error_discard(error);\n    destroy_client(opaque);\n}'),
   });
   assert.deepEqual(findings(r), [
-    'on_handover: runs inside the drain (a completion given to kafka_x_P_flush_cb) and reaches kafka_x_K_destroy_err through on_handover -> destroy_client -> kafka_x_K_destroy_err (native/producer.c:17): mark the client and destroy after the drain',
+    'on_handover: runs inside the drain (a completion given to kafka_x_P_flush_cb) and reaches kafka_x_K_destroy_err through on_handover -> destroy_client -> kafka_x_K_destroy_err (native/producer.c:22): mark the client and destroy after the drain',
   ]);
   r = runN(RULE, {
     'native/callback_queue.c': QUEUE_C.replace('    while (1) {', '    for (;;) {').replace(

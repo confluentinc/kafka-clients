@@ -288,18 +288,16 @@ test('values of the wrong type are TypeErrors', () => {
   });
 });
 
-test("the caller's key and value bytes cross as they are, marked for the addon to copy", () => {
+test("the caller's key and value bytes cross as they are, for the addon to borrow", () => {
   const key = Buffer.from('k');
   const value = new Uint8Array([1, 2, 3]);
   const r = new ProducerRecord({ topic: 't', partition: 3, timestamp: 1000, key, value });
-  const [topic, partition, timestamp, k, v, owned, headers] = r.internalToNative();
+  const [topic, partition, timestamp, k, v, headers] = r.internalToNative();
   assert.equal(topic, 't');
   assert.equal(partition, 3);
   assert.equal(timestamp, 1000);
   assert.equal(k, key);
   assert.equal(v, value);
-  // Neither is the client's own: native/record.c copies both.
-  assert.equal(owned, 0);
   assert.equal(headers, null);
 });
 
@@ -311,15 +309,12 @@ test('strings are encoded as UTF-8 and null stays null', () => {
     value: null,
     headers: [H('h', bytes('é')), H('n', null)],
   });
-  const [, partition, timestamp, k, v, owned, headers] = r.internalToNative();
+  const [, partition, timestamp, k, v, headers] = r.internalToNative();
   assert.equal(partition, -1);
   assert.equal(timestamp, -1);
   assert.deepEqual(k, Buffer.from('clé', 'utf8'));
   assert.equal(v, null);
-  // The encoded key is the client's own: not copied again.
-  assert.equal(owned, 1);
   assert.deepEqual(keysAsText(headers), [['h', bytes('é')], ['n', null]]);
-  assert.equal(new ProducerRecord({ topic: 't', key: Buffer.from('k'), value: 'v' }).internalToNative()[5], 2);
 });
 
 test('send seals the headers once the fields are checked, as Java\'s doSend calls setReadOnly', () => {
@@ -332,7 +327,7 @@ test('send seals the headers once the fields are checked, as Java\'s doSend call
   assert.match(String(r), /isReadOnly = true/);
   // Reading is unaffected, and so is a second send of the same record.
   assert.equal(r.headers.lastHeader('b').key(), 'b');
-  assert.deepEqual(keysAsText(r.internalToNative()[6]), [['a', null], ['b', null]]);
+  assert.deepEqual(keysAsText(r.internalToNative()[5]), [['a', null], ['b', null]]);
   // A record whose re-check fails leaves its headers writable.
   const bad = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: null });
   bad.value = 42;
@@ -389,19 +384,19 @@ test('a field reassigned after the constructor is checked again at send, with th
 });
 
 test('a field reassigned to a valid value is sent as reassigned', () => {
-  assert.deepEqual(reassigned('headers', null).internalToNative()[6], null);
+  assert.deepEqual(reassigned('headers', null).internalToNative()[5], null);
   assert.deepEqual(reassigned('partition', null).internalToNative()[1], -1);
   assert.deepEqual(reassigned('value', null).internalToNative()[4], null);
   // An iterable that is not a Headers is read as the constructor reads it.
   const set = reassigned('headers', new Set([H('a', null)]));
-  assert.deepEqual(keysAsText(set.internalToNative()[6]), [['a', null]]);
+  assert.deepEqual(keysAsText(set.internalToNative()[5]), [['a', null]]);
   const other = reassigned('headers', new Headers([H('b', null)]));
-  assert.deepEqual(keysAsText(other.internalToNative()[6]), [['b', null]]);
+  assert.deepEqual(keysAsText(other.internalToNative()[5]), [['b', null]]);
   // A Header keeps its state in private fields: nothing to reassign.
   const header = H('h', null);
   header.value = 'x';
   const withHeader = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [header] });
-  assert.deepEqual(keysAsText(withHeader.internalToNative()[6]), [['h', null]]);
+  assert.deepEqual(keysAsText(withHeader.internalToNative()[5]), [['h', null]]);
 });
 
 test('toString follows Java', () => {

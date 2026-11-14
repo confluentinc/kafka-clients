@@ -39,7 +39,7 @@ test('an owned type never destroyed nor consumed is a finding', () => {
     'confluent_kafka_bindings.h': HEADER.replace(' (consumed)', ''),
   });
   assert.deepEqual(findings(r), [
-    'kafka_x_Callback_t: native/ receives it owned (from kafka_x_Callback_new_err, native/producer.c:24) but never destroys it (kafka_x_Callback_destroy / kafka_x_Callback_destroy_err) nor hands it to a call that consumes it',
+    'kafka_x_Callback_t: native/ receives it owned (from kafka_x_Callback_new_err, native/producer.c:32) but never destroys it (kafka_x_Callback_destroy / kafka_x_Callback_destroy_err) nor hands it to a call that consumes it',
     "kafka_x_Thing_t: native/ receives it owned (as on_handover's value, a completion of kafka_x_P_send_cb) but never destroys it (kafka_x_Thing_destroy / kafka_x_Thing_destroy_err) nor hands it to a call that consumes it",
   ]);
 });

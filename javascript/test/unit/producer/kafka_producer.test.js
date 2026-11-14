@@ -842,49 +842,57 @@ test('a refused NUL-holding send leaves an unclosed producer idle', () => {
   assert.ok(r.ms < 30000, `took ${r.ms} ms`);
 });
 
-// The addon copies the caller's key and value bytes during send(), and frees
-// the copy once the core has taken the record (javascript/CLAUDE.md, rule 8).
-test('a key or value Buffer may be changed or detached as soon as send() returns', () => {
+// The addon borrows the caller's key and value Buffers: it holds a reference
+// on each until the send's hand-over, when the core no longer reads them, and
+// drops it then, whatever the hand-over's outcome (javascript/CLAUDE.md, rule 8).
+test('a key or value Buffer is held until the hand-over and released at it', () => {
   const r = runNode(
     `
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-    // Unreachable: each record waits for metadata in the core, which then
-    // reads the client's copy, not the caller's memory.
+    // Unreachable: the record waits for metadata in the core, which reads the
+    // caller's own memory until its hand-over.
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
+    const refs = [];
     const sends = [];
-    for (let i = 0; i < 50; i++) {
-      let key = new Uint8Array(1024).fill(1);
-      let value = Buffer.alloc(65536, 2);
-      sends.push(p.send(new ProducerRecord({ topic: 'detached', key, value })).then(() => 'sent', (e) => e.name));
-      key.fill(3);
-      // Detached: its memory moves to the clone (structuredClone's transfer).
-      structuredClone(key.buffer, { transfer: [key.buffer] });
-      value.fill(4);
-      key = value = null;
+    for (let i = 0; i < 20; i++) {
+      const key = new Uint8Array(1024).fill(1);
+      const value = Buffer.alloc(65536, 2);
+      refs.push(new WeakRef(key), new WeakRef(value));
+      sends.push(p.send(new ProducerRecord({ topic: 'borrowed', key, value })).then(() => 'sent', (e) => e.name));
     }
-    global.gc();
-    p.close({ timeout: 0 }).then(async () => {
-      const outcomes = new Set(await Promise.all(sends));
-      console.log('closed', [...outcomes].join(','));
-    });
+    const alive = () => refs.filter((r) => r.deref() !== undefined).length;
+    setTimeout(async () => {
+      global.gc();
+      console.log('before the hand-over', alive());
+      // A zero close fails the waiting records at their hand-over.
+      await p.close({ timeout: 0 });
+      console.log('outcomes', [...new Set(await Promise.all(sends))].join(','));
+      setImmediate(() => {
+        global.gc();
+        console.log('after the hand-over', alive());
+      });
+    }, 200);
   `,
     30000,
     ['--expose-gc'],
   );
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^closed /);
+  const lines = r.stdout.trim().split('\n');
+  assert.equal(lines[0], 'before the hand-over 40');
+  assert.match(lines[1], /^outcomes /);
+  assert.equal(lines[1].includes('sent'), false, lines[1]);
+  assert.equal(lines[2], 'after the hand-over 0');
 });
 
-test('the copies of many sends are freed: the process does not grow with them', () => {
-  // 20000 sends of a 64 KiB value copy 1.3 GB; a copy kept per record would
+test('the references of many sends are released: the process does not grow with them', () => {
+  // 20000 sends of a 64 KiB value hold 1.3 GB; a Buffer kept per record would
   // show far above the bound.
   const r = runNode(
     `
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 0 } });
-    const value = Buffer.alloc(65536, 7);
     const run = async (n) => {
-      for (let i = 0; i < n; i++) await p.send(new ProducerRecord({ topic: 'leak', value })).catch(() => {});
+      for (let i = 0; i < n; i++) await p.send(new ProducerRecord({ topic: 'leak', value: Buffer.alloc(65536, 7) })).catch(() => {});
     };
     (async () => {
       await run(2000);

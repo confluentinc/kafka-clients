@@ -300,9 +300,14 @@ export class KafkaProducer {
    * already due before handing its record over, so a callback may run inside
    * a `send()` call.
    *
-   * A Buffer or Uint8Array key or value is copied during the call, so it may
-   * be modified, reused or detached (transferred) as soon as `send()`
-   * returns. A string key or value is encoded to UTF-8 as Java's
+   * The client reads a `Buffer` or `Uint8Array` key or value after `send()`
+   * returns. Don't write to it, transfer it or resize it until the Promise
+   * from `send()` settles; awaiting `send()` is enough. A serializer must
+   * return a new Buffer for each record. If other workers share the Buffer's
+   * memory, they mustn't write to it until then either. *(deviation: Java
+   * copies the bytes inside `send()`. Why: it saves a memory copy of each
+   * Buffer, as the Python binding does.)* Header values are copied during
+   * the call. A string key or value is encoded to UTF-8 as Java's
    * `StringSerializer` encodes it (a lone surrogate as `?`). The record's
    * headers become read-only once its fields are checked: a later `add` or
    * `remove` throws `IllegalStateError` "RecordHeaders has been closed.".

@@ -437,10 +437,13 @@ producer.send({ record })))`) are concurrent, like Java `send()` calls on severa
 threads: there is no order between them, and a `flush()` or `close()`
 started before they resolved does not wait for them.
 
-**Keys and values are copied.** A `Buffer` / `Uint8Array` key or value is
-copied during `send()`, so it may be changed, reused or detached
-(transferred) as soon as `send()` returns. Each send holds its copy until its
-record completes (its delivery callback runs, or the hand-over fails).
+**Keys and values are not copied.** The client reads a `Buffer` or
+`Uint8Array` key or value after `send()` returns. Don't write to it, transfer
+it or resize it until the Promise from `send()` settles; awaiting `send()` is
+enough. A serializer must return a new Buffer for each record. A `Buffer`
+over a `SharedArrayBuffer` is borrowed the same way: if other workers share
+the Buffer's memory, they mustn't write to it until then either. Header
+values are copied during `send()`.
 
 **Strings are encoded as Java encodes them.** A string key or value is
 encoded to UTF-8 as Java's `StringSerializer` does (`String.getBytes(UTF_8)`):
@@ -525,7 +528,6 @@ code relying on them keeps running with another meaning: check each.
 | `IllegalArgumentError extends Error` | it, and `IndexOutOfBoundsError`, extend `RangeError` |
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
 | `flush()` after `close()` resolved | it rejects with `IllegalStateError`; an argument to `flush()` is refused |
-| a `Buffer` key or value was borrowed until the send settled | it is copied: it may be changed as soon as `send()` returns |
 | a lone surrogate in a string was written as U+FFFD | it is written as `?`, as Java's `StringSerializer` writes it |
 | an unclosed producer was force-closed when garbage collected | no garbage collection closes it: close every producer (or `await using` it); a warning counts those never closed |
 | `KafkaFuture` had `get()`, `isDone()`, `isCompletedExceptionally()`, `isCancelled()`, `cancel()` | Java's whole `KafkaFuture`: also `get(timeout)`, `getNow`, `thenApply`, `whenComplete`, `toCompletionStage()`, `completedFuture` and `allOf`; `cancel(mayInterruptIfRunning)` takes a boolean |
