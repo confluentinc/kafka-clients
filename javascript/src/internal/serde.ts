@@ -14,8 +14,8 @@
 
 // The serializers a producer is given (private): the check of the argument,
 // one serialize() call, and the close at the producer's close (root
-// CLAUDE.md, JavaScript Binding Conventions, Serialization). Shared by
-// KafkaProducer and MockProducer.
+// CLAUDE.md, JavaScript Binding Conventions, Serialization), used by
+// KafkaProducer.
 
 import { kind } from './args';
 import { illegalArgument } from './errors';
@@ -56,8 +56,9 @@ export function isThenable(value: unknown): value is PromiseLike<unknown> {
 }
 
 /**
- * The bytes a serializer gave, as the producer hands them over (and copies):
- * a `Uint8Array` (a `Buffer` is one) or null.
+ * The bytes a serializer gave, as the producer hands them over (borrowed
+ * until the hand-over, like the app's bytes): a `Uint8Array` (a `Buffer` is
+ * one) or null.
  *
  * @throws `TypeError` for any other value
  */
@@ -79,7 +80,7 @@ export function closeSerializer(serializer: Serializer<unknown> | null, name: st
   };
   try {
     if (serializer.close === undefined) {
-      SerializerDefaults.close(serializer);
+      SerializerDefaults.prototype.close.call(serializer);
       return;
     }
     const returned: unknown = serializer.close();
