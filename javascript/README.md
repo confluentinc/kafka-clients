@@ -330,6 +330,33 @@ close of its own, in the client, and checks its timeout the same way. The
 methods returning a Promise (`send`, `flush`, `close`) never throw: every
 failure rejects their Promise.
 
+### Serializers
+
+A producer runs its serializers in JavaScript, inside `send()`. A serializer
+is an object `{ serialize({ topic, headers, data }), close?() }` (Java's two
+`serialize` methods as one), given as a constructor argument, or made by a
+synchronous function `({ configs, isKey }) => serializer` in
+`key.serializer` / `value.serializer`, which the producer calls once with the
+whole configuration, in place of Java's class and its `configure()`. The keys
+the function reads don't reach the client's core, as Java marks them used. A
+constructor argument wins, and its config key is then ignored.
+`stringSerializer()` writes a string as Java's `StringSerializer` does, and
+goes in a config key without `()`:
+
+```js
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+
+const producer = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: stringSerializer() });
+// or, the same through the configuration:
+const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+```
+
+`stringSerializer()` supports UTF-8 only: a `key.serializer.encoding`,
+`value.serializer.encoding` or `serializer.encoding` naming another encoding
+throws `SerializationError` "Unsupported encoding <name>". A class name, a
+serializer object or a function that returns a Promise in a config key
+throws `ConfigError`.
+
 ### Headers
 
 `Header` and `Headers` are in `common/header`, with Java's members. A
