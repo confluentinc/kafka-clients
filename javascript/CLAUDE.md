@@ -396,16 +396,18 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `total({ unit: 'millisecond' })`, typed by its structure. One private helper
   converts them all (`src/internal/duration.ts`), as the root conventions say:
   rounded down; `Infinity` is Java's `Long.MAX_VALUE` milliseconds, handed to
-  the addon exactly as a bigint, and a timeout left out crosses as `-1`
-  (`close()`, which the addon sends to `close_cb`, Java's untimed form); a
-  negative one is Java's "The timeout cannot be negative."
-  (`IllegalArgumentError`) for `close`; one with years, months or weeks, `NaN`
-  and above `Number.MAX_SAFE_INTEGER` ms are a plain `RangeError`; `null` is
-  `TypeError('timeout must not be null')`, and any other value `TypeError`. `-Infinity`, which the root conventions do not name, is
-  `RangeError`. A wait's timeout (`KafkaFuture.get(timeout)`, Java's
-  `CompletableFuture.get`) is read by `waitDurationToMillis` instead: a
-  negative one is no error but no wait, as Java's times out at once, and its
-  range is ±`Number.MAX_SAFE_INTEGER` ms (`RangeError` beyond); a `get` longer
+  the addon exactly as a bigint. The form called picks the call: `close()`
+  passes `null`, which the addon sends to `close_cb`, Java's untimed form,
+  and `close({ timeout })` the timeout, to `close_with_timeout_cb`. A
+  negative timeout is passed on as it is: for `close` the FFI answers Java's
+  "The timeout cannot be negative." (`IllegalArgumentError`) and closes
+  nothing; for a wait (`KafkaFuture.get(timeout)`, Java's
+  `CompletableFuture.get`) it is no error but no wait, as Java's times out at
+  once. One with years, months or weeks, `NaN` and beyond
+  ±`Number.MAX_SAFE_INTEGER` ms are a plain `RangeError`; `null` is
+  `TypeError('timeout must not be null')`, and any other value `TypeError`.
+  `-Infinity`, which the root conventions do not name, is `RangeError`. A
+  `get` longer
   than a Node timer's 2^31 - 1 ms waits in steps of at most that (how
   `KafkaFuture.get({ timeout })` waits: not decided yet in the root
   conventions).
