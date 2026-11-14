@@ -37,10 +37,9 @@
 //     (javascript/CLAUDE.md "Java shape, JS idiom"), whether or not the Java
 //     index lists them, and the invented `toJSON()`, which returns the name
 //     (root CLAUDE.md, JavaScript Binding Conventions, Class family);
-//   - an abstract class: not its constructor, which only a subclass calls;
-//   - any class: not `equals` / `hashCode`, which the client does not
-//     translate, by the user's decision of 2026-11-05 (PLAN.md §8): no
-//     JavaScript operator or collection calls them.
+//   - an abstract class: not its constructor, which only a subclass calls.
+// `equals` and `hashCode` are asked as any member is: they stay methods (root
+// CLAUDE.md, JavaScript Binding Conventions, Class family, Q29).
 // An exported interface or object type mapped to a Java class (`Header`) is
 // asked as a class is.
 
@@ -50,9 +49,6 @@ const { ENUM_IMPLICIT, javaIndexOf, mappedItems, itemMembers, javaMember, shortN
 
 /** The instance method JavaScript adds to every enum (root CLAUDE.md, JavaScript Binding Conventions, Class family). */
 const ENUM_TO_JSON = 'toJSON';
-
-/** The Java methods the client does not translate on any class (PLAN.md §8, 2026-11-05). */
-const NOT_TRANSLATED = new Set(['equals', 'hashCode']);
 
 module.exports = {
   name: 'check-java-completeness',
@@ -90,7 +86,6 @@ module.exports = {
       if (!constantsOnly(cls)) {
         for (const o of cls.overloads) {
           if (o.visibility !== 'public' || o.deprecated) continue;
-          if (NOT_TRANSLATED.has(o.name)) continue;
           // A method that takes a `ConfigDef`, whose machinery is not
           // translated (root CLAUDE.md, JavaScript Binding Conventions,
           // Scope: SaslConfigs.addClientSaslSupport, SslConfigs.addClientSslSupport).

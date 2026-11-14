@@ -23,6 +23,7 @@
 import { JavaForms } from '../../internal/args';
 import { illegalArgument, illegalState } from '../../internal/errors';
 import { encodeLikeJava } from '../../internal/encode';
+import { objectHashCode, objectsEquals, sameClass } from '../../internal/java_object';
 import { Header } from './header';
 
 /** Whether `value` is an object with a callable `[Symbol.iterator]` (an array, a `Headers`, a `Set`, ...). */
@@ -51,6 +52,8 @@ const REMOVE_FORMS = new JavaForms('remove', [['key']], { bareTypes: { key: isKe
 const LAST_HEADER_FORMS = new JavaForms('lastHeader', [['key']], { bareTypes: { key: isKey } });
 const HEADERS_FORMS = new JavaForms('headers', [['key']], { bareTypes: { key: isKey } });
 const TO_ARRAY_FORMS = new JavaForms('toArray', [[]], { reader: true });
+const EQUALS_FORMS = new JavaForms('equals', [['o']]);
+const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
 // RecordHeaders.canWrite's message.
 const CLOSED = 'RecordHeaders has been closed.';
@@ -361,6 +364,54 @@ export class Headers implements Iterable<Header> {
    */
   [Symbol.iterator](): Iterator<Header> {
     return this.#headers[Symbol.iterator]();
+  }
+
+  /**
+   * Whether `o` is headers of this class holding equal headers in the same
+   * order, Java's `RecordHeaders.equals`: `Objects.equals` on the header
+   * lists, as `List.equals` compares them. The read-only state is not
+   * compared.
+   *
+   * @param options - the object to compare with
+   * @returns true when `o` is equal headers
+   * @throws `IllegalArgumentError` when the given parameters are not `{o}`
+   */
+  equals(options: {
+    /** The object to compare with. */
+    o: unknown;
+  }): boolean;
+  /**
+   * The same as `equals({o})`, with the object on its own; a plain object is
+   * read as the options object.
+   *
+   * @param o - the object to compare with
+   * @returns true when `o` is equal headers
+   */
+  equals(o: unknown): boolean;
+  equals(options: unknown): boolean {
+    EQUALS_FORMS.match(options, arguments.length);
+    const o = EQUALS_FORMS.value(options, 'o');
+    if (this === o) return true;
+    if (!sameClass(this, o)) return false;
+    const mine = this.#headers;
+    const theirs = (o as Headers).#headers;
+    if (mine.length !== theirs.length) return false;
+    for (let i = 0; i < mine.length; i++) if (!objectsEquals(mine[i], theirs[i])) return false;
+    return true;
+  }
+
+  /**
+   * The headers' hash code, Java's `RecordHeaders.hashCode`: their list's,
+   * `31 * h + header.hashCode()` over the headers, from 1.
+   *
+   * @returns the hash code, a 32-bit integer
+   * @throws `TypeError` when it is given an argument
+   */
+  hashCode(): number {
+    HASH_CODE_FORMS.match(undefined, arguments.length);
+    let h = 1;
+    for (const header of this.#headers) h = (Math.imul(31, h) + objectHashCode(header)) | 0;
+    return h;
   }
 
   /**

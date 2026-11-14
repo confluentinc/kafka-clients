@@ -15,6 +15,11 @@ export class Header {
         key: string;
         value: Uint8Array | null;
     });
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    hashCode(): number;
     key(): string;
     toJSON(): {
         key: string;
@@ -47,6 +52,11 @@ class Headers_2 implements Iterable<Header> {
         value: Uint8Array | null;
     }): Headers_2;
     add(header: Header): Headers_2;
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    hashCode(): number;
     headers(options: {
         key: string;
     }): Iterable<Header>;

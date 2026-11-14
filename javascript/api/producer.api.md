@@ -193,6 +193,11 @@ export class ProducerRecord {
         value: Data | null;
         headers?: never;
     });
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    hashCode(): number;
     readonly headers: Headers_2;
     readonly key: Data | null;
     readonly partition: number | null;

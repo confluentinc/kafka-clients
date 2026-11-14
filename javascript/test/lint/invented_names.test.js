@@ -53,7 +53,7 @@ test('needed entries that resolve pass, an invented options type named ...Args t
   assert.equal(r.status, 0, r.text);
   // The exported items, the public members of the exported classes, interfaces
   // and object types, and the 6 entries.
-  assert.ok(r.out.includes('✅ check-invented-names: 47 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-invented-names: 49 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {

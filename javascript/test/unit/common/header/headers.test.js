@@ -309,3 +309,26 @@ test("toString is RecordHeaders' and RecordHeader's; JSON writes the array", () 
   assert.match(String(headers), /isReadOnly = true\)$/);
   assert.equal(JSON.stringify(new Headers([new Header({ key: 'n', value: null })])), '[{"key":"n","value":null}]');
 });
+
+// The hash codes Java's own RecordHeaders.hashCode() gives (kafka-clients, run
+// on the same headers): the list's, 31 * h + each header's, from 1.
+test("equals and hashCode are RecordHeaders'", () => {
+  const h1 = new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) });
+  const h2 = new Header({ key: '\u{1F600}é', value: null });
+  const headers = new Headers([h1, h2]);
+  assert.equal(headers.hashCode(), 1733507910);
+  assert.equal(new Headers().hashCode(), 1);
+  const same = new Headers([new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) }), new Header({ key: '\u{1F600}é', value: null })]);
+  assert.ok(headers.equals(same));
+  assert.equal(headers.hashCode(), same.hashCode());
+  // The read-only state is not compared.
+  same.internalSetReadOnly();
+  assert.throws(() => same.add(h1), { name: "IllegalStateError" });
+  assert.ok(headers.equals({ o: same }));
+  // The order counts.
+  assert.ok(!headers.equals(new Headers([h2, h1])));
+  assert.ok(!headers.equals(new Headers([h1])));
+  assert.ok(new Headers().equals(new Headers([])));
+  for (const o of [null, [h1, h2], 'headers']) assert.equal(headers.equals({ o }), false);
+  assert.throws(() => headers.equals(), { name: 'IllegalArgumentError', message: 'equals() takes one of (o); got ()' });
+});

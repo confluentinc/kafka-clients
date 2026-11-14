@@ -24,6 +24,7 @@
 // fields.
 
 import { JavaForms } from '../../internal/args';
+import { bytesEquals, bytesHashCode, objectsEquals, sameClass, stringHashCode } from '../../internal/java_object';
 import { bytesToString } from '../../internal/bytes';
 
 const FORMS = new JavaForms('Header', [['key', 'value']], {
@@ -31,6 +32,8 @@ const FORMS = new JavaForms('Header', [['key', 'value']], {
 });
 const KEY_FORMS = new JavaForms('key', [[]], { reader: true });
 const VALUE_FORMS = new JavaForms('value', [[]], { reader: true });
+const EQUALS_FORMS = new JavaForms('equals', [['o']]);
+const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
 /**
  * The checked key of a header: Java's `RecordHeader` refuses a null key with
@@ -136,6 +139,50 @@ export class Header {
    */
   static internalValueOf(header: Header): Buffer | null {
     return header.#value;
+  }
+
+  /**
+   * Whether `o` is a header of this class with an equal key and the same value
+   * bytes, Java's `RecordHeader.equals`: `Objects.equals` on the keys and
+   * `Arrays.equals` on the values.
+   *
+   * @param options - the object to compare with
+   * @returns true when `o` is an equal header
+   * @throws `IllegalArgumentError` when the given parameters are not `{o}`
+   */
+  equals(options: {
+    /** The object to compare with. */
+    o: unknown;
+  }): boolean;
+  /**
+   * The same as `equals({o})`, with the object on its own; a plain object is
+   * read as the options object.
+   *
+   * @param o - the object to compare with
+   * @returns true when `o` is an equal header
+   */
+  equals(o: unknown): boolean;
+  equals(options: unknown): boolean {
+    EQUALS_FORMS.match(options, arguments.length);
+    const o = EQUALS_FORMS.value(options, 'o');
+    if (this === o) return true;
+    if (!sameClass(this, o)) return false;
+    const header = o as Header;
+    return objectsEquals(this.#key, header.#key) && bytesEquals(this.#value, header.#value);
+  }
+
+  /**
+   * The header's hash code, Java's `RecordHeader.hashCode`: the key's
+   * `String.hashCode()`, then `31 * result + Arrays.hashCode(value)`.
+   *
+   * @returns the hash code, a 32-bit integer
+   * @throws `TypeError` when it is given an argument
+   */
+  hashCode(): number {
+    HASH_CODE_FORMS.match(undefined, arguments.length);
+    let result = stringHashCode(this.#key);
+    result = (Math.imul(31, result) + bytesHashCode(this.#value)) | 0;
+    return result;
   }
 
   /**

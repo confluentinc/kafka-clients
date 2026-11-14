@@ -18,6 +18,10 @@
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",
     "Header.toString": "org.apache.kafka.common.header.internals.RecordHeader#toString",
     "Headers.constructor": "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders",
-    "Headers.toString": "org.apache.kafka.common.header.internals.RecordHeaders#toString"
+    "Headers.toString": "org.apache.kafka.common.header.internals.RecordHeaders#toString",
+    "Header.equals": "org.apache.kafka.common.header.internals.RecordHeader#equals",
+    "Header.hashCode": "org.apache.kafka.common.header.internals.RecordHeader#hashCode",
+    "Headers.equals": "org.apache.kafka.common.header.internals.RecordHeaders#equals",
+    "Headers.hashCode": "org.apache.kafka.common.header.internals.RecordHeaders#hashCode"
   }
 }

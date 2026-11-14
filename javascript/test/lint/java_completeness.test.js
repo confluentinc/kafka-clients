@@ -29,11 +29,22 @@ const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index
 test('a class translating every public, live Java member passes', () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Rec: UNKNOWN, Rec, topic, offset, getSize, isOpen, hasKey, close, toString (not old, hidden,
-  // mode, LEGACY, SECRET, nor equals / hashCode, which the client does not translate); Mode: ON, OFF, forName, java.lang.Enum's values, valueOf, name, ordinal, and toJSON;
+  // Rec: UNKNOWN, Rec, topic, offset, getSize, isOpen, hasKey, close, toString, equals, hashCode
+  // (not old, hidden, mode, LEGACY, SECRET); Mode: ON, OFF, forName, java.lang.Enum's values, valueOf, name, ordinal, and toJSON;
   // ProducerConfig: A_CONFIG (its constants only); the interface Header: key, value; the abstract
   // Future: get, not its constructor. The error and the function type ask nothing.
-  assert.ok(r.out.includes('✅ check-java-completeness: 21 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-java-completeness: 23 item(s) checked'), r.text);
+});
+
+test('equals and hashCode are asked for as any member is (root Class family, Q29)', () => {
+  const rec = LIB['src/producer/rec.ts']
+    .replace('  equals(options: { o: unknown }): boolean;\n  equals(o: unknown): boolean;\n', '')
+    .replace('  equals(options: unknown): boolean { void options; return false; }\n', '')
+    .replace('  hashCode(): number { return 0; }\n', '');
+  assert.deepEqual(findings(lint(fixture({ 'src/producer/rec.ts': rec }), [RULE])), [
+    'clients.producer.Rec#equals: Rec does not translate it',
+    'clients.producer.Rec#hashCode: Rec does not translate it',
+  ]);
 });
 
 test("an enum missing java.lang.Enum's members, or toJSON, is a finding, listed or not in the Java index", () => {

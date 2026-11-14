@@ -27,6 +27,7 @@ import { JavaForms } from '../internal/args';
 import { bytesToString } from '../internal/bytes';
 import { encodeLikeJava } from '../internal/encode';
 import { illegalArgument } from '../internal/errors';
+import { objectHashCode, objectsEquals } from '../internal/java_object';
 import type { Header } from '../common/header/header';
 import { Headers } from '../common/header/headers';
 
@@ -51,6 +52,8 @@ const FORMS = new JavaForms(
   ],
   { undefinedMessages: { value: "value must not be undefined. Pass null for Java's null, which sends a tombstone." } },
 );
+const EQUALS_FORMS = new JavaForms('equals', [['o']]);
+const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
 /** A header as the native send takes it: key and value bytes. */
 type NativeHeader = [Uint8Array, Uint8Array | null];
@@ -328,6 +331,68 @@ export class ProducerRecord {
     this.value = checkData(value, 'value');
     this.headers = checkHeaders(headers);
     Object.freeze(this);
+  }
+
+  /**
+   * Whether `o` is a `ProducerRecord` with equal fields, Java's
+   * `ProducerRecord.equals`: `Objects.equals` on the key, the partition, the
+   * topic, the headers, the value and the timestamp.
+   *
+   * @param options - the object to compare with
+   * @returns true when `o` is an equal record
+   * @throws `IllegalArgumentError` when the given parameters are not `{o}`
+   *
+   * @remarks A `Uint8Array` key or value is equal only to itself, as Java's
+   * `byte[]` is; a string key or value is equal to an equal string.
+   */
+  equals(options: {
+    /** The object to compare with. */
+    o: unknown;
+  }): boolean;
+  /**
+   * The same as `equals({o})`, with the object on its own; a plain object is
+   * read as the options object.
+   *
+   * @param o - the object to compare with
+   * @returns true when `o` is an equal record
+   */
+  equals(o: unknown): boolean;
+  equals(options: unknown): boolean {
+    EQUALS_FORMS.match(options, arguments.length);
+    const o = EQUALS_FORMS.value(options, 'o');
+    if (this === o) return true;
+    else if (!(o instanceof ProducerRecord)) return false;
+    const that = o;
+    return (
+      objectsEquals(this.key, that.key) &&
+      objectsEquals(this.partition, that.partition) &&
+      objectsEquals(this.topic, that.topic) &&
+      objectsEquals(this.headers, that.headers) &&
+      objectsEquals(this.value, that.value) &&
+      objectsEquals(this.timestamp, that.timestamp)
+    );
+  }
+
+  /**
+   * The record's hash code, Java's `ProducerRecord.hashCode`: the topic's,
+   * then `31 * result` plus the partition's, the headers', the key's, the
+   * value's and the timestamp's, each 0 when null.
+   *
+   * @returns the hash code, a 32-bit integer
+   * @throws `TypeError` when it is given an argument
+   *
+   * @remarks A `Uint8Array` key or value hashes by its bytes, a value Java
+   * leaves unspecified for a `byte[]`, whose identity hash code it is.
+   */
+  hashCode(): number {
+    HASH_CODE_FORMS.match(undefined, arguments.length);
+    let result = objectHashCode(this.topic);
+    result = (Math.imul(31, result) + objectHashCode(this.partition)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.headers)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.key)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.value)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.timestamp)) | 0;
+    return result;
   }
 
   toString(): string {

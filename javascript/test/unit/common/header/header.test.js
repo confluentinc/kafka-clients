@@ -66,3 +66,28 @@ test("toString is RecordHeader's", () => {
   assert.equal(String(new Header({ key: 'k', value: null })), 'RecordHeader(key = k, value = null)');
   assert.equal(String(new Header({ key: 'k', value: new Uint8Array(0) })), 'RecordHeader(key = k, value = [])');
 });
+
+// The hash codes Java's own RecordHeader.hashCode() gives for these headers
+// (kafka-clients, run on the same keys and values): the key's
+// String.hashCode() over UTF-16 code units, then Arrays.hashCode of the
+// signed value bytes.
+test("equals and hashCode are RecordHeader's", () => {
+  const h1 = new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) });
+  assert.equal(h1.hashCode(), 959477);
+  assert.equal(new Header({ key: '\u{1F600}é', value: null }).hashCode(), 1703763162);
+  assert.equal(new Header({ key: '', value: new Uint8Array(0) }).hashCode(), 1);
+  // Arrays.equals: the same bytes in another array are equal, as is a null value to a null value.
+  const same = new Header({ key: 'k', value: new Uint8Array([1, 255, 127, 128]) });
+  assert.ok(h1.equals(same));
+  assert.ok(h1.equals({ o: same }));
+  assert.equal(h1.hashCode(), same.hashCode());
+  assert.ok(new Header({ key: 'k', value: null }).equals(new Header({ key: 'k', value: null })));
+  assert.ok(!h1.equals(new Header({ key: 'k', value: null })));
+  assert.ok(!h1.equals(new Header({ key: 'j', value: Buffer.from([1, 255, 127, 128]) })));
+  assert.ok(!h1.equals(new Header({ key: 'k', value: Buffer.from([1, 255, 127]) })));
+  // getClass() != o.getClass(): a subclass's header is another class.
+  class Sub extends Header {}
+  assert.ok(!h1.equals(new Sub({ key: 'k', value: Buffer.from([1, 255, 127, 128]) })));
+  for (const o of [null, 'k', { key: 'k' }]) assert.equal(h1.equals({ o }), false);
+  assert.throws(() => h1.hashCode(1), { name: 'TypeError', message: 'hashCode() only reads: it takes no argument' });
+});

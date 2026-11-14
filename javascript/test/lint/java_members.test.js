@@ -29,10 +29,10 @@ const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index
 test('members named as Java\'s pass: getters as properties, supertype methods, constants, the constructor, invented ones', () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Rec: 11 members (the invented one, the private and # ones not counted); Mode: 6, its toString
+  // Rec: 13 members, equals and hashCode included (the invented one, the private and # ones not counted); Mode: 6, its toString
   // java.lang.Enum's; ProducerConfig: 2; Header: 2 (an interface); Future: get (its constructor
   // private); FooError: its 2 fields; Callback is a function type.
-  assert.ok(r.out.includes('✅ check-java-members: 26 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-java-members: 28 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
