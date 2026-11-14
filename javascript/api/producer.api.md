@@ -236,6 +236,4 @@ export class RecordMetadata {
     static readonly UNKNOWN_PARTITION: -1;
 }
 
-// (No @packageDocumentation comment for this package)
-
 ```

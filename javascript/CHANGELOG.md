@@ -33,6 +33,10 @@ newer.
 
 ### Packaging
 
+- The licence changed: 4.x is licensed under Apache-2.0, where the 1.x
+  releases are MIT, which they stay on the `2.x` branch. The client is a
+  translation of Apache Kafka's Java client, so every package ships Apache
+  Kafka's NOTICE line.
 - Released as three npm packages: `@confluentinc/kafka-javascript`, the
   compiled library, and a platform package per platform of the preview,
   `@confluentinc/kafka-javascript-linux-x64-gnu` (glibc) and
@@ -182,8 +186,9 @@ newer.
 - One copy of the package per application: a record or header made by one
   copy is refused by a producer of another, and errors are no `instanceof`
   the other copy's classes.
-- A client's objects are not shared between worker threads: one producer per
-  thread, and plain data between threads (a record's `Headers` as pairs).
+- The preview doesn't support clients in worker threads. Create clients in
+  the main thread, and send plain data to and from workers (a record's
+  `Headers` as pairs).
 - A default import (`import kafka from '@confluentinc/kafka-javascript'`)
   works only under Node's own ES module loader: compiled to CommonJS by an
   interop helper (TypeScript's `esModuleInterop`, Babel, a bundler) it would

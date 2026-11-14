@@ -16,11 +16,12 @@
 // (root CLAUDE.md, JavaScript Binding Conventions, Class family). Java's
 // Producer has no static member, so it has no runtime object.
 //
-// Not translated yet, as on KafkaProducer: initTransactions,
-// beginTransaction, sendOffsetsToTransaction, commitTransaction,
-// abortTransaction, registerMetricForSubscription,
-// unregisterMetricFromSubscription, partitionsFor, metrics and
-// clientInstanceId.
+// Left out, as on KafkaProducer (the producer package's documentation, in
+// index.ts): by request, initTransactions, beginTransaction,
+// sendOffsetsToTransaction, commitTransaction and abortTransaction; for want
+// of an FFI entry point, registerMetricForSubscription,
+// unregisterMetricFromSubscription and clientInstanceId; and, not translated
+// yet, partitionsFor and metrics.
 
 import type { KafkaFuture } from '../common/kafka_future';
 import type { Duration } from '../duration';

@@ -65,6 +65,4 @@ class Headers_2 implements Iterable<Header> {
 }
 export { Headers_2 as Headers }
 
-// (No @packageDocumentation comment for this package)
-
 ```
