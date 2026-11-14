@@ -22,13 +22,14 @@ VENV = . venv/bin/activate
 	test-integration-python-ssl test-integration-python-sasl-ssl \
 	test-integration-c-ssl test-integration-c-sasl-ssl \
 	test-integration-dotnet-ssl test-integration-dotnet-sasl-ssl \
-	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet \
+	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet build-grpc-native-dotnet-aot \
 	test-integration-python-native test-integration-c-native test-integration-dotnet-native \
+	test-integration-dotnet-native-aot \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
-	pack-dotnet package-check-dotnet \
+	pack-dotnet package-check-dotnet test-aot-dotnet \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -249,6 +250,14 @@ test-integration-c-native: build-grpc-native-c
 test-integration-dotnet-native: build-grpc-native-dotnet
 	$(MAKE) -C rust test-integration-grpc-dotnet-native
 
+# The .NET native arm again, against a Native AOT build of the gRPC server and binding (dotnet/'s
+# grpc-native-aot). Besides the .NET 10 SDK it needs the platform's C toolchain.
+build-grpc-native-dotnet-aot: build-rust-all-features
+	$(MAKE) -C dotnet $(ROOTS) grpc-native-aot
+
+test-integration-dotnet-native-aot: build-grpc-native-dotnet-aot
+	$(MAKE) -C rust test-integration-grpc-dotnet-native-aot
+
 # ── Performance integration tests ────────────────────────────────────────
 #
 # Separated from the functional suites because they assert latency and
@@ -354,6 +363,12 @@ pack-dotnet:
 
 package-check-dotnet:
 	$(MAKE) -C dotnet $(ROOTS) package-check-dotnet
+
+# The Native AOT check of the .NET library (net8.0 and net10.0): a whole-library
+# AOT publish that fails on any trim or AOT warning, then the run of the
+# published executables. See dotnet/Makefile.
+test-aot-dotnet:
+	$(MAKE) -C dotnet $(ROOTS) test-aot-dotnet
 
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
