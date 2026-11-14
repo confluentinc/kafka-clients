@@ -105,7 +105,9 @@ build-addon:
 # src/**/*.ts -> dist/ (.js, .d.ts and their maps), from a clean dist/ so a
 # removed source leaves no stale output. The private modules (src/internal/)
 # are never declared: their .d.ts are removed, so nothing can type against them
-# (test/typing checks no public declaration refers to one).
+# (test/typing checks no public declaration refers to one). Then each .js and
+# .d.ts gets its source's licence header first (scripts/dist_headers.js), as
+# the package check asks of every tarball.
 build-ts:
 	@$(TSC) --version >/dev/null 2>&1 || { \
 	  echo "javascript: cannot run tsc ($(TSC)): run \`npm ci\` in javascript/ to install the devDependencies (typescript, @types/node), or set TSC" >&2; \
@@ -113,6 +115,7 @@ build-ts:
 	rm -rf dist
 	$(TSC) -p tsconfig.json
 	find dist/internal \( -name '*.d.ts' -o -name '*.d.ts.map' \) -delete
+	$(NODE) scripts/dist_headers.js src dist
 
 # Then the container gRPC arm of the Rust multilanguage suite, as python/'s and
 # c/'s `test` end with theirs: a recipe line, so it runs after the broker-backed

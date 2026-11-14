@@ -6,7 +6,7 @@ are documented in this file.
 Before GA the public API is not stable, and an interface may change even in a
 minor release.
 
-## [4.4.0-preview.1] - Unreleased
+## [4.4.0-beta.1] - Unreleased
 
 Not published yet. It takes the npm name of the librdkafka-based client,
 `@confluentinc/kafka-javascript`, and is told apart from it by version, as the
@@ -48,11 +48,13 @@ newer.
 - Every package ships a `NOTICE` with Apache Kafka's credit line, and each
   platform package `THIRD_PARTY_LICENSES.txt`, the licences of the Rust
   crates linked into its addon.
-- Pre-releases are published under the `preview` dist-tag
-  (`npm install @confluentinc/kafka-javascript@preview`); `latest`, `rc` and
+- Pre-releases are published under the `beta` dist-tag
+  (`npm install @confluentinc/kafka-javascript@beta`); `latest`, `rc` and
   `alpha` stay with the earlier client; the publish job refuses to put a
   pre-release on `latest`. Semaphore publishes, with a granular npm token and
-  no provenance. `-preview.N` is a pre-release label of this package.
+  no provenance. The preview's versions are `-beta.N`, as the Python
+  client's are `bN`, and the docs and the warning still call the stage the
+  preview.
 - Node.js 22.14 or newer (`engines`), tested on 22, 24 and 26.
 - `MIGRATION.md`, shipped in the package, is the migration guide to 4.x for
   users of 1.x (both of its APIs) and of KafkaJS: what replaces what, what is

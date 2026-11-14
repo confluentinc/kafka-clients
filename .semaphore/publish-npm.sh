@@ -34,7 +34,7 @@
 #   - SEMAPHORE_GIT_TAG_NAME is javascript/v<version>, the version of the main tarball, 4.0.0 or
 #     higher (the npm name's versions below 4 are the earlier, librdkafka-based client's);
 #   - the tarballs match SHA256SUMS, which names exactly the expected ones;
-#   - the dist-tag is the one `check-npm.py dist-tag` gives the version: `preview` for a
+#   - the dist-tag is the one `check-npm.py dist-tag` gives the version: `beta` for a
 #     pre-release, which it never puts on `latest`, `latest` for a release (`legacy` is the 1.x
 #     line's, published from the earlier client's repository, never from here);
 #   - a package already on npmjs.com at the version has this tarball (it is skipped, so a rerun
@@ -74,9 +74,9 @@ cd "$1" || die "$1 is not a directory"
 command -v node >/dev/null 2>&1 || die "node is not on PATH"
 command -v npm >/dev/null 2>&1 || die "npm is not on PATH"
 
-release_tag_pattern='^javascript/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?$'
+release_tag_pattern='^javascript/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
 [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ${release_tag_pattern} ]] \
-    || die "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a JavaScript release tag (javascript/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or -rc.N)"
+    || die "'${SEMAPHORE_GIT_TAG_NAME:-}' is not a JavaScript release tag (javascript/v<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N)"
 version="${SEMAPHORE_GIT_TAG_NAME#javascript/v}"
 [ "${version%%.*}" -ge "$MIN_MAJOR" ] \
     || die "$version is below $MIN_MAJOR.0.0; the versions of $MAIN below $MIN_MAJOR are the earlier client's, published from its own repository under the legacy dist-tag"

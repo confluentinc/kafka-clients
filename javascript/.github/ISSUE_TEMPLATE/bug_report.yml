@@ -16,7 +16,7 @@ body:
     attributes:
       label: Package version
       description: The output of `npm ls @confluentinc/kafka-javascript`.
-      placeholder: "@confluentinc/kafka-javascript@4.4.0-preview.1"
+      placeholder: "@confluentinc/kafka-javascript@4.4.0-beta.1"
     validations:
       required: true
   - type: input

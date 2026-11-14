@@ -26,7 +26,8 @@
 //     would give a package a second import path (`namespace-export`);
 //   - the index declares nothing of its own, but the
 //     `export declare const __esModule: true;` marker, which emits no code
-//     (the module format is not decided yet in the root conventions)
+//     (the package is CommonJS, built with `module: nodenext`: root
+//     conventions, Layout and modules)
 //     (`index-declaration`);
 //   - src/index.ts re-exports only Java's built-in errors (the error classes
 //     src/internal/error_registry.ts maps to a `java.*` exception) and

@@ -56,8 +56,8 @@ host_platform() {
 }
 
 check_version() {
-    printf '%s' "$1" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?' \
-        || die "'$1' is not a release version (X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or -rc.N)"
+    printf '%s' "$1" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?' \
+        || die "'$1' is not a release version (X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N)"
 }
 
 # Installs the package into an empty project and runs the smoke program there. $1: the version;

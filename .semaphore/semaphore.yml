@@ -127,10 +127,10 @@ name: build-test-release
 #   - javascript/v<version> releases the Node.js client's npm packages,
 #     @confluentinc/kafka-javascript and its two platform packages. The
 #     version is "version" in javascript/package.json, and may carry an
-#     -alpha.N, -beta.N, -preview.N, -rc.N or -dev.N suffix. The tag build builds and
+#     -alpha.N, -beta.N, -rc.N or -dev.N suffix. The tag build builds and
 #     tests the packages and records them in the workflow's artifacts; its
 #     manual "Publish to npm" promotion (publish-npm.yml) publishes them, a
-#     pre-release under the preview dist-tag only. The name is shared with
+#     pre-release under the beta dist-tag only. The name is shared with
 #     confluent-kafka-javascript, the librdkafka-based client, whose versions
 #     are 1.x and whose fixes go out under the legacy dist-tag.
 #   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
@@ -172,7 +172,7 @@ name: build-test-release
 #      has passed, run the manual "Publish to npm" promotion (publish-npm.yml)
 #      on that release pipeline. It publishes the recorded tarballs with a
 #      granular npm token and no provenance (.semaphore/publish-npm.sh): a
-#      pre-release under the preview dist-tag, which check-npm.py refuses to
+#      pre-release under the beta dist-tag, which check-npm.py refuses to
 #      put on latest, and a release under latest, and then checks the
 #      registry. Then run the javascript-post-install task (service.yml) with
 #      that version, which installs it from npmjs.com on every supported
@@ -839,7 +839,7 @@ promotions:
           required: false
           description: "The version of the @confluentinc/kafka-javascript npm
             packages to release: \"version\" in javascript/package.json at
-            this commit (for example 4.4.0-preview.2). The tag build builds and
+            this commit (for example 4.4.0-beta.2). The tag build builds and
             tests the packages and records them in its artifacts; its
             \"Publish to npm\" promotion publishes them to npmjs.com.
             Leave empty to not release them."

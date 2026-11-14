@@ -16,7 +16,7 @@
 
 // The release scripts, without the registry: .semaphore/check-published-npm.py's
 // own self-test (its version ordering and dist-tag rules), check-npm.py's
-// dist-tag rule (a pre-release under preview only, never latest; 1.x fixes
+// dist-tag rule (a pre-release under beta only, never latest; 1.x fixes
 // under legacy), and .semaphore/publish-npm.sh, the Semaphore publish job, run
 // over a fake recorded release against a stub `npm`: a first publish, a rerun,
 // and its read-back of the dist-tags.
@@ -42,28 +42,28 @@ test("check-published-npm.py's version ordering and dist-tag rules", () => {
 });
 
 const MAIN = '@confluentinc/kafka-javascript';
-const VERSION = '4.4.0-preview.1';
+const VERSION = '4.4.0-beta.1';
 const PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
 
-test("check-npm.py dist-tag: preview for a pre-release, never latest; latest for a release; legacy for 1.x", () => {
+test("check-npm.py dist-tag: beta for a pre-release, never latest; latest for a release; legacy for 1.x", () => {
   const run = (...args) =>
     spawnSync(PYTHON, [path.join(REPO, '.semaphore', 'check-npm.py'), 'dist-tag', ...args], { encoding: 'utf8', cwd: REPO });
-  for (const [version, tag] of [['4.4.0-preview.1', 'preview'], ['4.4.0-rc.1', 'preview'], ['4.5.0', 'latest'], ['1.6.1', 'legacy']]) {
+  for (const [version, tag] of [['4.4.0-beta.1', 'beta'], ['4.4.0-rc.1', 'beta'], ['4.5.0', 'latest'], ['1.6.1', 'legacy']]) {
     const r = run(version);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, `${tag}\n`, version);
     assert.equal(run(version, '--tag', tag).status, 0, `${version} --tag ${tag}`);
   }
-  const latest = run('4.4.0-preview.1', '--tag', 'latest');
+  const latest = run('4.4.0-beta.1', '--tag', 'latest');
   assert.equal(latest.status, 1);
   assert.equal(
     latest.stderr,
-    "check-npm: refusing the dist-tag 'latest': 4.4.0-preview.1 is a pre-release, which goes out under preview only, never latest\n",
+    "check-npm: refusing the dist-tag 'latest': 4.4.0-beta.1 is a pre-release, which goes out under beta only, never latest\n",
   );
   const legacy = run('1.6.1', '--tag', 'latest');
   assert.equal(legacy.status, 1);
   assert.match(legacy.stderr, /1\.6\.1 is a fix of the earlier client \(below 4\.0\.0\), which goes out under legacy/);
-  assert.equal(run('4.4', '--tag', 'preview').status, 1);
+  assert.equal(run('4.4', '--tag', 'beta').status, 1);
 });
 
 // The stub: `npm whoami`, `npm view <pkg>@<v> dist.integrity`, `npm view <pkg>
@@ -100,8 +100,9 @@ esac
 /**
  * Runs publish-npm.sh over a fresh recorded release of `version`, whose
  * packages are published with `tags(name)` (`published` true) or published by
- * the run, ending with those tags (`published` false). Returns the result and
- * the stub's logged publish calls.
+ * the run, ending with those tags (`published` false), with `token` as
+ * NPM_TOKEN (`null`: unset; `undefined` would take the default). Returns the
+ * result and the stub's logged publish calls.
  */
 function runPublish(tags, { version = VERSION, published = true, token = 'npm_token', check = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-npm-'));
@@ -132,7 +133,7 @@ function runPublish(tags, { version = VERSION, published = true, token = 'npm_to
       STUB_NPM_STATE: state,
       SEMAPHORE_GIT_TAG_NAME: `javascript/v${version}`,
     };
-    if (token === undefined) delete env.NPM_TOKEN;
+    if (token === null) delete env.NPM_TOKEN;
     else env.NPM_TOKEN = token;
     const args = [path.join(REPO, '.semaphore', 'publish-npm.sh'), ...(check ? ['--check'] : []), release];
     const r = spawnSync('bash', args, { encoding: 'utf8', cwd: REPO, env });
@@ -144,9 +145,9 @@ function runPublish(tags, { version = VERSION, published = true, token = 'npm_to
   }
 }
 
-const GOOD = (name) => (name === MAIN ? { latest: '1.6.0', alpha: '1.0.0-alpha.1', preview: VERSION } : { latest: VERSION, preview: VERSION });
+const GOOD = (name) => (name === MAIN ? { latest: '1.6.0', alpha: '1.0.0-alpha.1', beta: VERSION } : { latest: VERSION, beta: VERSION });
 
-test('publish-npm.sh publishes the platform packages, then the main package, under preview, with no provenance', () => {
+test('publish-npm.sh publishes the platform packages, then the main package, under beta, with no provenance', () => {
   const r = runPublish(GOOD, { published: false });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(
@@ -154,22 +155,22 @@ test('publish-npm.sh publishes the platform packages, then the main package, und
     [...PLATFORMS.map((p) => `confluentinc-kafka-javascript-${p}-${VERSION}.tgz`), `confluentinc-kafka-javascript-${VERSION}.tgz`],
   );
   for (const call of r.calls) {
-    assert.match(call, / --access public --tag preview --provenance=false --registry https:\/\/registry\.npmjs\.org\/ /);
+    assert.match(call, / --access public --tag beta --provenance=false --registry https:\/\/registry\.npmjs\.org\/ /);
     assert.doesNotMatch(call, /--provenance( |$)|--otp/);
   }
-  assert.match(r.stdout, new RegExp(`${MAIN}: preview is ${VERSION.replace(/\./g, '\\.')}\n`));
-  assert.match(r.stdout, /is published under the preview dist-tag\.\n$/);
+  assert.match(r.stdout, new RegExp(`${MAIN}: beta is ${VERSION.replace(/\./g, '\\.')}\n`));
+  assert.match(r.stdout, /is published under the beta dist-tag\.\n$/);
 });
 
 test('publish-npm.sh accepts a rerun whose dist-tags are right, and publishes nothing again', () => {
   const r = runPublish(GOOD);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(r.calls, []);
-  assert.match(r.stdout, /Every package of 4\.4\.0-preview\.1 is already published\./);
+  assert.match(r.stdout, /Every package of 4\.4\.0-beta\.1 is already published\./);
 });
 
 test('publish-npm.sh refuses when latest moved to this client', () => {
-  const r = runPublish((name) => (name === MAIN ? { latest: VERSION, preview: VERSION } : GOOD(name)));
+  const r = runPublish((name) => (name === MAIN ? { latest: VERSION, beta: VERSION } : GOOD(name)));
   assert.equal(r.status, 1);
   assert.equal(
     r.stderr,
@@ -179,16 +180,16 @@ test('publish-npm.sh refuses when latest moved to this client', () => {
 });
 
 test('publish-npm.sh refuses when rc or alpha moved to this client', () => {
-  const r = runPublish((name) => (name === MAIN ? { latest: '1.6.0', rc: '4.4.0-rc.1', preview: VERSION } : GOOD(name)));
+  const r = runPublish((name) => (name === MAIN ? { latest: '1.6.0', rc: '4.4.0-rc.1', beta: VERSION } : GOOD(name)));
   assert.equal(r.status, 1);
   assert.match(r.stderr, /^publish-npm: the rc dist-tag of @confluentinc\/kafka-javascript is 4\.4\.0-rc\.1, but it must stay/);
 });
 
-test('publish-npm.sh refuses when a package was published without the preview tag', () => {
+test('publish-npm.sh refuses when a package was published without the beta tag', () => {
   const platform = `${MAIN}-${PLATFORMS[1]}`;
   const r = runPublish((name) => (name === platform ? { latest: VERSION } : GOOD(name)));
   assert.equal(r.status, 1);
-  assert.equal(r.stderr, `publish-npm: the preview dist-tag of ${platform} is not set, not ${VERSION}\n`);
+  assert.equal(r.stderr, `publish-npm: the beta dist-tag of ${platform} is not set, not ${VERSION}\n`);
 });
 
 test('publish-npm.sh puts a release on latest', () => {
@@ -205,7 +206,7 @@ test('publish-npm.sh refuses a 1.x version, whose fixes go out under legacy from
 });
 
 test('publish-npm.sh --check makes every token-free check, reading the registry anonymously, and stops before the token', () => {
-  const r = runPublish(GOOD, { token: undefined, check: true });
+  const r = runPublish(GOOD, { token: null, check: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /OK\n/);
   assert.match(r.stdout, /already published with this tarball; skipping it\n/);
@@ -215,7 +216,7 @@ test('publish-npm.sh --check makes every token-free check, reading the registry 
 });
 
 test('publish-npm.sh needs the token, and checks it only after the tarballs', () => {
-  const r = runPublish(GOOD, { token: undefined });
+  const r = runPublish(GOOD, { token: null });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /^publish-npm: NPM_TOKEN is not set/);
   assert.match(r.stdout, /OK\n/);

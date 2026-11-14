@@ -8,10 +8,10 @@ name: javascript-post-install
 #
 # Required Task parameter:
 #   JAVASCRIPT_VERSION -- the published version, X.Y.Z or X.Y.Z-alpha.N / -beta.N / -dev.N /
-#                         -preview.N / -rc.N (e.g. 4.4.0-preview.1).
+#                         -rc.N (e.g. 4.4.0-beta.1).
 #
 # "Registry" checks the registry (.semaphore/check-published-npm.py check): the main package and
-# the two platform packages are there at JAVASCRIPT_VERSION, the dist-tag of each (`preview`
+# the two platform packages are there at JAVASCRIPT_VERSION, the dist-tag of each (`beta`
 # for a pre-release, `latest` for a release) points at it or at a later version (so a rerun after
 # the next version still passes), for a pre-release the main package's `latest` (and `rc` /
 # `alpha`, when present) stays on the earlier client, a version below 4, the main package's
@@ -48,7 +48,7 @@ blocks:
               : "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}"
             # The parameter is free text: only a release version is passed on.
             - |
-              if ! [[ "${JAVASCRIPT_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+              if ! [[ "${JAVASCRIPT_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$ ]]; then
                 echo "Refusing to check: '${JAVASCRIPT_VERSION}' is not a release version" >&2
                 exit 1
               fi

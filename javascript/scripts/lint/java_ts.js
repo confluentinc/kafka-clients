@@ -189,9 +189,8 @@ const MAPPING_FILE = 'lint-mapping.json';
  *     invented options type is named `...Args` (check-invented-names).
  *   - `javaTargets`: the Java class, or member, of an item the convention
  *     does not find, `<fqn>` or `<fqn>#<member>`.
- * An export is keyed `src/<module>.ts:<Name>`, a member `<Class>.<member>`; a
- * member with a computed name (`[Symbol.asyncDispose]`) is not read, so not
- * listed.
+ * An export is keyed `src/<module>.ts:<Name>`, a member `<Class>.<member>`,
+ * one named by a well-known symbol `<Class>.[Symbol.asyncDispose]`.
  */
 function mappingLists(ctx) {
   return ctx.once('mappingLists', () => {
@@ -249,6 +248,25 @@ function hasFlag(ts, node, flag) {
 }
 
 /**
+ * The name of a member named `name`: its text for an identifier or a string,
+ * `[Symbol.x]` for a computed name that is a well-known symbol
+ * (`[Symbol.asyncDispose]`, `[Symbol.iterator]`), and null for any other
+ * computed name.
+ */
+function memberName(ts, name) {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  if (
+    ts.isComputedPropertyName(name) &&
+    ts.isPropertyAccessExpression(name.expression) &&
+    ts.isIdentifier(name.expression.expression) &&
+    name.expression.expression.text === 'Symbol'
+  ) {
+    return `[Symbol.${name.expression.name.text}]`;
+  }
+  return null;
+}
+
+/**
  * The public members of class declaration `cls`: `{name, kind, isStatic,
  * isReadonly, node}`, `kind` one of `constructor`, `method`, `get`, `set` and
  * `property`. A `private` / `protected` member, an ES `#` member, a `_`
@@ -289,7 +307,7 @@ function publicMembers(ts, cls) {
       continue;
     }
     if (!m.name || ts.isPrivateIdentifier(m.name)) continue;
-    const name = ts.isIdentifier(m.name) || ts.isStringLiteral(m.name) ? m.name.text : null;
+    const name = memberName(ts, m.name);
     if (name === null || name.startsWith('_')) continue;
     let kind = null;
     if (ts.isMethodDeclaration(m)) kind = 'method';

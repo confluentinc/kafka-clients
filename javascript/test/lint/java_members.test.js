@@ -67,6 +67,19 @@ test('each finding kind, with its exact text', () => {
   ]);
 });
 
+test('a member named by a well-known symbol is read, and passes only on the list of invented names', () => {
+  const rec = LIB['src/producer/rec.ts'].replace(
+    'extra(): void {}',
+    'extra(): void {}\n  [Symbol.iterator](): Iterator<number> { return [].values(); }',
+  );
+  assert.deepEqual(findings(lint(fixture({ 'src/producer/rec.ts': rec }), [RULE])), [
+    'Rec.[Symbol.iterator]: no Java member of clients.producer.Rec',
+  ]);
+  const listed = mapping({ invented: { ...INVENTED, 'Rec.[Symbol.iterator]': "JavaScript's iteration protocol" } });
+  const r = lint(fixture({ 'src/producer/rec.ts': rec, 'lint-mapping.json': listed }), [RULE]);
+  assert.equal(r.status, 0, r.text);
+});
+
 test('toString maps to java.lang.Enum only on an enum', () => {
   const r = lint(fixture({ 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  toString(): string { return \'\'; }\n', '') + '' }), [RULE]);
   assert.equal(r.status, 0, r.text);

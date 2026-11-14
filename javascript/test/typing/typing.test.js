@@ -20,7 +20,7 @@
 // with test/typing/usage.ts (and test/typing/temporal.ts, against the
 // Temporal polyfill's types, except in the ES2020 project, whose lib lacks the
 // polyfill's Intl types): resolved through package.json's `exports`
-// (node16), through its `typesVersions` (node10, the default for
+// (node16 and nodenext), through its `typesVersions` (node10, the default for
 // `"module": "commonjs"`), and in a project with no ambient types and an
 // ES2020 lib; and a default import is rejected under esModuleInterop. The
 // tsc runs are skipped, with a visible message, when tsc (a devDependency,
@@ -118,6 +118,26 @@ test('the declarations type-check under --strict', { skip: SKIP }, () => {
       lib: ['es2022'],
       module: 'node16',
       moduleResolution: 'node16',
+      types: ['node'],
+      typeRoots: [typeRoots()],
+    },
+    files: [path.join(ROOT, 'test', 'typing', 'usage.ts'), path.join(ROOT, 'test', 'typing', 'temporal.ts')],
+  });
+  const r = runTsc(['-p', config]);
+  assert.equal(r.status, 0, r.output);
+});
+
+// The same declarations, resolved as a project on `nodenext` resolves them,
+// the setting the library itself builds with (tsconfig.json).
+test('the declarations type-check under --strict with "module": "nodenext"', { skip: SKIP }, () => {
+  const config = writeConfig(path.join(ROOT, 'build', 'typing-nodenext'), {
+    compilerOptions: {
+      strict: true,
+      noEmit: true,
+      target: 'es2022',
+      lib: ['es2022'],
+      module: 'nodenext',
+      moduleResolution: 'nodenext',
       types: ['node'],
       typeRoots: [typeRoots()],
     },

@@ -1201,7 +1201,7 @@ blocks:
 
   # JavaScript release blocks. They run only on the build of a JavaScript
   # release tag, javascript/v<version> with an optional -alpha.N, -beta.N,
-  # -dev.N, -preview.N or -rc.N suffix, and are skipped on every other build. The pattern
+  # -dev.N or -rc.N suffix, and are skipped on every other build. The pattern
   # must stay identical in all of the blocks that use it, and in the scripts
   # that check it: release-npm.sh (release_version) and create-release-tag.yml
   # for the tag, and, for the version without its javascript/v prefix,
@@ -1248,7 +1248,7 @@ blocks:
   #      recorded tarballs from Semaphore, with a granular npm token loaded
   #      from Vault in its publish job only and no provenance
   #      (.semaphore/publish-npm.sh): the platform packages, then the main
-  #      package; a pre-release under the preview dist-tag only, which
+  #      package; a pre-release under the beta dist-tag only, which
   #      check-npm.py dist-tag refuses to put on latest. Its post-publish block
   #      checks the registry, and the javascript-post-install task
   #      (.semaphore/javascript-post-install.yml) then installs the published
@@ -1258,7 +1258,7 @@ blocks:
   - name: "Release (JavaScript): native addon (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1280,7 +1280,7 @@ blocks:
   - name: "Release (JavaScript): native addon (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1314,7 +1314,7 @@ blocks:
     # does not accept fails the release here.
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -1334,7 +1334,7 @@ blocks:
       - "Release (JavaScript): native addon (macOS arm64)"
       - "Release (JavaScript): third-party licences"
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1380,7 +1380,7 @@ blocks:
   - name: "Release (JavaScript): package verification (Linux amd64)"
     dependencies: ["Release (JavaScript): pack"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -1405,7 +1405,7 @@ blocks:
   - name: "Release (JavaScript): package verification (macOS arm64)"
     dependencies: ["Release (JavaScript): pack"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -1434,7 +1434,7 @@ blocks:
       - "Release (JavaScript): package verification (Linux amd64)"
       - "Release (JavaScript): package verification (macOS arm64)"
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:

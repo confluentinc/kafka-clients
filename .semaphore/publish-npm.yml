@@ -10,7 +10,7 @@ name: publish-npm
 # The token is a granular npm access token, loaded from Vault only in the publish job, after every
 # check that needs none (`publish-npm.sh --check`, which reads the registry anonymously). There is
 # no provenance (--provenance=false): npm attests only builds it can verify, which Semaphore's are
-# not. A pre-release goes out under the `preview` dist-tag only, and check-npm.py dist-tag refuses
+# not. A pre-release goes out under the `beta` dist-tag only, and check-npm.py dist-tag refuses
 # to put one on `latest`; a release goes out under `latest`; fixes of the earlier 1.x client go out
 # under `legacy`, from that client's own repository, never from here (publish-npm.sh).
 #
@@ -36,7 +36,7 @@ blocks:
   - name: "Release (JavaScript): publish to npm"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -60,7 +60,7 @@ blocks:
     # javascript-post-install task then installs it on every distribution and Node.js version.
     dependencies: ["Release (JavaScript): publish to npm"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 15
     task:
