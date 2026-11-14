@@ -15,6 +15,8 @@
     "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
     "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "src/common/serialization/string_serializer.ts:stringSerializer": "the built-in serde factory of Java's StringSerializer, which a serde config key takes without () (root CLAUDE.md, JavaScript Binding Conventions, Serialization)",
+    "src/common/topic_partition_map.ts:TopicPartitionMap": "the map keyed by TopicPartition for Java's Map<TopicPartition, V>: JavaScript has no value equality for map keys (root CLAUDE.md, JavaScript Binding Conventions, Class family, Q25)",
+    "src/common/topic_partition_set.ts:TopicPartitionSet": "the set form of TopicPartitionMap, for the Set<TopicPartition> the client returns: JavaScript has no value equality for set members (root CLAUDE.md, JavaScript Binding Conventions, Types, Q25)",
     "src/common/metric_name_map.ts:MetricNameMap": "the map keyed by MetricName that metrics() returns for Java's Map<MetricName, ? extends Metric>: JavaScript has no value equality for map keys (root CLAUDE.md, JavaScript Binding Conventions, Types, as TopicPartitionMap)"
   },
   "javaTargets": {
