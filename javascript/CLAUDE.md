@@ -1013,6 +1013,13 @@ The rules, each named in its finding:
   `check-waiting-call-promise` follows a method) or a field initializer
   reaching a `native.<fn>` use, as the mocks wrap the FFI's mocks (root
   conventions, Implementation over the FFI, Q62). There is no mock yet.
+- `check-encode-callers`: only the string serializer (`src/common/serialization/`),
+  the headers code (`src/common/header/`) and the config code
+  (`src/internal/config.ts`) use `encodeLikeJava` (root conventions, Types,
+  Q24). `src/producer/producer_record.ts` has an allowance, for a string key
+  or value given without a serializer, which the serializers replace with a
+  `TypeError` (Class family, Q27); the allowance fails as unused once that
+  call goes.
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
