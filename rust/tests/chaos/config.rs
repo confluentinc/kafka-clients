@@ -1198,8 +1198,17 @@ fn parse_workloads(s: &str) -> Result<Vec<WorkloadSpec>, String> {
             _ => return Err(format!("workload role must be producer or consumer, got '{role}'")),
         };
         let backend = Backend::parse(backend).ok_or_else(|| {
-            format!("workload backend must be rust, python, python-async, c, dotnet or dotnet-async, got '{backend}'")
+            format!(
+                "workload backend must be rust, python, python-async, c, dotnet, dotnet-async or javascript, got \
+                 '{backend}'"
+            )
         })?;
+        if role == Role::Consumer && backend == Backend::Js {
+            return Err(format!(
+                "workload '{tok}': the javascript backend has a producer only (the binding has no consumer yet); \
+                 use consumer:<another backend>"
+            ));
+        }
         let n = counters.entry((role, backend)).or_insert(0);
         *n += 1;
         specs.push(WorkloadSpec { role, backend, instance: *n });
@@ -1368,7 +1377,23 @@ mod tests {
 
         assert_eq!(
             parse_err(&[("CHAOS_WORKLOADS", "producer:rust,consumer:java")]),
-            "workload backend must be rust, python, python-async, c, dotnet or dotnet-async, got 'java'"
+            "workload backend must be rust, python, python-async, c, dotnet, dotnet-async or javascript, got 'java'"
+        );
+    }
+
+    /// The JavaScript backend runs a producer; it has no consumer to run.
+    #[test]
+    fn javascript_workloads_are_producers_only() {
+        let cfg =
+            parse(&[("CHAOS_WORKLOADS", "producer:javascript,consumer:rust")]).expect("javascript producer parses");
+        let labels: Vec<String> = cfg.workloads.iter().map(WorkloadSpec::label).collect();
+        assert_eq!(labels, ["producer-javascript-1", "consumer-rust-1"]);
+        assert!(cfg.workloads[0].backend.is_grpc());
+
+        assert_eq!(
+            parse_err(&[("CHAOS_WORKLOADS", "producer:rust,consumer:javascript")]),
+            "workload 'consumer:javascript': the javascript backend has a producer only (the binding has no consumer \
+             yet); use consumer:<another backend>"
         );
     }
 

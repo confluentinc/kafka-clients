@@ -9,6 +9,8 @@ tools/java-perf-test/bin/
 *.png
 *.svg
 *.json
+# The Node.js client's committed Java index (`cargo xtask java-api`).
+!/javascript/java-index.json
 *.jsonl
 !design/current/img/*.svg
 # The Confluent.Kafka NuGet package's icon (dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj).
@@ -41,3 +43,18 @@ tools/java-perf-test/bin/
 !/rust/tools/verifiable-clients/src/bin/
 !/rust/tools/verifiable-clients/src/bin/*.rs
 
+
+# The Node.js client's build outputs (the addon, the compiled library); its
+# package.json, lockfile and tsconfig.json are tracked despite the `*.json`
+# rule above.
+/javascript/build/
+/javascript/native/build/
+/javascript/dist/
+/javascript/node_modules/
+!/javascript/package.json
+!/javascript/package-lock.json
+!/javascript/tsconfig.json
+# The platform packages' manifests (javascript/npm/README.md), published as committed.
+!/javascript/npm/*/package.json
+# The interface check's baseline (javascript/scripts/api_report.js).
+!/javascript/api/*.json
