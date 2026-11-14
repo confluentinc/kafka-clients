@@ -462,7 +462,20 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   JSON text of the group, the name and the tags sorted by key (the fields
   `MetricName.equals` compares), keeping the original `MetricName`s, with a
   `toJSON()` writing the entries by that string key, as `TopicPartitionMap`'s
-  will;
+  does. Java's `Map<TopicPartition, V>` is a `TopicPartitionMap` and the
+  `Set<TopicPartition>` the client returns a `TopicPartitionSet` *(js-only, on
+  the invented-names list)* (root conventions, Class family and Types, Q25):
+  each wraps a `Map` keyed by `'<topic>:<partition>'` (`'orders:3'`; the
+  partition alone for a null topic, and the partition is an integer, so two
+  topic partitions never share a key), keeps the original `TopicPartition`s,
+  which `keys()`, `entries()` and iteration return, and does not extend `Map`
+  or `Set`. Both are mutable (`set` / `add`, `delete`, `clear`), `size()` is a
+  method, as `MetricNameMap`'s, `get()` returns `null` for a missing key,
+  `toString()` is Java's `AbstractMap` / `AbstractCollection` text
+  (`{orders-0=5}`, `[orders-0]`), and `toJSON()` writes a map's entries by
+  the string key, a `bigint` value as a decimal string, and a set as the
+  array of its members. Where Java takes a `Map<TopicPartition, V>`, only a
+  `TopicPartitionMap` is taken, and a `Map` is refused with a hint;
   `check-type-mapping` holds the rows.
 - `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
   runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
