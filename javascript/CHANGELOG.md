@@ -84,8 +84,9 @@ newer.
   every field but a record's `headers`, which becomes `{}`). A `ProducerRecord`
   is frozen, so `send()` sends the fields its constructor checked. `SecurityProtocol` and
   `SslClientAuth` have Java's `Enum` methods, `name()`, `ordinal()`,
-  `values()` and `valueOf()`; `toString()` and `toJSON()` return the name
-  (`SslClientAuth`'s too, where Java's writes it in lower case). A method that
+  `values()` and `valueOf()`; `toJSON()` returns the name, and so does
+  `toString()`, but `SslClientAuth`'s, which writes it in lower case, as
+  Java's does. A method that
   only reads throws `TypeError` when it is given an argument.
   `RecordMetadata` and the enums have private constructors.
 - `Header` and `Headers`, in `common/header`, with Java's members: `Header`

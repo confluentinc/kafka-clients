@@ -382,9 +382,9 @@ class keeps Java's getters as methods (`future.isDone()`, `header.key()`).
 The enums, `SecurityProtocol` and `SslClientAuth`, have Java's `Enum`
 methods: `name()`, `ordinal()`, static `values()` and static
 `valueOf(name)` (exact, else `IllegalArgumentError` "No enum constant
-org.apache.kafka.common.config.SslClientAuth.none"); `toString()` and
-`JSON.stringify` write the name (`SslClientAuth.REQUIRED.toString()` is
-`'REQUIRED'`, where Java's override writes it in lower case). Java's public
+org.apache.kafka.common.config.SslClientAuth.none"); `JSON.stringify`
+writes the name, and so does `toString()`, unless Java overrides it
+(`SslClientAuth.REQUIRED.toString()` is `'required'`, as Java's). Java's public
 final fields stay fields (`SecurityProtocol.SSL.id`). A constant Java `List`
 is a frozen array, and a constant `Set` (`SslConfigs.RECONFIGURABLE_CONFIGS`)
 a read-only set whose `add`, `delete` and `clear` throw
@@ -520,7 +520,6 @@ code relying on them keeps running with another meaning: check each.
 | `close(undefined)`, `flush(undefined)`, `get(undefined)` were the calls without an argument | they throw (or reject with) `TypeError`: leave the argument out |
 | a bare value of the wrong type threw `TypeError` | it fits no overload: `IllegalArgumentError` "… takes one of (…); got a number" |
 | a Temporal.Duration with years, months or weeks was an `IllegalArgumentError` | **silent** for `instanceof RangeError`: it is a plain `RangeError` |
-| `SslClientAuth.REQUIRED.toString()` was `'required'` | **silent**: it is `'REQUIRED'`, the name, as for every enum |
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
 | `key.serializer` / `value.serializer` reached the core | they throw `ConfigError`: a serializer is a constructor argument |
 | `metadata.offset` / `metadata.timestamp` / `record.timestamp` numbers | bigints, Java's `long`; a timestamp is given as a bigint or a whole number up to 2^53 - 1 |
