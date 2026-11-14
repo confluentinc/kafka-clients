@@ -220,8 +220,9 @@ class ProducerService {
     // timeout past that (the harness sends i64::MAX for Duration::MAX) is
     // Infinity, no limit, which crosses as Long.MAX_VALUE ms. A negative one
     // is passed on for the client to reject.
-    const ms = int64(request.timeout_ms) ?? 0;
-    const timeout = ms > Number.MAX_SAFE_INTEGER ? Infinity : ms;
+    const ms = int64(request.timeout_ms) ?? 0n;
+    // int64 gives a bigint; close() takes a number of milliseconds.
+    const timeout = ms > BigInt(Number.MAX_SAFE_INTEGER) ? Infinity : Number(ms);
     return this.#close(idOf(request.producer_id), { timeout });
   }
 
