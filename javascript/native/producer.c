@@ -133,11 +133,12 @@ static napi_value metadata_to_js(napi_env env, const kafka_producer_RecordMetada
     NAPI_CHECK(env, napi_set_named_property(env, obj, "partition", v), NULL);
     NAPI_CHECK(env, napi_get_boolean(env, has_offset != 0, &v), NULL);
     NAPI_CHECK(env, napi_set_named_property(env, obj, "hasOffset", v), NULL);
-    NAPI_CHECK(env, napi_create_int64(env, offset, &v), NULL);
+    // Java's long: a bigint (root CLAUDE.md, JavaScript Binding Conventions, Types).
+    NAPI_CHECK(env, napi_create_bigint_int64(env, offset, &v), NULL);
     NAPI_CHECK(env, napi_set_named_property(env, obj, "offset", v), NULL);
     NAPI_CHECK(env, napi_get_boolean(env, has_timestamp != 0, &v), NULL);
     NAPI_CHECK(env, napi_set_named_property(env, obj, "hasTimestamp", v), NULL);
-    NAPI_CHECK(env, napi_create_int64(env, timestamp, &v), NULL);
+    NAPI_CHECK(env, napi_create_bigint_int64(env, timestamp, &v), NULL);
     NAPI_CHECK(env, napi_set_named_property(env, obj, "timestamp", v), NULL);
     NAPI_CHECK(env, napi_create_int32(env, key_size, &v), NULL);
     NAPI_CHECK(env, napi_set_named_property(env, obj, "serializedKeySize", v), NULL);
@@ -461,7 +462,8 @@ static int is_function(napi_env env, napi_value v) {
 }
 
 // producerSend(handle, topic, partition, timestamp, key, value, headers,
-// onHandover, onComplete): partition and timestamp -1 for Java's null; key and
+// onHandover, onComplete): partition -1 and timestamp -1n (a bigint) for
+// Java's null; key and
 // value a Uint8Array or null, the app's (a serializer's included) or the
 // client's own (an encoded string), never copied: each is kept by a reference
 // until the hand-over (javascript/CLAUDE.md, rule 8); headers null or an
@@ -480,8 +482,10 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
     if (p == NULL) return NULL;
     int32_t partition = -1;
     int64_t timestamp = -1;
+    bool lossless = false;
     NAPI_CHECK(env, napi_get_value_int32(env, argv[2], &partition), NULL);
-    NAPI_CHECK(env, napi_get_value_int64(env, argv[3], &timestamp), NULL);
+    // A bigint src/ checked against Java's long range.
+    NAPI_CHECK(env, napi_get_value_bigint_int64(env, argv[3], &timestamp, &lossless), NULL);
     char* topic = js_string_dup(env, argv[1], "topic must be a string");
     if (topic == NULL) return NULL;
 

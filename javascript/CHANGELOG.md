@@ -27,7 +27,8 @@ included), a bare value of no overload's type refused with
 `header.value()`, no `[key, value]` pairs), `readonly` data fields, each
 package imported from its own path (the root's namespaces are gone), `ExecutionError` from a failed
 `get()`, errors without `code` / `errorName` / `retriable` / `apiError`,
-keys and values borrowed until `send()` settles, no garbage-collection close, and Node.js 22.14 or
+Java's `long` as a `bigint` (`metadata.offset`, `metadata.timestamp`,
+`record.timestamp`), keys and values borrowed until `send()` settles, no garbage-collection close, and Node.js 22.14 or
 newer.
 
 ### Packaging

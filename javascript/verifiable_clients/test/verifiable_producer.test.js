@@ -185,9 +185,10 @@ test('the create time is the record timestamp and advances', async () => {
     await producer.send(null, '1');
   });
   const [first, second] = mock.history().map((record) => record.timestamp);
-  assert.equal(first, 1_000);
-  assert.ok(second >= 1_005, `${second}`);
-  assert.ok(producer.createTime >= second + 5, `${producer.createTime}`);
+  // Java's long: a bigint.
+  assert.equal(first, 1_000n);
+  assert.ok(second >= 1_005n, `${second}`);
+  assert.ok(producer.createTime >= Number(second) + 5, `${producer.createTime}`);
 });
 
 test('a record without a create time has no timestamp', async () => {

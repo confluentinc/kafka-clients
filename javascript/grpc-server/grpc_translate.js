@@ -97,13 +97,12 @@ function unknownProducer(producerId) {
 }
 
 /**
- * A proto int64 (a decimal string under `longs: String`) as a Number, or null
- * when absent. Values beyond Number.MAX_SAFE_INTEGER are rejected by the
- * client's own range check (ProducerRecord) rather than silently rounded.
+ * A proto int64 (a decimal string under `longs: String`) as a bigint, Java's
+ * long (exact at every value), or null when absent.
  */
 function int64(value) {
   if (value === undefined || value === null) return null;
-  return Number(value);
+  return BigInt(value);
 }
 
 /**
@@ -138,8 +137,9 @@ function protoToProducerRecord(proto) {
 /** Translate a RecordMetadata into its proto form (`_record_metadata_to_proto`). */
 function recordMetadataToProto(metadata) {
   return {
-    offset: metadata.offset,
-    timestamp: metadata.timestamp,
+    // int64s, written as decimal strings, exact at every value.
+    offset: metadata.offset.toString(),
+    timestamp: metadata.timestamp.toString(),
     serialized_key_size: metadata.serializedKeySize,
     serialized_value_size: metadata.serializedValueSize,
     topic: metadata.topic,
@@ -170,7 +170,7 @@ class CallbackLog {
    * @param {string} clientId the server-local producer id
    * @param {string} kind a CallbackLogEntry kind
    * @param {Array<{topic: string, partition: number}>} partitions
-   * @param {Record<string, number>} offsets `{"<topic>-<partition>": offset}`
+   * @param {Record<string, string>} offsets `{"<topic>-<partition>": offset}`, each a decimal int64
    * @param {string} error the error message, or "" when the callback saw none
    */
   append(clientId, kind, partitions, offsets, error) {
@@ -202,7 +202,7 @@ function makeLoggingDeliveryCallback(log, clientId) {
       clientId,
       KIND_DELIVERY,
       [{ topic, partition }],
-      { [offsetKey(topic, partition)]: metadata.offset },
+      { [offsetKey(topic, partition)]: metadata.offset.toString() },
       error === null || error === undefined ? '' : error.message,
     );
   };

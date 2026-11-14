@@ -121,8 +121,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/record_metadata.ts',
-        '  /** The offset of the record in the topic/partition, or -1 if hasOffset is false. */\n  readonly offset: number;',
-        '  /**\n   * The offset of the record.\n   *\n   * @returns the offset\n   */\n  getOffset(): number {\n    return 0;\n  }',
+        '  /** The offset of the record in the topic/partition, or -1 if hasOffset is false. */\n  readonly offset: bigint;',
+        '  /**\n   * The offset of the record.\n   *\n   * @returns the offset\n   */\n  getOffset(): bigint {\n    return 0n;\n  }',
       ),
   },
   {
@@ -313,7 +313,7 @@ MUTATIONS.push(
   {
     rule: 'check-type-mapping',
     what: 'a field of another type than Java\'s',
-    apply: (root) => edit(root, 'src/producer/record_metadata.ts', 'readonly offset: number;', 'readonly offset: string;'),
+    apply: (root) => edit(root, 'src/producer/record_metadata.ts', 'readonly offset: bigint;', 'readonly offset: number;'),
   },
   {
     rule: 'check-waiting-call-promise',

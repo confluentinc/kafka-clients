@@ -32,9 +32,9 @@ interface RecordMetadataFields {
   topic: string;
   partition: number;
   hasOffset: boolean;
-  offset: number;
+  offset: bigint;
   hasTimestamp: boolean;
-  timestamp: number;
+  timestamp: bigint;
   serializedKeySize: number;
   serializedValueSize: number;
 }
@@ -62,7 +62,8 @@ interface Native {
     handle: ProducerHandle,
     topic: string,
     partition: number,
-    timestamp: number,
+    // -1n for Java's null.
+    timestamp: bigint,
     key: Uint8Array | null,
     // Borrowed, not copied: the addon holds a reference on each until the
     // hand-over (javascript/CLAUDE.md, rule 8).

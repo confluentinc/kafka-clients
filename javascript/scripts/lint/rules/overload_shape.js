@@ -116,7 +116,10 @@ function formText(form) {
  */
 function hostKind(type) {
   const base = type.replace(/<.*$/, '');
-  if (/^(byte|short|int|long|float|double|Byte|Short|Integer|Long|Float|Double|Number|Duration)$/.test(base)) return 'number';
+  if (/^(byte|short|int|float|double|Byte|Short|Integer|Float|Double|Number|Duration)$/.test(base)) return 'number';
+  // Java's long: a bigint, which also takes a whole number (root CLAUDE.md,
+  // JavaScript Binding Conventions, Types), a kind of its own.
+  if (base === 'long' || base === 'Long') return 'bigint';
   if (base === 'boolean' || base === 'Boolean') return 'boolean';
   if (base === 'String') return 'string';
   if (base === 'Map' || base === 'Properties') return 'configs';

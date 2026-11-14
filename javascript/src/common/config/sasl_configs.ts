@@ -152,7 +152,7 @@ export class SaslConfigs {
   /**
    * Java's `SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN`.
    */
-  static readonly DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN: number = 60000;
+  static readonly DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN: bigint = 60000n;
   /**
    * Login refresh thread will sleep until the specified window factor relative
    * to the credential's lifetime has been reached, at which time it will try to
@@ -252,7 +252,7 @@ export class SaslConfigs {
   /**
    * Java's `SaslConfigs.DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS`.
    */
-  static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS: number = 10000;
+  static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS: bigint = 10000n;
   /**
    * The documentation of `SaslConfigs.SASL_LOGIN_RETRY_BACKOFF_MAX_MS`.
    */
@@ -270,7 +270,7 @@ export class SaslConfigs {
   /**
    * Java's `SaslConfigs.DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS`.
    */
-  static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS: number = 100;
+  static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS: bigint = 100n;
   /**
    * The documentation of `SaslConfigs.SASL_LOGIN_RETRY_BACKOFF_MS`.
    */
@@ -680,7 +680,7 @@ export class SaslConfigs {
   /**
    * Java's `SaslConfigs.DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS`.
    */
-  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS: number = 3600000;
+  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS: bigint = 3600000n;
   /**
    * The documentation of
    * `SaslConfigs.SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS`.
@@ -700,7 +700,7 @@ export class SaslConfigs {
    * Java's
    * `SaslConfigs.DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS`.
    */
-  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS: number = 10000;
+  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS: bigint = 10000n;
   /**
    * The documentation of
    * `SaslConfigs.SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS`.
@@ -720,7 +720,7 @@ export class SaslConfigs {
    * Java's
    * `SaslConfigs.DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS`.
    */
-  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS: number = 100;
+  static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS: bigint = 100n;
   /**
    * The documentation of
    * `SaslConfigs.SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS`.

@@ -259,7 +259,8 @@ export class KafkaProducer {
    *   the string, or a field of the record was reassigned to a value its
    *   constructor refuses (the constructor's error)
    * @throws `RangeError` rejects with it when a field of the record was
-   *   reassigned to a partition above 2^31 - 1 or a timestamp above 2^53 - 1
+   *   reassigned to a partition beyond Java's `Integer`, or to a timestamp
+   *   beyond Java's `Long` or a number beyond 2^53 - 1
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `SerializationError` rejects with it if the key or value are not

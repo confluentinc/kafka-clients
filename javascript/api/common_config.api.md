@@ -19,15 +19,15 @@ export class ConfigError extends KafkaError {
 // @public
 export class SaslConfigs {
     static readonly DEFAULT_KERBEROS_KINIT_CMD: string;
-    static readonly DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN: number;
+    static readonly DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN: bigint;
     static readonly DEFAULT_KERBEROS_TICKET_RENEW_JITTER: number;
     static readonly DEFAULT_KERBEROS_TICKET_RENEW_WINDOW_FACTOR: number;
     static readonly DEFAULT_LOGIN_REFRESH_BUFFER_SECONDS: number;
     static readonly DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS: number;
     static readonly DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR: number;
     static readonly DEFAULT_LOGIN_REFRESH_WINDOW_JITTER: number;
-    static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS: number;
-    static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS: number;
+    static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS: bigint;
+    static readonly DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS: bigint;
     static readonly DEFAULT_SASL_MECHANISM: string;
     static readonly DEFAULT_SASL_OAUTHBEARER_ASSERTION_ALGORITHM: string;
     static readonly DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS: number;
@@ -35,9 +35,9 @@ export class SaslConfigs {
     static readonly DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS: number;
     static readonly DEFAULT_SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS: number;
     static readonly DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE: boolean;
-    static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS: number;
-    static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS: number;
-    static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS: number;
+    static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS: bigint;
+    static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS: bigint;
+    static readonly DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS: bigint;
     static readonly DEFAULT_SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS: string;
     static readonly DEFAULT_SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS: string;
     static readonly DEFAULT_SASL_OAUTHBEARER_SCOPE_CLAIM_NAME: string;

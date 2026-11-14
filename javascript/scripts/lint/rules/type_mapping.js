@@ -15,7 +15,7 @@
 'use strict';
 
 // J7 check-type-mapping (javascript/CLAUDE.md "Java shape, JS idiom": Java
-// `null` is `null`, a `long` crosses as a `number`, `send` returns a
+// `null` is `null`, a `long` is a `bigint`, `send` returns a
 // `KafkaFuture`, a blocking method returns a Promise): every parameter,
 // return and property type of a translated member is the TypeScript type the
 // table below gives its Java type (`return_type` and field `type` of the Java
@@ -29,7 +29,9 @@
 //
 // | Java                                         | TypeScript                              |
 // |----------------------------------------------|-----------------------------------------|
-// | byte, short, int, long, float, double, boxed | number                                  |
+// | byte, short, int, float, double, boxed       | number                                  |
+// | long, Long, returned (a return, a field)     | bigint                                  |
+// | long, Long, taken                            | bigint | number (a whole number up to 2^53) |
 // | boolean, Boolean                             | boolean                                 |
 // | String                                       | string                                  |
 // | void, Void                                   | void                                    |
@@ -70,7 +72,8 @@ const PURE_JS_WAITING = new Map([
 ]);
 const { mappedItems, functionType, constantsOnly, formParameters } = require('../java_ts');
 
-const NUMBERS = new Set(['byte', 'short', 'int', 'long', 'float', 'double', 'Byte', 'Short', 'Integer', 'Long', 'Float', 'Double', 'Number']);
+const NUMBERS = new Set(['byte', 'short', 'int', 'float', 'double', 'Byte', 'Short', 'Integer', 'Float', 'Double', 'Number']);
+const LONGS = new Set(['long', 'Long']);
 const LISTS = new Set(['List', 'Set', 'Collection', 'SortedSet', 'Queue']);
 
 /** A Java type as written (`Map<String, ? extends List<T>>[]`) parsed: `{name, args, dims}`. */
@@ -183,6 +186,15 @@ module.exports = {
         return e === undefined ? false : matches({ ...j, dims: j.dims - 1 }, e);
       }
       if (NUMBERS.has(j.name)) return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+      if (LONGS.has(j.name)) {
+        // Java's long: a bigint returned; taken, a bigint or a whole number
+        // (root CLAUDE.md, JavaScript Binding Conventions, Types).
+        const ps = parts(t);
+        const big = (p) => (p.flags & ts.TypeFlags.BigIntLike) !== 0;
+        const number = (p) => (p.flags & ts.TypeFlags.NumberLike) !== 0;
+        if (outward) return ps.every(big);
+        return ps.some(big) && ps.some(number) && ps.every((p) => big(p) || number(p));
+      }
       if (j.name === 'Duration') {
         // A number of milliseconds, and a Temporal.Duration typed by its
         // structure (its `total` method, src/internal/duration.ts).

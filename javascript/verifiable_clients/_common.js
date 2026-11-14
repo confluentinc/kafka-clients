@@ -76,7 +76,9 @@ function writeStdout(text) {
 function printJson(data) {
   let line;
   try {
-    line = JSON.stringify(data);
+    // A bigint (Java's long, as an offset) is written as the JSON number
+    // Jackson writes, exactly.
+    line = JSON.stringify(data, (key, value) => (typeof value === 'bigint' ? JSON.rawJSON(value.toString()) : value));
     if (line === undefined) throw new TypeError(`${typeof data} is not JSON`);
   } catch (error) {
     line = `Bad data can't be written as json: ${error && error.message}`;

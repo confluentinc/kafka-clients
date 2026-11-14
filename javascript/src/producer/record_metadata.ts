@@ -17,9 +17,9 @@ interface RecordMetadataFields {
   topic: string;
   partition: number;
   hasOffset: boolean;
-  offset: number;
+  offset: bigint;
   hasTimestamp: boolean;
-  timestamp: number;
+  timestamp: bigint;
   serializedKeySize: number;
   serializedValueSize: number;
 }
@@ -39,13 +39,13 @@ export class RecordMetadata {
   readonly partition: number;
 
   /** The offset of the record in the topic/partition, or -1 if hasOffset is false. */
-  readonly offset: number;
+  readonly offset: bigint;
 
   /** true if the offset is included in the metadata, false otherwise. */
   readonly hasOffset: boolean;
 
   /** The timestamp of the record in the topic/partition, or -1 if hasTimestamp is false. */
-  readonly timestamp: number;
+  readonly timestamp: bigint;
 
   /** true if a valid timestamp exists, false otherwise. */
   readonly hasTimestamp: boolean;
@@ -77,9 +77,9 @@ export class RecordMetadata {
   private constructor(fields: RecordMetadataFields) {
     this.topic = fields.topic;
     this.partition = fields.partition;
-    this.offset = fields.hasOffset ? fields.offset : -1;
+    this.offset = fields.hasOffset ? fields.offset : -1n;
     this.hasOffset = fields.hasOffset;
-    this.timestamp = fields.hasTimestamp ? fields.timestamp : -1;
+    this.timestamp = fields.hasTimestamp ? fields.timestamp : -1n;
     this.hasTimestamp = fields.hasTimestamp;
     this.serializedKeySize = fields.serializedKeySize;
     this.serializedValueSize = fields.serializedValueSize;
@@ -97,5 +97,37 @@ export class RecordMetadata {
 
   toString(): string {
     return `${this.topic}-${this.partition}@${this.offset}`;
+  }
+
+  /**
+   * The metadata as `JSON.stringify` writes it: its fields in their order,
+   * the offset and the timestamp decimal strings, which `BigInt()` reads
+   * back exactly. It ignores the key `JSON.stringify` passes.
+   *
+   * @returns the metadata's fields
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol: `JSON.stringify` throws
+   * on a `bigint`, and a `number` loses digits above 2^53.
+   */
+  toJSON(): {
+    topic: string;
+    partition: number;
+    offset: string;
+    hasOffset: boolean;
+    timestamp: string;
+    hasTimestamp: boolean;
+    serializedKeySize: number;
+    serializedValueSize: number;
+  } {
+    return {
+      topic: this.topic,
+      partition: this.partition,
+      offset: this.offset.toString(),
+      hasOffset: this.hasOffset,
+      timestamp: this.timestamp.toString(),
+      hasTimestamp: this.hasTimestamp,
+      serializedKeySize: this.serializedKeySize,
+      serializedValueSize: this.serializedValueSize,
+    };
   }
 }

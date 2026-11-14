@@ -76,8 +76,9 @@ test('produces one record with a key, a value and headers', { skip: SKIP, timeou
     assert.ok(metadata.timestamp >= before - 60000, `timestamp ${metadata.timestamp}`);
     assert.equal(metadata.serializedKeySize, 2);
     assert.equal(metadata.serializedValueSize, 15);
-    // A data object: a spread and a JSON copy keep every field.
-    assert.deepEqual(JSON.parse(JSON.stringify(metadata)), {
+    // A data object: a spread and a JSON copy keep every field, Java's longs
+    // as bigints, and as decimal strings in JSON.
+    const fields = {
       topic,
       partition: metadata.partition,
       offset: metadata.offset,
@@ -86,8 +87,11 @@ test('produces one record with a key, a value and headers', { skip: SKIP, timeou
       hasTimestamp: true,
       serializedKeySize: 2,
       serializedValueSize: 15,
-    });
-    assert.deepEqual({ ...metadata }, JSON.parse(JSON.stringify(metadata)));
+    };
+    assert.equal(typeof metadata.offset, 'bigint');
+    assert.equal(typeof metadata.timestamp, 'bigint');
+    assert.deepEqual(JSON.parse(JSON.stringify(metadata)), { ...fields, offset: String(metadata.offset), timestamp: String(metadata.timestamp) });
+    assert.deepEqual({ ...metadata }, fields);
     // get() again returns the same outcome, timed or not, and so do the
     // future's other readers and dependants.
     assert.equal((await future.get()).toString(), metadata.toString());
@@ -105,7 +109,7 @@ test('produces one record with a key, a value and headers', { skip: SKIP, timeou
       await producer.send({ record: new ProducerRecord({ topic, partition: metadata.partition, key: null, value: 'second' }) })
     ).get();
     assert.equal(next.partition, metadata.partition);
-    assert.equal(next.offset, metadata.offset + 1);
+    assert.equal(next.offset, metadata.offset + 1n);
     assert.equal(next.serializedKeySize, -1);
     await producer.flush();
 
@@ -113,8 +117,8 @@ test('produces one record with a key, a value and headers', { skip: SKIP, timeou
     assert.deepEqual(
       records.map((r) => [r.offset, r.key && r.key.toString(), r.value.toString(), r.headers.map((h) => [h.key, h.value && h.value.toString()])]),
       [
-        [metadata.offset, 'k1', 'hello-from-node', [['h1', 'v1'], ['h2', null]]],
-        [next.offset, null, 'second', []],
+        [Number(metadata.offset), 'k1', 'hello-from-node', [['h1', 'v1'], ['h2', null]]],
+        [Number(next.offset), null, 'second', []],
       ],
     );
   } finally {
@@ -201,15 +205,16 @@ test('CreateTime: the timestamp given, or the send time, reaches the broker', { 
         record: new ProducerRecord({
           topic,
           partition: 0,
-          timestamp: explicit + 1,
+          // A long given as a bigint.
+          timestamp: BigInt(explicit) + 1n,
           key: null,
           value: 'b',
           headers: [new Header({ key: 'h', value: Buffer.from('v') })],
         }),
       })
     ).get();
-    assert.equal(withoutHeaders.timestamp, explicit);
-    assert.equal(withHeaders.timestamp, explicit + 1);
+    assert.equal(withoutHeaders.timestamp, BigInt(explicit));
+    assert.equal(withHeaders.timestamp, BigInt(explicit) + 1n);
     // No timestamp: the producer stamps its current time.
     const before = Date.now();
     const future = await producer.send({ record: new ProducerRecord({ topic, partition: 0, timestamp: null, key: null, value: 'c' }) });
@@ -223,7 +228,7 @@ test('CreateTime: the timestamp given, or the send time, reaches the broker', { 
       [
         ['a', explicit],
         ['b', explicit + 1],
-        ['c', stamped.timestamp],
+        ['c', Number(stamped.timestamp)],
       ],
     );
   } finally {
@@ -256,7 +261,7 @@ test('awaited sends to a fresh topic land in send order', { skip: SKIP, timeout:
     // The first records queue in the core on the missing metadata.
     const futures = await sendSequentially(producer, topic, N, (i) => String(i));
     const offsets = await assertSendOrder(futures);
-    assert.deepEqual(offsets, Array.from({ length: N }, (_, i) => i));
+    assert.deepEqual(offsets, Array.from({ length: N }, (_, i) => BigInt(i)));
     const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
     assert.deepEqual(
       records.map((r) => r.value.toString()),
@@ -285,7 +290,7 @@ test('awaited sends that wait for buffer memory land in send order', { skip: SKI
     const payload = 'x'.repeat(3000);
     const futures = await sendSequentially(producer, topic, N, (i) => `${i}:${payload}`);
     const offsets = await assertSendOrder(futures);
-    assert.deepEqual(offsets, Array.from({ length: N }, (_, i) => i + 1));
+    assert.deepEqual(offsets, Array.from({ length: N }, (_, i) => BigInt(i + 1)));
   } finally {
     await producer.close();
   }

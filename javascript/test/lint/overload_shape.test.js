@@ -338,6 +338,17 @@ test("ProducerRecord's six forms: K and V keep their own kinds, so key and value
   ]);
 });
 
+test("Java's long is a kind of its own, bigint: a long and an int at one position stay two options", () => {
+  const { formOptionNames } = require('../../scripts/lint/rules/overload_shape');
+  const form = (params, names) => ({ params, param_names: names });
+  // seek(long offset) / seek(int index): a bigint and a number, two names.
+  assert.deepEqual(formOptionNames([form(['long'], ['offset']), form(['int'], ['index'])]), [['offset'], ['index']]);
+  // Two longs at one position are one option, named after the first form.
+  assert.deepEqual(formOptionNames([form(['long'], ['offset']), form(['Long'], ['position'])]), [['offset'], ['offset']]);
+  // An int and a double are both numbers: one option.
+  assert.deepEqual(formOptionNames([form(['int'], ['n']), form(['double'], ['x'])]), [['n'], ['n']]);
+});
+
 test('cannot run without the Java index', () => {
   const r = lint(project({ 'tsconfig.json': TSCONFIG, ...LIB }), [RULE]);
   assert.match(r.err[1], /^❌ check-overload-shape: cannot run, no Java index/);
