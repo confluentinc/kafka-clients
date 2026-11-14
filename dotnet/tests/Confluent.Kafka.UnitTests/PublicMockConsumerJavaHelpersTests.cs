@@ -253,7 +253,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => consumer.UpdateDurationOffsets(null!)).ParamName);
         Assert.Equal(
             "newOffsets",
-            Assert.Throws<ArgumentException>(
+            Assert.Throws<ArgumentNullException>(
                 () => consumer.UpdateDurationOffsets(new Dictionary<TopicPartition, long> { [default] = 1L })).ParamName);
     }
 

@@ -707,17 +707,17 @@ public sealed class PublicProducerTransactionTests
     [Theory]
     [InlineData(SyncFlavor, false)]
     [InlineData(AsyncFlavor, true)]
-    public async Task SendOffsetsToTransaction_NullOffsetValue_ThrowsArgumentException(string flavor, bool mock)
+    public async Task SendOffsetsToTransaction_NullOffsetValue_ThrowsArgumentNull(string flavor, bool mock)
     {
         object producer = mock ? Mock(flavor, autoComplete: true) : Transactional(flavor, MaxBlockMs);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets =
             new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("txn-input", 0)] = null! };
         try
         {
-            ArgumentException error = Assert.IsType<ArgumentException>(
+            ArgumentNullException error = Assert.IsType<ArgumentNullException>(
                 await CatchAsync(() => SendOffsetsTo(producer, offsets, GroupMetadata())));
             Assert.Equal("offsets", error.ParamName);
-            Assert.Equal(new ArgumentException("Offset value must not be null.", "offsets").Message, error.Message);
+            Assert.Equal(new ArgumentNullException("offsets", "offsets must not contain null").Message, error.Message);
         }
         finally
         {

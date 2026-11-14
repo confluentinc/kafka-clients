@@ -824,7 +824,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             if (topic is null)
             {
                 throw IsMock
-                    ? new ArgumentException("Topic names must not be null.", nameof(topics))
+                    ? new ArgumentNullException(nameof(topics), "topics must not contain null")
                     : GroupIdMissing ? GroupIdNotDefined() : new IllegalArgumentException(NullSubscribeTopicMessage);
             }
 
@@ -1805,7 +1805,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             (string topic, int partition) = topicPartitions[i];
             if (topic is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(topicPartitions));
+                throw new ArgumentNullException(nameof(topicPartitions), "topicPartitions must not contain a null topic");
             }
 
             if (partition < 0)
@@ -2034,7 +2034,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         int index = 0;
         foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
         {
-            topics[index] = entry.Key.Topic() ?? throw new ArgumentException("Topic names must not be null.", nameof(newOffsets));
+            topics[index] = entry.Key.Topic() ?? throw new ArgumentNullException(
+                nameof(newOffsets), "newOffsets must not contain a TopicPartition with a null topic");
             partitions[index] = entry.Key.Partition();
             offsets[index] = entry.Value;
             index++;
@@ -2525,7 +2526,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 throw nullTopicIsUnassigned
                     ? new IllegalStateException(NoCurrentAssignment(tp.Partition()))
-                    : new ArgumentException("Topic names must not be null.", paramName);
+                    : new ArgumentNullException(paramName, paramName + " must not contain a TopicPartition with a null topic");
             }
 
             snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
@@ -2572,7 +2573,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             TopicPartition tp = entry.Key;
             if (tp.Topic() is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
+                throw new ArgumentNullException(
+                    nameof(timestampsToSearch), "timestampsToSearch must not contain a TopicPartition with a null topic");
             }
 
             topics[index] = tp.Topic();

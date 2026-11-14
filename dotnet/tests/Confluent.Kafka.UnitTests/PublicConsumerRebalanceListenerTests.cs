@@ -906,16 +906,16 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     [Fact]
-    public void Subscribe_NullTopicName_ThrowsArgumentException()
+    public void Subscribe_NullTopicName_ThrowsArgumentNull()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ArgumentException exception = Assert.Throws<ArgumentException>(
+        ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.Subscribe(new string?[] { null }!, new RecordingListener()));
 
         Assert.Equal("topics", exception.ParamName);
-        Assert.Contains("Topic names must not be null.", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("topics must not contain null", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

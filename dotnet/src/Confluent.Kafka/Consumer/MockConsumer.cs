@@ -317,8 +317,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>MockConsumer.updateDurationOffsets(Map)</c>).
     /// </summary>
     /// <param name="newOffsets">The offset of each partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A partition in <paramref name="newOffsets"/> has a null topic.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> is null, or a partition in it has a null topic.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateDurationOffsets(newOffsets);
