@@ -23,7 +23,7 @@
 // `Boolean`, and an object with `equals` and `hashCode` methods for a
 // translated class. Any other object (a `Uint8Array` key, Java's `byte[]`)
 // has `Object`'s identity equality, as a Java array does, and a hash code
-// that stays the same for the object (`identityHashCode`).
+// that stays the same whatever is done to the object (`identityHashCode`).
 
 /** Java's `String.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the UTF-16 code units. */
 export function stringHashCode(s: string): number {
@@ -66,13 +66,21 @@ function isJavaValue(value: object): value is JavaValue {
 }
 
 /**
- * `Object.hashCode()` of an object with no `hashCode` of its own. Java leaves
- * the identity hash code unspecified but for being the same over the object's
- * life; a byte array's content hash meets that, since the client never
- * changes the bytes it is given, and keeps no table of objects.
+ * `Object.hashCode()` of an object with no `hashCode` of its own: 0, the same
+ * for every such object. Java's identity hash code is unspecified but for
+ * staying the same while the object lives, whatever is done to it. Its
+ * equality is identity, so one constant keeps "equal objects have equal hash
+ * codes" too. A hash of a `Uint8Array`'s bytes would not stay the same: the
+ * app may write to or transfer the Buffer once `send()` settled, while the
+ * record still equals itself. A per-object number would need a table of
+ * objects, which the binding keeps none of.
+ *
+ * @param value - the object
+ * @returns 0
  */
 function identityHashCode(value: object): number {
-  return value instanceof Uint8Array ? bytesHashCode(value) : 0;
+  void value;
+  return 0;
 }
 
 /** Java's `Objects.equals(a, b)`: `a == b`, or `a != null && a.equals(b)`. */

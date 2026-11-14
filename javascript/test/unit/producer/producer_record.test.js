@@ -151,6 +151,17 @@ test("hashCode is Java's, and equals compares as Java's does", () => {
   const key = bytes('k');
   assert.ok(new ProducerRecord({ topic: 't', key, value: null }).equals(new ProducerRecord({ topic: 't', key, value: null })));
   assert.ok(!new ProducerRecord({ topic: 't', key, value: null }).equals(new ProducerRecord({ topic: 't', key: bytes('k'), value: null })));
+  // Its hash code stays the same when its bytes change or it is transferred, as Java's byte[] identity hash does.
+  const record = new ProducerRecord({ topic: 't', key, value: null });
+  const before = record.hashCode();
+  key[0] = 0x78;
+  assert.equal(record.hashCode(), before);
+  const value = new Uint8Array([1, 2, 3]);
+  const withValue = new ProducerRecord({ topic: 't', key: null, value });
+  const hash = withValue.hashCode();
+  value.buffer.transfer();
+  assert.equal(withValue.hashCode(), hash);
+  assert.ok(withValue.equals(withValue));
   // Anything else is not equal.
   for (const o of [null, 'orders', 1, r1.toJSON()]) assert.equal(r1.equals({ o }), false);
   assert.ok(!r1.equals(headers));

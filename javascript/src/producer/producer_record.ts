@@ -381,8 +381,10 @@ export class ProducerRecord {
    * @returns the hash code, a 32-bit integer
    * @throws `TypeError` when it is given an argument
    *
-   * @remarks A `Uint8Array` key or value hashes by its bytes, a value Java
-   * leaves unspecified for a `byte[]`, whose identity hash code it is.
+   * @remarks A `Uint8Array` key or value adds the same hash code, 0, whatever
+   * its bytes: it is Java's `byte[]`, equal only to itself, whose identity hash
+   * code Java leaves unspecified, so the record's hash code stays the same if
+   * the Buffer is changed after `send()` settled.
    */
   hashCode(): number {
     HASH_CODE_FORMS.match(undefined, arguments.length);
