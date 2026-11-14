@@ -764,6 +764,11 @@ MUTATIONS.push(
     what: 'a closed flag on the producer',
     apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer implements Producer {\n', 'export class KafkaProducer implements Producer {\n  #closed = false;\n'),
   },
+  {
+    rule: 'check-no-repeated-precondition',
+    what: "Java's negative-timeout message in the duration helper",
+    apply: (root) => edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}export const NEGATIVE = 'The timeout cannot be negative.';\n`),
+  },
 );
 
 for (const m of MUTATIONS) {
