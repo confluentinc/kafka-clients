@@ -122,6 +122,7 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
     has(key: MetricName): boolean;
     keys(): IterableIterator<MetricName>;
     size(): number;
+    toJSON(): Record<string, V>;
     values(): IterableIterator<V>;
 }
 

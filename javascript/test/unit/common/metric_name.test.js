@@ -112,6 +112,12 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   map.forEach((value, key, m) => seen.push([key.name(), value, m === map]));
   assert.deepEqual(seen, [['request-latency-avg', 1, true], ['x', 2, true]]);
   assert.equal(map instanceof Map, false);
+  // toJSON: the entries by the map's string key, the group, the name and the sorted tags.
+  assert.deepEqual(JSON.parse(JSON.stringify(map)), {
+    '["consumer-fetch-manager-metrics","request-latency-avg",[["a","b"],["client-id","consumer-1"]]]': 1,
+    '["g","x",[]]': 2,
+  });
+  assert.deepEqual(new MetricNameMap().toJSON(), {});
   assert.equal(new MetricNameMap().size(), 0);
   assert.throws(() => map.get('x'), { constructor: IllegalArgumentError, message: 'get() takes one of (key); got a string' });
   assert.throws(() => map.has({ key: 'x' }), { constructor: TypeError, message: 'key must be a MetricName' });
