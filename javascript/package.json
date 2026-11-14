@@ -60,6 +60,10 @@
       "types": "./dist/common/security/auth/index.d.ts",
       "default": "./dist/common/security/auth/index.js"
     },
+    "./common/serialization": {
+      "types": "./dist/common/serialization/index.d.ts",
+      "default": "./dist/common/serialization/index.js"
+    },
     "./consumer": {
       "types": "./dist/consumer/index.d.ts",
       "default": "./dist/consumer/index.js"
@@ -103,6 +107,9 @@
       ],
       "common/security/auth": [
         "dist/common/security/auth/index.d.ts"
+      ],
+      "common/serialization": [
+        "dist/common/serialization/index.d.ts"
       ],
       "consumer": [
         "dist/consumer/index.d.ts"

@@ -85,7 +85,17 @@ const CONSTANTS_ONLY = new Set([
 const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.producer.ProducerRecord',
   'org.apache.kafka.clients.producer.RecordMetadata',
+  'org.apache.kafka.common.TopicPartition',
+  'org.apache.kafka.common.Node',
 ]);
+
+/**
+ * The Java types the client does not translate, which a signature that cannot
+ * be dropped takes as a placeholder typed `unknown` (root CLAUDE.md,
+ * JavaScript Binding Conventions, Scope: `export type Partitioner =
+ * unknown`): their members are not asked for.
+ */
+const PLACEHOLDERS = new Set(['Partitioner', 'Cluster', 'MetricConfig']);
 
 /**
  * The Java functional interfaces translated as a function type
@@ -592,6 +602,7 @@ module.exports = {
   PREFIX,
   ERROR_ALLOWANCE,
   DATA_CLASSES,
+  PLACEHOLDERS,
   ENUM_IMPLICIT,
   JavaIndex,
   javaIndexOf,

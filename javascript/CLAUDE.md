@@ -283,13 +283,13 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
-  The objects are not frozen (but `TopicPartition`, once translated), so
+  The objects are not frozen (but `TopicPartition`), so
   `ProducerRecord.internalToNative` runs the constructor's checks again at
   `send()` on the fields it reads, with the constructor's errors, rejecting
   the send (a field reassigned from plain JavaScript is never sent
   unchecked). The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord` and `RecordMetadata` today. **(root conflict)** The root
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
   `RecordMetadata`, `Node`, the admin description classes) does not name
   `Header`, which its one-line test would admit; the code follows the list, so
@@ -383,8 +383,33 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   ...check: BareCheck<U>)` infers `U` from the value alone and refuses any
   other `U` through the rest parameter, which no call gives, and a member of a
   class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
-  other object goes by name there, while plain JavaScript takes it bare. The
-  serializer forms of the constructor are not translated yet.
+  other object goes by name there, while plain JavaScript takes it bare.
+- Serializers (root conventions, Serialization): `Serializer` is an object
+  type in `common/serialization`, run in JavaScript inside `send()`
+  (`src/internal/serde.ts`), key then value, after the form, closed and
+  record checks and before the pump and the hand-over; a thenable result is
+  awaited, and the producer is checked for closed again after the await, as
+  its native producer may be gone. A null serializer, or none, sends the
+  record's own bytes (a string encoded by `encodeLikeJava`, checked at
+  `send()`: a `ProducerRecord<K, V>` holds any key and value).
+  **(root conflict)** The root conventions' Class family says an omitted or
+  `null` key or value binds `never`, and their Signatures say each Java form
+  has one TypeScript overload signature. With one signature per Java
+  constructor, TypeScript binds a `null` argument to `null`, not `never`
+  (binding `never` needs extra signatures per null combination, as Python's
+  binding stubs have); the code follows Signatures, so a record built with
+  `key: null` is a `ProducerRecord<null, ...>`, and `send` takes a
+  `ProducerRecord<K | null, V | null>`, noted in its `@remarks`.
+- `MockProducer` (root conventions, Implementation over the FFI) is a
+  TypeScript translation of Java's mock, calling no addon: its producer
+  methods (`send`, `flush`, `close`) return Promises as `KafkaProducer`'s do,
+  so it stands in for it (the rule linter's `check-type-mapping` reads a
+  `Mock...` member as its `Kafka...` peer's), its own methods are
+  synchronous, and Java's public mutable fields (`sendException`, ...) stay
+  mutable fields (`check-data-objects` allows a Java `public` non-final
+  field). The constructor taking a `Cluster` is left out (its only extra
+  parameter is untranslated; the list of forms Q30 leaves out is not decided
+  yet in the root conventions); `Partitioner` is a placeholder `unknown`.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with
@@ -632,8 +657,9 @@ The layout is the root conventions' (Layout and modules).
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
   TypeScript `private` constructor (`protected` where Java's is), and so is
-  one users must not call (`RecordMetadata`, whose Java constructor takes an
-  untranslated `TopicPartition`); there is no run-time guard (root
+  one users must not call (`RecordMetadata`, whose Java constructor's `long`
+  parameters wait on how a `long` is typed, not decided yet in the root
+  conventions); there is no run-time guard (root
   conventions, Class family). The library builds such an object through one
   static factory, `internalCreate`, and calls its own methods on public
   classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)

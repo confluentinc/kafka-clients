@@ -95,6 +95,24 @@ const ALLOWED = [
     key: 'JavaForms.#bare',
     reason: "a method's one-parameter Java forms, fixed when its module loads: a table of forms, not records",
   },
+  { key: 'PartitionInfo.#replicas', reason: "one partition's replicas (Java's Node[]), not a store of records" },
+  { key: 'PartitionInfo.#inSyncReplicas', reason: "one partition's in-sync replicas (Java's Node[]), not a store of records" },
+  { key: 'PartitionInfo.#offlineReplicas', reason: "one partition's offline replicas (Java's Node[]), not a store of records" },
+  {
+    key: 'MockProducer.#sent',
+    reason: "Java's MockProducer.sent, the records history() returns: the mock sends nothing, it holds what it was given",
+  },
+  { key: 'MockProducer.#completions', reason: "Java's MockProducer.completions, the sends completeNext() and errorNext() complete: a mock, not a send queue" },
+  {
+    key: 'MockProducer.#callbackErrors',
+    reason: "the errors the mock's callback Promises rejected with, raised one per later call (Python's AsyncMockProducer._mock_callback_errors): errors, not records",
+  },
+  {
+    key: 'MockProducer.#running',
+    reason: "the mock's callback Promises not settled yet, which flush() and close() wait for: not a store of records",
+  },
+  { key: 'MockProducer.#offsets', reason: "Java's MockProducer.offsets, the next offset of each topic partition" },
+  { key: 'src/producer/mock_producer.ts:INT_MAX', reason: "Java's Integer.MAX_VALUE in MockProducer's batch index, not a cap of records" },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',
