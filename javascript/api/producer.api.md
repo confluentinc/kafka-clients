@@ -30,13 +30,17 @@ export type CloseArgs = {
 };
 
 // @public
-export type Data = Buffer | Uint8Array | string;
-
-// @public
-export class KafkaProducer implements Producer {
+export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {
     [Symbol.asyncDispose](): Promise<void>;
     constructor(options: {
         configs: ProducerConfigs;
+        keySerializer?: never;
+        valueSerializer?: never;
+    });
+    constructor(options: {
+        configs: ProducerConfigs;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
     });
     constructor(configs: ProducerConfigs);
     close(): Promise<void>;
@@ -46,32 +50,32 @@ export class KafkaProducer implements Producer {
     static readonly NETWORK_THREAD_PREFIX: string;
     static readonly PRODUCER_METRIC_GROUP_NAME: string;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K | null, V | null>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K | null, V | null>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
-export interface Producer {
+export interface Producer<K = Uint8Array, V = Uint8Array> {
     [Symbol.asyncDispose](): Promise<void>;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
     flush(): Promise<void>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K | null, V | null>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K | null, V | null>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
@@ -146,45 +150,45 @@ export type ProducerConfigs = {
 };
 
 // @public
-export class ProducerRecord {
+export class ProducerRecord<out K = never, out V = never> {
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp: bigint | number | null;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers: Iterable<Header> | null;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp: bigint | number | null;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers: Iterable<Header> | null;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
         topic: string;
         partition?: never;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
@@ -192,7 +196,7 @@ export class ProducerRecord {
         partition?: never;
         timestamp?: never;
         key?: never;
-        value: Data | null;
+        value: V | null;
         headers?: never;
     });
     equals(options: {
@@ -201,21 +205,21 @@ export class ProducerRecord {
     equals(o: unknown): boolean;
     hashCode(): number;
     readonly headers: Headers_2;
-    readonly key: Data | null;
+    readonly key: K | null;
     readonly partition: number | null;
     readonly timestamp: bigint | null;
     toJSON(): {
         topic: string;
         partition: number | null;
         timestamp: string | null;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers: Headers_2;
     };
     readonly topic: string;
     // (undocumented)
     toString(): string;
-    readonly value: Data | null;
+    readonly value: V | null;
 }
 
 // @public
