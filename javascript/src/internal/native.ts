@@ -42,6 +42,9 @@ interface RecordMetadataFields {
 /** A native producer handle (native/producer.c), opaque to JavaScript. */
 type ProducerHandle = object;
 
+/** A record's future (native/producer.c, RecordFuture), opaque to JavaScript. */
+type RecordFutureHandle = object;
+
 /** A header as the native send takes it: key and value bytes. */
 type NativeHeader = [Uint8Array, Uint8Array | null];
 
@@ -69,7 +72,9 @@ interface Native {
     // hand-over (javascript/CLAUDE.md, rule 8).
     value: Uint8Array | null,
     headers: NativeHeader[] | null,
-    onHandover: (error: unknown) => void,
+    // The record's future, the native future of the hand-over, null when
+    // the hand-over failed (native/producer.c, record_future_to_js).
+    onHandover: (error: unknown, future: RecordFutureHandle | null) => void,
     // Returns undefined (the callback returned), the text of what it threw,
     // or a Promise of either, settling once the callback's own Promise did:
     // the report waits for it (native/producer.c, send_defer).
@@ -86,6 +91,16 @@ interface Native {
     onComplete: (error: unknown, closedNow: boolean) => void,
   ): void;
   producerPump(handle: ProducerHandle): void;
+  // A wait on a record's future through get_cb (timeoutMs null) or
+  // get_with_timeout_cb; `done` runs once it completed, from the producer's
+  // drain, or inside the call once the producer is destroyed. timedOut: the
+  // wait timed out, the error the core's TimeoutError.
+  recordFutureGet(
+    future: RecordFutureHandle,
+    timeoutMs: number | null,
+    done: (metadata: RecordMetadata | null, error: Error | null, timedOut: boolean) => void,
+  ): void;
+  recordFutureIsDone(future: RecordFutureHandle): boolean;
 }
 
 // This module is dist/internal/native.js, and dist/ is beside native/ in the

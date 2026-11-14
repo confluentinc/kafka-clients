@@ -245,5 +245,7 @@ napi_value js_producer_send(napi_env env, napi_callback_info info);
 napi_value js_producer_flush(napi_env env, napi_callback_info info);
 napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
+napi_value js_record_future_get(napi_env env, napi_callback_info info);
+napi_value js_record_future_is_done(napi_env env, napi_callback_info info);
 
 #endif  // CONFLUENT_KAFKA_JS_UTIL_H

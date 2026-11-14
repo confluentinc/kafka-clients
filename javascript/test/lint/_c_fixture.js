@@ -17,7 +17,7 @@
 // A small addon for the N rules' fixture projects: a header, the out_err
 // macros, a callback queue, a producer and a record reader that pass every N
 // rule under the test allowlists below, and a src/ whose delivery completion
-// runs the user callback before it completes the future.
+// runs the user callback before it records the delivery.
 
 const HEADER = `void kafka_x_P_flush(const kafka_x_P_t *self_, kafka_common_Error_t **out_err);
 
@@ -172,7 +172,7 @@ export = native;
 const PRODUCER_TS = `import native = require('../internal/native');
 import type { Callback } from './callback';
 class Future {
-  /** @internal */ internalComplete(v: unknown): void {
+  /** @internal */ internalSetDelivery(v: unknown): void {
     void v;
   }
 }
@@ -181,7 +181,7 @@ export class Producer {
     const future = new Future();
     const onComplete = (m: unknown, e: unknown): void => {
       callback(m, e);
-      future.internalComplete(m);
+      future.internalSetDelivery(m);
     };
     native.send(onComplete);
   }

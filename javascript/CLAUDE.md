@@ -118,19 +118,41 @@ These decide every question, in this order:
    closes a client, so no teardown needs a blocking close
    (`test/static/header_conformance.test.js` and `check-cb-twin-only` pin
    it).
-5. **Never call `KafkaFuture_get`.** The `kafka_common_KafkaFuture_t*` a send's
-   hand-over completion receives is destroyed unread; the delivery result comes
-   from the record's `kafka_producer_Callback_t`.
+5. **Never the blocking `KafkaFuture_get`; `get_cb` and
+   `get_with_timeout_cb` are the waits.** The `kafka_common_KafkaFuture_t*` a
+   send's hand-over completion receives is the record's future: the addon
+   hands it to JS in its own handle object (`native/producer.c`
+   `record_future_to_js`), whose finalizer destroys it, exactly once (a
+   hand-over whose completion cannot reach JS destroys it there). The
+   record's `KafkaFuture` waits on it through `kafka_common_KafkaFuture_get_cb`
+   (`get()`, and a first dependant: `thenApply`, `whenComplete`, `allOf`,
+   `toCompletionStage`) and `kafka_common_KafkaFuture_get_with_timeout_cb`
+   (`get({ timeout })`, the FFI keeping the time, a negative timeout passed on
+   as it is), each wait created on first use, so nothing waits, and no Promise
+   exists, for a future nobody reads; it reads `kafka_common_KafkaFuture_is_done`
+   for `isDone()`, `getNow()`, `isCompletedExceptionally()` and `toString()`.
+   A wait's completion runs in the producer's drain (inline inside the call
+   once the producer is destroyed); one the destroy runs, from the handle
+   object's finalizer, reaches no JS. Each handle object and each wait holds
+   one unit of the producer struct (`owners`). The core completes the native
+   future only once the record's callback reported (rule 6), so a record's
+   future completes after its callback, as Java's
+   `completeFutureAndFireCallbacks` fires the callback before completing the
+   future; it completes with the delivery its callback saw
+   (`KafkaFuture.internalSetDelivery`), the same objects, as Java's. Only a
+   future with no native handle (`allOf()`, `completedFuture()`, the
+   dependants) runs a JS timer, for a timed `get`.
 6. **One `Callback_t` per record.** In `on_completion` the order is: run the
-   user callback; complete the record's `KafkaFuture`; call
+   user callback; record the delivery on the record's `KafkaFuture`
+   (`internalSetDelivery`); call
    `__set_callback_result_err(view, id, NULL, err)` exactly once, `err` NULL or
    an owned `kafka_common_Error_local_callback` error carrying what the
    callback threw. No report is sent once destroy has begun (`_destroy`
    completes the unreported ones itself). A callback may return a Promise
    (root conventions, Threads and callbacks): the binding wraps any result
    but `undefined` (Java's `void`, reported at once, the cheap common case)
-   with `Promise.resolve(result)`, and the future completes, and the one
-   report is made, only once that settled (`send_defer` hands the Promise a function
+   with `Promise.resolve(result)`, and the delivery is recorded, and the one
+   report that completes the future is made, only once that settled (`send_defer` hands the Promise a function
    owning the record's context, as both its handlers, `callback_id` kept in C),
    a rejection reported as a throw. The function is held by a strong reference
    until it reports, so a garbage collection never reports a Promise early,
@@ -231,7 +253,8 @@ The rules are the root conventions' (Threads and callbacks, Lifetime). In this
 binding:
 
 - Every callback the core queues (delivery callbacks, hand-over completions,
-  `flush` / `close` completions) runs on the JS thread that owns the client,
+  `flush` / `close` completions, the waits on a record's future) runs on the
+  JS thread that owns the client,
   inside the drain, so JS values are created there directly.
 - A producer keeps Node running from its creation until `close()` closes it
   (root conventions, Lifetime): the threadsafe function is created
@@ -409,9 +432,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   ±`Number.MAX_SAFE_INTEGER` ms are a plain `RangeError`; `null` is
   `TypeError('timeout must not be null')`, and any other value `TypeError`.
   `-Infinity`, which the root conventions do not name, is `RangeError`. A
-  `get` longer
-  than a Node timer's 2^31 - 1 ms waits in steps of at most that (how
-  `KafkaFuture.get({ timeout })` waits: not decided yet in the root
+  record's future waits natively (rule 5); a `get` of a future with no native
+  handle longer than a Node timer's 2^31 - 1 ms waits in steps of at most
+  that (how `KafkaFuture.get({ timeout })` waits: not decided yet in the root
   conventions).
 - Promises (root conventions, Futures and waiting): a method returns a Promise
   if and only if its entry point has a `_cb` twin, and a method returning a
@@ -430,8 +453,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `toString()`; the nested `BaseFunction` / `BiConsumer` are type aliases on
   the class's namespace (`KafkaFuture.BaseFunction<A, B>`). One class has two
   value sources, as Python's: a record's future (`send()`'s, Java's
-  `FutureRecordMetadata`: `cancel()` false, never cancelled, a timed-out `get`
-  rejecting with `TimeoutError` "Timeout after waiting for <ms> ms.") and
+  `FutureRecordMetadata`, over the native future, rule 5: `cancel()` false,
+  never cancelled, a timed-out `get` rejecting with the root `TimeoutError`
+  and the core's message, "Timed out waiting for KafkaFuture after <ms> ms"
+  where Java's is "Timeout after waiting for <ms> ms.", the FFI's to
+  change) and
   Java's `KafkaFutureImpl` (`completedFuture`, `allOf`, the dependants:
   `cancel()` completes the future and its own dependants with a
   `CancellationError`, never its source, and answers as Java's
@@ -448,7 +474,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (`''` for `null` and `undefined`, as the `(cause)` form gives), and so is
   one whose class cannot be read (a revoked Proxy). `whenComplete`'s action
   gets the raw failure. What depends on a future runs where it completes
-  (inside the delivery drain for a record), or inside the registering call
+  (inside the producer's drain for a record), or inside the registering call
   when it is done, as `CompletableFuture` runs it. A dependant's completion is
   queued for the loop already running, as Java's `postComplete` runs a
   dependant's (no recursion, so a chain of any length completes; one waiter
@@ -472,14 +498,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   as Java's `send()` would throw. Only delivery failures are kept from
   surfacing unread: a future rejects only the Promises its `get()` and
   `toCompletionStage()` returned, so a failed future nobody reads raises no
-  unhandled rejection, and neither do its dependants; a `get()` Promise the
+  unhandled rejection, and neither do its dependants, and starts no native
+  wait; a `get()` Promise the
   caller drops still raises one, as any rejected Promise does.
 - `Callback` is a function of one object of named parameters,
   `({ metadata, exception }) => void` (root conventions, Class family), Java's
   `onCompletion(metadata, exception)` named as Java names them (the one place
   `exception` is an identifier, allowlisted in `check-exception-word`), run
   before the future completes, as Java fires the callback before completing
-  the future. A callback that returns a Promise is awaited (rule 6): the
+  the future (rules 5 and 6). A callback that returns a Promise is awaited
+  (rule 6): the
   record's future completes, and a `flush()` or `close()` covering the record
   returns, only once it settled; a rejection is a throw, logged by the core
   and never propagated. Such a Promise must not wait for `flush()` or

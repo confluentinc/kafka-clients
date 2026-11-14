@@ -25,29 +25,20 @@
 // client); an entry, if one is ever listed, names the exact call it allows,
 // and one that allows nothing is a finding.
 //
-// It also owns javascript/CLAUDE.md boundary rule 5 (never read the future):
-// no function named by `FORBIDDEN` is called in native/, its `_cb` twins
-// included (`kafka_common_KafkaFuture_get_cb`), which read the future too.
+// It also owns javascript/CLAUDE.md boundary rule 5 (a record's future is
+// waited on through `kafka_common_KafkaFuture_get_cb` and
+// `kafka_common_KafkaFuture_get_with_timeout_cb`): those are the `_cb` twins
+// of the future's blocking `get` and `get_with_timeout`, which the check above
+// refuses like any blocking form.
 
 const { cModel, applyAllowlist } = require('../c_model');
 
 /** The blocking calls allowed: `<file>:<function>:<callee>(<args>)`. None: every call is the `_cb` twin. */
 const ALLOWED = [];
 
-/** The header functions native/ never calls, whatever their form: each prefix with its reason. */
-const FORBIDDEN = [
-  {
-    prefix: 'kafka_common_KafkaFuture_get',
-    reason:
-      "never read the future (javascript/CLAUDE.md rule 5): a send's future is destroyed unread, the delivery " +
-      "result comes from the record's Callback_t",
-  },
-];
-
 module.exports = {
   name: 'check-cb-twin-only',
-  kinds: ['blocking-call', 'forbidden-call', 'cb-unused-allowance'],
-  FORBIDDEN,
+  kinds: ['blocking-call', 'cb-unused-allowance'],
   needs: ['native', 'header'],
   hint: 'Call the _cb twin and complete in its callback (javascript/CLAUDE.md boundary rule 4).',
   ALLOWED,
@@ -67,11 +58,6 @@ module.exports = {
       if (!header.has(c.name) || (c.directive && !c.macro)) continue;
       checked += 1;
       const caller = c.macro ? `the macro ${c.macro}` : c.function;
-      const forbidden = this.FORBIDDEN.find((f) => c.name.startsWith(f.prefix));
-      if (forbidden) {
-        raw.push({ kind: 'forbidden-call', subject: `${c.file}:${c.line}`, message: `${caller} calls ${c.name}: ${forbidden.reason}` });
-        continue;
-      }
       const twin = blocking.get(c.name);
       if (!twin) continue;
       raw.push({

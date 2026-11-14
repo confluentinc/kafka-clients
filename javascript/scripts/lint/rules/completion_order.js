@@ -28,14 +28,17 @@
 //   - TypeScript: the function src/ hands the native send as its delivery
 //     completion (an argument for a native parameter whose function type
 //     takes a `RecordMetadata`, and any function argument of a `native.<fn>`
-//     call that completes a future, `future.internalComplete(...)`) runs the user
-//     callback (a value of the `Callback` type) before it completes the
-//     future, each once, the functions it calls in src/ followed; a delivery
-//     callback the rule cannot resolve to a function is a finding. A
-//     completion site is counted once however many calls reach it: a
-//     callback that returns a Promise completes the future at the same site
-//     once the Promise settled, a function both paths call
-//     (`completeRecord`).
+//     call that records a delivery on a future,
+//     `future.internalSetDelivery(...)`, the outcome the future completes with
+//     once its native future is done, after the report) runs the user
+//     callback (a value of the `Callback` type) before it records the
+//     delivery, each once, the functions it calls in src/ followed; a
+//     delivery callback the rule cannot resolve to a function is a finding. A
+//     recording site is counted once however many calls reach it: a callback
+//     that returns a Promise records the delivery at the same site once the
+//     Promise settled, a function both paths call (`completeRecord`). The
+//     completion of a wait on a record's future (`WAITS`) runs no user
+//     callback and is not a delivery.
 // The completion functions are listed with what they run; an entry that
 // matches nothing is a finding.
 
@@ -77,13 +80,16 @@ const COMPLETIONS = [
   { key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" },
 ];
 
+/** The native functions whose function argument completes a wait on a record's future, not a delivery. */
+const WAITS = new Set(['recordFutureGet']);
+
 module.exports = {
   name: 'check-completion-order',
   kinds: ['completion-order', 'completion-count', 'completion-unlisted', 'completion-unresolved', 'report-unguarded', 'order-unused-allowance'],
   needs: ['program', 'native', 'header'],
   COMPLETIONS,
   hint:
-    'Run the user callback, then complete the future, then report __set_callback_result once ' +
+    'Run the user callback, then record the delivery on the future, then report __set_callback_result once ' +
     '(javascript/CLAUDE.md boundary rule 6).',
   check(ctx) {
     const { ts, checker } = ctx.program();
@@ -169,8 +175,8 @@ module.exports = {
     // A value of the `Callback` type itself (not a function taking one).
     const isCallback = (t) => (t.aliasSymbol && t.aliasSymbol.name === 'Callback') || checker.typeToString(t) === 'Callback';
     /**
-     * The user-callback runs and future completions of function `fn`, in call
-     * order, each completion site once (`sites`, shared by the functions followed).
+     * The user-callback runs and delivery recordings of function `fn`, in call
+     * order, each recording site once (`sites`, shared by the functions followed).
      */
     const events = (fn, stack = [fn], sites = new Set()) => {
       const out = [];
@@ -178,7 +184,7 @@ module.exports = {
         ts.forEachChild(n, visit);
         if (!ts.isCallExpression(n)) return;
         const e = n.expression;
-        if (ts.isPropertyAccessExpression(e) && e.name.text === 'internalComplete') {
+        if (ts.isPropertyAccessExpression(e) && e.name.text === 'internalSetDelivery') {
           if (sites.has(n)) return;
           sites.add(n);
           out.push({ what: 'complete', node: n });
@@ -194,7 +200,7 @@ module.exports = {
     };
     for (const u of nativeUses(ctx)) {
       const call = u.node.parent;
-      if (!ts.isCallExpression(call) || call.expression !== u.node) continue;
+      if (!ts.isCallExpression(call) || call.expression !== u.node || WAITS.has(u.name)) continue;
       for (const arg of call.arguments) {
         if (ts.isSpreadElement(arg)) continue;
         const delivery = takesMetadata(checker.getContextualType(arg));
@@ -224,10 +230,10 @@ module.exports = {
           findings.push({
             kind: 'completion-count',
             subject,
-            message: `runs the user callback ${userCalls.length} time(s) and completes the future ${completes.length} time(s), not once each`,
+            message: `runs the user callback ${userCalls.length} time(s) and records the delivery ${completes.length} time(s), not once each`,
           });
         } else if (ev.indexOf(completes[0]) < ev.indexOf(userCalls[0])) {
-          findings.push({ kind: 'completion-order', subject, message: 'completes the future before running the user callback' });
+          findings.push({ kind: 'completion-order', subject, message: 'records the delivery before running the user callback' });
         }
       }
     }

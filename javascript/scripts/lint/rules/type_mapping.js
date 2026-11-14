@@ -67,7 +67,8 @@ const { waitingMembers } = require('./waiting_call_promise');
 const PURE_JS_WAITING = new Map([
   [
     'org.apache.kafka.common.KafkaFuture#get',
-    "Java's get() blocks until the future completes; the JavaScript future settles in JavaScript, from the delivery callback",
+    "Java's get() blocks until the future completes; a JavaScript future with no native handle (allOf(), completedFuture(), " +
+      "the dependants) settles in JavaScript, and a record's waits natively through its _cb twins",
   ],
 ]);
 const { mappedItems, functionType, constantsOnly, formParameters } = require('../java_ts');
@@ -336,7 +337,11 @@ module.exports = {
         if (m.kind === 'method') {
           const sig = checker.getSignatureFromDeclaration(node);
           const javaReturn = (sameArity || forms[0] || jm.overloads[0]).return_type;
-          const blocking = waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`);
+          // A Java CompletionStage is itself a Promise: a member returning
+          // one (toCompletionStage, which waits on the future through its
+          // _cb twin) is never unwrapped.
+          const blocking =
+            (waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`)) && parseJava(javaReturn || 'void').name !== 'CompletionStage';
           if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking });
         }
         const p0 = params.length === 1 ? params[0] : null;

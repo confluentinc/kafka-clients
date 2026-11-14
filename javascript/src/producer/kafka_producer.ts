@@ -93,9 +93,10 @@ function checkCallback(callback: unknown): Callback | null {
 }
 
 /**
- * Completes a record's future after its callback ran (Java completes the
- * future after onCompletion returned) and gives back `failure`, the text of
- * what the callback threw, for the core to log.
+ * Records a record's delivery on its future after its callback ran, and
+ * gives back `failure`, the text of what the callback threw, for the core to
+ * log. The future completes natively once the core has that report (Java
+ * completes the future after onCompletion returned).
  */
 function completeRecord(
   future: KafkaFuture<RecordMetadata>,
@@ -103,13 +104,13 @@ function completeRecord(
   error: Error | null,
   failure: string | undefined,
 ): string | undefined {
-  future.internalComplete(metadata, error);
+  future.internalSetDelivery(metadata, error);
   return failure;
 }
 
 /**
  * `Promise.resolve(returned)`, the callback's result, with the record's
- * future completed once it settled: resolving to undefined, or to the text of
+ * delivery recorded once it settled: resolving to undefined, or to the text of
  * the rejection, which the producer reports as a throw. It never rejects (a
  * `then` getter that throws is a rejection too).
  */
@@ -376,8 +377,9 @@ export class KafkaProducer {
       if (error !== null) reject(error);
       else resolve(future);
     };
-    const onHandover = (error: unknown): void => {
+    const onHandover = (error: unknown, nativeFuture: object | null): void => {
       handedOver = true;
+      if (nativeFuture !== null) future.internalSetNative(nativeFuture);
       if (!inCall) {
         // Queued. Its completion may run in another send()'s pump, with no
         // event-loop turn since the count started: the count stays, and while
@@ -396,14 +398,16 @@ export class KafkaProducer {
     };
     // The record's delivery callback, run synchronously inside the native
     // drain: the user callback first (the only user code the drain runs),
-    // then the future, whose get() Promises it settles (their reactions run
-    // as microtasks after the drain). A message returned is what the callback
-    // threw, for the core to log; the callback id the core reports by stays
-    // in C (native/producer.c, send_on_completion). A callback that returned
-    // a thenable is awaited: the future completes, and the Promise returned
-    // here settles, once the thenable did, and the core's report waits for
-    // that (native/producer.c, send_defer). A callback returning nothing
-    // allocates no Promise.
+    // then the delivery recorded on the future, which completes natively once
+    // the core has the report this returns for (javascript/CLAUDE.md, rules 5
+    // and 6): its get() Promises settle in a later completion of the drain.
+    // A message returned is what the callback threw, for the core to log; the
+    // callback id the core reports by stays in C (native/producer.c,
+    // send_on_completion). A callback that returned a thenable is awaited:
+    // the delivery is recorded, and the Promise returned here settles, once
+    // the thenable did, and the core's report waits for that
+    // (native/producer.c, send_defer). A callback returning nothing allocates
+    // no Promise.
     const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined | Promise<string | undefined> => {
       let failure: string | undefined;
       let returned: unknown;

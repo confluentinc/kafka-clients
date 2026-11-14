@@ -19,10 +19,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { TSCONFIG, project, lint, findings } = require('./_project');
+const { TSCONFIG, project, lint: lintAll, findings } = require('./_project');
+const { withLists } = require('./_c_fixture');
+const WAITING = require('../../scripts/lint/rules/waiting_call_promise');
 const { FILES, PRODUCER_TS } = require('./_native_fixture');
 
 const RULE = 'check-waiting-call-promise';
+
+// The fixture has no KafkaFuture: the rule runs without the real tree's
+// DEPENDANTS, which would match nothing there.
+const lint = (root, names) => lintAll(root, names, { rules: [withLists(WAITING, { DEPENDANTS: [] })] });
 
 const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, ...FILES, ...files });
 
@@ -108,4 +114,14 @@ test('cannot run without the header, or the C sources', () => {
 test('no method with a native call fails: 0 items checked', () => {
   const r = lint(fixture({ 'src/producer/producer.ts': 'export class Producer {\n  ready(): boolean { return true; }\n}\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-waiting-call-promise: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
+});
+
+test('a DEPENDANTS entry that matches nothing is a finding; the real tree lists the three dependants', () => {
+  const r = lintAll(fixture(), [RULE], { rules: [withLists(WAITING, { DEPENDANTS: [{ key: 'Producer.nothing', reason: 'the test' }] })] });
+  assert.equal(r.status, 1);
+  assert.deepEqual(findings(r), ['Producer.nothing: is allowed as the test, but nothing matches it any more: delete the entry']);
+  assert.deepEqual(
+    WAITING.DEPENDANTS.map((d) => d.key),
+    ['KafkaFuture.allOf', 'KafkaFuture.thenApply', 'KafkaFuture.whenComplete'],
+  );
 });

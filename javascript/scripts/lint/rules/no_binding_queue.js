@@ -101,7 +101,9 @@ const ALLOWED = [
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',
-    reason: "the longest delay a Node timer holds (2^31 - 1 ms): one get(timeout)'s wait in steps, not a cap of records",
+    reason:
+      "the longest delay a Node timer holds (2^31 - 1 ms): one get(timeout)'s wait in steps, for a future with no native " +
+      "handle (allOf(), completedFuture(), thenApply's): a record's future waits natively; not a cap of records",
   },
   {
     key: 'src/common/kafka_future.ts:STAGES',
