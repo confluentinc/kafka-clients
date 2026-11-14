@@ -36,6 +36,14 @@ missing clients.producer.Producer#unregisterMetricFromSubscription
 # configure(): a serializer is given only as a constructor argument, for
 # which Java does not call it either.
 missing common.serialization.Serializer#configure
+# TopicPartition, Node and PartitionInfo: Java's equals and hashCode, not
+# translated yet (the plan's B1).
+missing common.Node#equals
+missing common.Node#hashCode
+missing common.PartitionInfo#equals
+missing common.PartitionInfo#hashCode
+missing common.TopicPartition#equals
+missing common.TopicPartition#hashCode
 # PartitionInfo: Java's constructors take Node[] arrays and three getters
 # return them; how a Java array other than byte[] is typed is not decided yet
 # (Q25, other collections). The client builds it through its library-only

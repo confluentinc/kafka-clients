@@ -1661,6 +1661,13 @@ test('a producer closed while a serializer Promise is pending rejects that send 
   await producer.close();
   release();
   await assert.rejects(sent, { name: 'IllegalStateError', message: CLOSED_MESSAGE });
+  // The binding keeps no closed state: on a closed producer the serializers
+  // still run, and the core reports the closed producer at the hand-over.
+  const calls = [];
+  const closed = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: recording(() => Buffer.from('v'), calls) });
+  await closed.close();
+  await assert.rejects(closed.send(new ProducerRecord({ topic: 'unit-serde-c', value: 'v' })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
+  assert.deepEqual(calls.map((c) => c.data), ['v']);
 });
 
 test("a serializer argument is a serializer object or null; a function gets Python's hint", () => {
@@ -1704,7 +1711,9 @@ test('close() closes both serializers, a failure being a process warning, never 
   const warnings = await warningsOf(async () => {
     const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer, valueSerializer });
     await producer.close();
-    // A second close closes nothing again.
+    // A second close closes nothing again: the core's close, which holds Node
+    // until its answer, as any call made on a closed producer does
+    // (javascript/CLAUDE.md, "Threads and liveness").
     await producer.close();
   });
   assert.deepEqual(closed, ['key', 'value']);
