@@ -64,6 +64,54 @@ const JAVA_NAMES = new Map([
     },
   ],
   [
+    'sendException',
+    {
+      reason: "Java's public field MockProducer#sendException, the parameter of its setter (plan §5 item 2; Python's set_send_exception)",
+    },
+  ],
+  [
+    'setSendException',
+    {
+      reason: "the setter of Java's public field MockProducer#sendException (plan §5 item 2: a Java public mutable field is a setter only)",
+    },
+  ],
+  [
+    'flushException',
+    {
+      reason: "Java's public field MockProducer#flushException, the parameter of its setter (plan §5 item 2; Python's set_flush_exception)",
+    },
+  ],
+  [
+    'setFlushException',
+    {
+      reason: "the setter of Java's public field MockProducer#flushException (plan §5 item 2: a Java public mutable field is a setter only)",
+    },
+  ],
+  [
+    'partitionsForException',
+    {
+      reason: "Java's public field MockProducer#partitionsForException, the parameter of its setter (plan §5 item 2; Python's set_partitions_for_exception)",
+    },
+  ],
+  [
+    'setPartitionsForException',
+    {
+      reason: "the setter of Java's public field MockProducer#partitionsForException (plan §5 item 2: a Java public mutable field is a setter only)",
+    },
+  ],
+  [
+    'closeException',
+    {
+      reason: "Java's public field MockProducer#closeException, the parameter of its setter (plan §5 item 2; Python's set_close_exception)",
+    },
+  ],
+  [
+    'setCloseException',
+    {
+      reason: "the setter of Java's public field MockProducer#closeException (plan §5 item 2: a Java public mutable field is a setter only)",
+    },
+  ],
+  [
     'exception',
     {
       reason:

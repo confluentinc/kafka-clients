@@ -27,6 +27,39 @@ missing clients.producer.Producer#initTransactions
 missing clients.producer.Producer#registerMetricForSubscription
 missing clients.producer.Producer#sendOffsetsToTransaction
 missing clients.producer.Producer#unregisterMetricFromSubscription
+# MockProducer, with the reasons of the producer package's documentation
+# (src/producer/index.ts): transactions are left out by request (the calls,
+# their state and their error fields); clientInstanceId, the telemetry and
+# metric-subscription calls have no FFI entry point; setMockMetrics needs a
+# native KafkaMetric the binding cannot build.
+missing clients.producer.MockProducer#abortTransaction
+missing clients.producer.MockProducer#abortTransactionException
+missing clients.producer.MockProducer#addedMetrics
+missing clients.producer.MockProducer#beginTransaction
+missing clients.producer.MockProducer#beginTransactionException
+missing clients.producer.MockProducer#clientInstanceId
+missing clients.producer.MockProducer#commitCount
+missing clients.producer.MockProducer#commitTransaction
+missing clients.producer.MockProducer#commitTransactionException
+missing clients.producer.MockProducer#consumerGroupOffsetsHistory
+missing clients.producer.MockProducer#disableTelemetry
+missing clients.producer.MockProducer#fenceProducer
+missing clients.producer.MockProducer#initTransactionException
+missing clients.producer.MockProducer#initTransactions
+missing clients.producer.MockProducer#injectTimeoutException
+missing clients.producer.MockProducer#registerMetricForSubscription
+missing clients.producer.MockProducer#sendOffsetsToTransaction
+missing clients.producer.MockProducer#sendOffsetsToTransactionException
+missing clients.producer.MockProducer#sentOffsets
+missing clients.producer.MockProducer#setClientInstanceId
+missing clients.producer.MockProducer#setMockMetrics
+missing clients.producer.MockProducer#transactionAborted
+missing clients.producer.MockProducer#transactionCommitted
+missing clients.producer.MockProducer#transactionInFlight
+missing clients.producer.MockProducer#transactionInitialized
+missing clients.producer.MockProducer#uncommittedOffsets
+missing clients.producer.MockProducer#uncommittedRecords
+missing clients.producer.MockProducer#unregisterMetricFromSubscription
 # Serializer: the root conventions (Serialization) give a serde no
 # configure(): a serializer is given only as a constructor argument, for
 # which Java does not call it either.

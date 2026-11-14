@@ -66,6 +66,64 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
 }
 
 // @public
+export class MockProducer<K, V> implements Producer<K, V> {
+    [Symbol.asyncDispose](): Promise<void>;
+    constructor();
+    constructor(options: {
+        autoComplete: boolean;
+        partitioner: Partitioner | null;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
+    });
+    clear(): void;
+    close(): Promise<void>;
+    close(options: CloseArgs): Promise<void>;
+    close(timeout: Duration): Promise<void>;
+    closed(): boolean;
+    completeNext(): boolean;
+    errorNext(options: {
+        e: Error | null;
+    }): boolean;
+    errorNext(e: Error | null): boolean;
+    flush(): Promise<void>;
+    flushed(): boolean;
+    history(): Array<ProducerRecord<K, V>>;
+    metrics(): MetricNameMap<Metric>;
+    partitionsFor(options: {
+        topic: string;
+    }): Promise<PartitionInfo[]>;
+    partitionsFor(topic: string): Promise<PartitionInfo[]>;
+    send(options: {
+        record: ProducerRecord<K, V>;
+        callback: Callback | null;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(options: {
+        record: ProducerRecord<K, V>;
+        callback?: never;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
+    setCloseException(options: {
+        closeException: Error | null;
+    }): void;
+    setCloseException(closeException: Error | null): void;
+    setFlushException(options: {
+        flushException: Error | null;
+    }): void;
+    setFlushException(flushException: Error | null): void;
+    setPartitionsForException(options: {
+        partitionsForException: Error | null;
+    }): void;
+    setPartitionsForException(partitionsForException: Error | null): void;
+    setSendException(options: {
+        sendException: Error | null;
+    }): void;
+    setSendException(sendException: Error | null): void;
+}
+
+// @public
+export type Partitioner = unknown;
+
+// @public
 export interface Producer<K = Uint8Array, V = Uint8Array> {
     [Symbol.asyncDispose](): Promise<void>;
     close(): Promise<void>;

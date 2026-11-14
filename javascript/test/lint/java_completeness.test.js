@@ -29,11 +29,16 @@ const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index
 test('a class translating every public, live Java member passes', () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Rec: UNKNOWN, Rec, topic, offset, getSize, isOpen, hasKey, close, toString, equals, hashCode
-  // (not old, hidden, mode, LEGACY, SECRET); Mode: ON, OFF, forName, java.lang.Enum's values, valueOf, name, ordinal, and toJSON;
+  // Rec: UNKNOWN, Rec, topic, offset, getSize, isOpen, hasKey, close, toString, equals, hashCode, and its
+  // public mutable field mode as setMode (not old, hidden, LEGACY, SECRET, or the static counter); Mode: ON, OFF, forName, java.lang.Enum's values, valueOf, name, ordinal, and toJSON;
   // ProducerConfig: A_CONFIG (its constants only); the interface Header: key, value; the abstract
   // Future: get, not its constructor. The error and the function type ask nothing.
-  assert.ok(r.out.includes('✅ check-java-completeness: 23 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-java-completeness: 24 item(s) checked'), r.text);
+});
+
+test("a Java public mutable field is asked for as its setter (plan §5 item 2)", () => {
+  const rec = LIB['src/producer/rec.ts'].replace('  setMode(mode: string): void { void mode; }\n', '');
+  assert.deepEqual(findings(lint(fixture({ 'src/producer/rec.ts': rec }), [RULE])), ['clients.producer.Rec#mode: Rec does not translate it']);
 });
 
 test('equals and hashCode are asked for as any member is (root Class family, Q29)', () => {
