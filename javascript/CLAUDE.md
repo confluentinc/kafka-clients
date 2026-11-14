@@ -1008,6 +1008,11 @@ The rules, each named in its finding:
   method of each default method's name. A `...Defaults` class nothing asks
   for is a finding too. `Callback` has no default method, so no helper
   exists yet.
+- `check-mock-native`: each exported `Mock...` class holds a native handle,
+  its constructor (through the `src/` functions it calls, as
+  `check-waiting-call-promise` follows a method) or a field initializer
+  reaching a `native.<fn>` use, as the mocks wrap the FFI's mocks (root
+  conventions, Implementation over the FFI, Q62). There is no mock yet.
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.

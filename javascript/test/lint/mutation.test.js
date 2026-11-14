@@ -786,6 +786,16 @@ MUTATIONS.push(
       fs.writeFileSync(file, JSON.stringify(index));
     },
   },
+  {
+    // An empty mock translates none of Java's members either.
+    rules: ['check-java-completeness', 'check-mock-native'],
+    what: 'a MockProducer translated in TypeScript, holding no native handle',
+    apply: (root) => {
+      const header = fs.readFileSync(path.join(root, 'src/producer/index.ts'), 'utf8').split(LICENSE_END)[0] + LICENSE_END;
+      add(root, 'src/producer/mock_producer.ts', `${header}\nexport class MockProducer {}\n`);
+      edit(root, 'src/producer/index.ts', "export { KafkaProducer } from './kafka_producer';\n", "export { KafkaProducer } from './kafka_producer';\nexport { MockProducer } from './mock_producer';\n");
+    },
+  },
 );
 
 for (const m of MUTATIONS) {

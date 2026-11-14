@@ -100,6 +100,7 @@ const ORDER = [
   'check-no-repeated-precondition',
   'check-tsfn-lifetime',
   'check-default-helpers',
+  'check-mock-native',
   'check-directives',
   'check-config',
 ];
