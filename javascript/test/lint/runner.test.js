@@ -68,6 +68,7 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-no-closed-flag',
     'check-no-repeated-precondition',
     'check-tsfn-lifetime',
+    'check-default-helpers',
   ]);
   assert.deepEqual(shape(ESLINT_CHECKS), [
     'check-no-todo',
