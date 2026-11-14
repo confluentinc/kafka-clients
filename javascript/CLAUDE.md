@@ -1070,10 +1070,12 @@ The rules, each named in its finding:
 
 - Every file carries Python's header, Confluent's copyright line with the
   Apache 2.0 text, as the core's files do (root conventions, Build, packaging
-  and release, Q76); a file copied unchanged from Apache Kafka keeps the
-  Foundation's header. `make build-ts` puts it first in each compiled `.js`
-  and `.d.ts` (`scripts/dist_headers.js`), and the package check confirms it
-  in each tarball. No TODO or FIXME.
+  and release, Q76), and code translated from OpenJDK keeps GPL with the
+  Classpath Exception. The Foundation's header, for a file copied unchanged
+  from Apache Kafka, has no place in `src/`, since Kafka ships no
+  TypeScript, so the build refuses it. `make build-ts` puts the header first
+  in each compiled `.js` and `.d.ts` (`scripts/dist_headers.js`), and the
+  package check confirms it in each tarball. No TODO or FIXME.
 - No Rust or C changes for the binding: a missing FFI function is reported,
   not added (root conventions, Implementation over the FFI).
 - `test/static/header_conformance.test.js` asserts that every `kafka_*`
