@@ -96,6 +96,7 @@ const ORDER = [
   'check-zero-copy',
   'check-string-encoding',
   'check-no-binding-queue',
+  'check-no-closed-flag',
   'check-directives',
   'check-config',
 ];
