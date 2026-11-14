@@ -33,15 +33,14 @@ const tagged = (description = 'd') =>
     ]),
   });
 
-test("Java's getters are methods; the tags are a new Map each call", () => {
+test("Java's getters are methods; tags() is the Map the constructor was given", () => {
   const name = tagged();
   assert.equal(name.name(), 'request-latency-avg');
   assert.equal(name.group(), 'consumer-fetch-manager-metrics');
   assert.equal(name.description(), 'd');
   assert.ok(name.tags() instanceof Map);
   assert.deepEqual([...name.tags()], [['client-id', 'consumer-1'], ['a', 'b']]);
-  name.tags().set('x', 'y');
-  assert.equal(name.tags().has('x'), false);
+  assert.equal(name.tags(), name.tags());
   assert.equal(name.toString(), 'MetricName [name=request-latency-avg, group=consumer-fetch-manager-metrics, description=d, tags={client-id=consumer-1, a=b}]');
 });
 
@@ -66,15 +65,21 @@ test("equals and hashCode are Java's: group, name and tags, not the description"
   assert.equal(tagged().equals(null), false);
 });
 
-test('the tags are a Map or a plain object, copied when the name is built', () => {
+test('a Map of tags is kept as given, as Java keeps it; a plain object becomes a Map', () => {
   const given = new Map([['client-id', 'c']]);
   const fromMap = new MetricName({ name: 'n', group: 'g', description: '', tags: given });
   const fromObject = new MetricName({ name: 'n', group: 'g', description: '', tags: { 'client-id': 'c' } });
+  assert.equal(fromMap.tags(), given);
+  assert.ok(fromObject.tags() instanceof Map);
   assert.deepEqual([...fromObject.tags()], [['client-id', 'c']]);
   assert.equal(fromMap.equals(fromObject), true);
   assert.equal(fromMap.hashCode(), fromObject.hashCode());
+  // A later change to the given Map shows in the name, as in Java: equality
+  // and the hash code follow the current contents.
   given.set('other', 'x');
-  assert.deepEqual([...fromMap.tags()], [['client-id', 'c']]);
+  assert.deepEqual([...fromMap.tags()], [['client-id', 'c'], ['other', 'x']]);
+  assert.equal(fromMap.equals(fromObject), false);
+  assert.notEqual(fromMap.hashCode(), fromObject.hashCode());
   assert.deepEqual([...new MetricName({ name: 'n', group: 'g', description: '', tags: {} }).tags()], []);
 });
 

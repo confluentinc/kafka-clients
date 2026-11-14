@@ -98,7 +98,7 @@ export class MetricName {
         name: string;
         group: string;
         description: string;
-        tags: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
+        tags: Map<string, string> | Readonly<Record<string, string>>;
     });
     description(): string;
     equals(options: {

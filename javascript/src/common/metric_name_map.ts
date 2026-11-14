@@ -16,7 +16,8 @@
 // key by value. It wraps a Map keyed by the string of a MetricName's group,
 // name and tags sorted by key (JSON.stringify, MetricName.internalKey), the
 // fields MetricName.equals compares, and keeps each original MetricName, so
-// keys() and entries() return MetricName objects. Read-only, as the map
+// keys() and entries() return MetricName objects. A key is computed when its
+// entry is stored. Read-only, as the map
 // Java's metrics() returns is unmodifiable.
 
 import { JavaForms } from '../internal/args';
@@ -44,6 +45,10 @@ function keyOf(name: unknown): string {
  *
  * @remarks *(js-only)* JavaScript has no value equality for map keys. It
  * does not extend `Map`, so `instanceof Map` is false.
+ *
+ * A key is computed when its entry is stored: a later change to the name's
+ * tags makes that entry unreachable by an equal new name, as a mutated key
+ * does in Java's `HashMap`.
  */
 export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   readonly #entries = new Map<string, [MetricName, V]>();

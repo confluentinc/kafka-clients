@@ -15,8 +15,10 @@
 // Java's MetricName: Java's methods (it is not a data class, the root
 // conventions' list not naming it) over private fields. The tags, Java's
 // Map<String, String>, are taken as a Map or a plain object, as a map keyed
-// by strings is (root CLAUDE.md, JavaScript Binding Conventions, Types, Q25),
-// copied into a Map, and returned as a new Map each call. `equals` and
+// by strings is (root CLAUDE.md, JavaScript Binding Conventions, Types, Q25).
+// A Map is kept as given and tags() returns it, as Java's constructor stores
+// the map and tags() returns that field; a plain object is read into a new
+// Map. `equals` and
 // `hashCode` are Java's bodies (Q29), the description left out as Java's.
 
 import { JavaForms } from '../internal/args';
@@ -40,17 +42,22 @@ function checkString(value: unknown, what: string): string {
 
 const TAGS_TYPE = 'tags must be a Map or a plain object of string to string';
 
-// Java's Map<String, String> taken: a Map, or a plain object's own
-// enumerable string keys, of string to string, copied.
-function checkTags(value: unknown): ReadonlyMap<string, string> {
+// Java's Map<String, String> taken: a Map of string to string, kept as it
+// is (Java stores the map it is given), or a plain object's own enumerable
+// string keys, read into a new Map.
+function checkTags(value: unknown): Map<string, string> {
   if (value === null) throw new TypeError('tags must not be null');
-  let entries: Iterable<readonly [unknown, unknown]>;
-  if (value instanceof Map) entries = value as Map<unknown, unknown>;
-  else if (typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)) entries = Object.entries(value);
-  else throw new TypeError(TAGS_TYPE);
+  if (value instanceof Map) {
+    for (const [key, tag] of value as Map<unknown, unknown>) {
+      if (typeof key !== 'string' || typeof tag !== 'string') throw new TypeError(TAGS_TYPE);
+    }
+    return value as Map<string, string>;
+  }
+  const proto: unknown = typeof value === 'object' ? Object.getPrototypeOf(value) : undefined;
+  if (proto !== Object.prototype && proto !== null) throw new TypeError(TAGS_TYPE);
   const out = new Map<string, string>();
-  for (const [key, tag] of entries) {
-    if (typeof key !== 'string' || typeof tag !== 'string') throw new TypeError(TAGS_TYPE);
+  for (const [key, tag] of Object.entries(value as object)) {
+    if (typeof tag !== 'string') throw new TypeError(TAGS_TYPE);
     out.set(key, tag);
   }
   return out;
@@ -76,7 +83,7 @@ export class MetricName {
   readonly #name: string;
   readonly #group: string;
   readonly #description: string;
-  readonly #tags: ReadonlyMap<string, string>;
+  readonly #tags: Map<string, string>;
 
   /**
    * Creates a metric name.
@@ -88,10 +95,9 @@ export class MetricName {
    *   `Objects.requireNonNull`), `undefined` or of the wrong type
    *
    * @remarks The tags, Java's `Map<String, String>`, are a `Map` or a plain
-   * object, copied into the metric name. *(deviation: Java's constructor
-   * keeps the map it is given, so a later change to that map shows in the
-   * name. Why: a plain object is read into a `Map` when the name is built,
-   * and a `MetricNameMap` key must not change once it is stored.)*
+   * object. A `Map` is kept as given, as Java keeps the map, so `tags()`
+   * returns it and a later change to it shows in the name; a plain object
+   * is read into a new `Map` when the name is built.
    */
   constructor(options: {
     /** The name of the metric */
@@ -101,7 +107,7 @@ export class MetricName {
     /** A human-readable description to include in the metric */
     description: string;
     /** additional key/value attributes of the metric */
-    tags: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
+    tags: Map<string, string> | Readonly<Record<string, string>>;
   }) {
     FORMS.match(options, arguments.length);
     this.#name = checkString(FORMS.value(options, 'name'), 'name');
@@ -135,12 +141,13 @@ export class MetricName {
   /**
    * The additional key/value attributes of the metric.
    *
-   * @returns the tags, a new Map each call
+   * @returns the tags: the `Map` the constructor was given, or the one it
+   *   read a plain object into
    * @throws `TypeError` when it is given an argument
    */
   tags(): Map<string, string> {
     TAGS_FORMS.match(undefined, arguments.length);
-    return new Map(this.#tags);
+    return this.#tags;
   }
 
   /**
