@@ -27,7 +27,7 @@
 // are check-no-closed-flag's. Not checked: a precondition repeated under
 // another message, or with none.
 
-const { tsLiterals, cLiterals } = require('../literals');
+const { tsLiterals, cLiterals, holds } = require('../literals');
 
 /** The precondition messages of Java and the core, each with the side that checks it. */
 const PRECONDITIONS = [
@@ -52,7 +52,7 @@ module.exports = {
     let checked = 0;
     for (const lit of [...tsLiterals(ctx), ...cLiterals(ctx)]) {
       checked++;
-      const hit = PRECONDITIONS.find(([text]) => lit.text.includes(text));
+      const hit = PRECONDITIONS.find(([text]) => holds(lit, text));
       if (hit) {
         findings.push({
           kind: 'repeated-precondition',

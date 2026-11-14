@@ -56,3 +56,29 @@ test('each precondition message the FFI or the core checks is a finding, in Type
     "native/a.c:1: writes \"Timeout must not be negative\", the message of a precondition the binding does not repeat (the core's _with_timeout check, which the consumer FFI reports)",
   ]);
 });
+
+test('a message split across a + chain, across adjacent C literals or around a template value is a finding too', () => {
+  const r = lint(
+    project({
+      'tsconfig.json': TSCONFIG,
+      'src/a.ts':
+        "export const A = 'The timeout cannot be ' +\n  'negative.';\n" +
+        'export const B = (n: string): string => `Timeout must not be ${n}`;\n' +
+        "export const C = (n: number): string => 'Invalid ' + `negative timeout ${n}`;\n" +
+        // Too little of the message around the value: no finding.
+        'export const D = (n: string): string => `Timeout ${n}`;\n',
+      'native/a.c': 'const char* m = "KafkaConsumer is not safe "\n    "for multi-threaded access.";\n',
+    }),
+    [RULE],
+  );
+  assert.equal(r.status, 1);
+  assert.deepEqual(
+    findings(r).map((f) => f.split(', the message')[0]),
+    [
+      'src/a.ts:1: writes "The timeout cannot be negative."',
+      'src/a.ts:3: writes "Timeout must not be negative"',
+      'src/a.ts:4: writes "Invalid negative timeout"',
+      'native/a.c:1: writes "is not safe for multi-threaded access"',
+    ],
+  );
+});

@@ -992,7 +992,7 @@ The rules, each named in its finding:
   a closed state under another name, or in a module-level or closure
   variable of `src/`.
 - `check-no-repeated-precondition`: no string literal of `src/` or
-  `native/` holds the message of a precondition the FFI or the core checks
+  `native/`, read as `check-no-closed-flag` reads them, holds the message of a precondition the FFI or the core checks
   ("The timeout cannot be negative.", "Invalid negative timeout", "Timeout
   must not be negative", the busy message, ...), so the binding cannot raise
   it itself (root conventions, Errors, Q35, Q58, Q60). The binding's own
