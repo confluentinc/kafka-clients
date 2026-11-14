@@ -999,8 +999,9 @@ The rules, each named in its finding:
   listed checks write their own messages.
 - `check-tsfn-lifetime`: no `napi_ref_threadsafe_function` in `native/`,
   and `napi_unref_threadsafe_function` only on the close path,
-  `cbq_closed`, which must call it, so a client keeps Node running until the
-  core reports it closed (root conventions, Lifetime, Q21; "Threads and
+  `cbq_closed`, which must call it and which only the close completion,
+  `close_on_complete`, calls, so a client keeps Node running until the core
+  reports it closed (root conventions, Lifetime, Q21; "Threads and
   liveness").
 - `check-default-helpers`: each interface the user implements (an
   exported interface or function type translating a Java interface that no

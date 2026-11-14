@@ -778,6 +778,17 @@ MUTATIONS.push(
       edit(root, 'native/callback_queue.c', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n    napi_ref_threadsafe_function(env, q->tsfn);\n'),
   },
   {
+    rule: 'check-tsfn-lifetime',
+    what: 'the producer marked closed when its close starts, before the core answered',
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '"close(handle, timeoutMs, done)");\n        return NULL;\n    }\n    Producer* p = unwrap_producer(env, argv[0]);\n',
+        '"close(handle, timeoutMs, done)");\n        return NULL;\n    }\n    Producer* p = unwrap_producer(env, argv[0]);\n    if (p != NULL) cbq_closed(env, &p->queue);\n',
+      ),
+  },
+  {
     rule: 'check-default-helpers',
     what: 'a helper class of Java default methods that no interface asks for',
     apply: (root) => {
