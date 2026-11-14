@@ -29,7 +29,7 @@ DOTNET_CONFIG ?= Release
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
 .PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	pack-dotnet package-check-dotnet
+	pack-dotnet package-check-dotnet test-aot-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -219,6 +219,32 @@ pack-dotnet:
 
 package-check-dotnet: pack-dotnet
 	cd $(REPO_ROOT) && sh .semaphore/test-nupkg.sh --smoke $(PACKAGE_DIR)
+
+# ---------------------------------------------------------------------------
+# Native AOT check of the library (net8.0 and net10.0).
+#
+# tools/AotSmoke is published with PublishAot for this machine's runtime, with the
+# whole Confluent.Kafka assembly rooted (TrimmerRootAssembly): the AOT compiler
+# analyzes every member of the library, and any trim or AOT warning fails the
+# publish (TreatWarningsAsErrors). It catches what the library's own analyzers
+# (IsAotCompatible) cannot see, such as a warning silenced with #pragma. Each
+# published executable then runs, and fails on a check that does not hold.
+#
+# Outside the solution, so `dotnet format $(SOLUTION)` does not reach it (hence
+# its own format pass): a Native AOT publish needs the platform's C toolchain
+# (Xcode's command line tools on macOS; clang, and zlib for net8.0, on Linux).
+# Depends on build-dotnet, as the executables P/Invoke the native library it
+# builds (CLAUDE.md §7.1).
+# ---------------------------------------------------------------------------
+AOT_SMOKE := $(REPO_ROOT)/dotnet/tools/AotSmoke/AotSmoke.csproj
+AOT_SMOKE_OUT := $(REPO_ROOT)/dotnet/artifacts/aot-smoke
+
+test-aot-dotnet: build-dotnet
+	$(DOTNET) format $(AOT_SMOKE) --verify-no-changes
+	$(DOTNET) publish -c $(DOTNET_CONFIG) -f net8.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net8.0
+	$(DOTNET) publish -c $(DOTNET_CONFIG) -f net10.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net10.0
+	$(AOT_SMOKE_OUT)/net8.0/AotSmoke
+	$(AOT_SMOKE_OUT)/net10.0/AotSmoke
 
 # ---------------------------------------------------------------------------
 # gRPC-server unit tests (M18/P1, PLAN §7.1): the chaos-harness service

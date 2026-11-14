@@ -441,6 +441,10 @@ blocks:
             # package can be packed and installed. Set on make's command line for the reason given
             # below.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make package-check-dotnet
+            # The Native AOT check: publishes a net8.0 and a net10.0 Native AOT executable with the
+            # whole library rooted, so a trim or AOT warning fails the job, then runs them. It needs
+            # no Docker. Set on make's command line for the reason given below.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make test-aot-dotnet
             - command -v colima >/dev/null 2>&1 || brew install colima
             - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
             - 'docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done'

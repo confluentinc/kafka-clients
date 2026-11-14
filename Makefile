@@ -28,7 +28,7 @@ VENV = . venv/bin/activate
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
-	pack-dotnet package-check-dotnet \
+	pack-dotnet package-check-dotnet test-aot-dotnet \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -354,6 +354,12 @@ pack-dotnet:
 
 package-check-dotnet:
 	$(MAKE) -C dotnet $(ROOTS) package-check-dotnet
+
+# The Native AOT check of the .NET library (net8.0 and net10.0): a whole-library
+# AOT publish that fails on any trim or AOT warning, then the run of the
+# published executables. See dotnet/Makefile.
+test-aot-dotnet:
+	$(MAKE) -C dotnet $(ROOTS) test-aot-dotnet
 
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
