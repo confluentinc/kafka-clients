@@ -174,7 +174,7 @@ test('the generated modules carry the license and the GENERATED, DO NOT EDIT hea
   const generated = [
     ...modules,
     'internal/error_registry.ts',
-    'internal/config_types.ts',
+    'producer/producer_configs.ts',
     'producer/producer_config.ts',
     'common/config/sasl_configs.ts',
     'common/config/ssl_configs.ts',

@@ -93,7 +93,7 @@ producer for them.
 
 | 1.x / KafkaJS | 4.x | Note |
 |---|---|---|
-| `new Kafka({ kafkaJS: { brokers } }).producer({ kafkaJS: { ... } })` | `new KafkaProducer({ 'bootstrap.servers': 'host:9092', ... })`, or `new KafkaProducer({ configs })` | Imported from its package path: `require('@confluentinc/kafka-javascript/producer')`. A `kafkaJS` block throws `ConfigError`, pointing to this guide |
+| `new Kafka({ kafkaJS: { brokers } }).producer({ kafkaJS: { ... } })` | `new KafkaProducer({ 'bootstrap.servers': 'host:9092', ... })`, or `new KafkaProducer({ configs })` | Imported from its package path: `require('@confluentinc/kafka-javascript/producer')`. A `kafkaJS` block is not read: it reaches the core as an unknown key, which the core lists as unused |
 | `new Kafka.Producer(conf)` (node-rdkafka style) | `new KafkaProducer(configs)` | Java's keys (Configuration, below) |
 | `await producer.connect()` | nothing: a client is ready once it is constructed, as in Java | There is no `connect()`; calling it is a `TypeError` |
 | `await producer.disconnect()` | `await producer.close()`, or `await using producer = new KafkaProducer(...)` | `close()` waits without a time limit for the records already sent (Java's `close()`); `close(0)` or `close({ timeout: 0 })` does not wait for them. As 1.x and KafkaJS from `connect()` to `disconnect()`, a producer keeps Node running from its creation until `close()` closes it: a script that never closes it never exits |
@@ -156,11 +156,11 @@ key, which the core lists in one log line and otherwise ignores.
 | `partitioner` | `createPartitioner` | `partitioner.type` (Read this first, above) |
 
 The config constants are Java's: `ProducerConfig.LINGER_MS_CONFIG`,
-`SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG`, `SaslConfigs.SASL_JAAS_CONFIG`. A
-value of the wrong type for its key throws `ConfigError` naming the key;
-`null` leaves a key unset (unless its Java validator refuses `null`), and
-`undefined` leaves it out. The value of a key Java does not define is a
-string, a number or a boolean.
+`SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG`, `SaslConfigs.SASL_JAAS_CONFIG`.
+Every value is written as a string (`true` as `"true"`, numbers and bigints
+in decimal, arrays joined with `,`, anything else by `String()`), and the
+core checks it, throwing `ConfigError` with Java's message naming the key;
+`null` and `undefined` leave a key unset.
 
 **1.x's serializer builder keys.** `js.key.serializer.builder` and
 `js.value.serializer.builder` (1.x's Schema Registry serde builders) are not

@@ -89,7 +89,6 @@ const ALLOWED = [
     key: 'src/common/header/headers.ts:EMPTY',
     reason: 'the one frozen empty list of every Headers that has none: no array per record, not a store of records',
   },
-  { key: 'src/internal/config.ts:INT_LABELS', reason: "the ConfigDef type names of Java's parseType messages, a constant table" },
   { key: 'src/internal/errors.ts:classes', reason: 'the generated error classes, loaded once: a table of classes, not records' },
   { key: 'src/internal/errors.ts:byId', reason: 'the error classes by FFI id, built once from the generated registry' },
   { key: 'src/internal/errors.ts:roots', reason: 'the generated error classes at the top of a chain, found once' },

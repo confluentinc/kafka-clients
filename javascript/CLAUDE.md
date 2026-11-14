@@ -554,29 +554,29 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `close()` do what the core does (they resolve), with no deviation. A
   negative `timeout` is `IllegalArgumentError` "The timeout cannot be
   negative.", from the FFI, and such a close changes nothing (rule 1).
-- Configuration (root conventions, Configuration): a plain object of Java's
-  config keys (a `Map`, or another non-plain object, throws `TypeError`),
-  checked as Python's `_config.py` checks it (`src/internal/config.ts`): a
-  value of a key Java's `ProducerConfig` defines must have a JS type its
-  `ConfigDef` type takes (the generated `src/internal/config_types.ts`; a
-  string is always accepted but for `STRING` / `PASSWORD`, which must be
-  strings), else `ConfigError` with Java's `parseType` message, a `PASSWORD`
-  value shown as `[hidden]`; an unknown key's value must be a string, a number
-  or a boolean; a `kafkaJS` block fails the value check with a pointer to the
-  migration guide; a `null` for a key whose validator rejects `null` throws
-  that validator's `ConfigError`; other `null`s and every `undefined` are
-  dropped; a key that is not a string (a symbol) throws `ConfigError` "Key must
-  be a string."; `key.serializer` and `value.serializer` throw `ConfigError`
-  pointing to the constructor arguments, whatever their value. Values are
-  then stringified (`true` → `"true"`, numbers in decimal, never in exponent
-  form, arrays joined with `,` for a `LIST` key; a bigint by `String` for an
-  integer key, while the `long` row is not decided yet in the root
-  conventions), and the keys and values cross as `encodeLikeJava`'s bytes. The core
-  validates them. What else happens to an unknown config key, and a warning
-  for 1.x-only keys, are not decided yet in the root conventions, and neither
-  is how the config classes are translated. Debug lines use
-  `util.debuglog('confluent_kafka')`, shown with `NODE_DEBUG=confluent_kafka`;
-  no constructor takes a logger or an error callback.
+- Configuration (root conventions, Configuration, Q52, Q54, Q55): a plain
+  object of Java's config keys (a `Map`, or another non-plain object, throws
+  `TypeError`), and a key that is not a string (a symbol) throws
+  `ConfigError` "Key must be a string.", as it has no string to cross as
+  (`src/internal/config.ts`). The binding has no `ConfigDef` table and checks
+  no value: each value becomes the string the FFI takes (`true` → `"true"`,
+  numbers in decimal, never in exponent form, bigints in decimal, so a `long`
+  above 2^53 goes as its exact digits, arrays' items written so and joined
+  with `,`, anything else by `String()`, an object as `[object Object]`);
+  `null` and `undefined` leave the key unset; unknown keys, a `kafkaJS` block
+  included, pass, and the core lists the ones it does not use. The keys and
+  values cross as `encodeLikeJava`'s bytes, and the core checks types,
+  ranges, enums, unknown keys and cross-key rules with Java's messages naming
+  the key. `key.serializer` and `value.serializer` throw `ConfigError`
+  pointing to the constructor arguments, whatever their value, until their
+  config route is built. The `ProducerConfigs` type, generated into
+  `src/producer/producer_configs.ts` by the `config_types` emitter
+  (`rust/xtask/src/config_types/js.rs`), lists the keys Java's
+  `ProducerConfig` defines (with its SSL and SASL keys) for autocompletion
+  and takes any other string through `(string & {})` *(js-only, types
+  only)*. Debug lines use `util.debuglog('confluent_kafka')`, shown with
+  `NODE_DEBUG=confluent_kafka`; no constructor takes a logger or an error
+  callback.
 
 ## Files and layout
 
@@ -769,8 +769,9 @@ binding:
 FFI enum (the Python client's generators, `rust/xtask/src/javascript_gen.rs`):
 the error classes and `src/internal/error_registry.ts`, the config classes'
 constants (`ProducerConfig`, `SslConfigs`, `SaslConfigs`, `SecurityConfig`)
-and `src/internal/config_types.ts`, all TypeScript (typed: a config
-constant's type is written out, `static readonly X: string = '...'`), which
+and the `ProducerConfigs` type's key list (`src/producer/producer_configs.ts`),
+all TypeScript (typed: a config constant's type is written out, `static
+readonly X: string = '...'`, a `long` one a `bigint`), which
 `make build` compiles with the rest. The root conventions (Build, packaging
 and release) add the form tables, now hand-written in the modules that call
 `src/internal/args.ts`. A generated file carries the license and `GENERATED,

@@ -521,7 +521,7 @@ code relying on them keeps running with another meaning: check each.
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
 | `key.serializer` / `value.serializer` reached the core | they throw `ConfigError`: a serializer is a constructor argument |
 | `metadata.offset` / `metadata.timestamp` / `record.timestamp` numbers | bigints, Java's `long`; a timestamp is given as a bigint or a whole number up to 2^53 - 1 |
-| an unknown config key took an array or a bigint | it takes a string, a number or a boolean (`ConfigError` otherwise) |
+| a config value was checked against its key's type, and an unknown key's value had to be a string, a number or a boolean | every value is written as a string (`true` as `"true"`, numbers and bigints in decimal, arrays joined with `,`, anything else by `String()`) and the core checks it; `null` and `undefined` leave the key unset |
 | the preview warning had the code `CONFLUENT_KAFKA_PREVIEW` | it has no code: filter on its type, `ExperimentalWarning` |
 | `record.headers` an array | `record.headers` a `Headers` (Java's methods: `add`, `remove`, `lastHeader`, `headers(key)`, `toArray()`, iteration), made read-only by `send()` |
 | `ProducerRecord` / `RecordMetadata` getters | the same names, now own `readonly` fields, which a spread and `JSON.stringify` keep; `structuredClone` / `postMessage` keep every field but `headers`, which becomes `{}` |
@@ -678,14 +678,12 @@ message is the cause's `String()`, as Java's is `cause.toString()`) and
 `TypeError` when constructed. The constructors that take a payload
 (`TopicAuthorizationError`'s topics, ...) are not translated yet, and a class
 whose every Java constructor takes one (`QuotaViolationError`, ...) cannot be
-constructed: the client builds it when the core reports it. A
-config value of the wrong JavaScript type for its key, the value of a key
-Java's `ProducerConfig` does not define that is not a string, a number or a
-boolean, `key.serializer` and `value.serializer` (a serializer is a
-constructor argument) and a `kafkaJS` block (the KafkaJS-compatible API's
-configuration; see the migration guide) throw a `ConfigError`, with Java's
-message where Java has one; any other value of the wrong JavaScript type throws a
-`TypeError`, and so does a topic, header key or config key or value holding a
+constructed: the client builds it when the core reports it. The
+configuration is checked by the client's core, which throws a `ConfigError`
+with Java's message naming the key (`{ 'linger.ms': true }` fails with "Not a
+number of type LONG"); `key.serializer` and `value.serializer` throw a
+`ConfigError` too (a serializer is a constructor argument). Any other value
+of the wrong JavaScript type throws a `TypeError`, and so does a topic, header key or config key or value holding a
 null byte (`"topic must be a string without null bytes"`), which C would read
 as the end of the string; keys, values and header values are bytes and may
 hold any. The core's error for a null mandatory argument (`LOCAL_NULL_POINTER`,
