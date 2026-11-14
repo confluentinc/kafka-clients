@@ -29,6 +29,7 @@ const { spawn, spawnSync } = require('node:child_process');
 
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 
 const common = require('../_common');
 const { ArgumentParserError } = common;
@@ -358,7 +359,14 @@ test('parse_args minimal', () => {
     ['t', 'b:9092', -1, -1, -1],
   );
   assert.deepEqual([res.createTime, res.valuePrefix, res.repeatingKeys], [-1, null, null]);
-  assert.deepEqual(props, { 'bootstrap.servers': 'b:9092', acks: '-1', retries: '0' });
+  // Java's StringSerializer for both, as its factory in the serde config keys.
+  assert.deepEqual(props, {
+    'bootstrap.servers': 'b:9092',
+    acks: '-1',
+    retries: '0',
+    'key.serializer': stringSerializer,
+    'value.serializer': stringSerializer,
+  });
 });
 
 test('parse_args every option', () => {
@@ -430,6 +438,8 @@ test('the command config overrides the command line', () => {
     'bootstrap.servers': 'b',
     acks: '1',
     retries: '5',
+    'key.serializer': stringSerializer,
+    'value.serializer': stringSerializer,
     'linger.ms': '10',
     'client.id': 'tool',
   });

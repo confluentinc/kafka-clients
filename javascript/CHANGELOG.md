@@ -116,10 +116,11 @@ newer.
   reads them after `send()` returns, so don't write to them, transfer them or
   resize them until the Promise from `send()` settles (awaiting `send()` is
   enough), and a serializer must return a new Buffer for each record. The
-  client holds a reference on each until then. A string key or value is encoded to
-  UTF-8 as Java's `StringSerializer` encodes it, a lone surrogate as `?` (Node
-  writes U+FFFD), and so are the header keys and the config keys and values;
-  topic names are not.
+  client holds a reference on each until then. A string key or value needs
+  `stringSerializer()`, which encodes it to UTF-8 as Java's `StringSerializer`
+  does, a lone surrogate as `?` (Node writes U+FFFD); without a serializer it
+  throws `TypeError` pointing to `stringSerializer()`. Header keys and config
+  keys and values are encoded the same way; topic names are not.
 - `send({ record, callback })` (or `send(record)`) resolves at hand-over with a
   `KafkaFuture` whose `get()` settles at delivery; `flush()` and `close()` /
   `close(timeout)`, a timeout being milliseconds or a `Temporal.Duration`

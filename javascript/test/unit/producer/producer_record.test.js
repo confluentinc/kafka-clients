@@ -338,11 +338,11 @@ test('values of the wrong type are TypeErrors', () => {
   assert.equal(typed.value, order);
   assert.throws(() => typed.internalToNative(), {
     name: 'TypeError',
-    message: 'key must be a Buffer, a Uint8Array, a string or null when the producer has no key serializer',
+    message: 'key must be a Buffer, a Uint8Array or null when the producer has no key serializer',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', value: {} }).internalToNative(), {
     name: 'TypeError',
-    message: 'value must be a Buffer, a Uint8Array, a string or null when the producer has no value serializer',
+    message: 'value must be a Buffer, a Uint8Array or null when the producer has no value serializer',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', partition: 1.5, key: null, value: 'v' }), {
     name: 'TypeError',
@@ -395,24 +395,36 @@ test("the caller's key and value bytes cross as they are, for the addon to borro
   assert.equal(headers, null);
 });
 
-test('strings are encoded as UTF-8 and null stays null', () => {
+test('a string key or value points to stringSerializer(); null stays null', () => {
   const r = new ProducerRecord({
     topic: 't',
     partition: null,
-    key: 'clé',
+    key: null,
     value: null,
     headers: [H('h', bytes('é')), H('n', null)],
   });
   const [, partition, timestamp, k, v, headers] = r.internalToNative();
   assert.equal(partition, -1);
   assert.equal(timestamp, -1n);
-  assert.deepEqual(k, Buffer.from('clé', 'utf8'));
+  assert.equal(k, null);
   assert.equal(v, null);
   assert.deepEqual(keysAsText(headers), [['h', bytes('é')], ['n', null]]);
+  // A string can't reach the FFI as bytes without a serializer (root Q24, Q27);
+  // the headers stay writable.
+  const s = new ProducerRecord({ topic: 't', key: 'clé', value: null });
+  assert.throws(() => s.internalToNative(), {
+    name: 'TypeError',
+    message:
+      "key is a string, and the producer has no key serializer: give the producer keySerializer: stringSerializer() (or 'key.serializer': " +
+      'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+  });
+  s.headers.add({ key: 'still', value: null });
+  // Bytes a serializer returned are what crosses.
+  assert.deepEqual(s.internalToNative(Buffer.from('k'), null).slice(3, 5), [Buffer.from('k'), null]);
 });
 
 test('send seals the headers once the fields are checked, as Java\'s doSend calls setReadOnly', () => {
-  const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [H('a', null)] });
+  const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: Buffer.from('v'), headers: [H('a', null)] });
   r.headers.add({ key: 'b', value: null });
   r.internalToNative();
   const closed = { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' };
@@ -428,7 +440,7 @@ test('send seals the headers once the fields are checked, as Java\'s doSend call
 // constructor checked it, so send() checks nothing again (root conventions,
 // Q35: the binding repeats no precondition).
 test('the record is frozen: a field cannot be reassigned, so send reads what the constructor checked', () => {
-  const r = new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: 'k', value: 'v', headers: [H('h', bytes('x'))] });
+  const r = new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: Buffer.from('k'), value: Buffer.from('v'), headers: [H('h', bytes('x'))] });
   assert.equal(Object.isFrozen(r), true);
   for (const [field, value] of [['value', undefined], ['key', 42], ['partition', -5], ['timestamp', NaN], ['topic', null], ['headers', null]]) {
     // Test files are strict mode: the assignment throws.
@@ -445,7 +457,7 @@ test('the record is frozen: a field cannot be reassigned, so send reads what the
   // A Header keeps its state in private fields: nothing to reassign.
   const header = H('h', null);
   header.value = 'x';
-  const withHeader = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [header] });
+  const withHeader = new ProducerRecord({ topic: 't', partition: null, key: null, value: Buffer.from('v'), headers: [header] });
   assert.deepEqual(keysAsText(withHeader.internalToNative()[5]), [['h', null]]);
 });
 
