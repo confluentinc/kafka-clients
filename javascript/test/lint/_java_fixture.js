@@ -173,6 +173,8 @@ const LIB = {
   equals(o: unknown): boolean;
   equals(options: unknown): boolean { void options; return false; }
   hashCode(): number { return 0; }
+  /** Java's public mutable field \`mode\`, as its setter. */
+  setMode(mode: string): void { void mode; }
   /** A JavaScript addition, on the list of invented names. */
   extraJs(): void {}
   private _native(): void {}

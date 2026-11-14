@@ -131,6 +131,32 @@ interface Native {
     onComplete: (error: unknown, closedNow: boolean) => void,
   ): void;
   producerPump(handle: ProducerHandle): void;
+  // A native producer handle over the FFI's MockProducer, Java's
+  // MockProducer(autoComplete, null, null, null): every producer* function
+  // takes it, through its __as_Producer view.
+  mockProducerCreate(autoComplete: boolean): ProducerHandle;
+  // A mock's send of the app's own record, which the mock keeps: its key and
+  // value cross as the FFI's `void *`, never read (native/producer.c,
+  // MockRecord). The completions are producerSend's.
+  mockProducerSend(
+    handle: ProducerHandle,
+    topic: string,
+    partition: number,
+    // -1n for Java's null.
+    timestamp: bigint,
+    record: object,
+    onHandover: (error: unknown, future: number | null) => void,
+    onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
+  ): void;
+  // The records the mock holds, the app's own, in send order.
+  mockProducerHistory(handle: ProducerHandle): object[];
+  mockProducerClear(handle: ProducerHandle): void;
+  // Java's public error field of the mock, set to `error` or cleared by null.
+  mockProducerSetError(handle: ProducerHandle, field: 'send' | 'flush' | 'partitionsFor' | 'close', error: Error | null): void;
+  // Java's errorNext(error), completeNext() for null: whether a send waited.
+  mockProducerCompleteNext(handle: ProducerHandle, error: Error | null): boolean;
+  // Java's closed() or flushed().
+  mockProducerState(handle: ProducerHandle, which: 'closed' | 'flushed'): boolean;
   // A wait on a record's future through get_cb (timeoutMs null) or
   // get_with_timeout_cb; `done` runs once it completed, from the producer's
   // drain, or inside the call once the producer is destroyed. timedOut: the

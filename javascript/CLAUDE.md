@@ -625,6 +625,47 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   hold the statics, as `Admin.create()`'s will).
 - `KafkaProducer` has `close()` and `[Symbol.asyncDispose]()`, which calls
   `close()`, so `await using` closes it.
+- `MockProducer` (`src/producer/mock_producer.ts`) wraps the FFI's
+  `MockProducer` (root conventions, Implementation over the FFI, Q62): the
+  addon builds it through `MockProducerOptionsBuilder` and
+  `MockProducer_with_options` (`autoComplete` set, the cluster left
+  `Cluster.empty()`, no partitioner and no serializers), and it is the same
+  native handle as a `KafkaProducer`'s, over its `__as_Producer` view, so
+  `send`, `flush`, `close`, `partitionsFor` and `metrics` go through the
+  producer's `_cb` twins and drain, with the same lifetime rules (rules 3, 5,
+  6, 10: no closed flag, `close()` keeps the handle, the finalizer destroys
+  only a closed mock, which `MockProducer_closed` decides, as a close that
+  threw `closeException` leaves Java's mock open). Its constructors are
+  Java's `()` and `{ autoComplete, partitioner, keySerializer,
+  valueSerializer }`, `partitioner` typed `Partitioner | null`, the
+  placeholder (Scope, Q30), and never called, as the cluster is empty; the
+  `Cluster` form is left out. A send passes the app's `ProducerRecord`: its
+  key and value cross as the `void *` addresses of a `MockRecord`'s tags,
+  which the FFI's mock keeps without reading, and the addon holds the record
+  by a reference from the send until `clear()` (for a record a hand-over
+  took) or the destroy (`native/producer.c`, `MockRecord`), so `history()`
+  returns the app's own records; no header crosses, the record keeping its
+  own, writable, as Java's mock leaves them. The serializers run in
+  JavaScript on every send, key then value, with fresh empty `Headers` (Java
+  serializes so when the cluster has no partition), awaited when they return
+  a thenable, and what they return is not kept; a null one is not run, as
+  the core's mock skips it *(deviation: Java's dereferences it. Why: the
+  mock is the core's)*. The serializers run before the core's mock checks
+  that it is closed, fenced or has a send error, which Java checks first
+  *(deviation, as for `KafkaProducer`)*. After each send, `completeNext()`
+  and `errorNext()` the mock runs the producer's pump, so a callback runs
+  inside the call that completed its record, as Java's mock runs it. Java's
+  public error fields are setters only (plan §5 item 2, Python's
+  `set_send_exception`): `setSendException`, `setFlushException`,
+  `setPartitionsForException`, `setCloseException`, over
+  `MockProducer_set_*_error`, as `errorNext(e)` is over `error_next`; the
+  addon hands the core a `LocalCallbackError` whose opaque is an
+  `InjectedError` holding the JS value, and `native/error.c` hands that very
+  value back wherever the core reports the error (root conventions, Errors,
+  Q38). Left out: transactions (by request), `setMockMetrics` (the FFI takes
+  a native `KafkaMetric_t`, which the binding cannot build), and the
+  telemetry and metric-subscription calls (no FFI); `metrics()` is therefore
+  always empty. The mock emits no preview warning.
 - A Java `long` is a `bigint` (root conventions, Types): returned always as a
   `bigint` (`RecordMetadata.offset` and `.timestamp`, `ProducerRecord.timestamp`,
   a `long` constant such as `SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN`),
@@ -789,7 +830,8 @@ The layout is the root conventions' (Layout and modules).
   function, drain, keep-alive and teardown (each client embeds a
   `CallbackQueue` and passes its own `__execute_callbacks`); `error.c`,
   `record.c` (`ProducerRecord`, the borrowed key and value, and
-  headers), `producer.c` (the `KafkaProducer` handle).
+  headers), `producer.c` (the `KafkaProducer` and `MockProducer` handles,
+  which share one native handle type).
 - `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
   per Java package (`clients` dropped), one public Java type per file,
   snake_case names. The package's own helpers are in `src/internal/` (never
@@ -1038,7 +1080,8 @@ The rules, each named in its finding:
   `check-public-audience`, `check-no-deprecated-translation`: every export
   translates a public, live Java class by name (or is listed), in its file,
   every public member a Java member, and every public Java member is
-  translated (an enum's `java.lang.Enum` members and `toJSON()` included).
+  translated (an enum's `java.lang.Enum` members and `toJSON()` included, a
+  public mutable field as its setter `set<Field>`, plan §5 item 2).
 - `check-invented-names`: every entry of `lint-mapping.json` is needed and
   resolves, and an invented options type is named `...Args`.
 - `check-module-exports`: each package has one import path; an index
@@ -1110,7 +1153,7 @@ The rules, each named in its finding:
   its constructor (through the `src/` functions it calls, as
   `check-waiting-call-promise` follows a method) or a field initializer
   reaching a `native.<fn>` use, as the mocks wrap the FFI's mocks (root
-  conventions, Implementation over the FFI, Q62). There is no mock yet.
+  conventions, Implementation over the FFI, Q62): `MockProducer` today.
 - `check-encode-callers`: only the string serializer (`src/common/serialization/`),
   the headers code (`src/common/header/`) and the config code
   (`src/internal/config.ts`) use `encodeLikeJava` (root conventions, Types,

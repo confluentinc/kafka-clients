@@ -172,6 +172,13 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"producerMetrics", NULL, js_producer_metrics, NULL, NULL, NULL, napi_default, NULL},
         {"producerClose", NULL, js_producer_close, NULL, NULL, NULL, napi_default, NULL},
         {"producerPump", NULL, js_producer_pump, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerCreate", NULL, js_mock_producer_create, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerSend", NULL, js_mock_producer_send, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerHistory", NULL, js_mock_producer_history, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerClear", NULL, js_mock_producer_clear, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerSetError", NULL, js_mock_producer_set_error, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerCompleteNext", NULL, js_mock_producer_complete_next, NULL, NULL, NULL, napi_default, NULL},
+        {"mockProducerState", NULL, js_mock_producer_state, NULL, NULL, NULL, napi_default, NULL},
         {"recordFutureGet", NULL, js_record_future_get, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);

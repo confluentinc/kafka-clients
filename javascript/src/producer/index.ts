@@ -18,20 +18,35 @@
  *
  * Transactions aren't in the preview: `KafkaProducer`'s transaction calls
  * (`initTransactions`, `beginTransaction`, `sendOffsetsToTransaction`,
- * `commitTransaction`, `abortTransaction`) come in a later release.
+ * `commitTransaction`, `abortTransaction`) come in a later release, and so
+ * do `MockProducer`'s (those five, `fenceProducer`, `transactionInitialized`,
+ * `transactionInFlight`, `transactionCommitted`, `transactionAborted`,
+ * `sentOffsets`, `commitCount`, `uncommittedRecords`,
+ * `consumerGroupOffsetsHistory`, `uncommittedOffsets` and their error
+ * fields).
  *
  * Left out because the C FFI has no entry point for them:
  * `KafkaProducer.clientInstanceId`, `registerMetricForSubscription` and
- * `unregisterMetricFromSubscription`.
+ * `unregisterMetricFromSubscription`, and `MockProducer`'s
+ * `clientInstanceId`, `disableTelemetry`, `injectTimeoutException`,
+ * `setClientInstanceId`, `registerMetricForSubscription`,
+ * `unregisterMetricFromSubscription` and `addedMetrics`.
+ * `MockProducer.setMockMetrics` is left out too: the FFI takes a native
+ * `KafkaMetric`, which the binding cannot build.
  *
- * Serializers: what a string key or value gets without a serializer, and
- * the built-in serializer factories, come with the serdes; whether a
- * serializer's methods must all be async is not decided yet (Q50).
+ * Left out because it takes an untranslated type (Q30):
+ * `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`, so a
+ * mock's cluster is always Java's `Cluster.empty()`.
+ *
+ * Serializers: whether a serializer's methods must all be async is not
+ * decided yet (Q50).
  *
  * @packageDocumentation
  */
 
 export { KafkaProducer } from './kafka_producer';
+export { MockProducer } from './mock_producer';
+export type { Partitioner } from './partitioner';
 export type { Producer } from './producer';
 export type { CloseArgs } from './kafka_producer';
 export type { ProducerConfigs } from './producer_configs';

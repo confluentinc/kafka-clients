@@ -16,7 +16,8 @@
 
 // J3 check-java-completeness (root CLAUDE.md DoD #2: every method of the
 // translated class is implemented): every public, non-deprecated Java
-// constructor, method and `public static final` constant of a class an
+// constructor, method, `public static final` constant and public mutable
+// field (as its setter, `set<Field>`, plan §5 item 2) of a class an
 // exported class translates has its TypeScript member, by the mapping of
 // scripts/lint/java_ts.js. One finding per Java name (`missing
 // <Class>#<member>`, the overloads of a name are one TypeScript function), so
@@ -86,6 +87,8 @@ module.exports = {
       const wanted = [];
       for (const f of cls.fields) {
         if (f.visibility === 'public' && f.static && f.final && !f.deprecated) wanted.push(f.name);
+        // A public mutable field is asked for as its setter (javaMember).
+        else if (f.visibility === 'public' && !f.static && !f.final && !f.deprecated) wanted.push(f.name);
       }
       if (!constantsOnly(cls)) {
         for (const o of cls.overloads) {

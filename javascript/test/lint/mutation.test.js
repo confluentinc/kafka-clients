@@ -525,8 +525,8 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    if (p->kp != NULL) cbq_drain(env, &p->queue);',
-        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err));',
+        '    if (producer_alive(p)) cbq_drain(env, &p->queue);',
+        '    if (producer_alive(p)) cbq_drain(env, &p->queue);\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err));',
       ),
   },
   {
@@ -646,7 +646,7 @@ MUTATIONS.push(
     rule: 'check-zero-copy',
     what: "the send's reference on the value's Buffer gone",
     apply: (root) =>
-      edit(root, 'native/producer.c', '        || (!ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)\n', ''),
+      edit(root, 'native/producer.c', '        || (!ctx->value.is_null && napi_create_reference(env, value, 1, &ctx->value_ref) != napi_ok)\n', ''),
   },
   {
     rule: 'check-string-encoding',
@@ -705,7 +705,7 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    int open = p->kp != NULL && !cbq_is_closed(&p->queue);\n    if (p->kp != NULL && cbq_is_closed(&p->queue)) producer_destroy(env, p);\n',
+        '    int open = producer_alive(p) && !cbq_is_closed(&p->queue);\n    if (producer_alive(p) && cbq_is_closed(&p->queue)) producer_destroy(env, p);\n',
         '    int open = 0;\n    if (p->kp != NULL) producer_destroy(env, p);\n',
       ),
   },
@@ -797,13 +797,12 @@ MUTATIONS.push(
     },
   },
   {
-    // An empty mock translates none of Java's members either.
-    rules: ['check-java-completeness', 'check-mock-native'],
-    what: 'a MockProducer translated in TypeScript, holding no native handle',
+    rule: 'check-mock-native',
+    what: "a MockProducer whose constructor builds no FFI mock, holding no native handle",
     apply: (root) => {
-      const header = fs.readFileSync(path.join(root, 'src/producer/index.ts'), 'utf8').split(LICENSE_END)[0] + LICENSE_END;
-      add(root, 'src/producer/mock_producer.ts', `${header}\nexport class MockProducer {}\n`);
-      edit(root, 'src/producer/index.ts', "export { KafkaProducer } from './kafka_producer';\n", "export { KafkaProducer } from './kafka_producer';\nexport { MockProducer } from './mock_producer';\n");
+      edit(root, 'src/producer/mock_producer.ts', '    this.#handle = native.mockProducerCreate(autoComplete);\n', '    void autoComplete;\n    this.#handle = {};\n');
+      // The addon's function is still used, outside the class.
+      edit(root, 'src/producer/mock_producer.ts', '/** The native producer handle', 'function nativeMock(): object {\n  return native.mockProducerCreate(false);\n}\nvoid nativeMock;\n\n/** The native producer handle');
     },
   },
   {

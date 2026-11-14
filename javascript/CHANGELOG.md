@@ -79,6 +79,16 @@ newer.
 
 - `KafkaProducer`, `ProducerRecord`, `RecordMetadata`, Java's `Callback` and,
   from `common`, `KafkaFuture` and `KafkaError`, over the Rust client's C FFI.
+- `MockProducer`, Java's mock, over the Rust client's own mock through the
+  C FFI, implementing `Producer`: the constructors `()` and `{ autoComplete,
+  partitioner, keySerializer, valueSerializer }`, `send`, `flush`, `close`,
+  `partitionsFor`, `metrics`, `history()` (the app's own records),
+  `clear()`, `completeNext()`, `errorNext(e)`, `closed()` and `flushed()`,
+  and Java's public error fields as the setters `setSendException`,
+  `setFlushException`, `setPartitionsForException` and `setCloseException`,
+  whose calls throw the very error given. The serializers run on every send.
+  Its `Cluster` constructor, transactions, `setMockMetrics` and the telemetry
+  calls are left out.
 - Java's `Producer` interface, a TypeScript interface that `KafkaProducer`
   implements. `KafkaFuture` is an abstract class, as Java's is: constructing
   it throws `TypeError`, and a subclass may be built. `DisconnectError` and

@@ -234,6 +234,12 @@ kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, i
                                               int64_t timestamp, const JsBytes* key,
                                               const JsBytes* value, napi_value headers);
 
+// producer.c: the JS value an error JS gave a mock carries, for the
+// LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
+// is not one (another callback's error) or its value is gone (the mock
+// destroyed).
+napi_value injected_error_value(napi_env env, void* opaque);
+
 // ---- the native functions addon.c registers -----------------------------------
 
 // error.c: setFactories(errorFactory, metadataFactory).
@@ -241,6 +247,13 @@ napi_value js_set_factories(napi_env env, napi_callback_info info);
 
 // producer.c: the KafkaProducer handle.
 napi_value js_producer_create(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_create(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_send(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_history(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_clear(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_set_error(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_complete_next(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_state(napi_env env, napi_callback_info info);
 napi_value js_producer_send(napi_env env, napi_callback_info info);
 napi_value js_producer_flush(napi_env env, napi_callback_info info);
 napi_value js_producer_partitions_for(napi_env env, napi_callback_info info);

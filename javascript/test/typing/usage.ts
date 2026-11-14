@@ -28,6 +28,8 @@ import {
   type Callback,
   type CloseArgs,
   KafkaProducer,
+  MockProducer,
+  type Partitioner,
   type Producer,
   ProducerConfig,
   type ProducerConfigs,
@@ -733,3 +735,43 @@ async function serializers(): Promise<void> {
   await Promise.all([typed.close(), bytes.close(), half.close()]);
 }
 void serializers;
+
+// MockProducer: Java's Producer, over the FFI's mock. Its type arguments are
+// inferred from its serializers; a mock built without them is the one place
+// a type argument is written (Q27).
+async function mocks(): Promise<void> {
+  const typed = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: stringSerializer(), valueSerializer: orderSerializer });
+  expectTypeOf(typed).toEqualTypeOf<MockProducer<string, Order>>();
+  const asInterface: Producer<string, Order> = typed;
+  expectTypeOf(asInterface.send).returns.toEqualTypeOf<Promise<KafkaFuture<RecordMetadata>>>();
+  await typed.send(new ProducerRecord({ topic: 't', key: 'k', value: { id: 1 } }));
+  // @ts-expect-error a number key for a string serializer
+  await typed.send(new ProducerRecord({ topic: 't', key: 1, value: { id: 1 } }));
+  expectTypeOf(typed.history()).toEqualTypeOf<Array<ProducerRecord<string, Order>>>();
+  expectTypeOf(typed.completeNext()).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.errorNext(new Error('e'))).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.errorNext({ e: null })).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.closed()).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.flushed()).toEqualTypeOf<boolean>();
+  typed.setSendException(new KafkaError('send'));
+  typed.setFlushException({ flushException: null });
+  typed.setPartitionsForException(null);
+  typed.setCloseException({ closeException: new Error('close') });
+  // @ts-expect-error an error to throw is an Error
+  typed.setSendException('boom');
+  typed.clear();
+  // Java's MockProducer() binds nothing: the type arguments are written.
+  const untyped: MockProducer<string, string> = new MockProducer<string, string>();
+  await untyped.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
+  // The partitioner is Java's untranslated Partitioner, a placeholder.
+  const partitioner: Partitioner = { partition: () => 0 };
+  void new MockProducer({ autoComplete: false, partitioner, keySerializer: null, valueSerializer: null });
+  // @ts-expect-error Java's forms take all four parameters or none
+  void new MockProducer({ autoComplete: true });
+  // @ts-expect-error a mock's cluster is always empty: Java's Cluster form is left out
+  void new MockProducer({ cluster: null, autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null });
+  await using disposed = new MockProducer<Uint8Array, Uint8Array>();
+  void disposed;
+  await Promise.all([typed.close(), untyped.close()]);
+}
+void mocks;
