@@ -981,6 +981,11 @@ The rules, each named in its finding:
 - `check-string-encoding`: `encodeLikeJava` in `src/internal/encode.ts` is the
   only place a string becomes bytes (no `Buffer.from(string)`, `TextEncoder`
   or string write elsewhere).
+- `check-no-closed-flag`: no class of `src/` and no C struct of `native/`
+  has a field for a closed or closing state, and no string literal holds
+  one of Java's closed-client messages ("Cannot perform operation after
+  producer has been closed", ...), which only the core reports (root
+  conventions, Implementation over the FFI, Q61; boundary rules 1 and 10).
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.

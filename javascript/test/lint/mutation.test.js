@@ -757,6 +757,15 @@ MUTATIONS.push(
   },
 );
 
+// The checks of what the binding must not keep or repeat (javascript/CLAUDE.md, The rule linter).
+MUTATIONS.push(
+  {
+    rule: 'check-no-closed-flag',
+    what: 'a closed flag on the producer',
+    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer implements Producer {\n', 'export class KafkaProducer implements Producer {\n  #closed = false;\n'),
+  },
+);
+
 for (const m of MUTATIONS) {
   const rules = m.rules || [m.rule];
   test(`${m.what} fails exactly ${rules.join(' and ')}`, () => {
