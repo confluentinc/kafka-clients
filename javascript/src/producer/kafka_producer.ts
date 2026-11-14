@@ -430,11 +430,6 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * serializes. Why: the binding keeps no state, and the conversion runs in
    * JavaScript before the call reaches the core.)*
    *
-   * The record is typed `ProducerRecord<K | null, V | null>`: a record built
-   * with a `null` key or value is a `ProducerRecord<null, ...>`, as
-   * `ProducerRecord` has one signature per Java constructor, which binds a
-   * `null` argument to `null` rather than `never`.
-   *
    * Inside a callback, do not call `flush()` or `close()` of the same
    * producer, run a transaction call, or await the future of a record sent
    * later: each waits for the callback itself. Before the callback's first
@@ -444,7 +439,7 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord<K | null, V | null>;
+    record: ProducerRecord<K, V>;
     /**
      * A user-supplied callback to execute when the record has been
      * acknowledged by the server (null indicates no callback).
@@ -461,7 +456,7 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord<K | null, V | null>;
+    record: ProducerRecord<K, V>;
     callback?: never;
   }): Promise<KafkaFuture<RecordMetadata>>;
   /**
@@ -472,7 +467,7 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * @returns resolving at hand-over to the future of the record's metadata,
    *   rejecting with the error Java's send() would throw
    */
-  send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
+  send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
   send(options: unknown): Promise<KafkaFuture<RecordMetadata>> {
     try {
       return this.#send(options, arguments.length);

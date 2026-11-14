@@ -405,10 +405,10 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
 - A `null` key or value binds `never` (root conventions, Class family, Q26),
   through extra TypeScript signatures for the null combinations, as Python's
   Binding rule adds one stub per combination beside its one stub per Java
-  overload, so the per-form rule (Q15) and the binding (Q26) both hold. It
-  applies once a class is generic over a key and a value: today neither
-  `KafkaProducer` nor `ProducerRecord` is (no serializer is translated, so a
-  key or value is `Data`), so there is nothing to bind.
+  overload, so the per-form rule (Q15) and the binding (Q26) both hold:
+  `ProducerRecord`'s constructor has, before each Java constructor's
+  signature, one with a `null` key, one with a `null` value and one with
+  both, each typed `null`, and `send` takes a `ProducerRecord<K, V>`.
 - Signatures (root conventions, Signatures): one Java overload set is one
   method taking one options object of Java's parameter names
   (`new KafkaProducer({configs})`, `send({record, callback})`,
@@ -494,15 +494,10 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   is not decided yet in the root conventions. `close()` closes both serializers once
   the core reports the producer closed; a construction the core fails with
   Java's relabelled "Failed to construct kafka producer" closes them too.
-  **(root conflict)** The root conventions' Class family says an omitted or
-  `null` key or value binds `never`, and their Signatures say each Java form
-  has one TypeScript overload signature. With one signature per Java
-  constructor, TypeScript binds a `null` argument to `null`, not `never`
-  (binding `never` needs extra signatures per null combination, as Python's
-  binding stubs have, which the plan's B4 adds: plan §5, item 7); the code
-  follows Signatures, so a record built with
-  `key: null` is a `ProducerRecord<null, ...>`, and `send` takes a
-  `ProducerRecord<K | null, V | null>`, noted in its `@remarks`.
+  An omitted or `null` key or value binds `never` (root conventions, Class
+  family, Q26), through extra `ProducerRecord` signatures for the null
+  combinations beside each Java constructor's, so `send` takes the
+  `ProducerRecord<K, V>` of the producer's serializers.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with

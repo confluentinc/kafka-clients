@@ -33,8 +33,9 @@
 //     signature translates one form (forms whose parameters have the same
 //     names, `KafkaProducer(Map)` / `(Properties)`, being one), a form of no
 //     parameter having a signature of none (`signature-per-form` otherwise);
-//   - or one signature per Java form (`ProducerRecord`): each names
-//     exactly its form's parameters, required (`signature-form` otherwise),
+//   - or one signature per Java form (`ProducerRecord`), plus those of its
+//     null combinations (a property typed `null`, which binds `never`): each
+//     names exactly its form's parameters, required (`signature-form` otherwise),
 //     and closes every name of the other forms with a property typed `never`
 //     (`option-unclosed` otherwise);
 //   - a signature taking one parameter named as a one-parameter form's is that
@@ -301,8 +302,14 @@ module.exports = {
           message: `takes no bare value, though ${javaName}'s form ${formText(f)} has one parameter: add a signature taking ${[...bareNames][0]} on its own`,
         });
       }
-      const neverProp = (prop, sig) =>
-        (checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(prop, sig.parameters[0])).flags & ts.TypeFlags.Never) !== 0;
+      // A property typed `null` is taken: the signature of a null key or value,
+      // which binds `never` (root CLAUDE.md, JavaScript Binding Conventions,
+      // Class family, Q26), names its form's parameters as the form's own does.
+      const neverProp = (prop, sig) => {
+        const type = checker.getTypeOfSymbolAtLocation(prop, sig.parameters[0]);
+        if ((type.flags & ts.TypeFlags.Null) !== 0) return false;
+        return (checker.getNonNullableType(type).flags & ts.TypeFlags.Never) !== 0;
+      };
       if (optionSigs.length > 1) {
         // One signature per Java form, so that the declarations accept a
         // form's parameters only: each names exactly its form's parameters,

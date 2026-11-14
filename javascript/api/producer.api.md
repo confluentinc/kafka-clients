@@ -55,14 +55,14 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     partitionsFor(topic: string): Promise<PartitionInfo[]>;
     static readonly PRODUCER_METRIC_GROUP_NAME: string;
     send(options: {
-        record: ProducerRecord<K | null, V | null>;
+        record: ProducerRecord<K, V>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord<K | null, V | null>;
+        record: ProducerRecord<K, V>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
@@ -78,14 +78,14 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
     }): Promise<PartitionInfo[]>;
     partitionsFor(topic: string): Promise<PartitionInfo[]>;
     send(options: {
-        record: ProducerRecord<K | null, V | null>;
+        record: ProducerRecord<K, V>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord<K | null, V | null>;
+        record: ProducerRecord<K, V>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
@@ -165,9 +165,57 @@ export class ProducerRecord<out K = never, out V = never> {
         topic: string;
         partition: number | null;
         timestamp: bigint | number | null;
+        key: null;
+        value: null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: null;
+        value: V | null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: K | null;
+        value: null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
         key: K | null;
         value: V | null;
         headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: null;
+        value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: K | null;
+        value: null;
+        headers?: never;
     });
     constructor(options: {
         topic: string;
@@ -181,9 +229,57 @@ export class ProducerRecord<out K = never, out V = never> {
         topic: string;
         partition: number | null;
         timestamp?: never;
+        key: null;
+        value: null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: null;
+        value: V | null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: K | null;
+        value: null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
         key: K | null;
         value: V | null;
         headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: null;
+        value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: K | null;
+        value: null;
+        headers?: never;
     });
     constructor(options: {
         topic: string;
@@ -197,8 +293,40 @@ export class ProducerRecord<out K = never, out V = never> {
         topic: string;
         partition?: never;
         timestamp?: never;
+        key: null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key: null;
+        value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key: K | null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
         key: K | null;
         value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key?: never;
+        value: null;
         headers?: never;
     });
     constructor(options: {

@@ -49,7 +49,7 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord<K | null, V | null>;
+    record: ProducerRecord<K, V>;
     /**
      * A user-supplied callback to execute when the record has been
      * acknowledged by the server (null indicates no callback).
@@ -64,7 +64,7 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord<K | null, V | null>;
+    record: ProducerRecord<K, V>;
     callback?: never;
   }): Promise<KafkaFuture<RecordMetadata>>;
   /**
@@ -73,7 +73,7 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * @param record - The record to send
    * @returns resolving at hand-over to the future of the record's metadata
    */
-  send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
+  send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
 
   /**
    * See `KafkaProducer.flush()`.
