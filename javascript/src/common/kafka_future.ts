@@ -31,7 +31,7 @@
 // runs them.
 
 import { JavaForms } from '../internal/args';
-import { isDurationOrNull, waitDurationToMillis } from '../internal/duration';
+import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { create } from '../internal/throwable';
 import { CancellationError } from '../cancellation_error';
 import type { Duration } from '../duration';
@@ -608,7 +608,7 @@ export class KafkaFuture<T> {
     let millis: number | bigint;
     try {
       if (GET_FORMS.match(options, arguments.length) === 0) return this.#get();
-      millis = waitDurationToMillis(GET_FORMS.value(options, 'timeout'), 'timeout');
+      millis = durationToMillis(GET_FORMS.value(options, 'timeout'), 'timeout');
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
       return Promise.reject(error);

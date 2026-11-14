@@ -645,11 +645,14 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
 }
 
 // producerClose(handle, timeoutMs, done): Producer.close() for a timeoutMs of
-// -1 (the timeout left out), else close(Duration.ofMillis(timeoutMs)), through the `_cb`
-// twins. timeoutMs is a number, or a bigint for a value a number does not
-// hold exactly (Long.MAX_VALUE, the no-limit timeout of src/internal/duration.ts).
-// `done(error | null, closedNow)` runs once the close completed (close_on_complete).
-// A close of a producer already closed goes to the core too.
+// null (the form without a timeout), else close(Duration.ofMillis(timeoutMs)),
+// through the `_cb` twins: the form called picks the call, never the value. A
+// negative timeoutMs goes to the core as it is, which rejects it with Java's
+// IllegalArgumentException. timeoutMs is a number, or a bigint for a value a
+// number does not hold exactly (Long.MAX_VALUE, the no-limit timeout of
+// src/internal/duration.ts). `done(error | null, closedNow)` runs once the
+// close completed (close_on_complete). A close of a producer already closed
+// goes to the core too.
 napi_value js_producer_close(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value argv[3];
@@ -662,8 +665,11 @@ napi_value js_producer_close(napi_env env, napi_callback_info info) {
     if (p == NULL) return NULL;
     napi_valuetype type;
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    int timed = type != napi_null;
     int64_t timeout = 0;
-    if (type == napi_bigint) {
+    if (!timed) {
+        // Java's close(): no timeout to read.
+    } else if (type == napi_bigint) {
         bool lossless = false;
         NAPI_CHECK(env, napi_get_value_bigint_int64(env, argv[1], &timeout, &lossless), NULL);
         if (!lossless) {
@@ -684,9 +690,7 @@ napi_value js_producer_close(napi_env env, napi_callback_info info) {
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
-    // -1: the timeout was left out, Java's close() (src/ refuses a negative
-    // timeout before this call).
-    if (timeout == -1) kafka_producer_Producer_close_cb(p->view, close_on_complete, ctx);
+    if (!timed) kafka_producer_Producer_close_cb(p->view, close_on_complete, ctx);
     else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);
     return NULL;
 }

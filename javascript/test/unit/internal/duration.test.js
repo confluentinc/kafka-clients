@@ -26,7 +26,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Temporal: Polyfill } = require('@js-temporal/polyfill');
 
-const { durationToMillis, NEGATIVE_TIMEOUT_MESSAGE, UNBOUNDED_MILLIS, waitDurationToMillis } = require('../../../dist/internal/duration');
+const { durationToMillis, UNBOUNDED_MILLIS } = require('../../../dist/internal/duration');
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 
 const TEMPORALS = [['the polyfill', Polyfill]];
@@ -50,15 +50,18 @@ test("Infinity is no limit: Java's Long.MAX_VALUE milliseconds, exactly", () => 
   assert.equal(UNBOUNDED_MILLIS, 9223372036854775807n);
 });
 
-test("a negative timeout is Java's IllegalArgumentException", () => {
-  for (const value of [-1, -0.5, -Number.MAX_SAFE_INTEGER, -(2 ** 70)]) {
-    assert.throws(() => durationToMillis(value, 'timeout'), (e) => {
-      assert.ok(e instanceof IllegalArgumentError);
-      assert.equal(e.message, 'The timeout cannot be negative.');
-      return true;
-    });
-  }
-  assert.equal(NEGATIVE_TIMEOUT_MESSAGE, 'The timeout cannot be negative.');
+test('a negative timeout is returned as it is, for the FFI to check: the binding repeats no precondition', () => {
+  // Rounded down as a positive one is: -0.5 is -1 ms.
+  assert.equal(durationToMillis(-1, 'timeout'), -1);
+  assert.equal(durationToMillis(-0.5, 'timeout'), -1);
+  assert.equal(durationToMillis(-5, 'timeout'), -5);
+  assert.equal(durationToMillis(-Number.MAX_SAFE_INTEGER, 'timeout'), -Number.MAX_SAFE_INTEGER);
+  assert.equal(durationToMillis(Polyfill.Duration.from({ milliseconds: -3 }), 'timeout'), -3);
+  // A count a number does not hold exactly is a RangeError either way.
+  assert.throws(() => durationToMillis(-(2 ** 60), 'timeout'), {
+    name: 'RangeError',
+    message: 'timeout of -1152921504606847000 ms is below -Number.MAX_SAFE_INTEGER ms',
+  });
 });
 
 test('NaN, -Infinity and a number above Number.MAX_SAFE_INTEGER are RangeErrors', () => {
@@ -107,14 +110,9 @@ for (const [label, Temporal] of TEMPORALS) {
     assert.equal(durationToMillis(Temporal.Duration.from('PT0.25S'), 'timeout'), 250);
   });
 
-  test(`a negative Temporal.Duration (${label}) is Java's negative-timeout error, as is one rounding below zero`, () => {
-    for (const d of [Temporal.Duration.from({ seconds: -1 }), Temporal.Duration.from({ nanoseconds: -1 })]) {
-      assert.throws(() => durationToMillis(d, 'timeout'), (e) => {
-        assert.ok(e instanceof IllegalArgumentError);
-        assert.equal(e.message, 'The timeout cannot be negative.');
-        return true;
-      });
-    }
+  test(`a negative Temporal.Duration (${label}) is a negative count, as is one rounding below zero`, () => {
+    assert.equal(durationToMillis(Temporal.Duration.from({ seconds: -1 }), 'timeout'), -1000);
+    assert.equal(durationToMillis(Temporal.Duration.from({ nanoseconds: -1 }), 'timeout'), -1);
   });
 
   test(`a Temporal.Duration (${label}) with years, months or weeks is a RangeError`, () => {
@@ -151,22 +149,4 @@ test('a Temporal.Duration is recognised by its toStringTag alone', () => {
     name: 'RangeError',
     message: 'timeout of 18446744073709552000 ms is above Number.MAX_SAFE_INTEGER ms; pass Infinity for no limit',
   });
-});
-
-test("a wait's Duration (KafkaFuture.get) reads the same, a negative one returned as it is", () => {
-  // Java's CompletableFuture.get(timeout, unit) does not refuse a negative timeout: it waits for no time.
-  assert.equal(waitDurationToMillis(-5, 'timeout'), -5);
-  assert.equal(waitDurationToMillis(-0.5, 'timeout'), -1);
-  assert.equal(waitDurationToMillis(Polyfill.Duration.from({ milliseconds: -3 }), 'timeout'), -3);
-  assert.equal(waitDurationToMillis(1500.9, 'timeout'), 1500);
-  assert.equal(waitDurationToMillis(Infinity, 'timeout'), UNBOUNDED_MILLIS);
-  assert.throws(() => waitDurationToMillis(-Infinity, 'timeout'), { name: 'RangeError', message: 'timeout must be a number of milliseconds, not -Infinity' });
-  assert.throws(() => waitDurationToMillis(NaN, 'timeout'), { name: 'RangeError', message: 'timeout must be a number of milliseconds, not NaN' });
-  assert.throws(() => waitDurationToMillis(-(2 ** 60), 'timeout'), {
-    name: 'RangeError',
-    message: 'timeout of -1152921504606847000 ms is below -Number.MAX_SAFE_INTEGER ms',
-  });
-  assert.throws(() => waitDurationToMillis(null, 'timeout'), { name: 'TypeError', message: 'timeout must not be null' });
-  // A negative count beyond the bound stays Java's negative-timeout error for a close.
-  assert.throws(() => durationToMillis(-(2 ** 60), 'timeout'), { name: 'IllegalArgumentError', message: NEGATIVE_TIMEOUT_MESSAGE });
 });

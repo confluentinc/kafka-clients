@@ -76,7 +76,8 @@ newer.
 - `ProducerRecord` and `RecordMetadata` are data objects: Java's getters are
   public `readonly` fields (`metadata.offset`, `metadata.hasOffset`), which a
   spread and `JSON.stringify` keep (`structuredClone` / `postMessage` keep
-  every field but a record's `headers`, which becomes `{}`). `SecurityProtocol` and
+  every field but a record's `headers`, which becomes `{}`). A `ProducerRecord`
+  is frozen, so `send()` sends the fields its constructor checked. `SecurityProtocol` and
   `SslClientAuth` have Java's `Enum` methods, `name()`, `ordinal()`,
   `values()` and `valueOf()`; `toString()` and `toJSON()` return the name
   (`SslClientAuth`'s too, where Java's writes it in lower case). A method that

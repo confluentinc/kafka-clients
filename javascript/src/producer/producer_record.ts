@@ -110,8 +110,8 @@ function checkOptionalLong(value: unknown, what: string): bigint | null {
   return BigInt(value);
 }
 
-// The constructor's checks of one argument, shared with the send-time
-// re-check (`internalToNative`), so both throw the same errors.
+// The constructor's checks of one argument: Java's, and the run-time types
+// TypeScript cannot enforce.
 
 function checkTopic(topic: unknown): string {
   if (topic === undefined || topic === null) throw illegalArgument('Topic cannot be null.');
@@ -133,24 +133,6 @@ function checkPartition(partition: unknown): number | null {
     throw illegalArgument(`Invalid partition: ${checked}. Partition number should always be non-negative or null.`);
   }
   return checked;
-}
-
-const VALUE_UNDEFINED = "value must not be undefined. Pass null for Java's null, which sends a tombstone.";
-
-// The constructor's message for a parameter given as `undefined`
-// (src/internal/args.ts), for a field reassigned to `undefined`.
-function undefinedField(name: string): TypeError {
-  return new TypeError(
-    name === 'value' ? VALUE_UNDEFINED : `${name} must not be undefined. Leave the key out, or pass null for Java's null`,
-  );
-}
-
-// A field read at send: `undefined` is refused, as the constructor refuses a
-// parameter given as `undefined` (it reads one left out as `null`, which a
-// field cannot be).
-function defined(value: unknown, name: string): unknown {
-  if (value === undefined) throw undefinedField(name);
-  return value;
 }
 
 /**
@@ -205,8 +187,9 @@ export class ProducerRecord {
    * partition, key, value, headers}`, `{topic, partition, key, value}`,
    * `{topic, key, value}` or `{topic, value}`; one a constructor leaves out is
    * what it passes (`null`, no headers). `null` is Java's `null`; a key set to
-   * `undefined` is refused (leave the key out). The fields are `readonly` but
-   * not frozen: `send()` checks them again.
+   * `undefined` is refused (leave the key out). The record is frozen: a field
+   * cannot be reassigned, so `send()` reads what this constructor checked.
+   * Its `headers` stay writable until the record is sent.
    */
   constructor(options: {
     /** The topic the record will be appended to. */
@@ -344,6 +327,7 @@ export class ProducerRecord {
     this.key = checkData(key, 'key');
     this.value = checkData(value, 'value');
     this.headers = checkHeaders(headers);
+    Object.freeze(this);
   }
 
   toString(): string {
@@ -383,66 +367,25 @@ export class ProducerRecord {
   }
 
   /**
-   * The arguments of the native send: topic, partition and timestamp (-1 for
-   * null), key and value bytes, header pairs or null; then the record's headers are made read-only, as
-   * Java's `doSend` seals them (`setReadOnly`) before handing the record
-   * over. Called by `KafkaProducer`, whose `send()` rejects with what this
-   * throws (the headers are then left writable).
-   *
-   * The fields are not frozen, so plain JavaScript may have reassigned one
-   * since the constructor checked it: the constructor's checks run again on
-   * the values read here, with its errors, as Java's `doSend` only ever reads
-   * what its constructor accepted (each header's too). A valid record with
-   * no headers allocates nothing more for them.
+   * The arguments of the native send: topic, partition (-1 for null) and
+   * timestamp (-1n for null), key and value bytes, header pairs or null; then
+   * the record's headers are made read-only, as Java's `doSend` seals them
+   * (`setReadOnly`) before handing the record over. Called by
+   * `KafkaProducer`. The record is frozen, so its fields are what the
+   * constructor checked: nothing is checked again. A record with no headers
+   * allocates nothing more for them.
    *
    * @internal
    */
   internalToNative(): NativeRecord {
     const { topic, partition, timestamp, key, value, headers } = this;
-    // The valid record's path: plain type and range tests, no call. Any other
-    // value goes through the constructor's checks, which throw its error (or
-    // accept it: an iterable of headers, read as the constructor reads one).
-    if (
-      typeof topic === 'string' &&
-      (partition === null || (typeof partition === 'number' && Number.isInteger(partition) && partition >= 0 && partition <= INT32_MAX)) &&
-      (timestamp === null || (typeof timestamp === 'bigint' && timestamp >= 0n && timestamp <= INT64_MAX)) &&
-      (key === null || typeof key === 'string' || isBytes(key)) &&
-      (value === null || typeof value === 'string' || isBytes(value)) &&
-      headers instanceof Headers
-    ) {
-      const nativeHeaders = headers.internalToNative();
-      const out: NativeRecord = [
-        topic,
-        partition === null ? -1 : partition,
-        timestamp === null ? -1n : timestamp,
-        toBytes(key),
-        toBytes(value),
-        nativeHeaders,
-      ];
-      headers.internalSetReadOnly();
-      return out;
-    }
-    return this.#checkedToNative();
-  }
-
-  // internalToNative for a record with a field the fast path did not accept:
-  // the constructor's checks, in its order, then the same arguments.
-  #checkedToNative(): NativeRecord {
-    const topic = checkTopic(defined(this.topic, 'topic'));
-    const timestamp = checkTimestamp(defined(this.timestamp, 'timestamp'));
-    const partition = checkPartition(defined(this.partition, 'partition'));
-    const key = checkData(defined(this.key, 'key'), 'key');
-    const value = checkData(defined(this.value, 'value'), 'value');
-    const given: unknown = defined(this.headers, 'headers');
-    const headers = given instanceof Headers ? given : checkHeaders(given);
-    const nativeHeaders = headers.internalToNative();
     const out: NativeRecord = [
       topic,
       partition === null ? -1 : partition,
       timestamp === null ? -1n : timestamp,
       toBytes(key),
       toBytes(value),
-      nativeHeaders,
+      headers.internalToNative(),
     ];
     headers.internalSetReadOnly();
     return out;

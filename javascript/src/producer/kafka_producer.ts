@@ -82,9 +82,6 @@ const SEND_FORMS = new JavaForms('send', [['record'], ['record', 'callback']], {
 const CLOSE_FORMS = new JavaForms('close', [[], ['timeout']], { bareTypes: { timeout: isDurationOrNull } });
 const FLUSH_FORMS = new JavaForms('flush', [[]]);
 
-/** What the addon takes for a close with its timeout left out: Java's close(). */
-const NO_TIMEOUT = -1;
-
 // A send() the producer takes at once settles its Promise inside the call, so
 // awaiting it runs only microtasks: a loop that awaits such sends never returns
 // to the event loop, where timers, I/O and the threadsafe function's callback
@@ -246,17 +243,11 @@ export class KafkaProducer {
    *   the core's error with Java's message
    * @throws `IllegalArgumentError` rejects with it when the given parameters
    *   are not `{record}` or `{record, callback}`, or a bare value is not a
-   *   ProducerRecord, or a field of the record was reassigned to a value its
-   *   constructor refuses (the constructor's error)
+   *   ProducerRecord
    * @throws `TypeError` rejects with it when `record` is null or not a
    *   ProducerRecord, `callback` not a function, a parameter is `undefined`,
-   *   the topic or a
-   *   header key holds a null byte, which the C ABI would read as the end of
-   *   the string, or a field of the record was reassigned to a value its
-   *   constructor refuses (the constructor's error)
-   * @throws `RangeError` rejects with it when a field of the record was
-   *   reassigned to a partition beyond Java's `Integer`, or to a timestamp
-   *   beyond Java's `Long` or a number beyond 2^53 - 1
+   *   or the topic or a header key holds a null byte, which the C ABI would
+   *   read as the end of the string
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `SerializationError` rejects with it if the key or value are not
@@ -571,8 +562,9 @@ export class KafkaProducer {
    *   trying to close the client; this error should be treated as fatal and
    *   indicate the client is no longer usable
    *
-   * @remarks A negative `timeout` is rejected and changes nothing. A
-   * callback Promise that never settles holds the close past its timeout.
+   * @remarks A negative `timeout` is rejected by the client, with Java's
+   * error, and changes nothing. A callback Promise that never settles holds
+   * the close past its timeout.
    */
   close(options: CloseArgs): Promise<void>;
   /**
@@ -592,13 +584,14 @@ export class KafkaProducer {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's or JavaScript's (typed unknown by catch)
       return Promise.reject(error);
     }
-    let timeoutMs: number | bigint;
+    // The form decides the FFI call: null for Java's close(), the timeout for
+    // close(Duration). A negative timeout goes to the FFI as it is, which
+    // rejects it with Java's error and closes nothing (root CLAUDE.md,
+    // JavaScript Binding Conventions, Signatures).
+    let timeoutMs: number | bigint | null;
     try {
-      timeoutMs = form === 0 ? NO_TIMEOUT : durationToMillis(CLOSE_FORMS.value(options, 'timeout'), 'timeout');
+      timeoutMs = form === 0 ? null : durationToMillis(CLOSE_FORMS.value(options, 'timeout'), 'timeout');
     } catch (error) {
-      // The core checks the sign too, but its verdict arrives at the next
-      // drain, after this call marked the producer closed: checked here, a
-      // rejected close changes nothing (javascript/CLAUDE.md, rule 1).
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
       return Promise.reject(error);
     }
