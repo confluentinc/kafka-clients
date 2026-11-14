@@ -33,9 +33,8 @@ namespace Confluent.Kafka.Consumer;
 /// The consumer has one owner at a time, as Java's does. A call from another thread while a call is in
 /// progress throws <see cref="ConcurrentModificationException"/> ("KafkaConsumer is not safe for
 /// multi-threaded access."); <see cref="AsyncMockConsumer{TKey, TValue}"/> makes it wait instead. Calls awaited
-/// one after another may resume on any thread. <see cref="IConsumerCommon.Wakeup"/> and
-/// <see cref="IConsumerCommon.Handle"/> may be called from any thread, and a <see cref="IDisposable.Dispose"/>
-/// from another thread wakes the call in progress, waits for it, and closes the consumer.
+/// one after another may resume on any thread. <see cref="IConsumerCommon.Wakeup"/> may be
+/// called from any thread, and a <see cref="IDisposable.Dispose"/> from another thread wakes the call in progress, waits for it, and closes the consumer.
 /// </para>
 /// <para>
 /// Rebalance listeners and commit callbacks run on the consumer's drain thread,
@@ -573,8 +572,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: <c>wakeup()</c> is sent, and the <see cref="Task"/> ends with
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task Commit(
@@ -591,8 +589,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: <c>wakeup()</c> is sent, and the <see cref="Task"/> ends with
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
@@ -650,7 +647,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <remarks>
     /// The callback runs as for <see cref="CommitAsync(IOffsetCommitCallback, CancellationToken)"/>. An empty
     /// <paramref name="offsets"/> commits nothing; the callback then receives <see langword="null"/> offsets, or the
-    /// empty map on <see cref="AsyncMockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it.
+    /// empty map on <see cref="AsyncMockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it. A
+    /// <see langword="null"/> literal for the callback is ambiguous with the asynchronous form: write
+    /// <c>(IOffsetCommitCallback?)null</c>.
     /// </remarks>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="callback">The callback that receives the commit's outcome, or <see langword="null"/> for none.</param>
@@ -658,13 +657,12 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null,
+        IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -700,7 +698,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <paramref name="offsets"/> commits nothing; the callback then receives <see langword="null"/> offsets, or the
     /// empty map on <see cref="AsyncMockConsumer{TKey, TValue}"/>, as Java's <c>MockConsumer</c> passes it. With a
     /// <see langword="null"/> literal for the callback the call is ambiguous: write
-    /// <c>CommitAsync(offsets)</c> to commit without one.
+    /// <c>CommitAsync(offsets, (IOffsetCommitCallback?)null)</c> to commit without one.
     /// </remarks>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="callback">The callback that receives the commit's outcome.</param>
@@ -708,8 +706,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> or <paramref name="callback"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="offsets"/> or <paramref name="callback"/> is null, or a key's topic or a value is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
@@ -852,8 +851,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>The resolved offset and timestamp per topic-partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -875,8 +873,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>The resolved offset and timestamp per topic-partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>

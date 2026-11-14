@@ -69,13 +69,13 @@ internal readonly struct OffsetsSnapshot
             TopicPartition tp = entry.Key;
             if (tp.Topic() is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(offsets));
+                throw new ArgumentNullException(nameof(offsets), "offsets must not contain a TopicPartition with a null topic");
             }
 
             OffsetAndMetadata value = entry.Value;
             if (value is null)
             {
-                throw new ArgumentException("Offset value must not be null.", nameof(offsets));
+                throw new ArgumentNullException(nameof(offsets), "offsets must not contain null");
             }
 
             topics[index] = tp.Topic();

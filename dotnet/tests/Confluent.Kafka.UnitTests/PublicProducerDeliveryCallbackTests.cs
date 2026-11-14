@@ -572,15 +572,15 @@ public sealed class PublicProducerDeliveryCallbackTests
     [Theory]
     [InlineData(Sync)]
     [InlineData(Async)]
-    public void NullCallback_IsReportedBeforeTheDisposedCheck(string flavor)
+    public void NullCallback_OnClosedProducer_ReportsTheClosedProducerFirst(string flavor)
     {
-        // The argument guards precede the closed check.
+        // As Java's MockProducer.send, the closed check precedes the argument guards.
         Flavor producer = Flavor.Create(flavor);
         TestTimeout.Dispose(producer);
 
-        ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => producer.SendInline(
+        IllegalStateException error = Assert.Throws<IllegalStateException>(() => producer.SendInline(
             new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback: null));
-        Assert.Equal("callback", error.ParamName);
+        Assert.Equal("MockProducer is already closed.", error.Message);
     }
 
     [Theory]

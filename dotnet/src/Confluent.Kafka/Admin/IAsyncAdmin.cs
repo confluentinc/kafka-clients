@@ -531,12 +531,12 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// reports, an empty <paramref name="offsets"/> included.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="groupId"/> or <paramref name="offsets"/> is null.
+    /// <paramref name="groupId"/> or <paramref name="offsets"/> is null, or <paramref name="offsets"/> contains a
+    /// null <see cref="OffsetAndMetadata"/> value.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="offsets"/> contains a topic partition with a null topic, or a null
-    /// <see cref="OffsetAndMetadata"/> value; or <paramref name="groupId"/>, a topic or an
-    /// offset's metadata contains a NUL character (see the
+    /// <paramref name="offsets"/> contains a topic partition with a null topic; or <paramref name="groupId"/>, a
+    /// topic or an offset's metadata contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks). A null metadata is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>

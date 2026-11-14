@@ -245,7 +245,10 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
 
     /// <inheritdoc/>
-    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+    public void EnforceRebalance() => _native.EnforceRebalance(null);
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
     public void CommitAsync() => _native.CommitAsync();
@@ -256,14 +259,13 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null) =>
+        IOffsetCommitCallback? callback) =>
         _native.CommitAsync(offsets, callback);
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
-    /// <inheritdoc/>
-    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+    internal ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

@@ -122,7 +122,7 @@ public sealed class PublicConsumerCommitTests
     }
 
     [Fact]
-    public async Task Commit_NullElementTopic_ThrowsArgument()
+    public async Task Commit_NullElementTopic_ThrowsArgumentNull()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -132,11 +132,13 @@ public sealed class PublicConsumerCommitTests
             [default] = new OffsetAndMetadata(1),
         };
 
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Commit(offsets));
+        ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Commit(offsets));
+        Assert.Equal("offsets", ex.ParamName);
+        Assert.Contains("offsets must not contain a TopicPartition with a null topic", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Commit_NullOffsetValue_ThrowsArgument()
+    public async Task Commit_NullOffsetValue_ThrowsArgumentNull()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -145,7 +147,9 @@ public sealed class PublicConsumerCommitTests
             [new TopicPartition(Topic, 0)] = null!,
         };
 
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Commit(offsets));
+        ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Commit(offsets));
+        Assert.Equal("offsets", ex.ParamName);
+        Assert.Contains("offsets must not contain null", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -68,13 +68,13 @@ public sealed class PublicSyncConsumerPreconditionTests
     }
 
     [Fact]
-    public void Subscribe_NullElementTopic_ThrowsArgumentException()
+    public void Subscribe_NullElementTopic_ThrowsArgumentNull()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Subscribe(new string[] { null! }));
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(new string[] { null! }));
         Assert.Equal("topics", ex.ParamName);
-        Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("topics must not contain null", ex.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -95,15 +95,15 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData("assign")]
     [InlineData("seekToBeginning")]
     [InlineData("seekToEnd")]
-    public void PartitionOps_NullElementTopic_ThrowArgumentException(string op)
+    public void PartitionOps_NullElementTopic_ThrowArgumentNull(string op)
     {
         // default(TopicPartition) has a null Topic, as a TopicPartition built with a null topic does.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
             () => InvokePartitionOp(consumer, op, new[] { default(TopicPartition) }));
         Assert.Equal("partitions", ex.ParamName);
-        Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("partitions must not contain a TopicPartition with a null topic", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     }
 
     [Fact]
-    public void Commit_NullOffsetValue_ThrowsArgumentException()
+    public void Commit_NullOffsetValue_ThrowsArgumentNull()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -125,9 +125,9 @@ public sealed class PublicSyncConsumerPreconditionTests
             [new TopicPartition(Topic, Partition)] = null!,
         };
 
-        ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Commit(offsets));
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Commit(offsets));
         Assert.Equal("offsets", ex.ParamName);
-        Assert.Contains("Offset value must not be null.", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("offsets must not contain null", ex.Message, StringComparison.Ordinal);
     }
 
     // Java's SubscriptionState.assignedState throws for a partition that is not assigned, which a null topic never is.

@@ -24,7 +24,7 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// <summary>
 /// The rebalance listener of a sync chaos consumer, Python's <c>_ChaosRebalanceListener</c>: it reports
 /// each callback; on a revoke it commits and, unless <see cref="Closing"/>, reads the commit back, both
-/// calls routed by the binding to the consumer's <see cref="ConsumerHandle"/>. Failures are reported.
+/// calls routed by the binding to the consumer's own handle. Failures are reported.
 /// </summary>
 internal sealed class ChaosRebalanceListener : IConsumerRebalanceListenerWithPartitionsLost
 {

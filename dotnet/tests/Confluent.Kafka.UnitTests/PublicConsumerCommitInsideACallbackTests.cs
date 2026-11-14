@@ -218,7 +218,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
             {
                 await Task.Yield();
                 Add(seen, "Assignment: " + Outcome(() => Format(consumer.Assignment())));
-                Add(seen, "CommitAsync: " + await OutcomeAsync(() => consumer.CommitAsync(Empty())));
+                Add(seen, "CommitAsync: " + await OutcomeAsync(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null)));
                 Add(seen, "Pause: " + await OutcomeAsync(() => consumer.Pause(new[] { s_tp0 })));
                 Add(seen, "Paused: " + Outcome(() => Format(consumer.Paused())));
             });
