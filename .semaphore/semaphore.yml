@@ -469,7 +469,8 @@ blocks:
     # The .NET client on Windows, whose package carries a win-x64 and a win-x86
     # library: each job builds the library of its platform, then runs
     # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
-    # net10.0 in a process of that platform
+    # net10.0 in a process of that platform, and the Native AOT check
+    # (net8.0 and net10.0 on x64, net10.0 on x86)
     # (.semaphore/verify-dotnet-windows.ps1). The broker-backed tests and the
     # multilanguage arms run on Linux and macOS only: they need Linux
     # containers, which the Windows agents do not run. The agent's shell is
