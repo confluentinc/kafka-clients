@@ -14,9 +14,11 @@
 
 'use strict';
 
-// A stand-in for Java's MockProducer, which the JavaScript binding does not
-// translate yet: the Python tests of the verifiable producer run over the
-// Python MockProducer, and these run over this one. It does what Java's
+// A stand-in for Java's MockProducer: the Python tests of the verifiable
+// producer run over the Python MockProducer, and these run over this one,
+// rather than the client's MockProducer, because they reach into its pending
+// completions (to complete them out of order), which the FFI's mock does not
+// expose. It does what Java's
 // MockProducer does for the calls the tool makes: send() checks the closed
 // state, then the injected send error, then records the record in history()
 // and, with autoComplete, completes it at once at the next offset of

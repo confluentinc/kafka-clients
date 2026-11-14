@@ -122,6 +122,7 @@ and the EC2, bootstrap, build and supervisor scripts.
     make -C javascript test-verifiable-clients
 
 builds the package and runs `test/*.test.js`. They need no broker: the
-producer logic runs over a stand-in for Java's `MockProducer`, which the
-binding does not translate yet (`test/_mock_producer.js`), and the scripts run
-end to end against an unreachable broker.
+producer logic runs over a stand-in for Java's `MockProducer`
+(`test/_mock_producer.js`), whose pending completions the tests reach into,
+which the client's `MockProducer` does not expose, and the scripts run end to
+end against an unreachable broker.
