@@ -14,8 +14,9 @@
 
 // Java's MetricName: Java's methods (it is not a data class, the root
 // conventions' list not naming it) over private fields. The tags, Java's
-// Map<String, String>, are a Map, copied when taken and a new Map each call
-// when returned. `equals` and
+// Map<String, String>, are taken as a Map or a plain object, as a map keyed
+// by strings is (root CLAUDE.md, JavaScript Binding Conventions, Types, Q25),
+// copied into a Map, and returned as a new Map each call. `equals` and
 // `hashCode` are Java's bodies (Q29), the description left out as Java's.
 
 import { JavaForms } from '../internal/args';
@@ -37,13 +38,19 @@ function checkString(value: unknown, what: string): string {
   return value;
 }
 
-// Java's Map<String, String> taken: a Map of string to string, copied.
+const TAGS_TYPE = 'tags must be a Map or a plain object of string to string';
+
+// Java's Map<String, String> taken: a Map, or a plain object's own
+// enumerable string keys, of string to string, copied.
 function checkTags(value: unknown): ReadonlyMap<string, string> {
   if (value === null) throw new TypeError('tags must not be null');
-  if (!(value instanceof Map)) throw new TypeError('tags must be a Map of string to string');
+  let entries: Iterable<readonly [unknown, unknown]>;
+  if (value instanceof Map) entries = value as Map<unknown, unknown>;
+  else if (typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)) entries = Object.entries(value);
+  else throw new TypeError(TAGS_TYPE);
   const out = new Map<string, string>();
-  for (const [key, tag] of value as Map<unknown, unknown>) {
-    if (typeof key !== 'string' || typeof tag !== 'string') throw new TypeError('tags must be a Map of string to string');
+  for (const [key, tag] of entries) {
+    if (typeof key !== 'string' || typeof tag !== 'string') throw new TypeError(TAGS_TYPE);
     out.set(key, tag);
   }
   return out;
@@ -80,7 +87,11 @@ export class MetricName {
    * @throws `TypeError` when an argument is null (Java's
    *   `Objects.requireNonNull`), `undefined` or of the wrong type
    *
-   * @remarks The tags, Java's `Map`, are copied.
+   * @remarks The tags, Java's `Map<String, String>`, are a `Map` or a plain
+   * object, copied into the metric name. *(deviation: Java's constructor
+   * keeps the map it is given, so a later change to that map shows in the
+   * name. Why: a plain object is read into a `Map` when the name is built,
+   * and a `MetricNameMap` key must not change once it is stored.)*
    */
   constructor(options: {
     /** The name of the metric */
@@ -90,7 +101,7 @@ export class MetricName {
     /** A human-readable description to include in the metric */
     description: string;
     /** additional key/value attributes of the metric */
-    tags: ReadonlyMap<string, string>;
+    tags: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
   }) {
     FORMS.match(options, arguments.length);
     this.#name = checkString(FORMS.value(options, 'name'), 'name');
