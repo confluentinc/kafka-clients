@@ -81,7 +81,7 @@ function formatNodeIds(nodes: readonly (Node | null)[] | null): string {
  * This is used to describe per-partition state in the MetadataResponse.
  */
 export class PartitionInfo {
-  readonly #topic: string;
+  readonly #topic: string | null;
   readonly #partition: number;
   readonly #leader: Node | null;
   readonly #replicas: readonly (Node | null)[] | null;
@@ -101,11 +101,11 @@ export class PartitionInfo {
    * @throws `RangeError` when the partition is beyond Java's `int`
    *
    * @remarks A Java `Node[]` is any iterable of `Node` here, copied when the
-   * object is built.
+   * object is built. A null topic is accepted, as Java accepts it.
    */
   constructor(options: {
-    /** The topic name. */
-    topic: string;
+    /** The topic name, or null. */
+    topic: string | null;
     /** The partition id. */
     partition: number;
     /** The leader, or null. */
@@ -124,8 +124,8 @@ export class PartitionInfo {
    *   in-sync replicas and offline replicas
    */
   constructor(options: {
-    /** The topic name. */
-    topic: string;
+    /** The topic name, or null. */
+    topic: string | null;
     /** The partition id. */
     partition: number;
     /** The leader, or null. */
@@ -140,7 +140,7 @@ export class PartitionInfo {
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     const topic = FORMS.value(options, 'topic');
-    if (typeof topic !== 'string') throw new TypeError('topic must be a string');
+    if (topic !== null && typeof topic !== 'string') throw new TypeError('topic must be a string or null');
     const partition = checkInt(FORMS.value(options, 'partition'), 'partition');
     const leader = FORMS.value(options, 'leader');
     if (leader !== null && !(leader instanceof Node)) throw new TypeError('leader must be a Node or null');
@@ -156,10 +156,11 @@ export class PartitionInfo {
   /**
    * The topic name
    *
-   * @returns the topic name
+   * @returns the topic name, or null when the object was built with a null
+   *   topic
    * @throws `TypeError` when it is given an argument
    */
-  topic(): string {
+  topic(): string | null {
     TOPIC_FORMS.match(undefined, arguments.length);
     return this.#topic;
   }
