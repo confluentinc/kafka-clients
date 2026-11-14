@@ -98,6 +98,7 @@ const ORDER = [
   'check-no-binding-queue',
   'check-no-closed-flag',
   'check-no-repeated-precondition',
+  'check-tsfn-lifetime',
   'check-directives',
   'check-config',
 ];

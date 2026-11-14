@@ -992,6 +992,11 @@ The rules, each named in its finding:
   must not be negative", the busy message, ...), so the binding cannot raise
   it itself (root conventions, Errors, Q35, Q58, Q60). The binding's own
   listed checks write their own messages.
+- `check-tsfn-lifetime`: no `napi_ref_threadsafe_function` in `native/`,
+  and `napi_unref_threadsafe_function` only on the close path,
+  `cbq_closed`, which must call it, so a client keeps Node running until the
+  core reports it closed (root conventions, Lifetime, Q21; "Threads and
+  liveness").
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
