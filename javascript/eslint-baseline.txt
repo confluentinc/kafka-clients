@@ -8,15 +8,14 @@
 # check-java-completeness: Java API the client does not translate yet.
 # KafkaProducer, with the reasons of the producer package's documentation
 # (src/producer/index.ts): transactions aren't in the preview; clientInstanceId
-# and the metric-subscription calls have no FFI entry point; partitionsFor and
-# metrics are not translated yet.
+# and the metric-subscription calls have no FFI entry point; metrics is not
+# translated yet.
 missing clients.producer.KafkaProducer#abortTransaction
 missing clients.producer.KafkaProducer#beginTransaction
 missing clients.producer.KafkaProducer#clientInstanceId
 missing clients.producer.KafkaProducer#commitTransaction
 missing clients.producer.KafkaProducer#initTransactions
 missing clients.producer.KafkaProducer#metrics
-missing clients.producer.KafkaProducer#partitionsFor
 missing clients.producer.KafkaProducer#registerMetricForSubscription
 missing clients.producer.KafkaProducer#sendOffsetsToTransaction
 missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
@@ -28,7 +27,6 @@ missing clients.producer.Producer#clientInstanceId
 missing clients.producer.Producer#commitTransaction
 missing clients.producer.Producer#initTransactions
 missing clients.producer.Producer#metrics
-missing clients.producer.Producer#partitionsFor
 missing clients.producer.Producer#registerMetricForSubscription
 missing clients.producer.Producer#sendOffsetsToTransaction
 missing clients.producer.Producer#unregisterMetricFromSubscription
