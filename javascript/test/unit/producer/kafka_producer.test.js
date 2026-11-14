@@ -1045,6 +1045,78 @@ test('a closed producer lets the process exit, and is destroyed when garbage col
   assert.equal(r.stderr.split('\n').filter((l) => l.includes('Closing the Kafka producer')).length, 1, r.stderr);
 });
 
+// The destroy itself, observed: the producer is collected (a
+// FinalizationRegistry), and the native producer's threads are gone once
+// the finalizer destroyed it. A send refused once the core reported the
+// close, or failed by the close, leaves no JS function of its own alive
+// that would hold the producer (javascript/CLAUDE.md, rule 10).
+test('a closed producer is destroyed when collected, a send refused after close() or failed by it included', { skip: !['linux', 'darwin'].includes(process.platform) }, () => {
+  const r = runNode(
+    `
+    const { execSync } = require('node:child_process');
+    const fs = require('node:fs');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const threads = () =>
+      process.platform === 'linux'
+        ? fs.readdirSync('/proc/self/task').length
+        : execSync('ps -M -p ' + process.pid).toString().trim().split('\\n').length - 1;
+    const collected = [];
+    const registry = new FinalizationRegistry((name) => collected.push(name));
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const CASES = {
+      'close': async (p) => {
+        await p.close();
+      },
+      'send after close': async (p) => {
+        await p.close();
+        await p.send(new ProducerRecord({ topic: 't', value: 'v' })).catch(() => {});
+      },
+      'send failed by close': async (p) => {
+        // Waits for metadata in the core until the zero close fails it.
+        const sent = p.send(new ProducerRecord({ topic: 't', value: 'v' })).catch(() => {});
+        await new Promise((r) => setImmediate(r));
+        await p.close({ timeout: 0 });
+        await sent;
+      },
+    };
+    // In a function of its own, so no frame keeps the producer.
+    async function one(name, run) {
+      const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
+      registry.register(p, name);
+      await run(p);
+    }
+    (async () => {
+      // A closed producer no longer holds the loop: the test does.
+      const hold = setInterval(() => {}, 1000);
+      // The first producer starts what the process keeps afterwards.
+      await one('warm-up', CASES['close']);
+      await settle();
+      for (const [name, run] of Object.entries(CASES)) {
+        const before = threads();
+        for (let i = 0; i < 5; i++) await one(name, run);
+        await settle();
+        console.log(name, collected.filter((c) => c === name).length, threads() - before);
+      }
+      clearInterval(hold);
+    })();
+  `,
+    120000,
+    ['--expose-gc', '--no-warnings'],
+  );
+  assert.equal(r.status, 0, r.stderr);
+  // Five producers collected per case, and fewer threads left over than one
+  // live producer runs (about 18): each destroyed producer took its threads
+  // with it. A leak shows as 5 live producers, about 90 threads.
+  const lines = r.stdout.trim().split('\n').map((l) => /^(.*) (\d+) (-?\d+)$/.exec(l));
+  assert.deepEqual(lines.map((m) => m && [m[1], m[2]]), [['close', '5'], ['send after close', '5'], ['send failed by close', '5']], r.stdout);
+  for (const m of lines) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
+});
+
 test('the preview notice is one ExperimentalWarning per process, which --no-warnings silences', () => {
   const script = `
     const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');

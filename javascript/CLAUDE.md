@@ -206,7 +206,11 @@ These decide every question, in this order:
     free the native handle. Its completion (`close_on_complete`) records the
     core's answer: any outcome but a rejected timeout closed the producer, so
     `cbq_closed` unreferences the threadsafe function and makes the queue's
-    reference on the handle object weak. The handle object's Node-API
+    reference on the handle object weak, and drops the `on_complete`
+    function of every send context parked on the orphan list (a hand-over
+    refused after the close drops its own at once): no delivery callback can
+    fire for those records any more, and the functions' closures hold the
+    `KafkaProducer`, which would never be collected. The handle object's Node-API
     finalizer (`producer_finalize`) then calls `KafkaProducer_destroy_err`,
     on the JS thread, outside a drain, running no JS (`finalizing`), only for
     a producer that `cbq_is_closed` says is closed, and releases the
