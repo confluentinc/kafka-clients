@@ -104,8 +104,6 @@ export interface JavaFormsOptions {
    * Conventions, Class family).
    */
   readonly reader?: boolean;
-  /** The form error's message for a call of `count` arguments, when not the default. */
-  readonly manyArguments?: (count: number) => string;
 }
 
 /** Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null. */
@@ -134,7 +132,6 @@ export class JavaForms {
   readonly #bare: ReadonlyArray<readonly [name: string, index: number, test: ((value: unknown) => boolean) | null]>;
   readonly #bareIsPlainObject: boolean;
   readonly #reader: boolean;
-  readonly #manyArguments: ((count: number) => string) | null;
   readonly #undefinedMessages: Readonly<Record<string, string>>;
 
   /**
@@ -175,7 +172,6 @@ export class JavaForms {
     this.#bare = bareNames.map((name) => [name, forms.findIndex((form) => form.length === 1 && form[0] === name), tests?.[name] ?? null] as const);
     this.#bareIsPlainObject = options.bareIsPlainObject === true;
     this.#reader = options.reader === true;
-    this.#manyArguments = options.manyArguments ?? null;
     if (this.#reader && (forms.length !== 1 || forms[0].length !== 0)) throw new Error(`JavaForms(${method}): a reader takes no parameter`);
     if (this.#bareIsPlainObject && this.#bare.length !== 1) throw new Error(`JavaForms(${method}): no one-parameter form`);
     this.#undefinedMessages = options.undefinedMessages ?? {};
@@ -202,7 +198,7 @@ export class JavaForms {
   match(args: unknown, count: number): number {
     if (count > 0 && this.#reader) throw new TypeError(`${this.#method}() only reads: it takes no argument`);
     if (count > 1) {
-      throw illegalArgument(this.#manyArguments !== null ? this.#manyArguments(count) : `${this.#prefix}${count} arguments, not one object of named parameters`);
+      throw illegalArgument(`${this.#prefix}${count} arguments, not one object of named parameters`);
     }
     if (count === 0) return this.#matched(0, null);
     if (args === undefined) {
