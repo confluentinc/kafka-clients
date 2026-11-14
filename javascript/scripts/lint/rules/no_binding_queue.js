@@ -92,6 +92,7 @@ const ALLOWED = [
     key: 'src/internal/java_number.ts:INT64_MAX',
     reason: "the largest Java long: a range check of one argument, not a cap of records",
   },
+  { key: 'MetricName.#tags', reason: "one metric name's tags, Java's Map<String, String> field, not a store of records" },
   { key: 'MetricNameMap.#entries', reason: "one metrics() snapshot's entries (Java's Map<MetricName, ? extends Metric>), not a store of records" },
   { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
   {
