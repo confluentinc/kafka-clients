@@ -101,6 +101,7 @@ const ORDER = [
   'check-tsfn-lifetime',
   'check-default-helpers',
   'check-mock-native',
+  'check-encode-callers',
   'check-directives',
   'check-config',
 ];

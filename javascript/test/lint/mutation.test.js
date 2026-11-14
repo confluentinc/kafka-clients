@@ -796,6 +796,11 @@ MUTATIONS.push(
       edit(root, 'src/producer/index.ts', "export { KafkaProducer } from './kafka_producer';\n", "export { KafkaProducer } from './kafka_producer';\nexport { MockProducer } from './mock_producer';\n");
     },
   },
+  {
+    rule: 'check-encode-callers',
+    what: 'the duration helper turning a string into bytes through encodeLikeJava',
+    apply: (root) => edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}import { encodeLikeJava } from './encode';\nvoid encodeLikeJava('x');\n`),
+  },
 );
 
 for (const m of MUTATIONS) {

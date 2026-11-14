@@ -72,6 +72,7 @@ const RUNNER_CHECKS = [
   require('./rules/tsfn_lifetime'),
   require('./rules/default_helpers'),
   require('./rules/mock_native'),
+  require('./rules/encode_callers'),
 ];
 
 /** The ESLint rule name of check `check`: `check-java-name` -> `java-name`. */
