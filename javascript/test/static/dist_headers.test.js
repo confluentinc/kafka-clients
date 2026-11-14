@@ -27,7 +27,8 @@ const { spawnSync } = require('node:child_process');
 
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'dist_headers.js');
 const HEADER = fs.readFileSync(SCRIPT, 'utf8').split('\n').slice(0, 13);
-// A file copied unchanged from Apache Kafka keeps the Foundation's header.
+// The Foundation's header, which a translation that copied its Java file's
+// header would carry: refused, as Kafka ships no TypeScript.
 const ASF = [
   '// Licensed to the Apache Software Foundation (ASF) under one or more',
   '// contributor license agreements. See the NOTICE file distributed with',
@@ -93,8 +94,8 @@ test('the header goes first in the .js and the .d.ts, and the maps follow it', (
   }
 });
 
-test("the Foundation's and OpenJDK's headers the root allows go first too", () => {
-  for (const header of [ASF, OPENJDK]) {
+test("OpenJDK's header, which the root allows for a translation from OpenJDK, goes first too", () => {
+  for (const header of [OPENJDK]) {
     const dir = fixture(header);
     try {
       const r = run(dir);
@@ -111,8 +112,9 @@ test("the Foundation's and OpenJDK's headers the root allows go first too", () =
 });
 
 test('a source without the licence header fails the build', () => {
-  // Another comment, a Confluent header cut short, and OpenJDK's without its Classpath Exception.
-  for (const header of [['// Some other comment'], HEADER.slice(0, 12), OPENJDK.filter((l) => !l.includes('Classpath'))]) {
+  // Another comment, a Confluent header cut short, OpenJDK's without its Classpath Exception, and
+  // the Foundation's, a Java file's header copied into a translation.
+  for (const header of [['// Some other comment'], HEADER.slice(0, 12), OPENJDK.filter((l) => !l.includes('Classpath')), ASF]) {
     const dir = fixture(header);
     try {
       const r = run(dir);
@@ -126,7 +128,8 @@ test('a source without the licence header fails the build', () => {
 
 // .semaphore/check-npm.py package: a .js or .d.ts in a tarball that does not
 // start with a licence header is a finding, whatever else is wrong with the
-// fake tarballs here; one with any of the three headers is not.
+// fake tarballs here, the Foundation's header included; one with Confluent's
+// or OpenJDK's is not.
 test('check-npm.py package reports each tarball file without the licence header', () => {
   const repo = path.join(__dirname, '..', '..', '..');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-npm-headers-'));
@@ -161,7 +164,7 @@ test('check-npm.py package reports each tarball file without the licence header'
     });
     assert.equal(r.status, 1, r.stdout);
     const reported = [...r.stderr.matchAll(/: (dist\/\S+) does not start with the licence header/g)].map((m) => m[1]).sort();
-    assert.deepEqual(reported, ['dist/bare.d.ts', 'dist/strict_first.js']);
+    assert.deepEqual(reported, ['dist/asf.js', 'dist/bare.d.ts', 'dist/strict_first.js']);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

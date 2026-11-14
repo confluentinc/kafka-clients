@@ -23,7 +23,7 @@
 // of the `.d.ts`. Each source map is fixed to match, line for line: the
 // `.js.map`'s first lines are reordered as the lines are, and the
 // `.d.ts.map`'s mappings start as many lines later as the header has. The
-// header is Confluent's, or one of the two others the root allows
+// header is Confluent's, or OpenJDK's for a translation from OpenJDK
 // (`HEADERS`); a source without one fails the build.
 //
 // Usage: node scripts/dist_headers.js <src> <dist>
@@ -33,13 +33,16 @@ const path = require('node:path');
 
 /**
  * The licence headers a source may start with (root CLAUDE.md, Translation
- * Rules 1.3 and Build, packaging and release, Q76), as `//` comment lines:
+ * Rules 1.3 and 9, and Build, packaging and release, Q76), as `//` comment
+ * lines:
  *   - Confluent's copyright line with the Apache 2.0 text, every translated
  *     file's: exactly 13 lines;
- *   - the Apache Software Foundation's, for a file copied unchanged from
- *     Apache Kafka;
  *   - OpenJDK's GPL version 2 with the Classpath Exception, for code
  *     translated from OpenJDK.
+ * The Apache Software Foundation's header, which the root keeps for a file
+ * copied unchanged from Apache Kafka, is refused: Kafka ships no TypeScript,
+ * so no source can be such a copy, and a translation that took its Java
+ * file's header must fail.
  * Each is recognised by its first and last line (and, for OpenJDK's, its
  * Classpath Exception sentence); the header is the file's leading run of `//`
  * lines.
@@ -50,11 +53,6 @@ const HEADERS = [
     first: /^\/\/ Copyright 20[0-9]{2} Confluent Inc\.$/,
     last: '// limitations under the License.',
     lines: 13,
-  },
-  {
-    name: 'Apache Software Foundation',
-    first: /^\/\/ Licensed to the Apache Software Foundation \(ASF\) under one or more$/,
-    last: '// limitations under the License.',
   },
   {
     name: 'OpenJDK',
