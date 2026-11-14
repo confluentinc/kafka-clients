@@ -40,16 +40,23 @@
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
-// | a key or value type variable K / V           | Data (bytes, or a string encodeLikeJava encodes) |
 // | Future<T>, KafkaFuture<T>                    | KafkaFuture<T>                          |
 // | CompletionStage<T>                           | Promise<T>                              |
 // | KafkaFuture.BaseFunction<A, B>, BiConsumer   | the alias of the same name: KafkaFuture.BaseFunction<A, B> |
 // | Throwable                                    | unknown (anything a function may throw)  |
+// | MetricValueProvider, MetricConfig, Measurable, Partitioner (placeholders) | unknown    |
+// | Time (not a public Java type)                | unknown                                 |
 // | ? (an unbounded wildcard)                    | any type                                 |
 // | T, as a bare value's type                    | Bare<T> (Extract<T, BareValue>), at the bare parameter only |
-// | List / Set / Collection<T>, T[]              | an array of T                           |
-// | Set<T> (a constant Set)                      | ReadonlySet<T>, a read-only set          |
-// | Iterable<T>                                  | Iterable<T>, or an array of T           |
+// | List / Set / Collection / Iterable<T>, T[], taken | Iterable<T>, or an array of T      |
+// | List / Collection<T>, T[], returned          | an array of T (a new array each call)   |
+// | Iterable<T>, returned                        | Iterable<T>, or an array of T           |
+// | Set<T>, returned (a constant: read-only)     | Set<T> or ReadonlySet<T>                |
+// | Set<TopicPartition>, returned                | TopicPartitionSet                       |
+// | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
+// | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
+// | Map<String, String>, returned                | Map<string, string>                     |
+// | Map<String, String>, taken                   | a Map or ReadonlyMap, or a plain object (Record) of string to string |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type     |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
@@ -72,7 +79,18 @@ const PURE_JS_WAITING = new Map([
       "the dependants) settles in JavaScript, and a record's waits natively through its _cb twins",
   ],
 ]);
-const { mappedItems, functionType, constantsOnly, formParameters } = require('../java_ts');
+/**
+ * The Java members a user implements whose JavaScript form may also return a
+ * Promise of the mapped type, which the client awaits (root CLAUDE.md,
+ * JavaScript Binding Conventions, Serialization: *(js-only)*).
+ */
+const AWAITED_RETURNS = new Map([
+  [
+    'org.apache.kafka.common.serialization.Serializer#serialize',
+    'a serializer may return a Promise, which the producer awaits before it hands the record over',
+  ],
+]);
+const { mappedItems, functionType, constantsOnly, formParameters, PLACEHOLDERS, NOT_PUBLIC_TYPES } = require('../java_ts');
 
 const NUMBERS = new Set(['byte', 'short', 'int', 'float', 'double', 'Byte', 'Short', 'Integer', 'Float', 'Double', 'Number']);
 const LONGS = new Set(['long', 'Long']);
@@ -165,12 +183,17 @@ module.exports = {
     };
     const parts = (t) => (t.isUnion() ? t.types : [t]);
     const symbolName = (t) => (t.aliasSymbol && t.aliasSymbol.name) || (t.symbol && t.symbol.name) || '';
-    const elementOf = (t) => {
+    // The element type of an array (any direction) or, taken only, of an
+    // Iterable: a Java array or collection the caller passes is any iterable
+    // of its elements, and one returned is an array (root CLAUDE.md,
+    // JavaScript Binding Conventions, Types; the plan's §5, item 1).
+    const elementOf = (t, iterable = !outward) => {
       if (checker.isArrayType(t) || checker.isTupleType(t)) return checker.getTypeArguments(t)[0];
       const n = symbolName(t);
-      if (n === 'ReadonlyArray' || n === 'Array' || n === 'Iterable') return (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
+      if (n === 'ReadonlyArray' || n === 'Array' || (iterable && n === 'Iterable')) return (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
       return undefined;
     };
+    const typeArgs = (t) => t.aliasTypeArguments || checker.getTypeArguments(t);
 
     /** Whether TS type `t` (null stripped) is what Java type `j` maps to: true, false, or 'unmapped'. */
     const matches = (j, t0) => {
@@ -208,11 +231,6 @@ module.exports = {
       if (j.name === 'String' || j.name === 'char' || j.name === 'Character') return (t.flags & ts.TypeFlags.StringLike) !== 0;
       if (j.name === 'void' || j.name === 'Void') return (t.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)) !== 0;
       if (j.name === 'Object') return (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0;
-      if (j.name === 'K' || j.name === 'V') {
-        return parts(t).every(
-          (p) => (p.flags & ts.TypeFlags.StringLike) !== 0 || ['Buffer', 'Uint8Array'].includes(symbolName(p)),
-        );
-      }
       if (j.name === 'CompletionStage') {
         return symbolName(t) === 'Promise' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
@@ -226,19 +244,54 @@ module.exports = {
         );
       }
       if (j.name === 'Throwable') return (t.flags & ts.TypeFlags.Unknown) !== 0;
+      // The types the client does not translate, and those Java does not make
+      // public, typed unknown (root CLAUDE.md, JavaScript Binding
+      // Conventions, Scope). A placeholder is an alias of unknown.
+      if (PLACEHOLDERS.has(j.name) || NOT_PUBLIC_TYPES.has(j.name)) return (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0;
       if (j.name === '?') return true;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
-      if (j.name === 'Set' && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
-        // A constant Set is a read-only set (root CLAUDE.md, JavaScript
-        // Binding Conventions, Names).
-        const e = (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
+      if (j.name === 'Set' && outward && j.args[0] !== undefined && j.args[0].name === 'TopicPartition') {
+        // A set of TopicPartition returned is a TopicPartitionSet, whose
+        // members compare by value (root CLAUDE.md, JavaScript Binding
+        // Conventions, Types).
+        return symbolName(t) === 'TopicPartitionSet';
+      }
+      if (j.name === 'Set' && outward && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
+        // A Set returned is a Set; a constant one a read-only set (root
+        // CLAUDE.md, JavaScript Binding Conventions, Names).
+        const e = typeArgs(t)[0];
         const elem = j.args[0];
         return elem === undefined || e === undefined ? true : matches(elem, e);
       }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'TopicPartition') {
+        return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Map' && j.args.length === 2 && j.args.every((a) => a.name === 'String' && a.dims === 0)) {
+        // A map keyed by strings: a Map returned; taken, a Map, a ReadonlyMap
+        // or a plain object of string to string (root CLAUDE.md, JavaScript
+        // Binding Conventions, Types, "Other collections taken").
+        if ((t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs')) return true;
+        const part = (p) => {
+          const n = symbolName(p);
+          if (n === 'Map' || (!outward && n === 'ReadonlyMap')) {
+            const [k, v] = typeArgs(p);
+            return matches(j.args[0], k) === true && matches(j.args[1], v) === true;
+          }
+          if (outward) return false;
+          const index = checker.getIndexInfoOfType(p, ts.IndexKind.String);
+          return index !== undefined && matches(j.args[1], index.type) === true;
+        };
+        return parts(t).every(part);
+      }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'MetricName') {
+        return symbolName(t) === 'MetricNameMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Set' && outward) return false;
       if (LISTS.has(j.name) || j.name === 'Iterable') {
-        const e = elementOf(t);
+        // A Java Iterable returned stays an iterable.
+        const e = elementOf(t, !outward || j.name === 'Iterable');
         if (e === undefined) return false;
         const elem = j.args[0];
         return elem === undefined ? true : matches(elem, e);
@@ -267,11 +320,13 @@ module.exports = {
      * forms naming one option, their union); `promise` unwraps a Promise
      * return of a waiting member.
      */
-    const check = (subject, where, javaTypes, tsType, { promise = false } = {}) => {
+    const check = (subject, where, javaTypes, tsType, { promise = false, awaited = false } = {}) => {
       const list = (Array.isArray(javaTypes) ? javaTypes : [javaTypes]).filter((x) => x);
       if (list.length === 0) return;
       checked += 1;
-      outward = where === 'type' || where === 'return';
+      // A return the user's implementation gives the client (AWAITED_RETURNS)
+      // is taken, not returned.
+      outward = (where === 'type' || where === 'return') && !awaited;
       const js = [...new Map(list.map((x) => [x, parseJava(x)])).values()];
       let t = tsType;
       if (promise) {
@@ -279,7 +334,12 @@ module.exports = {
         if (symbolName(s) === 'Promise') t = checker.getTypeArguments(s)[0] || (s.aliasTypeArguments || [])[0] || t;
       }
       let ok;
-      if (js.length === 1) {
+      if (awaited && js.length === 1) {
+        // Each part as itself, a Promise as what it resolves to.
+        const ps = parts(strip(t)).map((p) => (symbolName(p) === 'Promise' ? checker.getTypeArguments(p)[0] || p : p));
+        const each = ps.map((p) => matches(js[0], p));
+        ok = each.includes('unmapped') ? 'unmapped' : each.every((x) => x === true);
+      } else if (js.length === 1) {
         ok = matches(js[0], t);
       } else {
         const ps = parts(strip(t));
@@ -343,7 +403,8 @@ module.exports = {
           // _cb twin) is never unwrapped.
           const blocking =
             (waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`)) && parseJava(javaReturn || 'void').name !== 'CompletionStage';
-          if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking });
+          const awaited = AWAITED_RETURNS.has(`${jm.owner.fqn}#${jm.name}`);
+          if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }
         const p0 = params.length === 1 ? params[0] : null;
         if (p0 !== null && bareName !== null && ts.isIdentifier(p0.name) && p0.name.text === bareName) {

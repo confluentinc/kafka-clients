@@ -168,6 +168,8 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"producerCreate", NULL, js_producer_create, NULL, NULL, NULL, napi_default, NULL},
         {"producerSend", NULL, js_producer_send, NULL, NULL, NULL, napi_default, NULL},
         {"producerFlush", NULL, js_producer_flush, NULL, NULL, NULL, napi_default, NULL},
+        {"producerPartitionsFor", NULL, js_producer_partitions_for, NULL, NULL, NULL, napi_default, NULL},
+        {"producerMetrics", NULL, js_producer_metrics, NULL, NULL, NULL, napi_default, NULL},
         {"producerClose", NULL, js_producer_close, NULL, NULL, NULL, napi_default, NULL},
         {"producerPump", NULL, js_producer_pump, NULL, NULL, NULL, napi_default, NULL},
         {"recordFutureGet", NULL, js_record_future_get, NULL, NULL, NULL, napi_default, NULL},

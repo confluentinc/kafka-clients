@@ -24,11 +24,9 @@
  * `KafkaProducer.clientInstanceId`, `registerMetricForSubscription` and
  * `unregisterMetricFromSubscription`.
  *
- * Not translated yet: `KafkaProducer`'s constructors taking serializers
- * (`Map`/`Properties`, `Serializer`, `Serializer`), `partitionsFor`,
- * `metrics`, and its constants `NETWORK_THREAD_PREFIX` and
- * `PRODUCER_METRIC_GROUP_NAME`; `RecordMetadata`'s public constructor, which
- * takes a `TopicPartition`.
+ * Serializers: what a string key or value gets without a serializer, and
+ * the built-in serializer factories, come with the serdes; whether a
+ * serializer's methods must all be async is not decided yet (Q50).
  *
  * @packageDocumentation
  */
@@ -39,7 +37,6 @@ export type { CloseArgs } from './kafka_producer';
 export type { ProducerConfigs } from './producer_configs';
 export type { Callback } from './callback';
 export { ProducerRecord } from './producer_record';
-export type { Data } from './producer_record';
 export { RecordMetadata } from './record_metadata';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { BufferExhaustedError } from './buffer_exhausted_error';

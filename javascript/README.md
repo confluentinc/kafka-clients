@@ -166,9 +166,9 @@ make test-integration-javascript         # Linux only: the server in a container
 
 The native arm loads `@grpc/grpc-js` and `@grpc/proto-loader`, two of the
 devDependencies, from `javascript/node_modules` (`npm ci`);
-`make -C javascript grpc-native` checks they are there. The transaction, `partitionsFor` and
-metrics cases are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`),
-as the producer has none of them yet.
+`make -C javascript grpc-native` checks they are there. The transaction cases
+are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`), as the
+producer has no transactions yet.
 
 ## Layout
 
@@ -367,7 +367,7 @@ metadata wait)*.
 
 ### Data objects, enums and constructors
 
-`ProducerRecord` and `RecordMetadata` are data objects: Java's getters are
+`ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` are data objects: Java's getters are
 public `readonly` fields, set once in the constructor (`record.topic`,
 `metadata.offset`, `metadata.hasOffset`), so `{ ...metadata }`,
 `JSON.stringify` and `structuredClone` keep them. Java's `-1` and `null` are
@@ -378,13 +378,17 @@ given to `ProducerRecord` is a bigint or a whole number up to 2^53 - 1 (a
 larger number throws `RangeError` rather than rounding). `JSON.stringify`
 writes a bigint as a decimal string, such as `"42"`, which `BigInt()` reads
 back exactly. A Java `int`, such as a partition, stays a number, and one
-outside Java's range throws `RangeError`. A `ProducerRecord` is frozen: a
+outside Java's range throws `RangeError`. A data object is frozen: a
 field cannot be reassigned (in strict mode the assignment throws
 `TypeError`), so `send()` sends what its constructor checked. A record's
 `headers` is
 a `Headers`, a class with methods: `JSON.stringify` writes it as its array of
 headers, and `structuredClone` as an empty object. Every other
-class keeps Java's getters as methods (`future.isDone()`, `header.key()`).
+class keeps Java's getters as methods (`future.isDone()`, `header.key()`,
+`partitionInfo.replicas()`). A Java array or collection a method takes is any
+iterable (`new PartitionInfo({ ..., replicas: new Set(nodes) })`), and one it
+returns is a new array each call. `TopicPartition`, `Node` and
+`PartitionInfo` have Java's `equals` and `hashCode`.
 
 The enums, `SecurityProtocol` and `SslClientAuth`, have Java's `Enum`
 methods: `name()`, `ordinal()`, static `values()` and static
@@ -397,8 +401,10 @@ is a frozen array, and a constant `Set` (`SslConfigs.RECONFIGURABLE_CONFIGS`)
 a read-only set whose `add`, `delete` and `clear` throw
 `UnsupportedOperationError`.
 
-`RecordMetadata`, `KafkaFuture` and the enums are built by the client only:
-their constructors are private.
+`KafkaFuture` and the enums are built by the client only: their constructors
+are private. `RecordMetadata` has Java's public constructor, `new
+RecordMetadata({ topicPartition, baseOffset, batchIndex, timestamp,
+serializedKeySize, serializedValueSize })`.
 
 ### `send` in two steps
 

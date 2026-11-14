@@ -349,6 +349,30 @@ test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: 
   }
 });
 
+test('the serializers bytes, a header one adds and the sizes reach the broker', { skip: SKIP, timeout: 120000 }, async () => {
+  const topic = freshTopic('serde');
+  const keySerializer = { serialize: ({ data }) => (data === null ? null : Buffer.from(`key-${data}`)) };
+  const valueSerializer = {
+    serialize: async ({ headers, data }) => {
+      headers.add({ key: 'type', value: Buffer.from('json') });
+      return Buffer.from(JSON.stringify(data));
+    },
+  };
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' }, keySerializer, valueSerializer });
+  try {
+    const metadata = await (await producer.send(new ProducerRecord({ topic, partition: 0, key: 7, value: { a: 1 } }))).get();
+    assert.equal(metadata.serializedKeySize, 'key-7'.length);
+    assert.equal(metadata.serializedValueSize, '{"a":1}'.length);
+    const { records } = await fetchRecords(BOOTSTRAP, topic, metadata.partition);
+    assert.deepEqual(
+      records.map((r) => [r.key, r.value, r.headers]),
+      [[Buffer.from('key-7'), Buffer.from('{"a":1}'), [{ key: 'type', value: Buffer.from('json'), keyBytes: Buffer.from('type') }]]],
+    );
+  } finally {
+    await producer.close();
+  }
+});
+
 test('CreateTime: the timestamp given, or the send time, reaches the broker', { skip: SKIP, timeout: 120000 }, async () => {
   const topic = freshTopic('create-time');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
@@ -843,6 +867,46 @@ test('send() runs the delivery callbacks already due before handing its record o
     assert.ok(callbacksInsideSend > 0, 'no delivery callback ran inside a send() call');
     await producer.flush();
     assert.equal(callbacks, SENDS);
+  } finally {
+    await producer.close();
+  }
+});
+
+test("partitionsFor resolves to the topic's partitions, PartitionInfo with Node values", { skip: SKIP, timeout: 120000 }, async () => {
+  const { Node, PartitionInfo } = require('@confluentinc/kafka-javascript/common');
+  const topic = freshTopic('pf');
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+  try {
+    // The first send creates the topic (auto-creation), with one partition.
+    await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
+    const partitions = await producer.partitionsFor(topic);
+    assert.ok(Array.isArray(partitions));
+    assert.equal(partitions.length, 1);
+    const [info] = partitions;
+    assert.ok(info instanceof PartitionInfo);
+    assert.equal(info.topic(), topic);
+    assert.equal(info.partition(), 0);
+    assert.ok(info.leader() instanceof Node);
+    assert.equal(info.leader().isEmpty, false);
+    assert.deepEqual(info.replicas().map((n) => n.id), [info.leader().id]);
+    assert.ok(info.replicas()[0].equals(info.leader()));
+    assert.deepEqual(info.inSyncReplicas().map((n) => n.id), [info.leader().id]);
+    assert.deepEqual(info.offlineReplicas(), []);
+    assert.equal(info.toString(), `Partition(topic = ${topic}, partition = 0, leader = ${info.leader().id}, replicas = [${info.leader().id}], isr = [${info.leader().id}], offlineReplicas = [])`);
+  } finally {
+    await producer.close();
+  }
+});
+
+test('metrics() counts the records sent, read again on each call', { skip: SKIP, timeout: 120000 }, async () => {
+  const { MetricName } = require('@confluentinc/kafka-javascript/common');
+  const topic = freshTopic('metrics');
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-metrics' } });
+  try {
+    const key = new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', 'js-it-metrics']]) });
+    assert.equal(producer.metrics().get(key).metricValue(), 0);
+    for (let i = 0; i < 3; i++) await (await producer.send(new ProducerRecord({ topic, value: Buffer.from(`v${i}`) }))).get();
+    assert.equal(producer.metrics().get(key).metricValue(), 3);
   } finally {
     await producer.close();
   }

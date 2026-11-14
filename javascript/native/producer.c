@@ -26,7 +26,8 @@
 // taken or refused at once), so a send's whole state is in place before that
 // call.
 //
-// Each request has its own context (SendCtx, FlushCtx, CloseCtx), whose
+// Each request has its own context (SendCtx, FlushCtx, CloseCtx,
+// PartitionsForCtx), whose
 // pointer is what the core receives as the completion's opaque. A send that
 // fails at hand-over parks its context on the orphan list, freed only after
 // destroy.
@@ -113,6 +114,11 @@ typedef struct {
     Producer* p;
     napi_ref done;                             // JS (error | null, closedNow) => void
 } CloseCtx;
+
+typedef struct {
+    Producer* p;
+    napi_ref done;                             // JS (error | null, partitions | null) => void
+} PartitionsForCtx;
 
 static void producer_release(Producer* p) {
     if (--p->owners != 0) return;
@@ -799,6 +805,356 @@ napi_value js_producer_flush(napi_env env, napi_callback_info info) {
     }
     kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);
     return NULL;
+}
+
+// ---- partitionsFor ----------------------------------------------------------
+
+// A node's fields as src/common/node.ts's constructor takes them: { id, host,
+// port, rack, isFenced }, or null for a NULL node.
+static napi_value node_to_js(napi_env env, const kafka_common_Node_t* n) {
+    napi_value obj, v;
+    if (n == NULL) {
+        NAPI_CHECK(env, napi_get_null(env, &obj), NULL);
+        return obj;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t id = -1, port = -1;
+    const char* host = NULL;
+    const char* rack = NULL;
+    int8_t has_rack = 0, fenced = 0;
+    error_warn(env, 1, FFI_SET(id, kafka_common_Node_id_err(n, &ffi_err)));
+    error_warn(env, 1, FFI_SET(host, kafka_common_Node_host_err(n, &ffi_err)));
+    error_warn(env, 1, FFI_SET(port, kafka_common_Node_port_err(n, &ffi_err)));
+    error_warn(env, 1, FFI_SET(has_rack, kafka_common_Node_has_rack_err(n, &ffi_err)));
+    if (has_rack) error_warn(env, 1, FFI_SET(rack, kafka_common_Node_rack_err(n, &ffi_err)));
+    error_warn(env, 1, FFI_SET(fenced, kafka_common_Node_is_fenced_err(n, &ffi_err)));
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    NAPI_CHECK(env, napi_create_int32(env, id, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "id", v), NULL);
+    if (host != NULL) NAPI_CHECK(env, napi_create_string_utf8(env, host, NAPI_AUTO_LENGTH, &v), NULL);
+    else NAPI_CHECK(env, napi_get_null(env, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "host", v), NULL);
+    NAPI_CHECK(env, napi_create_int32(env, port, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "port", v), NULL);
+    if (rack != NULL) NAPI_CHECK(env, napi_create_string_utf8(env, rack, NAPI_AUTO_LENGTH, &v), NULL);
+    else NAPI_CHECK(env, napi_get_null(env, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "rack", v), NULL);
+    NAPI_CHECK(env, napi_get_boolean(env, fenced != 0, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "isFenced", v), NULL);
+    return obj;
+}
+
+// An owned kafka_List_t of owned kafka_common_Node_t * as an array of node
+// fields, the list freed; a NULL list is null.
+static napi_value nodes_take_to_js(napi_env env, kafka_List_t* list) {
+    napi_value arr;
+    if (list == NULL) {
+        NAPI_CHECK(env, napi_get_null(env, &arr), NULL);
+        return arr;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t size = 0;
+    error_warn(env, 1, FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
+    napi_value result = NULL;
+    if (napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok) {
+        result = arr;
+        for (int32_t i = 0; i < size && result != NULL; i++) {
+            const kafka_common_Node_t* n = NULL;
+            error_warn(env, 1, FFI_SET(n, (const kafka_common_Node_t*)kafka_List_get_err(list, i, &ffi_err)));
+            napi_value v = node_to_js(env, n);
+            if (v == NULL || napi_set_element(env, arr, (uint32_t)i, v) != napi_ok) result = NULL;
+        }
+    }
+    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
+    return result;
+}
+
+// A partition's fields as src/common/partition_info.ts's constructor takes
+// them: { topic, partition, leader, replicas, inSyncReplicas,
+// offlineReplicas }, each node as node_to_js gives it.
+static napi_value partition_info_to_js(napi_env env, const kafka_common_PartitionInfo_t* info) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const char* topic = NULL;
+    int32_t partition = -1;
+    const kafka_common_Node_t* leader = NULL;
+    kafka_List_t* replicas = NULL;
+    kafka_List_t* in_sync = NULL;
+    kafka_List_t* offline = NULL;
+    error_warn(env, 1, FFI_SET(topic, kafka_common_PartitionInfo_topic_err(info, &ffi_err)));
+    error_warn(env, 1, FFI_SET(partition, kafka_common_PartitionInfo_partition_err(info, &ffi_err)));
+    error_warn(env, 1, FFI_SET(leader, kafka_common_PartitionInfo_leader_err(info, &ffi_err)));
+    error_warn(env, 1, FFI_SET(replicas, kafka_common_PartitionInfo_replicas_err(info, &ffi_err)));
+    error_warn(env, 1, FFI_SET(in_sync, kafka_common_PartitionInfo_in_sync_replicas_err(info, &ffi_err)));
+    error_warn(env, 1, FFI_SET(offline, kafka_common_PartitionInfo_offline_replicas_err(info, &ffi_err)));
+    // Each owned list is freed, whatever happens to the others.
+    napi_value r = nodes_take_to_js(env, replicas);
+    napi_value s = nodes_take_to_js(env, in_sync);
+    napi_value o = nodes_take_to_js(env, offline);
+    napi_value l = node_to_js(env, leader);
+    if (r == NULL || s == NULL || o == NULL || l == NULL) return NULL;
+    napi_value obj, v;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    NAPI_CHECK(env, napi_create_string_utf8(env, topic != NULL ? topic : "", NAPI_AUTO_LENGTH, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "topic", v), NULL);
+    NAPI_CHECK(env, napi_create_int32(env, partition, &v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "partition", v), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "leader", l), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "replicas", r), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "inSyncReplicas", s), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "offlineReplicas", o), NULL);
+    return obj;
+}
+
+// The owned list of owned kafka_common_PartitionInfo_t * partitions_for_cb
+// delivers, as an array of partition fields; the list (and its elements) freed.
+static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t size = 0;
+    error_warn(env, 1, FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
+    napi_value arr;
+    napi_value result = NULL;
+    if (napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok) {
+        result = arr;
+        for (int32_t i = 0; i < size && result != NULL; i++) {
+            const kafka_common_PartitionInfo_t* info = NULL;
+            error_warn(env, 1, FFI_SET(info, (const kafka_common_PartitionInfo_t*)kafka_List_get_err(list, i, &ffi_err)));
+            napi_value v = info == NULL ? NULL : partition_info_to_js(env, info);
+            if (v == NULL || napi_set_element(env, arr, (uint32_t)i, v) != napi_ok) result = NULL;
+        }
+    }
+    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
+    return result;
+}
+
+// The partitions_for_cb completion, on the JS thread: `done(error, null)` or
+// `done(null, partitions)`.
+static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
+    PartitionsForCtx* ctx = (PartitionsForCtx*)opaque;
+    Producer* p = ctx->p;
+    napi_env env = p->env;
+    if (!p->queue.finalizing) {
+        napi_value argv[2];
+        if (error != NULL) {
+            argv[0] = error_take_to_js(env, error);
+            error = NULL;
+            if (argv[0] != NULL && napi_get_null(env, &argv[1]) == napi_ok) call_ref(env, ctx->done, 2, argv, NULL);
+            if (value != NULL) {
+                kafka_common_Error_t* ffi_err = NULL;
+                error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(value, &ffi_err)));
+            }
+        } else {
+            argv[1] = value == NULL ? NULL : partitions_take_to_js(env, value);
+            value = NULL;
+            if (argv[1] == NULL) js_warn_thrown(env);
+            else if (napi_get_null(env, &argv[0]) == napi_ok) call_ref(env, ctx->done, 2, argv, NULL);
+        }
+    } else if (value != NULL) {
+        kafka_common_Error_t* ffi_err = NULL;
+        error_discard(FFI_ERR(kafka_List_destroy_err(value, &ffi_err)));
+    }
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+}
+
+// producerPartitionsFor(handle, topic, done): Producer.partitionsFor(topic)
+// through partitions_for_cb; `done(error | null, partitions | null)` runs
+// with the partitions' fields once the core answered.
+napi_value js_producer_partitions_for(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 3 || !is_function(env, argv[2])) {
+        napi_throw_type_error(env, NULL, "partitionsFor(handle, topic, done)");
+        return NULL;
+    }
+    Producer* p = unwrap_producer(env, argv[0]);
+    if (p == NULL) return NULL;
+    // Java's null is NULL, which the core refuses with Java's
+    // NullPointerException ("topic cannot be null").
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    char* topic = NULL;
+    if (type != napi_null) {
+        topic = js_string_dup(env, argv[1], "topic must be a string");
+        if (topic == NULL) return NULL;
+    }
+    PartitionsForCtx* ctx = (PartitionsForCtx*)calloc(1, sizeof(PartitionsForCtx));
+    if (ctx == NULL) {
+        free(topic);
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    ctx->p = p;
+    if (napi_create_reference(env, argv[2], 1, &ctx->done) != napi_ok) {
+        free(topic);
+        free(ctx);
+        js_throw_last_napi_error(env, "napi_create_reference");
+        return NULL;
+    }
+    kafka_producer_Producer_partitions_for_cb(p->view, topic, partitions_for_on_complete, ctx);
+    free(topic);
+    return NULL;
+}
+
+// ---- metrics ----------------------------------------------------------------
+
+// A metric value as JS: a double or an int a number, a long a bigint (Java's
+// long, root CLAUDE.md, JavaScript Binding Conventions, Types), a string a
+// string; the value freed.
+static napi_value metric_value_take_to_js(napi_env env, kafka_common_MetricValue_t* value) {
+    kafka_common_Error_t* ffi_err = NULL;
+    napi_value v = NULL;
+    if (value == NULL) {
+        NAPI_CHECK(env, napi_get_null(env, &v), NULL);
+        return v;
+    }
+    int kind = kafka_common_MetricValue_DOUBLE;
+    error_warn(env, 1, FFI_SET(kind, (int)kafka_common_MetricValue__enum_err(value, &ffi_err)));
+    napi_status status = napi_ok;
+    if (kind == kafka_common_MetricValue_STRING) {
+        const char* text = NULL;
+        error_warn(env, 1, FFI_SET(text, kafka_common_MetricValue_as_string_err(value, &ffi_err)));
+        status = napi_create_string_utf8(env, text != NULL ? text : "", NAPI_AUTO_LENGTH, &v);
+    } else if (kind == kafka_common_MetricValue_LONG) {
+        int64_t n = 0;
+        error_warn(env, 1, FFI_SET(n, kafka_common_MetricValue_as_long_err(value, &ffi_err)));
+        status = napi_create_bigint_int64(env, n, &v);
+    } else if (kind == kafka_common_MetricValue_INT) {
+        int32_t n = 0;
+        error_warn(env, 1, FFI_SET(n, kafka_common_MetricValue_as_int_err(value, &ffi_err)));
+        status = napi_create_int32(env, n, &v);
+    } else {
+        double d = 0;
+        error_warn(env, 1, FFI_SET(d, kafka_common_MetricValue_as_double_err(value, &ffi_err)));
+        status = napi_create_double(env, d, &v);
+    }
+    error_warn(env, 1, FFI_ERR(kafka_common_MetricValue_destroy_err(value, &ffi_err)));
+    return status == napi_ok ? v : NULL;
+}
+
+// A metric name's tags, the map of char * to char * sorted by key, as an array
+// of [key, value] pairs in that order; the map freed.
+static napi_value tags_take_to_js(napi_env env, kafka_Map_t* tags) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t size = 0;
+    if (tags != NULL) error_warn(env, 1, FFI_SET(size, kafka_Map_size_err(tags, &ffi_err)));
+    napi_value arr;
+    napi_value result = NULL;
+    if (napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok) {
+        result = arr;
+        for (int32_t i = 0; i < size && result != NULL; i++) {
+            const char* key = NULL;
+            const char* value = NULL;
+            error_warn(env, 1, FFI_SET(key, (const char*)kafka_Map_key_err(tags, i, &ffi_err)));
+            error_warn(env, 1, FFI_SET(value, (const char*)kafka_Map_value_err(tags, i, &ffi_err)));
+            napi_value pair, k, v;
+            if (napi_create_array_with_length(env, 2, &pair) != napi_ok
+                || napi_create_string_utf8(env, key != NULL ? key : "", NAPI_AUTO_LENGTH, &k) != napi_ok
+                || napi_create_string_utf8(env, value != NULL ? value : "", NAPI_AUTO_LENGTH, &v) != napi_ok
+                || napi_set_element(env, pair, 0, k) != napi_ok || napi_set_element(env, pair, 1, v) != napi_ok
+                || napi_set_element(env, arr, (uint32_t)i, pair) != napi_ok)
+                result = NULL;
+        }
+    }
+    if (tags != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(tags, &ffi_err)));
+    return result;
+}
+
+// One metric as JS: { name, group, description, tags, value, measurable },
+// read when metrics() runs.
+static napi_value metric_to_js(napi_env env, const kafka_common_MetricName_t* name,
+                               const kafka_common_metrics_KafkaMetric_t* metric) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const char* n = NULL;
+    const char* g = NULL;
+    const char* d = NULL;
+    kafka_Map_t* tags = NULL;
+    const kafka_common_Metric_t* as_metric = NULL;
+    kafka_common_MetricValue_t* value = NULL;
+    int8_t measurable = 0;
+    error_warn(env, 1, FFI_SET(n, kafka_common_MetricName_name_err(name, &ffi_err)));
+    error_warn(env, 1, FFI_SET(g, kafka_common_MetricName_group_err(name, &ffi_err)));
+    error_warn(env, 1, FFI_SET(d, kafka_common_MetricName_description_err(name, &ffi_err)));
+    error_warn(env, 1, FFI_SET(tags, kafka_common_MetricName_tags_err(name, &ffi_err)));
+    error_warn(env, 1, FFI_SET(as_metric, kafka_common_metrics_KafkaMetric__as_Metric_err(metric, &ffi_err)));
+    if (as_metric != NULL) error_warn(env, 1, FFI_SET(value, kafka_common_Metric_metric_value_err(as_metric, &ffi_err)));
+    error_warn(env, 1, FFI_SET(measurable, kafka_common_metrics_KafkaMetric_is_measurable_err(metric, &ffi_err)));
+    // Each owned value is freed, whatever happens to the others.
+    napi_value t = tags_take_to_js(env, tags);
+    napi_value v = metric_value_take_to_js(env, value);
+    if (t == NULL || v == NULL) return NULL;
+    napi_value obj, x;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    NAPI_CHECK(env, napi_create_string_utf8(env, n != NULL ? n : "", NAPI_AUTO_LENGTH, &x), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "name", x), NULL);
+    NAPI_CHECK(env, napi_create_string_utf8(env, g != NULL ? g : "", NAPI_AUTO_LENGTH, &x), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "group", x), NULL);
+    NAPI_CHECK(env, napi_create_string_utf8(env, d != NULL ? d : "", NAPI_AUTO_LENGTH, &x), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "description", x), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "tags", t), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "value", v), NULL);
+    NAPI_CHECK(env, napi_get_boolean(env, measurable != 0, &x), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "measurable", x), NULL);
+    return obj;
+}
+
+// producerMetrics(handle): Producer.metrics() through kafka_producer_Producer_metrics,
+// synchronously (it has no _cb twin): every metric's fields and value, read
+// now, as an array (src/producer/kafka_producer.ts builds the snapshot).
+napi_value js_producer_metrics(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 1) {
+        napi_throw_type_error(env, NULL, "metrics(handle)");
+        return NULL;
+    }
+    Producer* p = unwrap_producer(env, argv[0]);
+    if (p == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_metrics_MetricsView_t* view = NULL;
+    kafka_common_Error_t* err = FFI_SET(view, kafka_producer_Producer_metrics_err(p->view, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    kafka_Iterator_t* it = NULL;
+    err = FFI_SET(it, kafka_common_metrics_MetricsView_iterator_err(view, &ffi_err));
+    error_warn(env, 1, FFI_ERR(kafka_common_metrics_MetricsView_destroy_err(view, &ffi_err)));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value arr;
+    napi_value result = NULL;
+    if (napi_create_array(env, &arr) == napi_ok) {
+        result = arr;
+        uint32_t i = 0;
+        for (;;) {
+            int8_t more = 0;
+            error_warn(env, 1, FFI_SET(more, kafka_Iterator_has_next_err(it, &ffi_err)));
+            if (!more) break;
+            const kafka_Map_Entry_t* entry = NULL;
+            err = FFI_SET(entry, (const kafka_Map_Entry_t*)kafka_Iterator_next_err(it, &ffi_err));
+            if (err != NULL || entry == NULL) {
+                error_warn(env, 1, err);
+                break;
+            }
+            const kafka_common_MetricName_t* name = NULL;
+            const kafka_common_metrics_KafkaMetric_t* metric = NULL;
+            error_warn(env, 1, FFI_SET(name, (const kafka_common_MetricName_t*)kafka_Map_Entry_key_err(entry, &ffi_err)));
+            error_warn(env, 1, FFI_SET(metric, (const kafka_common_metrics_KafkaMetric_t*)kafka_Map_Entry_value_err(entry, &ffi_err)));
+            if (name == NULL || metric == NULL) continue;
+            napi_value v = metric_to_js(env, name, metric);
+            if (v == NULL || napi_set_element(env, arr, i++, v) != napi_ok) {
+                result = NULL;
+                break;
+            }
+        }
+    }
+    error_warn(env, 1, FFI_ERR(kafka_Iterator_destroy_err(it, &ffi_err)));
+    return result;
 }
 
 // ---- close and destroy ------------------------------------------------------

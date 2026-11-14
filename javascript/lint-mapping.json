@@ -4,7 +4,6 @@
     "src/duration.ts:Duration": "the type of every parameter taking a Java Duration: a number of milliseconds or a Temporal.Duration, which the root exports",
     "src/producer/producer_configs.ts:ProducerConfigs": "the type of the configuration map the constructor takes, Java's Map and Properties as one, its known keys generated from Java's ProducerConfig",
     "src/producer/kafka_producer.ts:CloseArgs": "the options object of Java's close(Duration), the timed form of the close() overload set",
-    "src/producer/producer_record.ts:Data": "the JavaScript types a key or value takes",
     "KafkaProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the producer",
     "Headers.[Symbol.iterator]": "[Symbol.iterator] where Java has Iterable, JavaScript's iteration protocol",
     "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
@@ -12,7 +11,9 @@
     "Headers.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "ProducerRecord.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
-    "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string"
+    "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "src/common/metric_name_map.ts:MetricNameMap": "the map keyed by MetricName that metrics() returns for Java's Map<MetricName, ? extends Metric>: JavaScript has no value equality for map keys (root CLAUDE.md, JavaScript Binding Conventions, Types, as TopicPartitionMap)"
   },
   "javaTargets": {
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",

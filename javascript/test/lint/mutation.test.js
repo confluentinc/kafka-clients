@@ -92,7 +92,7 @@ const MUTATIONS = [
   {
     rule: 'check-internal-members',
     what: 'a library-only member reached with bracket access',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'record.internalToNative()', "record['internalToNative']()"),
+    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'record.internalToNative(key, value)', "record['internalToNative'](key, value)"),
   },
   {
     rule: 'check-internal-members',
@@ -245,7 +245,7 @@ MUTATIONS.push(
   {
     rule: 'check-overload-shape',
     what: "a key renamed in one ProducerRecord constructor's signature",
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', '    key: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key', '    recordKey: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key'),
+    apply: (root) => edit(root, 'src/producer/producer_record.ts', '    key: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key', '    recordKey: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key'),
   },
   {
     rule: 'check-overload-shape',
@@ -266,8 +266,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;\n  });',
-        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n  });',
+        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;\n  });',
+        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n  });',
       ),
   },
   {
@@ -278,8 +278,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        '    partition: number | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;',
-        '    partition: string | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;',
+        '    partition: number | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;',
+        '    partition: string | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;',
       ),
   },
   {
@@ -589,7 +589,7 @@ MUTATIONS.push(
   {
     rule: 'check-zero-copy',
     what: 'a Uint8Array key copied by Buffer.from in src/',
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.from(value);'),
+    apply: (root) => edit(root, 'src/producer/producer_record.ts', '  if (isBytes(value)) return value;', '  if (isBytes(value)) return Buffer.from(value);'),
   },
   {
     rule: 'check-zero-copy',
@@ -629,7 +629,7 @@ MUTATIONS.push(
   {
     rule: 'check-zero-copy',
     what: 'a key copied with Buffer.concat in src/',
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.concat([value]);'),
+    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'if (isBytes(value)) return value;', 'if (isBytes(value)) return Buffer.concat([value]);'),
   },
   {
     rule: 'check-zero-copy',
@@ -638,8 +638,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        'encodeLikeJava(value) : value;',
-        'encodeLikeJava(value) : copyOf(value);\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
+        'if (isBytes(value)) return value;',
+        'if (isBytes(value)) return copyOf(value);\n  return null;\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
       ),
   },
   {
@@ -764,7 +764,7 @@ MUTATIONS.push(
   {
     rule: 'check-no-closed-flag',
     what: 'a closed flag on the producer',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer implements Producer {\n', 'export class KafkaProducer implements Producer {\n  #closed = false;\n'),
+    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {\n', 'export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {\n  #closed = false;\n'),
   },
   {
     rule: 'check-no-repeated-precondition',

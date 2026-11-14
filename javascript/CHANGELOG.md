@@ -150,6 +150,48 @@ newer.
   no garbage collection closes one: a script that never calls `close()` never
   exits on its own. Once closed, a producer no longer holds Node, and its
   native client is released when it is garbage collected.
+- Serializers: `new KafkaProducer({ configs, keySerializer, valueSerializer })`
+  takes a `Serializer` (`common/serialization`) for each, or `null`: an
+  object `{ serialize({ topic, headers, data }), close?() }`, Java's two
+  `serialize` methods as one. They run in `send()`, key then value, are
+  called for a null key or value too, and may return a Promise, which
+  `send()` awaits (sends not awaited one by one may then reach the producer
+  out of call order); what they return is a `Uint8Array` or `null`, borrowed
+  like the app's bytes until `send()` settles. The producer's type arguments are inferred from them,
+  and a producer without them is a `KafkaProducer<Uint8Array, Uint8Array>`.
+  `close()` closes both; a failure there is a process warning. A function
+  given where a serializer goes throws `IllegalArgumentError` "... did you
+  forget '()'?". `ProducerRecord<K, V>` is generic: its key and value are
+  what the serializers take, checked at `send()` when there is no serializer.
+- `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
+  in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
+  `Node` (a frozen data object) and `PartitionInfo` (Java's methods, its
+  public constructors taking any iterable of `Node` for Java's `Node[]`, and
+  `replicas()`, `inSyncReplicas()` and `offlineReplicas()` returning a new
+  array each call). The three have Java's `equals` and `hashCode`, and an
+  `int` argument beyond Java's `int` is a `RangeError`.
+- `KafkaProducer.partitionsFor(topic)`, Java's `partitionsFor`: a Promise
+  through the C API's `_cb` form, resolving to an array of `PartitionInfo`
+  (Java's `List`), and rejecting with the core's errors (a metadata timeout,
+  "topic cannot be null" as a `TypeError`). The gRPC server serves its
+  `PartitionsFor` RPC.
+- `KafkaProducer.metrics()`, Java's `metrics()`, synchronous: a
+  `MetricNameMap<Metric>` (`common`, *js-only*: a read-only map keyed as
+  `MetricName.equals` compares, by group, name and tags, with a `toJSON()`
+  of its entries by that key) of `KafkaMetric`
+  (`common/metrics`), the values read when `metrics()` runs, where Java's map
+  is a live view. `MetricName` (`common`) has Java's methods, its `tags()` a
+  `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public
+  constructor, its value provider, configuration and time Java types this
+  client does not translate (`MetricValueProvider`, `MetricConfig` and
+  `Measurable` are placeholder types) and Java's `config()` getter; the
+  setter `config(MetricConfig)` is left out (Q30). A long value is a
+  `bigint`. The gRPC
+  server serves its `Metrics` RPC.
+- `RecordMetadata` has Java's public constructor, `new RecordMetadata({
+  topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,
+  serializedValueSize })`, a `long` taking a bigint or a whole number; every
+  `RecordMetadata` is frozen.
 
 ### Errors and security
 

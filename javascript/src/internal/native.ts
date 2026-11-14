@@ -27,7 +27,38 @@ import { fromNative } from './errors';
 import { loadAddon, platformKey } from './native_loader';
 import { RecordMetadata } from '../producer/record_metadata';
 
+/** A metric's fields and its value read when metrics() ran (native/producer.c, metric_to_js). */
+interface NativeMetric {
+  name: string;
+  group: string;
+  description: string;
+  // The tags sorted by key.
+  tags: Array<[string, string]>;
+  // A double or an int a number, a long a bigint, a string gauge a string.
+  value: number | bigint | string;
+  measurable: boolean;
+}
+
 /** The fields the native layer reads a delivered record's metadata into (native/producer.c). */
+/** A node's fields, as the addon reads them (native/producer.c, node_to_js). */
+interface NativeNode {
+  id: number;
+  host: string | null;
+  port: number;
+  rack: string | null;
+  isFenced: boolean;
+}
+
+/** A partition's fields, as the addon reads them (native/producer.c, partition_info_to_js). */
+interface NativePartitionInfo {
+  topic: string;
+  partition: number;
+  leader: NativeNode | null;
+  replicas: NativeNode[] | null;
+  inSyncReplicas: NativeNode[] | null;
+  offlineReplicas: NativeNode[] | null;
+}
+
 interface RecordMetadataFields {
   topic: string;
   partition: number;
@@ -79,6 +110,17 @@ interface Native {
     onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
   ): void;
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
+  // Java's partitionsFor through partitions_for_cb; the partitions' fields
+  // as src/common/partition_info.ts's constructor takes them, each node as
+  // src/common/node.ts's does. A null topic goes to the core as NULL.
+  // Java's metrics() through kafka_producer_Producer_metrics (no _cb twin):
+  // every metric, read now.
+  producerMetrics(handle: ProducerHandle): NativeMetric[];
+  producerPartitionsFor(
+    handle: ProducerHandle,
+    topic: string | null,
+    onComplete: (error: unknown, partitions: NativePartitionInfo[] | null) => void,
+  ): void;
   producerClose(
     handle: ProducerHandle,
     // null when the timeout was left out (Java's close()), else the
@@ -119,8 +161,7 @@ function warn(error: unknown): void {
   }
 }
 
-// RecordMetadata's constructor is private: users never build one. The native
-// layer does, through its library-only factory.
+// The native layer builds RecordMetadata through its library-only factory.
 native.setFactories(
   (fields) => fromNative(fields),
   (fields) => RecordMetadata.internalCreate(fields),

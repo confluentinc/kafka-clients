@@ -20,10 +20,12 @@
 // index.ts): not in the preview, initTransactions, beginTransaction,
 // sendOffsetsToTransaction, commitTransaction and abortTransaction; for want
 // of an FFI entry point, registerMetricForSubscription,
-// unregisterMetricFromSubscription and clientInstanceId; and, not translated
-// yet, partitionsFor and metrics.
+// unregisterMetricFromSubscription and clientInstanceId.
 
 import type { KafkaFuture } from '../common/kafka_future';
+import type { Metric } from '../common/metric';
+import type { MetricNameMap } from '../common/metric_name_map';
+import type { PartitionInfo } from '../common/partition_info';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
 import type { CloseArgs } from './kafka_producer';
@@ -33,9 +35,12 @@ import type { RecordMetadata } from './record_metadata';
 /**
  * The interface for the `KafkaProducer`.
  *
+ * @typeParam K - the type of the keys the producer's key serializer takes
+ * @typeParam V - the type of the values the producer's value serializer takes
+ *
  * @see KafkaProducer
  */
-export interface Producer {
+export interface Producer<K = Uint8Array, V = Uint8Array> {
   /**
    * See `KafkaProducer.send({ record, callback })`.
    *
@@ -44,7 +49,7 @@ export interface Producer {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord;
+    record: ProducerRecord<K | null, V | null>;
     /**
      * A user-supplied callback to execute when the record has been
      * acknowledged by the server (null indicates no callback).
@@ -59,7 +64,7 @@ export interface Producer {
    */
   send(options: {
     /** The record to send. */
-    record: ProducerRecord;
+    record: ProducerRecord<K | null, V | null>;
     callback?: never;
   }): Promise<KafkaFuture<RecordMetadata>>;
   /**
@@ -68,7 +73,7 @@ export interface Producer {
    * @param record - The record to send
    * @returns resolving at hand-over to the future of the record's metadata
    */
-  send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+  send(record: ProducerRecord<K | null, V | null>): Promise<KafkaFuture<RecordMetadata>>;
 
   /**
    * See `KafkaProducer.flush()`.
@@ -76,6 +81,31 @@ export interface Producer {
    * @returns resolving once the records sent before it completed
    */
   flush(): Promise<void>;
+
+  /**
+   * See `KafkaProducer.partitionsFor({ topic })`.
+   *
+   * @param options - the topic
+   * @returns resolving to the topic's partitions
+   */
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+  }): Promise<PartitionInfo[]>;
+  /**
+   * See `KafkaProducer.partitionsFor(topic)`: the topic on its own.
+   *
+   * @param topic - The topic to get partition metadata for
+   * @returns resolving to the topic's partitions
+   */
+  partitionsFor(topic: string): Promise<PartitionInfo[]>;
+
+  /**
+   * See `KafkaProducer.metrics()`.
+   *
+   * @returns the producer's metrics, by name
+   */
+  metrics(): MetricNameMap<Metric>;
 
   /**
    * See `KafkaProducer.close()`.

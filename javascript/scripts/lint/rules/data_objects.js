@@ -24,7 +24,10 @@
 //     declares (a getter: `topic()`, `hasOffset()`), but `toString`, `equals`,
 //     `hashCode` and a name starting with `get`, which stay methods, as a
 //     public `readonly` instance field of the same name: not a get accessor,
-//     not a method, not a mutable field;
+//     not a method, not a mutable field, and its constructor freezes the
+//     instance (`Object.freeze(this);` as a top-level statement, `not-frozen`:
+//     root CLAUDE.md, JavaScript Binding Conventions, Class family, a data
+//     object is set once when it is built);
 //   - a class that is not a data class has no get accessor (a Java getter is
 //     a method there) and no public instance field, except a `readonly` one
 //     translating a Java `public final` instance field of its Java class or
@@ -96,7 +99,7 @@ function javaGetters(cls) {
 
 module.exports = {
   name: 'check-data-objects',
-  kinds: ['getter-not-field', 'accessor', 'field', 'mutable-field', 'setter', 'static-mutable', 'stale-data-class'],
+  kinds: ['not-frozen', 'getter-not-field', 'accessor', 'field', 'mutable-field', 'setter', 'static-mutable', 'stale-data-class'],
   needs: ['program', 'java'],
   hint:
     'On a data class, make each Java getter a public readonly field set in the constructor; elsewhere, make it a ' +
@@ -117,7 +120,18 @@ module.exports = {
       const isError = row !== undefined && row.name === item.name;
       const cls = javaOf.get(item.node);
       const isData = cls !== undefined && cls !== null && dataClasses.has(cls.fqn);
-      if (isData) seenData.add(cls.fqn);
+      if (isData) {
+        seenData.add(cls.fqn);
+        checked += 1;
+        if (!freezesInstances(ts, item.node)) {
+          findings.push({
+            kind: 'not-frozen',
+            subject: item.name,
+            at: atNode(ctx, item.node),
+            message: 'is a data class whose constructor does not run Object.freeze(this): its fields are set once, when it is built',
+          });
+        }
+      }
       const getters = isData ? javaGetters(cls) : new Set();
       const members = publicMembers(ts, item.node);
       for (const m of members) {

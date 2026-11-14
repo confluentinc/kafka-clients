@@ -48,6 +48,7 @@ const REC = `export class Rec {
     this.offset = 0;
     this.isOpen = true;
     this.hasKey = false;
+    Object.freeze(this);
   }
   getSize(): number { return 0; }
   close(): void {}
@@ -81,14 +82,29 @@ test('a data class with readonly fields, and classes with methods, pass', () => 
     withData(),
   );
   assert.equal(r.status, 0, r.text);
-  // Rec: UNKNOWN and its 4 getter fields; Proto.id; the one data class listed.
-  assert.ok(r.out.includes('✅ check-data-objects: 7 item(s) checked'), r.text);
+  // Rec: frozen, UNKNOWN and its 4 getter fields; Proto.id; the one data class listed.
+  assert.ok(r.out.includes('✅ check-data-objects: 8 item(s) checked'), r.text);
 });
 
-test("the shipped list names the producer data classes, not Header (the root's list does not)", () => {
+test("a data class whose constructor does not freeze the instance is a finding", () => {
+  for (const unfrozen of [
+    REC.replace('    Object.freeze(this);\n', ''),
+    // Under a condition, it may not run.
+    REC.replace('    Object.freeze(this);\n', '    if (topic) Object.freeze(this);\n'),
+  ]) {
+    const r = lint(project({ ...FILES, 'src/producer/rec.ts': unfrozen }), [RULE], withData());
+    assert.deepEqual(findings(r), [
+      'Rec: is a data class whose constructor does not run Object.freeze(this): its fields are set once, when it is built',
+    ]);
+  }
+});
+
+test("the shipped list names the data classes the client translates, not Header (the root's list does not)", () => {
   assert.deepEqual([...rule.DATA_CLASSES].sort(), [
     'org.apache.kafka.clients.producer.ProducerRecord',
     'org.apache.kafka.clients.producer.RecordMetadata',
+    'org.apache.kafka.common.Node',
+    'org.apache.kafka.common.TopicPartition',
   ]);
 });
 

@@ -332,13 +332,13 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
-  A `ProducerRecord` is frozen (`Object.freeze(this)` in its constructor,
-  as `TopicPartition` will be), so `ProducerRecord.internalToNative` reads
+  Every data class is frozen (`Object.freeze(this)` in its constructor,
+  which `check-data-objects` requires), so `ProducerRecord.internalToNative` reads
   the fields its constructor checked and checks nothing again at `send()`
   (root conventions, Q35: no repeated precondition); its `Headers` stays
   writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord` and `RecordMetadata` today. **(root conflict)** The root
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
   `RecordMetadata`, `Node`, the admin description classes) does not name
   `Header`, which its one-line test would admit; the code follows the list, so
@@ -445,8 +445,51 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   ...check: BareCheck<U>)` infers `U` from the value alone and refuses any
   other `U` through the rest parameter, which no call gives, and a member of a
   class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
-  other object goes by name there, while plain JavaScript takes it bare. The
-  serializer forms of the constructor are not translated yet.
+  other object goes by name there, while plain JavaScript takes it bare.
+- Collections (root conventions, Types): a Java array or collection taken is
+  any iterable (`PartitionInfo`'s `Node[]`, plan §5 item 1), and one
+  returned is a new array each call (`PartitionInfo.replicas()`,
+  `partitionsFor()`'s `List`). A map keyed by strings taken is a `Map` or a
+  plain object (the root's Types row "Other collections taken", Q25):
+  `MetricName`'s constructor takes its `tags` so: a `Map` is kept as given
+  and `tags()` returns it, as Java stores the map; a plain object is read
+  into a new `Map`. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
+  *(js-only, on the invented-names list)*, a read-only map keyed by the
+  JSON text of the group, the name and the tags sorted by key (the fields
+  `MetricName.equals` compares), keeping the original `MetricName`s, with a
+  `toJSON()` writing the entries by that string key, as `TopicPartitionMap`'s
+  will;
+  `check-type-mapping` holds the rows.
+- `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
+  runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
+  constructor, its untranslated `MetricValueProvider`, `MetricConfig` and
+  `Measurable` placeholder types typed `unknown`, read by their Java
+  methods), each built with a provider returning the value read. *(deviation:
+  Java's map is a live view. Why: only the clients call the addon, and
+  Python's `metrics()` is a snapshot too. Goes when: the JavaScript metrics
+  wrap the core's.)* A long value is a `bigint`.
+- Serializers (root conventions, Serialization): `Serializer` is an object
+  type in `common/serialization`, run in JavaScript inside `send()`
+  (`src/internal/serde.ts`), key then value, after the form and argument
+  checks and before the pump and the hand-over; a thenable result is
+  awaited. The binding keeps no closed state, so a serializer runs on a
+  closed producer too, and the core reports the closed producer at the
+  hand-over (rule 1). What a serializer returns is borrowed until the
+  hand-over, as the app's bytes are (rule 8). A null serializer, or none,
+  sends the record's own bytes (a string encoded by `encodeLikeJava`, checked
+  at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
+  type TypeScript cannot enforce). `close()` closes both serializers once
+  the core reports the producer closed; a construction the core fails with
+  Java's relabelled "Failed to construct kafka producer" closes them too.
+  **(root conflict)** The root conventions' Class family says an omitted or
+  `null` key or value binds `never`, and their Signatures say each Java form
+  has one TypeScript overload signature. With one signature per Java
+  constructor, TypeScript binds a `null` argument to `null`, not `never`
+  (binding `never` needs extra signatures per null combination, as Python's
+  binding stubs have, which the plan's B4 adds: plan §5, item 7); the code
+  follows Signatures, so a record built with
+  `key: null` is a `ProducerRecord<null, ...>`, and `send` takes a
+  `ProducerRecord<K | null, V | null>`, noted in its `@remarks`.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with
@@ -748,11 +791,11 @@ The layout is the root conventions' (Layout and modules).
   to match. `dist/` is git-ignored and is what
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
-  TypeScript `private` constructor (`protected` where Java's is), and so is
-  one users must not call (`RecordMetadata`, whose Java constructor takes an
-  untranslated `TopicPartition`); there is no run-time guard (root
-  conventions, Class family). The library builds such an object through one
-  static factory, `internalCreate`, and calls its own methods on public
+  TypeScript `private` constructor (`protected` where Java's is); there is no
+  run-time guard (root conventions, Class family). The library builds such an
+  object through one static factory, `internalCreate` (`RecordMetadata`'s
+  builds it from the native layer's fields, through its public constructor
+  with a module-private mark that no caller can give), and calls its own methods on public
   classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)
   with dot access: each is a public member marked `@internal` in its TSDoc
   and named `internal...`, which tsc's `stripInternal` leaves out of the

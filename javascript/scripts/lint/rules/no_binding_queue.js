@@ -84,6 +84,16 @@ const ALLOWED = [
     key: 'src/producer/producer_record.ts:INT64_MAX',
     reason: "the largest timestamp Java's long carries: a range check of one record, not a cap of records",
   },
+  {
+    key: 'src/internal/java_number.ts:INT32_MAX',
+    reason: "the largest Java int: a range check of one argument, not a cap of records",
+  },
+  {
+    key: 'src/internal/java_number.ts:INT64_MAX',
+    reason: "the largest Java long: a range check of one argument, not a cap of records",
+  },
+  { key: 'MetricName.#tags', reason: "one metric name's tags, Java's Map<String, String> field, not a store of records" },
+  { key: 'MetricNameMap.#entries', reason: "one metrics() snapshot's entries (Java's Map<MetricName, ? extends Metric>), not a store of records" },
   { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
   {
     key: 'src/common/header/headers.ts:EMPTY',
@@ -98,6 +108,9 @@ const ALLOWED = [
     key: 'JavaForms.#bare',
     reason: "a method's one-parameter Java forms, fixed when its module loads: a table of forms, not records",
   },
+  { key: 'PartitionInfo.#replicas', reason: "one partition's replicas (Java's Node[]), not a store of records" },
+  { key: 'PartitionInfo.#inSyncReplicas', reason: "one partition's in-sync replicas (Java's Node[]), not a store of records" },
+  { key: 'PartitionInfo.#offlineReplicas', reason: "one partition's offline replicas (Java's Node[]), not a store of records" },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',

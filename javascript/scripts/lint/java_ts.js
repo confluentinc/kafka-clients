@@ -88,7 +88,25 @@ const CONSTANTS_ONLY = new Set([
 const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.producer.ProducerRecord',
   'org.apache.kafka.clients.producer.RecordMetadata',
+  'org.apache.kafka.common.TopicPartition',
+  'org.apache.kafka.common.Node',
 ]);
+
+/**
+ * The Java types the client does not translate, which a signature that cannot
+ * be dropped takes or returns as a placeholder typed `unknown` (root
+ * CLAUDE.md, JavaScript Binding Conventions, Scope: `export type Partitioner =
+ * unknown`): their members are not asked for.
+ */
+const PLACEHOLDERS = new Set(['Partitioner', 'MetricValueProvider', 'MetricConfig', 'Measurable']);
+
+/**
+ * The Java types that are not `@InterfaceAudience.Public`, which a public
+ * signature types `unknown` (root CLAUDE.md, JavaScript Binding Conventions,
+ * Scope: "A type that Java doesn't make public, such as `Time`, is
+ * `unknown`").
+ */
+const NOT_PUBLIC_TYPES = new Set(['Time']);
 
 /**
  * The Java functional interfaces translated as a function type
@@ -614,6 +632,8 @@ module.exports = {
   PREFIX,
   ERROR_ALLOWANCE,
   DATA_CLASSES,
+  PLACEHOLDERS,
+  NOT_PUBLIC_TYPES,
   ENUM_IMPLICIT,
   JavaIndex,
   javaIndexOf,

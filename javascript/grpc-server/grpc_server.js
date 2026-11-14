@@ -26,11 +26,9 @@
 // Only ProducerService is registered: the binding has no consumer or admin
 // client yet. Within it, the RPCs for what the JS producer does not have yet
 // are deliberately left out, so grpc-js answers them with UNIMPLEMENTED rather
-// than this server inventing a result:
-//   - InitTransactions, BeginTransaction, CommitTransaction, AbortTransaction,
-//     SendOffsetsToTransaction: no transaction surface;
-//   - PartitionsFor: no partitionsFor();
-//   - Metrics: no metrics().
+// than this server inventing a result: InitTransactions, BeginTransaction,
+// CommitTransaction, AbortTransaction and SendOffsetsToTransaction, as there
+// is no transaction surface.
 // The tests needing them are skipped for this backend only, by JS_GRPC_SKIPS in
 // rust/Makefile, each with the condition for removing its skip.
 //
@@ -62,6 +60,8 @@ const {
   int64,
   kafkaErrorToProto,
   makeLoggingDeliveryCallback,
+  metricToProto,
+  partitionInfoToProto,
   protoToProducerRecord,
   recordMetadataToProto,
   serverError,
@@ -135,6 +135,8 @@ class ProducerService {
       CreateProducer: unary(this.createProducer),
       Send: unary(this.send),
       Flush: unary(this.flush),
+      PartitionsFor: unary(this.partitionsFor),
+      Metrics: unary(this.metrics),
       Close: unary(this.close),
       CloseTimeout: unary(this.closeTimeout),
       GetCallbackLog: unary(this.getCallbackLog),
@@ -208,6 +210,32 @@ class ProducerService {
       return { error: kafkaErrorToProto(e) };
     }
     return {};
+  }
+
+  async partitionsFor(request) {
+    const id = idOf(request.producer_id);
+    const producer = this.#producers.get(id);
+    if (producer === undefined) return { error: unknownProducer(id) };
+    let partitions;
+    try {
+      partitions = await producer.partitionsFor(request.topic === undefined ? '' : request.topic);
+    } catch (e) {
+      return { error: kafkaErrorToProto(e) };
+    }
+    return { partitions: partitions.map(partitionInfoToProto) };
+  }
+
+  async metrics(request) {
+    const id = idOf(request.producer_id);
+    const producer = this.#producers.get(id);
+    if (producer === undefined) return { error: unknownProducer(id) };
+    let metrics;
+    try {
+      metrics = producer.metrics();
+    } catch (e) {
+      return { error: kafkaErrorToProto(e) };
+    }
+    return { metrics: { metrics: [...metrics.values()].map(metricToProto) } };
   }
 
   async close(request) {
