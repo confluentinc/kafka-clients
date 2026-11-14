@@ -981,11 +981,16 @@ The rules, each named in its finding:
 - `check-string-encoding`: `encodeLikeJava` in `src/internal/encode.ts` is the
   only place a string becomes bytes (no `Buffer.from(string)`, `TextEncoder`
   or string write elsewhere).
-- `check-no-closed-flag`: no class of `src/` and no C struct of `native/`
-  has a field for a closed or closing state, and no string literal holds
-  one of Java's closed-client messages ("Cannot perform operation after
-  producer has been closed", ...), which only the core reports (root
-  conventions, Implementation over the FFI, Q61; boundary rules 1 and 10).
+- `check-no-closed-flag`: no property of a `src/` class and no member or
+  variable of `native/` is named for a closed or closing state (`closed`,
+  `closing`, `isClosed`, with `#`, `_` or `is_` prefixes), and no string
+  literal holds one of Java's closed-client messages ("Cannot perform
+  operation after producer has been closed", ...), which only the core
+  reports; a `+` chain of strings, adjacent C literals and a template's
+  pieces read as one literal (`scripts/lint/literals.js`) (root conventions,
+  Implementation over the FFI, Q61; boundary rules 1 and 10). Not checked:
+  a closed state under another name, or in a module-level or closure
+  variable of `src/`.
 - `check-no-repeated-precondition`: no string literal of `src/` or
   `native/` holds the message of a precondition the FFI or the core checks
   ("The timeout cannot be negative.", "Invalid negative timeout", "Timeout

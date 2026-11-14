@@ -30,7 +30,7 @@
 // no call is refused on them (javascript/CLAUDE.md boundary rule 10). Not
 // checked: a closed state under another name.
 
-const { tsLiterals, cLiterals } = require('../literals');
+const { tsLiterals, cLiterals, holds } = require('../literals');
 const { scan } = require('../c_source');
 
 /** A field name for a closed or closing state, `#` or `_` prefixes and an `is` included. */
@@ -100,7 +100,7 @@ module.exports = {
     }
     for (const lit of [...tsLiterals(ctx), ...cLiterals(ctx)]) {
       checked++;
-      const message = CLOSED_MESSAGES.find((m) => lit.text.includes(m));
+      const message = CLOSED_MESSAGES.find((m) => holds(lit, m));
       if (message) {
         findings.push({
           kind: 'closed-message',

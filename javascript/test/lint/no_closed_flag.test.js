@@ -63,3 +63,18 @@ test('each closed field, in a class or in C, and each closed message is a findin
     'native/queue.c:4: writes Java\'s closed message "This consumer has already been closed.": only the core reports a closed client',
   ]);
 });
+
+test('a closed message split across a + chain, adjacent C literals or a template is a finding', () => {
+  const r = lint(
+    project({
+      ...CLEAN,
+      'src/client.ts':
+        "export const A = 'Cannot perform operation after producer ' + 'has been closed';\n" +
+        'export const B = (who: string): string => `Cannot perform operation after ${who} has been closed`;\n',
+      'native/queue.c': 'const char* m = "This consumer has " "already been closed.";\n',
+    }),
+    [RULE],
+  );
+  assert.equal(r.status, 1);
+  assert.deepEqual(findings(r).map((f) => f.split(':').slice(0, 2).join(':')), ['src/client.ts:1', 'src/client.ts:2', 'native/queue.c:1']);
+});
