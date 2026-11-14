@@ -276,7 +276,8 @@ blocks:
     #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
     #     — the full binding gate (ctest / pytest / dotnet test unit tests, the
     #     PLAINTEXT gRPC arm, check-bindings, and the Python and .NET perf
-    #     suites).
+    #     suites); the .NET job then runs the Native AOT check
+    #     (make test-aot-dotnet).
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
     #     unit tests, check-bindings and perf are protocol-independent, so
@@ -330,6 +331,8 @@ blocks:
             - which dotnet
             - dotnet --list-runtimes
             - make verify-dotnet
+            # The Native AOT check. Native AOT links with clang, or with gcc where clang is missing.
+            - make test-aot-dotnet
         - name: "verify-dotnet (Linux amd64) — ssl"
           commands:
             - make test-integration-dotnet-ssl
