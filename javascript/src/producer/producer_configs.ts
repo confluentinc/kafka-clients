@@ -16,12 +16,17 @@
 // Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`);
 // `cargo xtask check-generated` checks it is up to date.
 
+import type { Serializer } from '../common/serialization/serializer';
+
 /**
  * A producer's configuration: Java's `ProducerConfig` keys, as a plain object
  * (a `Map` is refused). Each value is written as the string the core parses
  * (`true` as `"true"`, numbers and bigints in decimal, arrays joined with
  * `,`, anything else by `String()`); `null` and `undefined` leave the key
  * out. The core checks every key and value, with Java's messages.
+ * `key.serializer` and `value.serializer` take a synchronous function
+ * `({ configs, isKey }) => serializer`, such as `stringSerializer`, and
+ * never reach the core.
  *
  * @remarks *(js-only)* The type of the configuration the constructor takes,
  * Java's `Map<String, Object>` and `Properties` as one. It lists the keys
@@ -153,5 +158,18 @@ export type ProducerConfigs = {
     | 'value.serializer'
     // Any other key, keeping the known keys' autocompletion: the core
     // lists the keys it does not use.
-    | (string & {})]?: string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;
+    | (string & {})]?: key extends 'key.serializer' | 'value.serializer'
+    ? SerializerConfig
+    : string extends key
+      ? ConfigValue | SerializerConfig
+      : ConfigValue;
 };
+
+// A value the core parses.
+type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;
+
+// A serde config key's value: the function that makes the serializer.
+type SerializerConfig =
+  | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<never>)
+  | null
+  | undefined;

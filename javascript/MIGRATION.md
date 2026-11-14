@@ -168,13 +168,16 @@ core checks it, throwing `ConfigError` with Java's message naming the key;
 keys of this client: like librdkafka's keys, they reach the core as unknown
 keys (their value, an object, written as `[object Object]`), which the core
 lists as unused and otherwise ignores, so a builder given there is silently
-not used. Java's `key.serializer` and `value.serializer` throw
-`ConfigError` too, whatever their value: a serializer is a constructor
-argument, never a configuration value:
+not used. A serializer is a constructor argument,
 `new KafkaProducer({ configs, keySerializer, valueSerializer })`, each an
 object `{ serialize({ topic, headers, data }) }` (or `null`), whose
-`serialize` may return a Promise. The built-in serializer factories
-(`stringSerializer()`, ...) are not in the preview yet (Section 3).
+`serialize` may return a Promise, or it comes through Java's
+`key.serializer` and `value.serializer`, which take a synchronous function
+`({ configs, isKey }) => serializer`, such as `stringSerializer`, called once
+with the whole configuration in place of Java's class and its `configure()`.
+A class name, a serializer object or a function that returns a Promise
+there throws `ConfigError`. A constructor argument wins, and its config key
+is then ignored.
 
 **Schema Registry.** Keep `@confluentinc/schemaregistry`, its imports and its
 calls, and upgrade it to its release that supports 4.x, which ships its own
@@ -251,8 +254,9 @@ is decided for them already:
   timeoutMs: 5000 })`, `result.values()`), each RPC returning its `*Result` at
   once, with a `KafkaFuture` per key; and **`close()` has no time limit on the
   admin client either**.
-- **Serdes go in the constructor**, never in the configuration, and a string
-  key or value then needs `stringSerializer()`.
+- **Serdes go in the constructor, or in `key.serializer` / `value.serializer`
+  as a function `({ configs, isKey }) => serializer`**, never as a class
+  name, and a string key or value needs `stringSerializer()`.
 
 ## 4. Available here and not in 1.x or KafkaJS
 
