@@ -253,7 +253,9 @@ await producer.close();          // or close(5000) / close({ timeout: 5000 }), m
 
 `await using producer = new KafkaProducer(...)` closes the producer when its
 scope ends (`[Symbol.asyncDispose]` calls `close()`), where the runtime
-supports `await using` (Node 24 and later).
+supports `await using` (Node 24 and later). When the block throws and
+`close()` throws too, JavaScript raises a `SuppressedError`, whose `error` is
+`close()`'s error and whose `suppressed` is the block's.
 
 ### The callback
 
@@ -477,7 +479,8 @@ longer holds Node, so a script whose only pending work is such a call can
 exit before it settles. A `process.exit()` runs no
 cleanup: the process ends at once and the unsent records are lost, as Java's
 daemon I/O thread loses unsent records at JVM exit. The preview doesn't
-support clients in worker threads.
+support clients in worker threads. Create clients in the main thread, and
+send plain data to and from workers (Limitations, below).
 
 `examples/producer.js` produces one record, awaiting its hand-over and then
 its delivery, and prints its metadata:
@@ -564,24 +567,26 @@ package root.
   no `instanceof` the other copy's classes. Make sure npm installs the
   package once (`npm ls @confluentinc/kafka-javascript`; deduplicate with
   `npm dedupe` or an `overrides` entry).
-- **Objects are not shared between worker threads.** A producer, a future or
-  a record belongs to the thread that made it: create one producer per worker
-  thread (each is a client of its own, with its own connections), and send
-  plain data between threads, not the client's objects. A record's fields
-  cross as they are once copied out, except its headers: `postMessage` and
-  `structuredClone` copy a `Headers` as an empty object, so convert them to
-  plain pairs first, and rebuild the record and its `Header`s on the other
-  side:
+- **No clients in worker threads.** The preview doesn't support clients in
+  worker threads. Create clients in the main thread, and send plain data to
+  and from workers. A worker that ends with its client still open, through
+  `worker.terminate()`, `process.exit()` or an uncaught error, may crash the
+  whole process. Nothing refuses a client made in a worker, and a
+  client's objects (a producer, a future, a record) stay in the thread that
+  made them. A record's fields cross as they are once copied out, except its
+  headers: `postMessage` and `structuredClone` copy a `Headers` as an empty
+  object, so convert them to plain pairs first, and rebuild the record and
+  its `Header`s on the other side:
 
   ```js
-  // Sending side: plain data (Buffers and Uint8Arrays cross as Uint8Arrays).
+  // In a worker: plain data (Buffers and Uint8Arrays cross as Uint8Arrays).
   const message = {
     topic: record.topic, partition: record.partition, timestamp: record.timestamp,
     key: record.key, value: record.value,
     headers: record.headers.toArray().map((h) => [h.key(), h.value()]),
   };
-  worker.postMessage(message);
-  // Receiving side: a record of its own.
+  parentPort.postMessage(message);
+  // In the main thread, which owns the producer: a record of its own.
   const copy = new ProducerRecord({
     ...message,
     headers: message.headers.map(([key, value]) => new Header({ key, value })),

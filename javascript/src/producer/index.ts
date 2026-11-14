@@ -12,17 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.clients.producer this client
-// has.
-//
-// Not translated yet: KafkaProducer's constructors taking serializers
-// (Map/Properties, Serializer, Serializer), its transaction calls
-// (initTransactions, beginTransaction, sendOffsetsToTransaction,
-// commitTransaction, abortTransaction), partitionsFor, metrics,
-// clientInstanceId, registerMetricForSubscription,
-// unregisterMetricFromSubscription, and its constants NETWORK_THREAD_PREFIX
-// and PRODUCER_METRIC_GROUP_NAME; RecordMetadata's public constructor, which
-// takes a TopicPartition.
+/**
+ * The public classes of Java's `org.apache.kafka.clients.producer` this
+ * client has.
+ *
+ * Left out by request: `KafkaProducer`'s transaction calls
+ * (`initTransactions`, `beginTransaction`, `sendOffsetsToTransaction`,
+ * `commitTransaction`, `abortTransaction`).
+ *
+ * Left out because the C FFI has no entry point for them:
+ * `KafkaProducer.clientInstanceId`, `registerMetricForSubscription` and
+ * `unregisterMetricFromSubscription`.
+ *
+ * Not translated yet: `KafkaProducer`'s constructors taking serializers
+ * (`Map`/`Properties`, `Serializer`, `Serializer`), `partitionsFor`,
+ * `metrics`, and its constants `NETWORK_THREAD_PREFIX` and
+ * `PRODUCER_METRIC_GROUP_NAME`; `RecordMetadata`'s public constructor, which
+ * takes a `TopicPartition`.
+ *
+ * @packageDocumentation
+ */
 
 export { KafkaProducer } from './kafka_producer';
 export type { Producer } from './producer';

@@ -74,6 +74,15 @@ export class RecordMetadata {
    */
   readonly #brand = true;
 
+  /**
+   * Not constructible: a `RecordMetadata` comes from the producer, as the
+   * value of the `KafkaFuture` that `KafkaProducer.send()` resolves with
+   * (`future.get()`) and as the `metadata` of the send's `callback`.
+   *
+   * @remarks
+   * *(deviation)* Java's public constructor takes a `TopicPartition`, which
+   * this client does not translate yet, so it is not translated either.
+   */
   private constructor(fields: RecordMetadataFields) {
     this.topic = fields.topic;
     this.partition = fields.partition;

@@ -82,10 +82,11 @@ producer for them.
    ```
 
    `partitioner.type` takes `ConsistentRandomPartitioner` (the default),
-   `Murmur2RandomPartitioner` or `RoundRobinPartitioner`. A record without a
-   key goes to a sticky partition chosen by load (Java's KIP-794 behaviour),
-   not to a random one per record. (Whether the default stays CRC-32 is not
-   decided yet.)
+   `Murmur2RandomPartitioner` or `RoundRobinPartitioner`. The default is the
+   Rust core's, and the client keeps it: keys can land on other partitions
+   than with 1.x's KafkaJS-style API, KafkaJS or Java. A record without a key
+   goes to a sticky partition chosen by load (Java's KIP-794 behaviour), not
+   to a random one per record.
 
 ## 1. Rewriting call sites
 
@@ -93,7 +94,7 @@ producer for them.
 
 | 1.x / KafkaJS | 4.x | Note |
 |---|---|---|
-| `new Kafka({ kafkaJS: { brokers } }).producer({ kafkaJS: { ... } })` | `new KafkaProducer({ 'bootstrap.servers': 'host:9092', ... })`, or `new KafkaProducer({ configs })` | Imported from its package path: `require('@confluentinc/kafka-javascript/producer')`. A `kafkaJS` block is not read: it reaches the core as an unknown key, which the core lists as unused |
+| `new Kafka({ kafkaJS: { brokers } }).producer({ kafkaJS: { ... } })` | `new KafkaProducer({ 'bootstrap.servers': 'host:9092', ... })`, or `new KafkaProducer({ configs })` | Imported from its package path: `require('@confluentinc/kafka-javascript/producer')`. A `kafkaJS` block is ignored: it reaches the core as an unknown key, which the core lists in one log line as unused and otherwise ignores |
 | `new Kafka.Producer(conf)` (node-rdkafka style) | `new KafkaProducer(configs)` | Java's keys (Configuration, below) |
 | `await producer.connect()` | nothing: a client is ready once it is constructed, as in Java | There is no `connect()`; calling it is a `TypeError` |
 | `await producer.disconnect()` | `await producer.close()`, or `await using producer = new KafkaProducer(...)` | `close()` waits without a time limit for the records already sent (Java's `close()`); `close(0)` or `close({ timeout: 0 })` does not wait for them. As 1.x and KafkaJS from `connect()` to `disconnect()`, a producer keeps Node running from its creation until `close()` closes it: a script that never closes it never exits |
@@ -115,7 +116,7 @@ producer for them.
 | `dr_cb: true`, `dr_msg_cb` | the `callback` of each `send()` | Per send, not per client |
 | `acks`, `timeout`, `compression` per `send()` (KafkaJS) | the producer's `acks`, `delivery.timeout.ms` and `compression.type` configuration | Java sets them per producer |
 | `await producer.flush({ timeout })` / `flush(timeout, cb)` | `await producer.flush()` | Java's `flush()` takes no timeout: it waits until every record sent before it is delivered or failed |
-| `producer.transaction()`, `sendOffsets()`, `commit()`, `abort()` (KafkaJS) | `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()` and `abortTransaction()`, Java's names | Not in the preview yet (Section 3). When they come, they return Promises, `beginTransaction()` included, and a send counts in a transaction once its `send()` Promise resolved: await every `send()` before `commitTransaction()` |
+| `producer.transaction()`, `sendOffsets()`, `commit()`, `abort()` (KafkaJS) | `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()` and `abortTransaction()`, Java's names | Not in the preview yet (Section 3). When they come, they return Promises, `beginTransaction()` included. A send is part of the transaction once its `send()` Promise has resolved. `commitTransaction()` waits for its delivery, so there's no need to await `future.get()` first. A send whose Promise hasn't resolved yet may be left out |
 
 ### Reading results and values
 
@@ -164,8 +165,10 @@ core checks it, throwing `ConfigError` with Java's message naming the key;
 
 **1.x's serializer builder keys.** `js.key.serializer.builder` and
 `js.value.serializer.builder` (1.x's Schema Registry serde builders) are not
-keys of this client: their value, an object, fails the configuration check
-with `ConfigError`. Java's `key.serializer` and `value.serializer` throw
+keys of this client: like librdkafka's keys, they reach the core as unknown
+keys (their value, an object, written as `[object Object]`), which the core
+lists as unused and otherwise ignores, so a builder given there is silently
+not used. Java's `key.serializer` and `value.serializer` throw
 `ConfigError` too, whatever their value: a serializer is a constructor
 argument, never a configuration value. The preview has no serializers yet
 (Section 3): serialize keys and values yourself, then send the bytes.
@@ -190,7 +193,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | positional arguments, `send(record, callback)` | one object of Java's names, `send({ record, callback })`, or the value on its own for a one-parameter form, `send(record)`, `close(5000)` | A second argument is refused with `IllegalArgumentError`, never dropped |
 | `undefined` for "not given" | leave the key or the argument out; `null` is Java's null | `undefined` as a value throws `TypeError` naming the parameter (`"value must not be undefined. Pass null for Java's null, which sends a tombstone."`), except in a configuration, where it leaves the key out |
 | timeouts in milliseconds, `-1` for "forever" | milliseconds or a `Temporal.Duration`; `Infinity` for no limit, `0` for "don't wait" | A negative timeout throws `IllegalArgumentError` |
-| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one) or a string | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
+| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one) or a string | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
 
 ## 2. Not offered, by design
 
@@ -204,7 +207,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | `producer.sendBatch()`, a producer queue length | the core batches and applies backpressure itself (`max.block.ms`) | `send()` in a loop, then `flush()` |
 | 1.x's `types/kafkajs` type definitions | the package ships the types of its own API | import the types from the package paths |
 | more than one copy of the package in an app | classes are told apart with plain `instanceof` | install it once (`npm ls @confluentinc/kafka-javascript`, `npm dedupe`): "The client supports one copy of the package in an app. If `node_modules` holds two versions, calls that take the client's classes can fail." |
-| sharing a client or its objects between worker threads | a client stays in the thread that created it | "The client doesn't support sharing its objects between worker threads. Create one client per thread, and send plain data between threads." (`README.md`, Limitations, shows how to turn a record and its `Headers` into plain data) |
+| clients in worker threads | a worker that ends with its client still open may crash the whole process | "The preview doesn't support clients in worker threads. Create clients in the main thread, and send plain data to and from workers." (`README.md`, Limitations, shows how to turn a record and its `Headers` into plain data) |
 
 ## 3. Not available yet
 
@@ -212,8 +215,9 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 |---|---|
 | The consumer: `KafkaConsumer` with `poll()`, `subscribe()`, `assign()`, `commitSync()` and `commitAsync()` | the consumer |
 | The admin client: `Admin.create()`, its RPCs, `*Options` and `*Result` classes | the admin client |
-| Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | not translated yet |
-| `partitionsFor()`, `metrics()`, `clientInstanceId()` | not translated yet |
+| Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
+| `partitionsFor()`, `metrics()` | not translated yet |
+| `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
 | Serializers: the `keySerializer` / `valueSerializer` constructor arguments and the built-in factories (`stringSerializer()`, ...) | the serdes |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |
 | Musl (Alpine), Linux arm64 and Windows packages | later releases; build from source until then |
@@ -274,6 +278,8 @@ behaves otherwise.
 |---|---|---|---|
 | `await send()` | resolves on delivery, with the metadata (KafkaJS-style API, KafkaJS) | resolves on acceptance, with a `KafkaFuture` | Code that treats "resolved" as "delivered" loses records silently on a later failure (Read this first) |
 | Keyed record → partition | murmur2 (KafkaJS-style API, KafkaJS); CRC-32 (node-rdkafka style) | CRC-32 | The same key lands on another partition; set `partitioner.type: 'Murmur2RandomPartitioner'` (Read this first) |
+| A `Buffer` key or value changed after `send()` | the bytes at the call are sent: 1.x copies a plain Buffer inside `send()` (`RK_MSG_COPY`) | the client reads the Buffer after `send()` returns, until its Promise settles | A Buffer reused or written to before `send()` settles sends other bytes; await `send()` first, and have a serializer return a new Buffer for each record |
+| 64-bit values (`RecordMetadata.offset`, `.timestamp`) | numbers (callback API) or strings (KafkaJS-style API) | `bigint`s, Java's `long`, exact at every value | `offset === 0` is false for `0n`, and arithmetic mixing a `bigint` and a number throws `TypeError`; `JSON.stringify` writes them as decimal strings |
 | Keyless record → partition | round-robin or random | a sticky partition chosen by load (KIP-794) | Another distribution and batching |
 | A lone surrogate in a string key, value, header key or config value | written as U+FFFD (`Buffer.from`) | written as `?`, as Java's `String.getBytes(UTF_8)` writes it | Other bytes on the wire for a malformed string; well-formed strings encode the same |
 | `enable.idempotence` unset | off (librdkafka, KafkaJS) | on, as in Java, unless a conflicting setting turns it off | `acks` is `all` and retries keep each partition's order, as Java's producer does by default |

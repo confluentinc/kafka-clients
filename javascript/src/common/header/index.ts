@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The package of Java's org.apache.kafka.common.header, Header
-// and Headers (with the constructors of their internal classes RecordHeader
-// and RecordHeaders).
-//
-// Not translated: RecordHeader's (ByteBuffer, ByteBuffer) constructor, as
-// JavaScript has no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the
-// other form).
+/**
+ * The package of Java's `org.apache.kafka.common.header`, `Header` and
+ * `Headers` (with the constructors of their internal classes `RecordHeader`
+ * and `RecordHeaders`).
+ *
+ * Not translated: `RecordHeader`'s `(ByteBuffer, ByteBuffer)` constructor, as
+ * JavaScript has no `ByteBuffer` (a `Buffer` is a `Uint8Array`, the `byte[]`
+ * of the other form).
+ *
+ * @packageDocumentation
+ */
 
 export { Header } from './header';
 export { Headers } from './headers';
