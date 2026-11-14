@@ -57,7 +57,7 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 .PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
 	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
-	pack-dotnet package-check-dotnet coverage-dotnet
+	pack-dotnet package-check-dotnet coverage-dotnet test-aot-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -236,14 +236,15 @@ verify-macos: test-dotnet-macos
 
 # The checks that are not tests: `dotnet format --verify-no-changes`, which
 # enforces the checked-in .editorconfig, over the solution and over the soak
-# projects, which are outside it (built first, as the soak tests build them), then
-# the examples' build and format check. CI runs them in their own job,
-# "check-dotnet (Linux amd64)".
+# projects and tools/AotSmoke, which are outside it (the soak projects built
+# first, as the soak tests build them), then the examples' build and format
+# check. CI runs them in their own job, "check-dotnet (Linux amd64)".
 check-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOAK_TESTS)
 	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
+	$(DOTNET) format $(AOT_SMOKE) --verify-no-changes
 	$(MAKE) test-examples-dotnet
 
 # ---------------------------------------------------------------------------
@@ -365,6 +366,32 @@ pack-dotnet:
 
 package-check-dotnet: pack-dotnet
 	cd $(REPO_ROOT) && sh .semaphore/test-nupkg.sh --smoke $(PACKAGE_DIR)
+
+# ---------------------------------------------------------------------------
+# Native AOT check of the library (net8.0 and net10.0).
+#
+# tools/AotSmoke is published with PublishAot for this machine's runtime, with the
+# whole Confluent.Kafka assembly rooted (TrimmerRootAssembly): the AOT compiler
+# analyzes every member of the library, and any trim or AOT warning fails the
+# publish (TreatWarningsAsErrors). It catches what the library's own analyzers
+# (IsAotCompatible) cannot see, such as a warning silenced with #pragma. Each
+# published executable then runs, and fails on a check that does not hold.
+#
+# Outside the solution, as a Native AOT publish needs the platform's C toolchain
+# (Xcode's command line tools on macOS; clang, and zlib for net8.0, on Linux), so
+# `dotnet format $(SOLUTION)` does not reach it: check-dotnet formats it. Depends
+# on build-dotnet, as the executables P/Invoke the native library it builds
+# (CLAUDE.md §7.1); $(CARGO_PROFILE_PROP) makes the publish copy that library. No
+# test selection applies: like the builds, the check runs in full.
+# ---------------------------------------------------------------------------
+AOT_SMOKE := $(REPO_ROOT)/dotnet/tools/AotSmoke/AotSmoke.csproj
+AOT_SMOKE_OUT := $(REPO_ROOT)/dotnet/artifacts/aot-smoke
+
+test-aot-dotnet: build-dotnet
+	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net8.0
+	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net10.0
+	$(AOT_SMOKE_OUT)/net8.0/AotSmoke
+	$(AOT_SMOKE_OUT)/net10.0/AotSmoke
 
 # ---------------------------------------------------------------------------
 # gRPC-server unit tests (M18/P1, PLAN §7.1): the chaos-harness service

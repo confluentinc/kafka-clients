@@ -56,8 +56,9 @@ name: build-test-release
 #      not the test suite: mypy --strict over the package and the static checks
 #      of test/static (`make -C python check`).
 #   5. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
-#      the test suite, one job each: dotnet format over the solution and the
-#      soak projects and the examples' build and format check (check-dotnet),
+#      the test suite, one job each: dotnet format over the solution, the soak
+#      projects and tools/AotSmoke, and the examples' build and format check
+#      (check-dotnet),
 #      and the .NET unit tests' code coverage (coverage-dotnet), which runs
 #      every unit test on every build, a pull request's included.
 #   On a release tag, the "Release" promotion then starts release.yml, which
@@ -659,8 +660,8 @@ blocks:
     #
     # check-dotnet (`make -C dotnet check-dotnet`) builds the
     # solution against the debug all-features library, then runs dotnet format
-    # --verify-no-changes over the solution and the soak projects, and builds
-    # and format-checks the examples.
+    # --verify-no-changes over the solution, the soak projects and
+    # tools/AotSmoke, and builds and format-checks the examples.
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
     # (`make -C dotnet coverage-dotnet`), against the debug
