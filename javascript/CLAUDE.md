@@ -732,8 +732,8 @@ The layout is the root conventions' (Layout and modules).
   target, both in `lint-mapping.json` (The rule linter); `src/` carries no
   `@java` or `@jsOnly` tag. Each module's header comment lists the Java
   overloads it leaves out; the producer package's is its `index.ts`'s
-  `@packageDocumentation` TSDoc, so the declarations and the API report show
-  it. The root conventions add a docs lint, the `require-param` and
+  `@packageDocumentation` TSDoc, so the declarations show it (the API report
+  records only that the package has one). The root conventions add a docs lint, the `require-param` and
   `require-returns` rules of `eslint-plugin-jsdoc` (Documentation, Q64, Q74),
   and an HTML reference built with TypeDoc; neither is set up yet. `make
   build` (`build-ts`) compiles `src/` into `dist/` (`.js`, `.d.ts`, both with
