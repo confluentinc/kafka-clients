@@ -177,7 +177,8 @@ newer.
   `PartitionsFor` RPC.
 - `KafkaProducer.metrics()`, Java's `metrics()`, synchronous: a
   `MetricNameMap<Metric>` (`common`, *js-only*: a read-only map keyed as
-  `MetricName.equals` compares, by group, name and tags) of `KafkaMetric`
+  `MetricName.equals` compares, by group, name and tags, with a `toJSON()`
+  of its entries by that key) of `KafkaMetric`
   (`common/metrics`), the values read when `metrics()` runs, where Java's map
   is a live view. `MetricName` (`common`) has Java's methods, its `tags()` a
   `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public

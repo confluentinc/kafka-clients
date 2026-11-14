@@ -146,6 +146,23 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   }
 
   /**
+   * The map as `JSON.stringify` writes it: an object of its entries, each
+   * keyed by the map's string key (the JSON text of the group, the name and
+   * the tags sorted by key), in the order of the entries. It ignores the key
+   * `JSON.stringify` passes.
+   *
+   * @returns the entries, by the map's string key
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol, whose output is frozen
+   * once released, as `TopicPartitionMap`'s is.
+   */
+  toJSON(): Record<string, V> {
+    const out: Record<string, V> = {};
+    for (const [key, [, value]] of this.#entries) out[key] = value;
+    return out;
+  }
+
+  /**
    * The entries, as `entries()` gives them.
    *
    * @returns an iterator over the entries

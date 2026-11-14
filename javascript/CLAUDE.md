@@ -455,7 +455,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `MetricName.tags()` returns a new `Map` each call. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
   *(js-only, on the invented-names list)*, a read-only map keyed by the
   JSON text of the group, the name and the tags sorted by key (the fields
-  `MetricName.equals` compares), keeping the original `MetricName`s;
+  `MetricName.equals` compares), keeping the original `MetricName`s, with a
+  `toJSON()` writing the entries by that string key, as `TopicPartitionMap`'s
+  will;
   `check-type-mapping` holds the rows.
 - `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
   runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
