@@ -94,10 +94,10 @@ function checkCallback(callback: unknown): Callback | null {
 }
 
 /**
- * Records a record's delivery on its future after its callback ran, and
+ * Records a record's delivery on its future after its callback ran, which
+ * completes it (Java completes the future after onCompletion returned), and
  * gives back `failure`, the text of what the callback threw, for the core to
- * log. The future completes natively once the core has that report (Java
- * completes the future after onCompletion returned).
+ * log.
  */
 function completeRecord(
   future: KafkaFuture<RecordMetadata>,
@@ -378,9 +378,9 @@ export class KafkaProducer implements Producer {
       if (error !== null) reject(error);
       else resolve(future);
     };
-    const onHandover = (error: unknown, nativeFuture: object | null): void => {
+    const onHandover = (error: unknown, nativeFuture: number | null): void => {
       handedOver = true;
-      if (nativeFuture !== null) future.internalSetNative(nativeFuture);
+      if (nativeFuture !== null) future.internalSetNative(this.#handle, nativeFuture);
       if (!inCall) {
         // Queued. Its completion may run in another send()'s pump, with no
         // event-loop turn since the count started: the count stays, and while
@@ -399,9 +399,9 @@ export class KafkaProducer implements Producer {
     };
     // The record's delivery callback, run synchronously inside the native
     // drain: the user callback first (the only user code the drain runs),
-    // then the delivery recorded on the future, which completes natively once
-    // the core has the report this returns for (javascript/CLAUDE.md, rules 5
-    // and 6): its get() Promises settle in a later completion of the drain.
+    // then the delivery recorded on the future, which completes it, before the
+    // core has the report this returns for (javascript/CLAUDE.md, rules 5 and
+    // 6): its get() Promises settle as microtasks after the drain.
     // A message returned is what the callback threw, for the core to log; the
     // callback id the core reports by stays in C (native/producer.c,
     // send_on_completion). A callback that returned a thenable is awaited:

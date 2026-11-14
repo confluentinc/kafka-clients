@@ -16,12 +16,12 @@
 // client's (python/confluent_kafka/common/kafka_future.py):
 //
 // - a record's future, the one `KafkaProducer.send` resolves to: Java's
-//   FutureRecordMetadata, over the native future of the record's hand-over
-//   (javascript/CLAUDE.md, rule 5), which completes once the record's
-//   callback has returned; its waits go through the FFI's `get_cb` and
-//   `get_with_timeout_cb`, created on first use, and its state is read
-//   through `is_done`. It is never cancelled (`cancel()` answers false),
-//   and a timed `get` that times out rejects with the core's TimeoutError;
+//   FutureRecordMetadata, completed with the record's delivery once its
+//   callback returned, as Java's; a wait started before that goes through the
+//   FFI's `get_cb` or `get_with_timeout_cb` on the native future of the
+//   record's hand-over (javascript/CLAUDE.md, rule 5), created on first use.
+//   It is never cancelled (`cancel()` answers false), and a timed `get` that
+//   times out rejects with the core's TimeoutError;
 // - Java's KafkaFutureImpl: `completedFuture`, `allOf` and the dependants of
 //   `thenApply` / `whenComplete`, which can be cancelled; cancelling one
 //   cancels it and its own dependants, never its source.
@@ -62,8 +62,8 @@ const CANCELLED_AS_DEPENDANT = 4;
 // no native handle waits in steps of at most this, rechecking its deadline.
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-/** The native handle of a record's future (native/producer.c, RecordFuture), opaque to JavaScript. */
-type RecordFutureHandle = object;
+/** The native producer handle a record's future waits through (native/producer.c), opaque to JavaScript. */
+type ProducerHandle = object;
 
 /** What runs when a future completes: its state and outcome (the value, or the failure). */
 type Listener = (state: number, outcome: unknown) => void;
@@ -226,10 +226,11 @@ function checkFunction(value: unknown, name: string, shape: string): (...args: n
  * @remarks The future `KafkaProducer.send` resolves to is Java's
  *   `FutureRecordMetadata`: it is never cancelled, so its `cancel()` returns
  *   false, and a timed `get()` that times out rejects with the client's
- *   message, "Timed out waiting for KafkaFuture after <ms> ms" *(deviation:
- *   Java's is "Timeout after waiting for <ms> ms.". Why: the message is the
- *   C FFI's, which the binding passes on. Goes when: the FFI gives Java's
- *   message)*. Every other future (`completedFuture`, `allOf`, the
+ *   message, "Timed out waiting for KafkaFuture after <ms> ms", a negative
+ *   timeout printed as 0 ms *(deviation: Java's is "Timeout after waiting
+ *   for <ms> ms.", with the value given. Why: the message is the Rust core's
+ *   `KafkaFutureImpl::get_with_timeout`, which every future shares and the
+ *   C FFI passes on. Goes when: the core gives Java's message)*. Every other future (`completedFuture`, `allOf`, the
  *   dependants of `thenApply` and `whenComplete`) is Java's
  *   `KafkaFutureImpl` and can be
  *   cancelled. Java's `get()` blocks; here it returns a Promise. A failed
@@ -599,18 +600,21 @@ export abstract class KafkaFuture<T> {
   abstract internalComplete(value: T, error: unknown): boolean;
 
   /**
-   * Sets a record's future's native handle: the future of the record's
-   * hand-over, which the record's waits read. Called by `KafkaProducer` at
-   * the hand-over, before the future is handed out.
+   * Sets a record's future's native source: the producer's handle and the
+   * slot of the record's native future, which a wait started before the
+   * delivery reads. Called by
+   * `KafkaProducer` at the hand-over, before the future is handed out.
    *
    * @internal
    */
-  abstract internalSetNative(handle: RecordFutureHandle): void;
+  abstract internalSetNative(producer: ProducerHandle, slot: number): void;
 
   /**
    * Records a record's delivery, as its callback saw it, once the callback
-   * ran: the future's outcome once its native future is done. A future with
-   * no native handle completes with it now. Called by `KafkaProducer`.
+   * ran, and completes the future with it, as Java completes the future once
+   * onCompletion returned: from then on `get()`, `getNow()` and `isDone()`
+   * answer from it, and the native future is read no more. Called by
+   * `KafkaProducer`.
    *
    * @internal
    */
@@ -649,16 +653,12 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   // A record's future: the native future of its hand-over, set at the
   // hand-over (null for every other future, and for a record's future the
   // tests build).
-  #native: RecordFutureHandle | null = null;
+  #native: ProducerHandle | null = null;
+  // Its slot number in that producer's table of record futures.
+  #slot = -1;
 
   // The untimed native wait (`get_cb`) is in flight: one serves every waiter.
   #nativeWaiting = false;
-
-  // A record's delivery as its callback saw it, set before the native future
-  // completes: SUCCEEDED or FAILED, its value or error held in `#outcome`
-  // meanwhile; the outcome once the native future is done, so the callback
-  // and `get()` see the same objects, as in Java. PENDING until then.
-  #delivery: number = PENDING;
 
   // A record's future (Java's FutureRecordMetadata) when `record` is true.
   constructor(record: boolean) {
@@ -761,7 +761,7 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   override getNow(options: unknown): T | null {
     GET_NOW_FORMS.match(options, arguments.length);
     const valueIfAbsent = GET_NOW_FORMS.value(options, 'valueIfAbsent') as T | null;
-    if (this.#state === PENDING && !this.#readNative()) return valueIfAbsent;
+    if (this.#state === PENDING) return valueIfAbsent;
     if (this.#state === SUCCEEDED) return this.#outcome as T;
     throw this.#failure();
   }
@@ -773,20 +773,18 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   override isCompletedExceptionally(): boolean {
     if (arguments.length !== 0) COMPLETED_WITH_ERROR_FORMS.match(undefined, arguments.length);
-    if (this.#state === PENDING) this.#readNative();
     return this.#state >= FAILED;
   }
 
   override isDone(): boolean {
     if (arguments.length !== 0) IS_DONE_FORMS.match(undefined, arguments.length);
-    return this.#state !== PENDING || this.#nativeDone();
+    return this.#state !== PENDING;
   }
 
   // Java's KafkaFutureImpl.toString():
   // `KafkaFuture{value=<value>,exception=<error>,done=<done>}`, `done` being
   // whether the value or the error is not null, as Java's.
   override toString(): string {
-    if (this.#state === PENDING) this.#readNative();
     const value = this.#state === SUCCEEDED ? this.#outcome : null;
     const error = this.#state >= FAILED ? this.#outcome : null;
     return `KafkaFuture{value=${text(value)},exception=${text(error)},done=${String(error !== null || value !== null)}}`;
@@ -846,7 +844,6 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   // An untimed wait: the settled answer, or a Promise settled at completion.
   #get(): Promise<T> {
-    if (this.#state === PENDING) this.#nativeDone();
     if (this.#state !== PENDING) return this.#answer();
     return new Promise<T>((resolve, reject) => {
       if (this.#waiters === null) this.#waiters = [];
@@ -857,10 +854,9 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   // A timed wait of `millis` ms (a negative or zero one does not wait).
   #timedGet(millis: number): Promise<T> {
-    if (this.#state === PENDING) this.#nativeDone();
     if (this.#state !== PENDING) return this.#answer();
     const handle = this.#native;
-    if (handle !== null) return this.#nativeTimedGet(handle, millis);
+    if (handle !== null) return this.#nativeTimedGet(handle, this.#slot, millis);
     if (millis <= 0) return Promise.reject(this.#timedOut(millis));
     return new Promise<T>((resolve, reject) => {
       const deadline = performance.now() + millis;
@@ -919,11 +915,11 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   // A timed wait of a record's future, through the FFI's get_with_timeout_cb,
   // which keeps the time (a negative or zero timeout does not wait): the
   // core's TimeoutError when the wait timed out, FutureRecordMetadata's.
-  #nativeTimedGet(handle: RecordFutureHandle, millis: number): Promise<T> {
+  #nativeTimedGet(handle: ProducerHandle, slot: number, millis: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.#waiters === null) this.#waiters = [];
       this.#waiters.push(resolve, reject);
-      native.recordFutureGet(handle, millis, (metadata, error, timedOut) => {
+      native.recordFutureGet(handle, slot, millis, (metadata, error, timedOut) => {
         if (!timedOut) {
           this.#completeNative(metadata, error);
           return;
@@ -945,42 +941,21 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     const handle = this.#native;
     if (handle === null || this.#nativeWaiting) return;
     this.#nativeWaiting = true;
-    native.recordFutureGet(handle, null, (metadata, error) => {
+    native.recordFutureGet(handle, this.#slot, null, (metadata, error) => {
       this.#nativeWaiting = false;
       this.#completeNative(metadata, error);
     });
   }
 
-  // A native wait completed: the record's future completes with its delivery
-  // (the objects its callback saw), else with the value the wait read.
+  // A native wait completed: a record's future still pending (its delivery
+  // reached no JavaScript) completes with the value the wait read.
   #completeNative(metadata: unknown, error: unknown): void {
-    if (this.#delivery !== PENDING) this.#settle(this.#delivery, this.#outcome, false);
-    else if (error === null) this.#settle(SUCCEEDED, metadata, false);
+    if (error === null) this.#settle(SUCCEEDED, metadata, false);
     else this.#settle(FAILED, error, false);
-  }
-
-  // Whether a pending record's future is done natively; it then completes
-  // with its delivery. False for every other future. A record's callback
-  // reaches JavaScript before its future is done natively: the producer's
-  // close completes every record, and runs its callback, before it resolves.
-  #nativeDone(): boolean {
-    const handle = this.#native;
-    if (handle === null || !native.recordFutureIsDone(handle)) return false;
-    if (this.#delivery !== PENDING) this.#settle(this.#delivery, this.#outcome, false);
-    return true;
-  }
-
-  // For a read that answers at once (`getNow`, `isCompletedExceptionally`,
-  // `toString`): completes a pending record's future that is done natively,
-  // and returns whether the future is done now.
-  #readNative(): boolean {
-    this.#nativeDone();
-    return this.#state !== PENDING;
   }
 
   // Runs `listener` at completion, or now when already done.
   #listen(listener: Listener): void {
-    if (this.#state === PENDING) this.#nativeDone();
     if (this.#state !== PENDING) {
       listener(this.#state, this.#outcome);
       return;
@@ -1078,21 +1053,21 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   // The record's native future.
   /** @internal */
-  override internalSetNative(handle: RecordFutureHandle): void {
-    this.#native = handle;
+  override internalSetNative(producer: ProducerHandle, slot: number): void {
+    // A delivery recorded first: nothing will wait natively.
+    if (this.#state !== PENDING) return;
+    this.#native = producer;
+    this.#slot = slot;
   }
 
   // The record's delivery, as its callback saw it.
   /** @internal */
   override internalSetDelivery(value: T, error: unknown): void {
-    if (this.#native === null) {
-      this.internalComplete(value, error);
-      return;
-    }
-    if (this.#state !== PENDING || this.#delivery !== PENDING) return;
-    this.#delivery = error === null ? SUCCEEDED : FAILED;
-    this.#outcome = error === null ? value : error;
+    // JavaScript reads the native future no more: the addon may destroy it.
+    this.#native = null;
+    this.internalComplete(value, error);
   }
+
 }
 
 // The public class's name, which a message naming an argument's class

@@ -210,6 +210,87 @@ test("a record's future waits through the FFI's get_cb and get_with_timeout_cb, 
   }
 });
 
+// A record's native future across close, collection and destroy
+// (javascript/CLAUDE.md, rule 5): read each way (never; get() once and twice;
+// a timed get that times out, then get(); a dependant; toCompletionStage()),
+// each producer closed and collected. Every producer and future is collected
+// and their threads are gone, so each future was destroyed and each wait
+// released its unit of the producer struct (a unit held for ever would keep
+// the struct, not the threads, so the threads alone prove the destroy; the
+// collection proves no wait kept its JS future). A future kept past its
+// producer's destroy still answers from its delivery.
+test("a record's native future is released across close, collection and destroy, whatever read it", { skip: SKIP || !['linux', 'darwin'].includes(process.platform), timeout: 180000 }, () => {
+  const topic = freshTopic('destroy-futures');
+  const script = `
+    const { execSync } = require('node:child_process');
+    const fs = require('node:fs');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const threads = () =>
+      process.platform === 'linux'
+        ? fs.readdirSync('/proc/self/task').length
+        : execSync('ps -M -p ' + process.pid).toString().trim().split('\\n').length - 1;
+    const collected = [];
+    const registry = new FinalizationRegistry((name) => collected.push(name));
+    const count = (name) => collected.filter((c) => c === name).length;
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const kept = [];
+    // In a function of its own, so no frame keeps the producer.
+    async function one(round) {
+      const p = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP, 'linger.ms': 500 } });
+      registry.register(p, 'producer');
+      await (await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: 'w' }))).get();
+      const futures = [];
+      for (let i = 0; i < 6; i++) futures.push(await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: 'v' + i })));
+      for (const f of futures) registry.register(f, 'future');
+      const waits = [futures[1].get(), futures[2].get(), futures[2].get()];
+      const timedOut = await futures[3].get({ timeout: 20 }).then(() => 'resolved', (e) => e.constructor.name + ': ' + e.message);
+      waits.push(futures[3].get(), futures[4].whenComplete(() => {}).get(), futures[5].toCompletionStage());
+      const results = await Promise.all(waits);
+      await p.close();
+      if (round === 0) kept.push(futures[0]);
+      return timedOut + ' ' + results.length;
+    }
+    (async () => {
+      // A closed producer no longer holds the loop: the test does.
+      const hold = setInterval(() => {}, 1000);
+      console.log(await one(0));
+      await settle();
+      const before = threads();
+      for (let r = 1; r <= 5; r++) await one(r);
+      await settle();
+      console.log('producers', count('producer'), 'futures', count('future'), 'threads', threads() - before < 10);
+      // In a function of its own, so no frame keeps the future after.
+      await (async () => {
+        const f = kept.pop();
+        console.log('kept', f.isDone(), f.getNow(null).topic === process.env.TOPIC, (await f.get()).topic === process.env.TOPIC, (await f.get({ timeout: 0 })).topic === process.env.TOPIC);
+      })();
+      await settle();
+      console.log('futures', count('future'));
+      clearInterval(hold);
+    })();
+  `;
+  const r = spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', script], {
+    cwd: path.join(__dirname, '..', '..'),
+    encoding: 'utf8',
+    timeout: 170000,
+    env: { ...process.env, BOOTSTRAP, TOPIC: topic },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    'TimeoutError: Timed out waiting for KafkaFuture after 20 ms 6\n' +
+      // Six producers, 35 futures: all but the one kept.
+      'producers 6 futures 35 threads true\n' +
+      'kept true true true true\n' +
+      'futures 36\n',
+  );
+});
+
 test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: SKIP, timeout: 120000 }, async () => {
   // Only the strings the C ABI reads as NUL-terminated (topic, header key,
   // config) refuse a NUL; bytes cross with their length.

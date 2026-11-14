@@ -171,7 +171,6 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"producerClose", NULL, js_producer_close, NULL, NULL, NULL, napi_default, NULL},
         {"producerPump", NULL, js_producer_pump, NULL, NULL, NULL, napi_default, NULL},
         {"recordFutureGet", NULL, js_record_future_get, NULL, NULL, NULL, napi_default, NULL},
-        {"recordFutureIsDone", NULL, js_record_future_is_done, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
     return exports;
