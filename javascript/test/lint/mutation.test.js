@@ -629,7 +629,7 @@ MUTATIONS.push(
   {
     rule: 'check-zero-copy',
     what: 'a key copied with Buffer.concat in src/',
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.concat([value]);'),
+    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'if (isBytes(value)) return value;', 'if (isBytes(value)) return Buffer.concat([value]);'),
   },
   {
     rule: 'check-zero-copy',
@@ -638,8 +638,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        'encodeLikeJava(value) : value;',
-        'encodeLikeJava(value) : copyOf(value);\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
+        'if (isBytes(value)) return value;',
+        'if (isBytes(value)) return copyOf(value);\n  return null;\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
       ),
   },
   {
@@ -764,7 +764,7 @@ MUTATIONS.push(
   {
     rule: 'check-no-closed-flag',
     what: 'a closed flag on the producer',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer implements Producer {\n', 'export class KafkaProducer implements Producer {\n  #closed = false;\n'),
+    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {\n', 'export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {\n  #closed = false;\n'),
   },
   {
     rule: 'check-no-repeated-precondition',

@@ -20,6 +20,7 @@
 import { kind } from './args';
 import { illegalArgument } from './errors';
 import type { Serializer } from '../common/serialization/serializer';
+import { SerializerDefaults } from './serializer_defaults';
 
 /**
  * The serializer given as `name` (`keySerializer`, `valueSerializer`), or
@@ -77,7 +78,10 @@ export function closeSerializer(serializer: Serializer<unknown> | null, name: st
     process.emitWarning(`Failed to close producer ${name}: ${describe(thrown)}`);
   };
   try {
-    if (serializer.close === undefined) return;
+    if (serializer.close === undefined) {
+      SerializerDefaults.close(serializer);
+      return;
+    }
     const returned: unknown = serializer.close();
     if (isThenable(returned)) void returned.then(undefined, warn);
   } catch (thrown) {
