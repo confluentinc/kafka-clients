@@ -345,6 +345,8 @@ test('a Java array or collection taken is any iterable; one returned is an array
       method('parts', [], { return_type: 'Set<TopicPartition>' }),
       method('lags', [], { return_type: 'Map<TopicPartition, Long>' }),
       method('metrics', [], { return_type: 'Map<MetricName, ? extends Metric>' }),
+      method('labels', [], { return_type: 'Map<String, String>' }),
+      method('label', ['Map'], { param_types: ['Map<String, String>'], return_type: 'void', param_names: ['labels'] }),
     ],
   });
   const extra = [
@@ -362,10 +364,12 @@ test('a Java array or collection taken is any iterable; one returned is an array
     parts: 'parts(): TopicPartitionSet { return new TopicPartitionSet(); }',
     lags: 'lags(): TopicPartitionMap<bigint> { return new TopicPartitionMap(); }',
     metrics: 'metrics(): MetricNameMap<Metric> { return new MetricNameMap(); }',
+    labels: 'labels(): Map<string, string> { return new Map(); }',
+    label: 'label(labels: ReadonlyMap<string, string>): void { void labels; }',
   };
   const source = (members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
-    "import type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
+    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
     `void TopicPartition;\nexport class Coll {\n${Object.values(members).map((m) => `  ${m}\n`).join('')}}\n`;
   const files = (members) =>
     project({
@@ -392,6 +396,8 @@ test('a Java array or collection taken is any iterable; one returned is an array
     ['tags', 'tags(): string[] { return []; }', 'Coll.tags: return: Java Set<String> is not TypeScript string[]'],
     ['parts', 'parts(): Set<TopicPartition> { return new Set(); }', 'Coll.parts: return: Java Set<TopicPartition> is not TypeScript Set<TopicPartition>'],
     ['lags', 'lags(): TopicPartitionMap<number> { return new TopicPartitionMap(); }', 'Coll.lags: return: Java Map<TopicPartition, Long> is not TypeScript TopicPartitionMap<number>'],
+    ['labels', 'labels(): ReadonlyMap<string, string> { return new Map(); }', 'Coll.labels: return: Java Map<String, String> is not TypeScript ReadonlyMap<string, string>'],
+    ['metrics', 'metrics(): Map<MetricName, Metric> { return new Map(); }', 'Coll.metrics: return: Java Map<MetricName, Metric> is not TypeScript Map<MetricName, Metric>'],
   ]) {
     r = lint(files({ ...GOOD, [name]: member }), [RULE]);
     assert.deepEqual(findings(r), [finding], member);

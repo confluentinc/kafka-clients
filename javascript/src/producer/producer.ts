@@ -20,10 +20,11 @@
 // index.ts): not in the preview, initTransactions, beginTransaction,
 // sendOffsetsToTransaction, commitTransaction and abortTransaction; for want
 // of an FFI entry point, registerMetricForSubscription,
-// unregisterMetricFromSubscription and clientInstanceId; and, not translated
-// yet, metrics.
+// unregisterMetricFromSubscription and clientInstanceId.
 
 import type { KafkaFuture } from '../common/kafka_future';
+import type { Metric } from '../common/metric';
+import type { MetricNameMap } from '../common/metric_name_map';
 import type { PartitionInfo } from '../common/partition_info';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
@@ -98,6 +99,13 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * @returns resolving to the topic's partitions
    */
   partitionsFor(topic: string): Promise<PartitionInfo[]>;
+
+  /**
+   * See `KafkaProducer.metrics()`.
+   *
+   * @returns the producer's metrics, by name
+   */
+  metrics(): MetricNameMap<Metric>;
 
   /**
    * See `KafkaProducer.close()`.

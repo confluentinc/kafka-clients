@@ -87,6 +87,45 @@ export namespace KafkaFuture {
 }
 
 // @public
+export interface Metric {
+    metricName(): MetricName;
+    metricValue(): unknown;
+}
+
+// @public
+export class MetricName {
+    constructor(options: {
+        name: string;
+        group: string;
+        description: string;
+        tags: ReadonlyMap<string, string>;
+    });
+    description(): string;
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    group(): string;
+    hashCode(): number;
+    name(): string;
+    tags(): Map<string, string>;
+    toString(): string;
+}
+
+// @public
+export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
+    [Symbol.iterator](): IterableIterator<[MetricName, V]>;
+    constructor(entries?: Iterable<readonly [MetricName, V]>);
+    entries(): IterableIterator<[MetricName, V]>;
+    forEach(callback: (value: V, key: MetricName, map: MetricNameMap<V>) => void): void;
+    get(key: MetricName): V | undefined;
+    has(key: MetricName): boolean;
+    keys(): IterableIterator<MetricName>;
+    size(): number;
+    values(): IterableIterator<V>;
+}
+
+// @public
 export class Node {
     constructor(options: {
         id: number;

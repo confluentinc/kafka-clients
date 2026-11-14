@@ -34,7 +34,8 @@ import {
   ProducerRecord,
   RecordMetadata,
 } from '@confluentinc/kafka-javascript/producer';
-import { KafkaError, KafkaFuture, Node, PartitionInfo, TopicPartition } from '@confluentinc/kafka-javascript/common';
+import { KafkaError, KafkaFuture, type Metric, MetricName, MetricNameMap, Node, PartitionInfo, TopicPartition } from '@confluentinc/kafka-javascript/common';
+import { KafkaMetric } from '@confluentinc/kafka-javascript/common/metrics';
 import { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateError } from '@confluentinc/kafka-javascript';
 import { AuthenticationError, RetriableError, SaslAuthenticationError, TopicAuthorizationError } from '@confluentinc/kafka-javascript/common/errors';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
@@ -338,6 +339,21 @@ async function produce(): Promise<void> {
   expectTypeOf(asInterface.partitionsFor({ topic: 't' })).toEqualTypeOf<Promise<PartitionInfo[]>>();
   // @ts-expect-error a topic is a string
   void kafkaProducer.partitionsFor(1);
+  // metrics(): synchronous, Java's Map<MetricName, ? extends Metric>.
+  const metrics = kafkaProducer.metrics();
+  expectTypeOf(metrics).toEqualTypeOf<MetricNameMap<Metric>>();
+  expectTypeOf(asInterface.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
+  for (const [metricName, metric] of metrics) {
+    expectTypeOf(metricName.tags()).toEqualTypeOf<Map<string, string>>();
+    expectTypeOf(metric.metricValue()).toEqualTypeOf<unknown>();
+  }
+  const metricName = new MetricName({ name: 'n', group: 'g', description: '', tags: new Map([['client-id', 'c']]) });
+  expectTypeOf(metrics.get(metricName)).toEqualTypeOf<Metric | undefined>();
+  const kafkaMetric = new KafkaMetric({ lock: null, metricName, valueProvider: { value: () => 1 }, config: null, time: { milliseconds: () => 0 } });
+  const asMetric: Metric = kafkaMetric;
+  void asMetric;
+  // @ts-expect-error metrics() takes no argument
+  kafkaProducer.metrics(1);
   const closeArgs: CloseArgs = { timeout: 0 };
   await kafkaProducer.close(closeArgs);
   // @ts-expect-error undefined is no timeout: leave the argument out
