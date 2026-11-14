@@ -8,7 +8,9 @@ CLANG_TIDY ?= clang-tidy
 # ships without one: CLANG_TIDY_EXTRA_ARGS=--extra-arg=-isystem/usr/lib/gcc/x86_64-linux-gnu/15/include
 CLANG_TIDY_EXTRA_ARGS ?=
 
-SOURCES := $(shell find include test -name '*.hpp' -o -name '*.cpp')
+# The linter's own code is formatted too; its vendored grammar and build trees are not.
+SOURCES := $(shell find include test tools/lint \( -path tools/lint/build -o -path tools/lint/grammar \) -prune \
+	-o \( -name '*.hpp' -o -name '*.cpp' \) -print)
 # Translation units clang-tidy processes; headers are covered through
 # .clang-tidy's HeaderFilterRegex.
 TIDY_SOURCES := $(shell find test -name '*.cpp')

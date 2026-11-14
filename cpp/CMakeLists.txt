@@ -96,6 +96,14 @@ if(CONFLUENT_KAFKA_CPP_BUILD_TESTS)
     add_subdirectory(test/unit)
 endif()
 
+# The translation linter (tools/lint): parses the Java sources and checks the
+# headers against cpp/CLAUDE.md. Off by default, as it needs a Java runtime and
+# downloads the pinned ANTLR tool and runtime on the first configure.
+option(CONFLUENT_KAFKA_CPP_LINT "Build the translation linter" OFF)
+if(CONFLUENT_KAFKA_CPP_LINT)
+    add_subdirectory(tools/lint)
+endif()
+
 # Installation: headers plus a package config so `find_package(ConfluentKafkaCpp)`
 # yields ConfluentKafka::cpp. The Rust core itself is installed by the core's
 # own packaging; the config file locates it through the same cache variables.

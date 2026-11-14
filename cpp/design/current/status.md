@@ -1,6 +1,6 @@
 # C++ binding: status
 
-Updated 2026-11-12.
+Updated 2026-11-14.
 
 ## Done
 
@@ -17,6 +17,22 @@ Updated 2026-11-12.
 - `CLAUDE.md` with the rules derived from the kickstart questionnaire answers (Confluence page
   6364529292).
 
+## Translation linter (`tools/lint`)
+
+A clang-tidy plugin that parses the Java sources with an ANTLR-generated C++ parser and checks the
+headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, or on its own with
+`cmake -S cpp/tools/lint`. Spikes, each answered before the code that depends on it:
+
+- (c) **Yes**: the grammars-v4 Java grammar (`tools/lint/grammar`, pinned) with ANTLR 4.13.2
+  parses all 1340 files of `kafka/clients/src/main/java` with no syntax error
+  (`java_parse_kafka_clients`). 9.7 s on one thread, 5.3 s on four and no faster beyond; the
+  slowest file is `KafkaAdminClient.java` (0.7 s). Full LL from the start: SLL-first gains
+  nothing, as SLL fails on three files in four with this grammar. A prediction cache per thread
+  is slower than the shared one. ThreadSanitizer finds nothing with 8 threads.
+- (a) the plugin loading into `clang-tidy-21` and reading comments on template members, and
+  (b) `clang-tidy-21` parsing libstdc++ 15's `<chrono> <span> <compare> <functional>`: open,
+  waiting for LLVM 21 (`clang-21 clang-tidy-21 libclang-21-dev libclang-cpp21-dev llvm-21-dev`).
+
 ## Next
 
 1. `detail::check(out_err)` and the error hierarchy: the C++ emitter of
@@ -27,7 +43,8 @@ Updated 2026-11-12.
    `RecordMetadata`, `Callback`, the serdes, the completion thread; `KafkaProducerTest` and
    `MockProducerTest`.
 4. The consumer family, then the admin family.
-5. The API inventory and `abidiff` check (§12.4), `verify-cpp`, the integration tests and the gRPC
+5. The rest of the translation linter (Java model, rules, checks, `abi-check` with the API
+   inventory and `abidiff` of §12.4), `verify-cpp`, the integration tests and the gRPC
    conformance backend (§11.3), the vcpkg overlay port (§13.3).
 
 ## Core and FFI asks
@@ -44,7 +61,7 @@ Recorded here, not worked around in the binding (CLAUDE.md §1.6):
 ## Environment notes
 
 - clang-format and clang-tidy are not pinned by the build; the Makefile takes `CLANG_FORMAT` and
-  `CLANG_TIDY`. With LLVM 19's clang-tidy built without its resource directory, pass
+  `CLANG_TIDY`. The linter will pin clang-tidy 21, the major its plugin is built for. With LLVM 19's clang-tidy built without its resource directory, pass
   `CLANG_TIDY_EXTRA_ARGS=--extra-arg=-isystem/usr/lib/gcc/x86_64-linux-gnu/15/include`.
 - The C header's opaque structs use a zero-length array, so the header directory is a SYSTEM
   include; the project's own headers build with `-Wpedantic -Werror`.
