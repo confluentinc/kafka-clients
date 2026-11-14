@@ -825,12 +825,6 @@ public sealed class ClientConfigsTests
         Assert.Equal(
             Invalid("bootstrap.servers", "{a=1}", NotAList),
             Refusal(ClientKind.Producer, "bootstrap.servers", new ListMap { ["a"] = 1 }));
-        Assert.Equal(
-            Invalid("bootstrap.servers", "{a=1}", NotAList),
-            Refusal(ClientKind.Producer, "bootstrap.servers", new PairList { new("a", 1) }));
-        Assert.Equal(
-            Invalid("bootstrap.servers", "{a=1}", NotAList),
-            Refusal(ClientKind.Producer, "bootstrap.servers", new ReadOnlyPairList { new("a", 1) }));
 #if NET9_0_OR_GREATER
         Assert.Equal(
             Invalid("bootstrap.servers", "{a=1, b=2}", NotAList),
@@ -839,6 +833,13 @@ public sealed class ClientConfigsTests
                 "bootstrap.servers",
                 new OrderedDictionary<string, int> { ["a"] = 1, ["b"] = 2 }));
 #endif
+    }
+
+    [Fact]
+    public void Lists_AListThatIsOnlyAGenericMap_IsSentAsItsElements()
+    {
+        AssertSent(ClientKind.Producer, "bootstrap.servers", new PairList { new("a", 1) }, "[a, 1]");
+        AssertSent(ClientKind.Producer, "bootstrap.servers", new ReadOnlyPairList { new("a", 1) }, "[a, 1]");
     }
 
     [Fact]
