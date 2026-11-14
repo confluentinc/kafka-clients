@@ -34,9 +34,8 @@ namespace Confluent.Kafka.Consumer;
 /// <para>
 /// The consumer has one owner at a time, as Java's does. A call from another thread while a call is in progress
 /// throws <see cref="ConcurrentModificationException"/> ("KafkaConsumer is not safe for multi-threaded access.");
-/// <see cref="MockConsumer{TKey, TValue}"/> makes it wait instead. <see cref="IConsumerCommon.Wakeup"/> and
-/// <see cref="IConsumerCommon.Handle"/> may be called from any thread, and a <see cref="IDisposable.Dispose"/> from
-/// another thread wakes the call in progress, waits for it, and closes the consumer.
+/// <see cref="MockConsumer{TKey, TValue}"/> makes it wait instead. <see cref="IConsumerCommon.Wakeup"/> may
+/// be called from any thread, and a <see cref="IDisposable.Dispose"/> from another thread wakes the call in progress, waits for it, and closes the consumer.
 /// </para>
 /// <para>
 /// Rebalance listeners run on the calling thread, only inside <c>Poll</c>, <c>Unsubscribe</c> and <c>Close</c>;

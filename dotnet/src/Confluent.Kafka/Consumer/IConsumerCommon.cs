@@ -132,20 +132,4 @@ public interface IConsumerCommon
     /// The consumer is closed: the native handle is gone, where Java's consumer still answers.
     /// </exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
-
-    /// <summary>
-    /// Returns a new <see cref="ConsumerHandle"/>, the way into this consumer from inside one of its own callbacks,
-    /// as a Java listener calls the <c>consumer</c> it captured. Inside a callback the consumer routes its own calls
-    /// to a handle of its own, which also has the forms <see cref="ConsumerHandle"/> lacks, so a callback can also
-    /// call the consumer directly.
-    /// </summary>
-    /// <remarks>
-    /// It may be called from any thread, a callback included. The handle holds the consumer weakly: it does not
-    /// keep the consumer alive. Once the consumer is destroyed, the handle's <see cref="ConsumerHandle.Wakeup"/> does
-    /// nothing, its <see cref="ConsumerHandle.Assignment"/> and <see cref="ConsumerHandle.Paused"/> still return, and
-    /// its other operations throw <see cref="IllegalStateException"/>. See <see cref="ConsumerHandle"/>.
-    /// </remarks>
-    /// <returns>A new, caller-owned handle (never <see langword="null"/>).</returns>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    ConsumerHandle Handle();
 }

@@ -42,7 +42,7 @@ namespace Confluent.Kafka.Consumer;
 /// <c>SeekToEnd</c>, <c>Pause</c>, <c>Resume</c>, <c>Position</c>, <c>CurrentLag</c>, <c>Commit</c>,
 /// <c>CommitAsync</c>, <c>Committed</c>, <c>BeginningOffsets</c>, <c>EndOffsets</c>, <c>OffsetsForTimes</c>,
 /// <c>PartitionsFor</c>, <c>ListTopics</c>, <c>Assignment</c>, <c>Paused</c> and <c>GroupMetadata</c>, timed or not,
-/// go to the consumer's own handle and block, also where <see cref="ConsumerHandle"/> lacks the form. On a mock
+/// go to the consumer's own handle and block. On a mock
 /// consumer only the commits, timed or not, <c>CurrentLag</c>, <c>Assignment</c>, <c>Paused</c> and
 /// <c>GroupMetadata</c> work there; every other routed call throws <see cref="UnsupportedOperationException"/>
 /// ("ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer

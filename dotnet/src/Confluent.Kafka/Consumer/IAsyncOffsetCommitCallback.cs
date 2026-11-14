@@ -38,8 +38,8 @@ namespace Confluent.Kafka.Consumer;
 /// a <see cref="KafkaException"/> with the message "Failed to close kafka consumer".
 /// </para>
 /// <para>
-/// A callback that a blocking commit runs, when a callback commits again through its consumer or a
-/// <see cref="ConsumerHandle"/>, is reported at once instead, so the callbacks after it may start before it ends. The
+/// A callback that a blocking commit runs, when a callback commits again through its consumer,
+/// is reported at once instead, so the callbacks after it may start before it ends. The
 /// call that delivered the outer callback waits until its <see cref="Task"/> ends, then throws its exception, wrapped
 /// as above, instead of its own outcome; a <c>Poll</c> returns its records, and a cancelled call ends cancelled, and
 /// the consumer's next asynchronous call throws the exception.

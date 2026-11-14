@@ -338,8 +338,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
-    /// <inheritdoc/>
-    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+    internal ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <summary>
     /// Sets the beginning offset of a partition, used when <see cref="SeekToBeginning"/> resets it (Java
