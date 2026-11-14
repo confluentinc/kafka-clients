@@ -21,6 +21,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!-- Native AOT: an AOT app compiles the net8.0 or net10.0 asset, so those builds run the trim, AOT and
+       single-file analyzers, and a warning from them fails the build (TreatWarningsAsErrors).
+       tools/AotSmoke checks the whole assembly with the AOT compiler itself (make test-aot-dotnet). -->
+  <PropertyGroup>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
+  </PropertyGroup>
+
   <!--
     The package. The id is confluent-kafka-dotnet's, with a new major version, which closes
     CLAUDE.md §4's package-id gate. The version is <Version> in
