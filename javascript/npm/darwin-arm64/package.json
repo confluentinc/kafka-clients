@@ -1,6 +1,6 @@
 {
   "name": "@confluentinc/kafka-javascript-darwin-arm64",
-  "version": "4.4.0-preview.1",
+  "version": "4.4.0-beta.1",
   "description": "The darwin-arm64 native binary of @confluentinc/kafka-javascript",
   "license": "Apache-2.0",
   "repository": {

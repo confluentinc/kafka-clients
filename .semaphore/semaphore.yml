@@ -107,10 +107,10 @@ name: build-test-release
 #   - javascript/v<version> releases the Node.js client's npm packages,
 #     @confluentinc/kafka-javascript and its two platform packages. The
 #     version is "version" in javascript/package.json, and may carry an
-#     -alpha.N, -beta.N, -preview.N, -rc.N or -dev.N suffix. The tag build builds and
+#     -alpha.N, -beta.N, -rc.N or -dev.N suffix. The tag build builds and
 #     tests the packages and records them in the workflow's artifacts; its
 #     manual "Publish to npm" promotion (publish-npm.yml) publishes them, a
-#     pre-release under the preview dist-tag only. The name is shared with
+#     pre-release under the beta dist-tag only. The name is shared with
 #     confluent-kafka-javascript, the librdkafka-based client, whose versions
 #     are 1.x and whose fixes go out under the legacy dist-tag.
 #   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
@@ -149,7 +149,7 @@ name: build-test-release
 #      passed, run the manual "Publish to npm" promotion (publish-npm.yml) on
 #      that tag build. It publishes the recorded tarballs with a granular npm
 #      token and no provenance (.semaphore/publish-npm.sh): a pre-release under
-#      the preview dist-tag, which check-npm.py refuses to put on latest, and a
+#      the beta dist-tag, which check-npm.py refuses to put on latest, and a
 #      release under latest, and then checks the registry. Then run the
 #      javascript-post-install task (service.yml) with that version, which
 #      installs it from npmjs.com on every supported distribution and Node.js
@@ -1872,7 +1872,7 @@ blocks:
 
   # JavaScript release blocks. They run only on the build of a JavaScript
   # release tag, javascript/v<version> with an optional -alpha.N, -beta.N,
-  # -dev.N, -preview.N or -rc.N suffix, and are skipped on every other build. The pattern
+  # -dev.N or -rc.N suffix, and are skipped on every other build. The pattern
   # must stay identical in all of the blocks that use it, and in the scripts
   # that check it: release-npm.sh (release_version) and create-release-tag.yml
   # for the tag, and, for the version without its javascript/v prefix,
@@ -1919,7 +1919,7 @@ blocks:
   #      recorded tarballs from Semaphore, with a granular npm token loaded
   #      from Vault in its publish job only and no provenance
   #      (.semaphore/publish-npm.sh): the platform packages, then the main
-  #      package; a pre-release under the preview dist-tag only, which
+  #      package; a pre-release under the beta dist-tag only, which
   #      check-npm.py dist-tag refuses to put on latest. Its post-publish block
   #      checks the registry, and the javascript-post-install task
   #      (.semaphore/javascript-post-install.yml) then installs the published
@@ -1929,7 +1929,7 @@ blocks:
   - name: "Release (JavaScript): native addon (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1951,7 +1951,7 @@ blocks:
   - name: "Release (JavaScript): native addon (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1985,7 +1985,7 @@ blocks:
     # does not accept fails the release here.
     dependencies: []
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -2005,7 +2005,7 @@ blocks:
       - "Release (JavaScript): native addon (macOS arm64)"
       - "Release (JavaScript): third-party licences"
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -2050,7 +2050,7 @@ blocks:
   - name: "Release (JavaScript): package verification (Linux amd64)"
     dependencies: ["Release (JavaScript): pack"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -2075,7 +2075,7 @@ blocks:
   - name: "Release (JavaScript): package verification (macOS arm64)"
     dependencies: ["Release (JavaScript): pack"]
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 30
     task:
@@ -2106,7 +2106,7 @@ blocks:
       - "Release (JavaScript): package verification (Linux amd64)"
       - "Release (JavaScript): package verification (macOS arm64)"
     run:
-      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\\.(0|[1-9][0-9]*))?$'"
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -2165,7 +2165,7 @@ promotions:
           required: false
           description: "The version of the @confluentinc/kafka-javascript npm
             packages to release: \"version\" in javascript/package.json at
-            this commit (for example 4.4.0-preview.2). The tag build builds and
+            this commit (for example 4.4.0-beta.2). The tag build builds and
             tests the packages and records them in its artifacts; its
             \"Publish to npm\" promotion publishes them to npmjs.com.
             Leave empty to not release them."

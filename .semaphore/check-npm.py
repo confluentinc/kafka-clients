@@ -37,7 +37,7 @@
 #       its optionalDependencies; a platform package's is javascript/npm/<platform>/package.json,
 #       committed as it is published. The version defaults to `version`'s.
 #   check-npm.py dist-tag <version> [--tag <tag>]
-#       Prints the npm dist-tag <version> is published under: `preview` for a pre-release, which a
+#       Prints the npm dist-tag <version> is published under: `beta` for a pre-release, which a
 #       check refuses to put on `latest`; `latest` for a release; `legacy` for a 1.x version, the
 #       earlier client's fixes. With --tag, checks that <tag> is that dist-tag and prints it.
 #   check-npm.py path-folders <dir>
@@ -50,7 +50,8 @@
 #   check-npm.py package <dir> [--version <v>] [--platforms "<platform> ..."] [--dev] [--published]
 #       Checks the tarballs in <dir>, which must hold the main package and the platform package of
 #       each platform (all of them by default) and nothing else: their file names, the exact list of
-#       their entries and how they are stored, their package.json, and each addon as `native` does.
+#       their entries and how they are stored, their package.json, that every .js and .d.ts file
+#       starts with the licence header, and each addon as `native` does.
 #
 # --dev is for packages packed from a developer's or a CI job's own build (make -C javascript
 # pack): the platform floors are not checked, since that addon was not built for them. A release
@@ -81,10 +82,10 @@ ADDON = "confluent-kafka-javascript.node"
 LICENSES = "THIRD_PARTY_LICENSES.txt"
 LICENSES_TITLE = "Third-party licences of the native addon of @confluentinc/kafka-javascript"
 
-# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or
-# -rc.N. The
-# javascript/v<version> tag pattern of semaphore.yml is this pattern after its prefix.
-VERSION_PATTERN = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?"
+# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N (the
+# preview is 4.4.0-beta.1). The javascript/v<version> tag pattern of semaphore.yml is this
+# pattern after its prefix.
+VERSION_PATTERN = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?"
 # The package name is shared with confluent-kafka-javascript, whose versions are 1.x: this
 # client's versions start at 4, the Apache Kafka line, so that none can be taken for one of those.
 MIN_MAJOR = 4
@@ -140,7 +141,7 @@ def fail(message):
 def release_version_problem(version):
     """Why `version` is not a release version of the package, or None."""
     if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
-        return f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|preview|rc).N"
+        return f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|rc).N"
     if int(version.split(".")[0]) < MIN_MAJOR:
         return (f"'{version}' is below {MIN_MAJOR}.0.0; the versions of {MAIN_PACKAGE} below {MIN_MAJOR} are "
                 "confluent-kafka-javascript's")
@@ -176,7 +177,7 @@ def dist_tag(version, requested=None):
     """The dist-tag `version` is published under (see the usage above), after checking that
     `requested`, when given, is that one."""
     if not isinstance(version, str) or not re.fullmatch(VERSION_PATTERN, version):
-        fail(f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|preview|rc).N")
+        fail(f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|rc).N")
     major = int(version.split(".")[0])
     prerelease = "-" in version
     if major < MIN_MAJOR:
@@ -184,8 +185,8 @@ def dist_tag(version, requested=None):
         expected = "legacy"
         why = f"{version} is a fix of the earlier client (below {MIN_MAJOR}.0.0), which goes out under legacy"
     elif prerelease:
-        expected = "preview"
-        why = f"{version} is a pre-release, which goes out under preview only, never latest"
+        expected = "beta"
+        why = f"{version} is a pre-release, which goes out under beta only, never latest"
     else:
         expected = "latest"
         why = f"{version} is a release, which goes out under latest"
@@ -605,6 +606,33 @@ def read_tarball(path):
     return files, problems
 
 
+# The licence header every compiled .js and .d.ts file starts with (root CLAUDE.md, Q76): the
+# sources' header, Confluent's copyright line and the Apache 2.0 text, which the build puts first
+# in each file (javascript/scripts/dist_headers.js).
+LICENSE_HEADER = re.compile(
+    r"// Copyright 20[0-9]{2} Confluent Inc\.\n"
+    r"//\n"
+    r"// Licensed under the Apache License, Version 2\.0 \(the \"License\"\);\n"
+    r"// you may not use this file except in compliance with the License\.\n"
+    r"// You may obtain a copy of the License at\n"
+    r"//\n"
+    r"//     http://www\.apache\.org/licenses/LICENSE-2\.0\n"
+    r"//\n"
+    r"// Unless required by applicable law or agreed to in writing, software\n"
+    r"// distributed under the License is distributed on an \"AS IS\" BASIS,\n"
+    r"// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied\.\n"
+    r"// See the License for the specific language governing permissions and\n"
+    r"// limitations under the License\.\n"
+)
+
+
+def header_problems(tarball, files):
+    """Every .js and .d.ts file of a tarball that does not start with the licence header."""
+    return [f"{tarball}: {name[len('package/'):]} does not start with the licence header"
+            for name in sorted(files)
+            if name.endswith((".js", ".d.ts")) and not LICENSE_HEADER.match(files[name].decode("utf-8", "replace"))]
+
+
 def dist_problems(dist, manifest, compare_sources):
     """Checks the files under package/dist/ of the main package: compiled from javascript/src/
     when `compare_sources`, otherwise for what every release has."""
@@ -792,6 +820,7 @@ def check_packages(directory, version, platforms, dev, published):
             continue
         found = check_main(files, version, published) if platform is None else check_platform(platform, files, version, dev, published)
         problems += [f"{name}: {problem}" for problem in found]
+        problems += header_problems(name, files)
     return problems
 
 

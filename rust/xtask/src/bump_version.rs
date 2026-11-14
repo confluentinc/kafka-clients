@@ -52,7 +52,8 @@
 //! committed in the repository's `package.json` would break `npm ci` once the
 //! version is on the registry). It is in the semver form only and 4.0.0 or
 //! higher (the npm name is shared with an earlier client whose versions are
-//! 1.x); it alone may also be a `-preview.N`, between dev and rc. It is a
+//! 1.x); its preview releases are `-beta.N`, from `4.4.0-beta.1`, as Python's
+//! are `4.4.0bN`. It is a
 //! fourth line, like .NET's: it moves only when given, and a version lower
 //! than the current one is refused. Its `MAJOR.MINOR` is the Apache Kafka
 //! release of [`KAFKA_GRADLE_PROPERTIES`], and its `PATCH` follows
@@ -121,7 +122,7 @@ const USAGE: &str =
      form; without it that version is left as it is. It only moves up too.\n\
      --javascript-version sets the Node.js packages' version (javascript/package.json, its\n\
      lockfile and javascript/npm/<platform>/package.json), in the semver form and 4.0.0 or higher,\n\
-     -preview.N allowed too; without it that version is left as it is. It only moves up too, its\n\
+     such as 4.4.0-beta.1; without it that version is left as it is. It only moves up too, its\n\
      MAJOR.MINOR is the Apache Kafka release in kafka/, and its PATCH is\n\
      AK_patch * 100 + core_patch * 10 + binding_patch (rfc/versioning.md).";
 
@@ -132,36 +133,28 @@ enum Stage {
     Alpha,
     Beta,
     Dev,
-    /// The JavaScript package's preview releases only (`4.4.0-preview.1`):
-    /// no other version takes it.
-    Preview,
     Rc,
 }
 
 impl Stage {
-    /// The stages of every version but the JavaScript package's.
+    /// The stages of every version.
     const ALL: [Stage; 4] = [Stage::Alpha, Stage::Beta, Stage::Dev, Stage::Rc];
-    /// The stages of the JavaScript package's version.
-    const JAVASCRIPT: [Stage; 5] = [Stage::Alpha, Stage::Beta, Stage::Dev, Stage::Preview, Stage::Rc];
 
     fn semver(self) -> &'static str {
         match self {
             Stage::Alpha => "alpha",
             Stage::Beta => "beta",
             Stage::Dev => "dev",
-            Stage::Preview => "preview",
             Stage::Rc => "rc",
         }
     }
 
-    /// The PEP 440 label. A preview version is a JavaScript one, which is
-    /// never written in PEP 440 form, so it is never asked for it.
+    /// The PEP 440 label.
     fn pep440(self) -> &'static str {
         match self {
             Stage::Alpha => "a",
             Stage::Beta => "b",
             Stage::Dev => ".dev",
-            Stage::Preview => unreachable!("a preview version is the JavaScript package's, never a Python one"),
             Stage::Rc => "rc",
         }
     }
@@ -181,12 +174,6 @@ impl PackageVersion {
     /// else, such as a build suffix or another pre-release label, does not
     /// parse.
     pub(crate) fn parse(text: &str) -> Option<Self> {
-        Self::parse_stages(text, &Stage::ALL)
-    }
-
-    /// [`Self::parse`] with the pre-release stages `stages` (only the
-    /// JavaScript package's version takes `-preview.N`).
-    fn parse_stages(text: &str, stages: &[Stage]) -> Option<Self> {
         let mut release_len = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
         // The dot of PEP 440's `.devN` belongs to the suffix.
         if text[..release_len].ends_with('.') {
@@ -209,12 +196,12 @@ impl PackageVersion {
         let (stage, n) = match suffix.strip_prefix('-') {
             Some(semver) => {
                 let (label, n) = semver.split_once('.')?;
-                let stage = stages.iter().copied().find(|s| s.semver() == label)?;
+                let stage = Stage::ALL.into_iter().find(|s| s.semver() == label)?;
                 (stage, n)
             },
             None => {
                 let (label, n) = suffix.split_at(suffix.find(|c: char| c.is_ascii_digit())?);
-                let stage = stages.iter().copied().find(|s| *s != Stage::Preview && s.pep440() == label)?;
+                let stage = Stage::ALL.into_iter().find(|s| s.pep440() == label)?;
                 (stage, n)
             },
         };
@@ -496,15 +483,15 @@ fn ensure_dotnet_not_lowered(current: &str, new: PackageVersion) -> anyhow::Resu
 /// The JavaScript version given with `--javascript-version`: the semver form
 /// only, as npm writes it, and 4.0.0 or higher.
 fn parse_javascript_version(text: &str) -> anyhow::Result<PackageVersion> {
-    match PackageVersion::parse_stages(text, &Stage::JAVASCRIPT) {
+    match PackageVersion::parse(text) {
         Some(version) if version.to_string() == text && version.major >= JAVASCRIPT_MIN_MAJOR => Ok(version),
         Some(version) if version.to_string() == text => anyhow::bail!(
             "`{text}` is below {JAVASCRIPT_MIN_MAJOR}.0.0: the versions of @confluentinc/kafka-javascript below \
              {JAVASCRIPT_MIN_MAJOR} are the earlier librdkafka-based client's"
         ),
         _ => anyhow::bail!(
-            "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N, -preview.N or \
-             -rc.N, such as 4.4.0-preview.1"
+            "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, \
+             such as 4.4.0-beta.1"
         ),
     }
 }
@@ -1414,16 +1401,16 @@ version = \"9.9.9\"
         let v = |text: &str| parse_javascript_version(text).expect(text);
         let check = |current: &str, new: &str, kafka| ensure_javascript_patch_digits(v(current), v(new), kafka);
         // rfc/versioning.md's worked examples, on Apache Kafka 4.3.0 and 4.3.1.
-        for (current, new) in [("4.3.0", "4.3.1"), ("4.3.1", "4.3.10"), ("4.3.0-preview.1", "4.3.0")] {
+        for (current, new) in [("4.3.0", "4.3.1"), ("4.3.1", "4.3.10"), ("4.3.0-beta.1", "4.3.0")] {
             check(current, new, (4, 3, 0)).unwrap_or_else(|e| panic!("{current} -> {new}: {e}"));
         }
         for (current, new) in [("4.3.10", "4.3.100"), ("4.3.120", "4.3.123"), ("4.0.101", "4.0.200")] {
             let kafka = (v(new).major, v(new).minor, v(new).patch / 100);
             check(current, new, kafka).unwrap_or_else(|e| panic!("{current} -> {new}: {e}"));
         }
-        // The preview, and GA on the next Kafka line.
-        check("4.4.0-preview.1", "4.4.0-preview.2", (4, 4, 0)).unwrap();
-        check("4.4.0-preview.2", "4.5.0", (4, 5, 0)).unwrap();
+        // The preview's betas, and GA on the next Kafka line.
+        check("4.4.0-beta.1", "4.4.0-beta.2", (4, 4, 0)).unwrap();
+        check("4.4.0-beta.2", "4.5.0", (4, 5, 0)).unwrap();
         assert_eq!(
             check("4.4.0", "4.5.0", (4, 4, 0)).unwrap_err().to_string(),
             "4.5.0 is not on the Apache Kafka line: its MAJOR.MINOR must be 4.4, the release in kafka/ (rfc/versioning.md)"
@@ -1645,18 +1632,16 @@ version = \"9.9.9\"
             "4.4.0-alpha.1",
             "4.4.0-beta.2",
             "4.4.0-dev.3",
-            "4.4.0-preview.1",
             "4.4.0-rc.0",
             "10.0.100",
         ] {
             assert_eq!(parse_javascript_version(text).unwrap().to_string(), text);
         }
-        // A preview sorts after dev and before rc, as semver compares the labels.
-        let [dev, preview, later_preview, rc] = ["4.4.0-dev.9", "4.4.0-preview.1", "4.4.0-preview.2", "4.4.0-rc.1"]
-            .map(|t| parse_javascript_version(t).unwrap());
-        assert!(dev < preview && preview < later_preview && later_preview < rc);
-        // No other version takes it.
-        assert_eq!(PackageVersion::parse("4.4.0-preview.1"), None);
+        // The preview is a beta, which sorts before dev and rc, as semver
+        // compares the labels.
+        let [beta, later_beta, dev, rc] =
+            ["4.4.0-beta.1", "4.4.0-beta.2", "4.4.0-dev.1", "4.4.0-rc.1"].map(|t| parse_javascript_version(t).unwrap());
+        assert!(beta < later_beta && later_beta < dev && dev < rc);
         for text in [
             "4.4.0b1",
             "4.4.0.dev1",
@@ -1665,13 +1650,14 @@ version = \"9.9.9\"
             "4.4.0-beta",
             "4.4.0+abc",
             "4.4.0-pre.1",
+            "4.4.0-preview.1",
             "",
         ] {
             assert_eq!(
                 parse_javascript_version(text).unwrap_err().to_string(),
                 format!(
-                    "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N, \
-                     -preview.N or -rc.N, such as 4.4.0-preview.1"
+                    "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or \
+                     -rc.N, such as 4.4.0-beta.1"
                 )
             );
         }

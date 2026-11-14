@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // The library build (`make -C javascript build`): src/**/*.ts -> dist/, as
-// CommonJS (the package has no "type", so `module: node16` emits CommonJS,
+// CommonJS (the package has no "type", so `module: nodenext` emits CommonJS,
 // which `require` loads and an ES module `import`s through Node's CommonJS
 // interop), with declarations and source maps. ES2022, and ES2024's string
 // methods (`isWellFormed`), are what Node 22.14, the oldest supported, runs.
@@ -24,8 +24,8 @@
     "strict": true,
     "target": "es2022",
     "lib": ["es2022", "es2024.string"],
-    "module": "node16",
-    "moduleResolution": "node16",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "types": ["node"],
     "rootDir": "src",
     "outDir": "dist",

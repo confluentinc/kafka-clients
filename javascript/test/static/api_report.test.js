@@ -50,13 +50,13 @@ test('the report names follow the import paths', () => {
 });
 
 test('a change warns before GA and in a major release, and fails in a minor or patch release after GA', () => {
-  assert.equal(severity('4.4.0-preview.2', '4.4.0-preview.1'), 'warn');
-  assert.equal(severity('4.5.0-rc.1', '4.4.0-preview.3'), 'warn');
+  assert.equal(severity('4.4.0-beta.2', '4.4.0-beta.1'), 'warn');
+  assert.equal(severity('4.5.0-rc.1', '4.4.0-beta.3'), 'warn');
   assert.equal(severity('5.0.0', '4.9.0'), 'warn');
   assert.equal(severity('4.6.0', '4.5.0'), 'fail');
   assert.equal(severity('4.5.1', '4.5.0'), 'fail');
   // GA, from a preview baseline: the interface freezes only from GA on.
-  assert.equal(severity('4.5.0', '4.4.0-preview.3'), 'warn');
+  assert.equal(severity('4.5.0', '4.4.0-beta.3'), 'warn');
   assert.equal(severity('4.5.1', '4.5.0'), 'fail');
 });
 

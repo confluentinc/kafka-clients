@@ -41,7 +41,7 @@ name: create-release-tag
 #     optionally by .devN), <Version> in dotnet/Directory.Build.props
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N,
 #     -dev.N or -rc.N), or "version" in javascript/package.json (the same
-#     form, -preview.N allowed too, 4.0.0 or higher);
+#     form, 4.0.0 or higher);
 #   - on a release branch <major>.<minor>.x, only rust is entered, and its
 #     version is of that <major>.<minor>, the only one its publish block
 #     accepts from the branch; the python, dotnet and javascript release blocks
@@ -134,8 +134,8 @@ blocks:
                   javascript)
                     version_param=JAVASCRIPT_VERSION
                     version=${JAVASCRIPT_VERSION:-}
-                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|preview|rc)\.(0|[1-9][0-9]*))?$'
-                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N, -preview.N or -rc.N'
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N'
                     dev_pattern='-dev\.[0-9]+$'
                     manifest=javascript/package.json
                     manifest_key=version

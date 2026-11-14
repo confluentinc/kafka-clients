@@ -11,7 +11,7 @@ KafkaJS. 4.x has one API, shaped like Java's: code written for either API of
 This guide lists what users of 1.x and KafkaJS lose and what replaces it: the
 call sites to rewrite, what is not offered, what is not available yet, and the
 code that keeps running with another meaning. It is not exhaustive. The
-preview, `4.4.0-preview.1`, has the **producer only**: the rows about the
+preview, `4.4.0-beta.1`, has the **producer only**: the rows about the
 consumer and the admin client say what comes with them.
 
 Two rules explain most rows at once:
@@ -29,10 +29,10 @@ Two rules explain most rows at once:
 ## Install
 
 ```bash
-npm install @confluentinc/kafka-javascript@preview
+npm install @confluentinc/kafka-javascript@beta
 ```
 
-The 4.x pre-releases are published under npm's `preview` dist-tag only; `latest`
+The 4.x pre-releases, the preview, are published under npm's `beta` dist-tag only; `latest`
 stays on the 1.x line until 4.x is generally available, so a plain
 `npm install @confluentinc/kafka-javascript`, and a `^1` range, keep installing
 1.x. The npm 1.x releases are built from the `2.x` branch of

@@ -20,10 +20,10 @@ blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). This first
 slice covers the producer only.
 
 The package is `@confluentinc/kafka-javascript`, the npm name of the
-librdkafka-based client, at version `4.4.0-preview.1`: like the Rust-based Python
+librdkafka-based client, at version `4.4.0-beta.1`: like the Rust-based Python
 client, which reuses PyPI's `confluent-kafka` at `4.4.0b1`, it is told apart
 from the earlier client (0.x and 1.x releases) by version, 4.0.0 or higher.
-Its pre-releases are published under npm's `preview` dist-tag, never `latest`,
+Its pre-releases are published under npm's `beta` dist-tag, never `latest`,
 `rc` or `alpha`, which the earlier client's 1.x releases hold. The npm 1.x
 releases are built from the `2.x` branch of
 [confluent-kafka-javascript](https://github.com/confluentinc/confluent-kafka-javascript);
@@ -38,7 +38,7 @@ published one (see "Packaging").
 ## Install from npm
 
 ```bash
-npm install @confluentinc/kafka-javascript@preview
+npm install @confluentinc/kafka-javascript@beta
 ```
 
 Prebuilt for Linux x64 with glibc 2.28 or newer (RHEL 8, Debian 10, Ubuntu
@@ -141,7 +141,7 @@ are built, tested and recorded by the tag build of `javascript/v<version>`
 (the "Release (JavaScript):" blocks of `.semaphore/semaphore.yml`), and
 published from Semaphore by that build's "Publish to npm" promotion
 (`.semaphore/publish-npm.yml`), with a granular npm token and no provenance:
-a pre-release under the `preview` dist-tag only, which a check refuses to put
+a pre-release under the `beta` dist-tag only, which a check refuses to put
 on `latest`. `tools/package-smoke/` is the smoke program the install tests
 run; it is not published. `cargo xtask bump-version --javascript-version <v>`
 (`make bump-version JAVASCRIPT_VERSION=<v>`) sets the version of
@@ -506,7 +506,7 @@ venv/bin/python python/verifiable_clients/verifiable_consumer.py --bootstrap-ser
 
 (For 1.x and KafkaJS, see [`MIGRATION.md`](MIGRATION.md).)
 
-The development builds before `4.4.0-preview.1` had another call shape. Every
+The development builds before `4.4.0-beta.1` had another call shape. Every
 change below is user-visible. Most turn a call that ran into one that throws
 or rejects, so a test run finds them; the rows marked **silent** do not, and
 code relying on them keeps running with another meaning: check each.

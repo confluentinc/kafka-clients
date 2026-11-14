@@ -25,7 +25,7 @@
 #       registry has no such package. Fails if the registry cannot be read.
 #   check-published-npm.py check <version>
 #       Checks that the main package and the two platform packages are on the registry at
-#       <version>; that the dist-tag of each (`preview` for a pre-release, `latest` for a release,
+#       <version>; that the dist-tag of each (`beta` for a pre-release, `latest` for a release,
 #       as check-npm.py dist-tag gives it) points at it or at a later version (npm's semver
 #       precedence), so the check can be rerun once a newer version is out; that, for a
 #       pre-release, the main package's `latest`, and its `rc` and `alpha` when present, stay on
@@ -59,7 +59,7 @@ MAIN_PACKAGE = "@confluentinc/kafka-javascript"
 # The platform packages of the preview (javascript/npm/).
 PLATFORMS = ("linux-x64-gnu", "darwin-arm64")
 # A pre-release's dist-tag (check-npm.py dist-tag); a release's is `latest`.
-DIST_TAG = "preview"
+DIST_TAG = "beta"
 # The main package's dist-tags that the earlier, librdkafka-based client holds with its 0.x and
 # 1.x releases: a version of this client (MIN_MAJOR or above, check-npm.py's) must never move them.
 EARLIER_CLIENT_TAGS = ("latest", "rc", "alpha")
@@ -148,7 +148,7 @@ def semver_key(version):
 
 def expected_dist_tag(version):
     """The dist-tag `version` goes out under, as check-npm.py dist-tag gives it for this client:
-    `preview` for a pre-release, `latest` for a release."""
+    `beta` for a pre-release, `latest` for a release."""
     return DIST_TAG if "-" in version else "latest"
 
 
@@ -189,24 +189,24 @@ def self_test():
         expect(semver_key(bad) is None, f"{bad!r} is not a version")
     platform = f"{MAIN_PACKAGE}-{PLATFORMS[0]}"
     cases = [
-        (MAIN_PACKAGE, {"latest": "1.6.0", "preview": "4.4.0-beta.1"}, "4.4.0-beta.1", []),
+        (MAIN_PACKAGE, {"latest": "1.6.0", "beta": "4.4.0-beta.1"}, "4.4.0-beta.1", []),
         # A rerun for an older version once a newer pre-release is out.
-        (MAIN_PACKAGE, {"latest": "1.6.0", "preview": "4.4.0-beta.2", "rc": "1.0.0-rc.1"}, "4.4.0-beta.1", []),
-        (MAIN_PACKAGE, {"latest": "1.6.0", "preview": "4.4.0-beta.1"}, "4.4.0-beta.2",
-         [f"the preview dist-tag of {MAIN_PACKAGE} is '4.4.0-beta.1', not 4.4.0-beta.2 or a later version"]),
-        (MAIN_PACKAGE, {"latest": "4.4.0-beta.1", "preview": "4.4.0-beta.1", "alpha": "4.4.0-alpha.1"},
+        (MAIN_PACKAGE, {"latest": "1.6.0", "beta": "4.4.0-beta.2", "rc": "1.0.0-rc.1"}, "4.4.0-beta.1", []),
+        (MAIN_PACKAGE, {"latest": "1.6.0", "beta": "4.4.0-beta.1"}, "4.4.0-beta.2",
+         [f"the beta dist-tag of {MAIN_PACKAGE} is '4.4.0-beta.1', not 4.4.0-beta.2 or a later version"]),
+        (MAIN_PACKAGE, {"latest": "4.4.0-beta.1", "beta": "4.4.0-beta.1", "alpha": "4.4.0-alpha.1"},
          "4.4.0-beta.1",
          [f"the latest dist-tag of {MAIN_PACKAGE} is '4.4.0-beta.1': it must stay on the earlier client, a "
           "version below 4.0.0",
           f"the alpha dist-tag of {MAIN_PACKAGE} is '4.4.0-alpha.1': it must stay on the earlier client, a "
           "version below 4.0.0"]),
         (MAIN_PACKAGE, {"latest": "1.6.0"}, "4.4.0-beta.1",
-         [f"the preview dist-tag of {MAIN_PACKAGE} is None, not 4.4.0-beta.1 or a later version"]),
+         [f"the beta dist-tag of {MAIN_PACKAGE} is None, not 4.4.0-beta.1 or a later version"]),
         # The registry sets `latest` on a platform package's first publish: harmless.
-        (platform, {"latest": "4.4.0-beta.1", "preview": "4.4.0-beta.1"}, "4.4.0-beta.1", []),
+        (platform, {"latest": "4.4.0-beta.1", "beta": "4.4.0-beta.1"}, "4.4.0-beta.1", []),
         # A release goes out under latest, which then leaves the earlier client.
-        (MAIN_PACKAGE, {"latest": "4.5.0", "preview": "4.5.0-preview.2"}, "4.5.0", []),
-        (MAIN_PACKAGE, {"latest": "1.6.0", "preview": "4.5.0"}, "4.5.0",
+        (MAIN_PACKAGE, {"latest": "4.5.0", "beta": "4.5.0-beta.2"}, "4.5.0", []),
+        (MAIN_PACKAGE, {"latest": "1.6.0", "beta": "4.5.0"}, "4.5.0",
          [f"the latest dist-tag of {MAIN_PACKAGE} is '1.6.0', not 4.5.0 or a later version"]),
     ]
     for name, tags, version, expected in cases:
