@@ -36,7 +36,18 @@ import {
   ProducerRecord,
   RecordMetadata,
 } from '@confluentinc/kafka-javascript/producer';
-import { KafkaError, KafkaFuture, type Metric, MetricName, MetricNameMap, Node, PartitionInfo, TopicPartition } from '@confluentinc/kafka-javascript/common';
+import {
+  KafkaError,
+  KafkaFuture,
+  type Metric,
+  MetricName,
+  MetricNameMap,
+  Node,
+  PartitionInfo,
+  TopicPartition,
+  TopicPartitionMap,
+  TopicPartitionSet,
+} from '@confluentinc/kafka-javascript/common';
 import { KafkaMetric } from '@confluentinc/kafka-javascript/common/metrics';
 import { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateError } from '@confluentinc/kafka-javascript';
 import { AuthenticationError, RetriableError, SaslAuthenticationError, TopicAuthorizationError } from '@confluentinc/kafka-javascript/common/errors';
@@ -380,6 +391,21 @@ async function produce(): Promise<void> {
   void asMetric;
   // @ts-expect-error metrics() takes no argument
   kafkaProducer.metrics(1);
+  // TopicPartitionMap and TopicPartitionSet (js-only, Q25): keyed by value.
+  const offsets = new TopicPartitionMap<bigint>([[new TopicPartition({ topic: 't', partition: 0 }), 5n]]);
+  expectTypeOf(offsets.get(new TopicPartition({ topic: 't', partition: 0 }))).toEqualTypeOf<bigint | null>();
+  expectTypeOf(offsets.set(new TopicPartition({ topic: 't', partition: 1 }), 6n)).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  for (const [tp, offset] of offsets) {
+    expectTypeOf(tp).toEqualTypeOf<TopicPartition>();
+    expectTypeOf(offset).toEqualTypeOf<bigint>();
+  }
+  // @ts-expect-error a TopicPartitionMap is keyed by TopicPartition only
+  offsets.set('t-0', 1n);
+  const partitions = new TopicPartitionSet([new TopicPartition({ topic: 't', partition: 0 })]);
+  expectTypeOf(partitions.has(new TopicPartition({ topic: 't', partition: 0 }))).toEqualTypeOf<boolean>();
+  expectTypeOf([...partitions]).toEqualTypeOf<TopicPartition[]>();
+  // @ts-expect-error a TopicPartitionSet holds TopicPartitions only
+  partitions.add({ topic: 't', partition: 0 });
   const closeArgs: CloseArgs = { timeout: 0 };
   await kafkaProducer.close(closeArgs);
   // @ts-expect-error undefined is no timeout: leave the argument out

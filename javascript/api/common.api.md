@@ -219,6 +219,41 @@ export class TopicPartition {
     toString(): string;
 }
 
+// @public
+export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
+    [Symbol.iterator](): IterableIterator<[TopicPartition, V]>;
+    constructor();
+    constructor(entries: Iterable<readonly [TopicPartition, V]>);
+    clear(): void;
+    delete(key: TopicPartition): boolean;
+    entries(): IterableIterator<[TopicPartition, V]>;
+    forEach(callback: (value: V, key: TopicPartition, map: TopicPartitionMap<V>) => void): void;
+    get(key: TopicPartition): V | null;
+    has(key: TopicPartition): boolean;
+    keys(): IterableIterator<TopicPartition>;
+    set(key: TopicPartition, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
+}
+
+// @public
+export class TopicPartitionSet implements Iterable<TopicPartition> {
+    [Symbol.iterator](): IterableIterator<TopicPartition>;
+    constructor();
+    constructor(values: Iterable<TopicPartition>);
+    add(value: TopicPartition): this;
+    clear(): void;
+    delete(value: TopicPartition): boolean;
+    forEach(callback: (value: TopicPartition, key: TopicPartition, set: TopicPartitionSet) => void): void;
+    has(value: TopicPartition): boolean;
+    size(): number;
+    toJSON(): TopicPartition[];
+    toString(): string;
+    values(): IterableIterator<TopicPartition>;
+}
+
 // (No @packageDocumentation comment for this package)
 
 ```

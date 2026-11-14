@@ -23,6 +23,8 @@ export { MetricNameMap } from './metric_name_map';
 export { Node } from './node';
 export { PartitionInfo } from './partition_info';
 export { TopicPartition } from './topic_partition';
+export { TopicPartitionMap } from './topic_partition_map';
+export { TopicPartitionSet } from './topic_partition_set';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';

@@ -134,4 +134,17 @@ export class TopicPartition {
   toJSON(): { topic: string | null; partition: number } {
     return { topic: this.topic, partition: this.partition };
   }
+
+  /**
+   * The key of a `TopicPartitionMap` or `TopicPartitionSet`, the fields
+   * `equals` compares: `<topic>:<partition>`, such as `'orders:3'`, or the
+   * partition alone for a null topic. The partition is an integer, so two
+   * topic partitions never share a key. Called by `TopicPartitionMap` and
+   * `TopicPartitionSet`.
+   *
+   * @internal
+   */
+  internalKey(): string {
+    return this.topic === null ? String(this.partition) : `${this.topic}:${this.partition}`;
+  }
 }
