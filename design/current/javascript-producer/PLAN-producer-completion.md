@@ -1,6 +1,6 @@
 # JavaScript producer: aligned with the binding rules, then code complete (transactions excluded)
 
-Status: **draft, awaiting approval** (2026-11-14).
+Status: **Phase A done on PR #312 (`44ee5ab04`), Phase B in progress on PR #333** (2026-11-14).
 
 Checked against PR #327's head **`05abb9564`** (2026-11-13 15:04 IST). Four read-only reviews of PR #312 + PR #333
 fed it: the runtime and the addon, the public surface, packaging/docs/tests/CI, and the rule linter. Before each
@@ -45,7 +45,32 @@ open and still changing.
 | A15 | **`javascript/CLAUDE.md` rewritten** to match the root rules. Boundary rules 1, 4, 5, 8 and 10 and the liveness section are reversed. Rows marked "not decided" are now decided. `preview` becomes `beta`, and `node:test` becomes Jest. The readings of §5 are recorded, each with the rule it follows. | all | M |
 | A16 | **Enum `toString()` and null binding.** `SslClientAuth.toString()` returns Java's lowercase text (§5, 6). Extra signatures for the null combinations, so a `null` key or value binds `never` (§5, 7). | Q12, Q26 | S |
 
+### Phase A status (PR #312 at `44ee5ab04`)
+
+- **Done:** A1, A2, A3, A4, A5, A7, A9, A10, A11, A12, A13 (but the parts below), A15.
+- **A16:** `SslClientAuth.toString()` done; the null binding (§5, 7) moved to B4.
+- **A6** moved to B4.
+- **A8** waits on the owner's decision about the parked `Headers` row (§5).
+- **Waiting on npm registry access:** A14 (Jest), and A13's docs lint
+  (`eslint-plugin-jsdoc`), TypeDoc, Prettier and publint.
+
+Notes from Phase A, for Phase B:
+
+- `stringSerializer()` is decided by the Types rule ("`stringSerializer()` calls it for keys and values"), so
+  B4 builds it, and A6's message can name it. Only the rest of the factory list stays parked (§5).
+- The timed `get()`'s message is a recorded deviation that needs a core change: the core's text comes from
+  `rust/src/common/internals/kafka_future_impl.rs`.
+- No runtime `Producer` object is needed (A9): Java's `Producer` has no statics, so only the TypeScript
+  interface exists.
+- A latent edge to recheck when transactions are built: a zero-timeout `close()` from inside a delivery
+  callback may skip a user callback for a record that was appended and then refused.
+
 ## 3. Phase B: complete the producer (PR #333)
+
+PR #333 was rebased onto PR #312 at `44ee5ab04`. Its `MockProducer` translation ("javascript: MockProducer,
+its non-transactional members") and all its fixups were **dropped**: B5 rewrites the mock over the FFI's
+mock, so the gRPC server's empty-config mock goes with it until B5. The serializer commit was re-applied onto
+Phase A's send path (zero copy, no closed state, frozen records).
 
 | # | Change | Rule | Size |
 |---|---|---|---|
