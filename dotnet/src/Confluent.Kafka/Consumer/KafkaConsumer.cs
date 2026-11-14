@@ -265,8 +265,7 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
-    /// <inheritdoc/>
-    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+    internal ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

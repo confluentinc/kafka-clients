@@ -26,7 +26,7 @@ namespace Confluent.Kafka.GrpcServer.Chaos;
 /// <summary>
 /// <see cref="ChaosRebalanceListener"/> for an async chaos consumer, Python's
 /// <c>_AsyncChaosRebalanceListener</c>: its revoke awaits <c>Commit</c> and <c>Committed</c>, which the
-/// binding routes to the consumer's <see cref="ConsumerHandle"/> inside the callback, after an await too.
+/// binding routes to the consumer's own handle inside the callback, after an await too.
 /// </summary>
 internal sealed class AsyncChaosRebalanceListener : IAsyncConsumerRebalanceListenerWithPartitionsLost
 {

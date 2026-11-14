@@ -235,7 +235,14 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.Empty(consumer.Poll(TimeSpan.Zero));
     }
 
-    public static TheoryData<string, Action<ConsumerHandle>> MockUnsupportedOperations()
+    // The theories take an operation's name: ConsumerHandle is internal, so a public test cannot take the operation.
+    public static TheoryData<string> MockUnsupportedOperationsNames() => NamesOf(MockUnsupportedOperations());
+
+    public static TheoryData<string> GatedOperationsNames() => NamesOf(GatedOperations());
+
+    public static TheoryData<string> AllOperationsNames() => NamesOf(AllOperations());
+
+    internal static TheoryData<string, Action<ConsumerHandle>> MockUnsupportedOperations()
     {
         IReadOnlyCollection<TopicPartition> one = new[] { s_tp0 };
         IReadOnlyDictionary<TopicPartition, long> timestamps = new Dictionary<TopicPartition, long> { [s_tp0] = 1 };
@@ -258,10 +265,10 @@ public sealed class PublicConsumerReentrancyHandleTests
     }
 
     [Theory]
-    [MemberData(nameof(MockUnsupportedOperations))]
-    public void MockDerivedHandle_EveryUnwiredOperation_ThrowsUnsupportedOperationException(
-        string name, Action<ConsumerHandle> operation)
+    [MemberData(nameof(MockUnsupportedOperationsNames))]
+    public void MockDerivedHandle_EveryUnwiredOperation_ThrowsUnsupportedOperationException(string name)
     {
+        Action<ConsumerHandle> operation = OperationOf(MockUnsupportedOperations(), name);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
@@ -331,7 +338,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.Empty(consumer.Assignment());
     }
 
-    public static TheoryData<string, Action<ConsumerHandle>> GatedOperations()
+    internal static TheoryData<string, Action<ConsumerHandle>> GatedOperations()
     {
         TheoryData<string, Action<ConsumerHandle>> data = MockUnsupportedOperations();
         data.Add("CurrentLag", h => h.CurrentLag(s_tp0));
@@ -344,7 +351,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         return data;
     }
 
-    public static TheoryData<string, Action<ConsumerHandle>> AllOperations()
+    internal static TheoryData<string, Action<ConsumerHandle>> AllOperations()
     {
         TheoryData<string, Action<ConsumerHandle>> data = GatedOperations();
         data.Add("Wakeup", h => h.Wakeup());
@@ -353,10 +360,25 @@ public sealed class PublicConsumerReentrancyHandleTests
         return data;
     }
 
-    [Theory]
-    [MemberData(nameof(AllOperations))]
-    public void EveryOperation_AfterDispose_ThrowsObjectDisposed(string name, Action<ConsumerHandle> operation)
+    private static TheoryData<string> NamesOf(TheoryData<string, Action<ConsumerHandle>> operations)
     {
+        TheoryData<string> names = new TheoryData<string>();
+        foreach (object[] row in operations)
+        {
+            names.Add((string)row[0]);
+        }
+
+        return names;
+    }
+
+    private static Action<ConsumerHandle> OperationOf(TheoryData<string, Action<ConsumerHandle>> operations, string name) =>
+        (Action<ConsumerHandle>)operations.Single(row => (string)row[0] == name)[1];
+
+    [Theory]
+    [MemberData(nameof(AllOperationsNames))]
+    public void EveryOperation_AfterDispose_ThrowsObjectDisposed(string name)
+    {
+        Action<ConsumerHandle> operation = OperationOf(AllOperations(), name);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerHandle handle = consumer.Handle();
@@ -368,10 +390,10 @@ public sealed class PublicConsumerReentrancyHandleTests
     }
 
     [Theory]
-    [MemberData(nameof(GatedOperations))]
-    public void EveryBlockingOperation_AfterTheConsumersDestroy_ThrowsIllegalState(
-        string name, Action<ConsumerHandle> operation)
+    [MemberData(nameof(GatedOperationsNames))]
+    public void EveryBlockingOperation_AfterTheConsumersDestroy_ThrowsIllegalState(string name)
     {
+        Action<ConsumerHandle> operation = OperationOf(GatedOperations(), name);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         consumer.Assign(new[] { s_tp0 });
         using ConsumerHandle handle = consumer.Handle();
@@ -564,10 +586,10 @@ public sealed class PublicConsumerReentrancyHandleTests
     }
 
     [Theory]
-    [MemberData(nameof(GatedOperations))]
-    public void KafkaConsumerHandle_OutsideACallback_RefusesEveryBlockingOperation(
-        string name, Action<ConsumerHandle> operation)
+    [MemberData(nameof(GatedOperationsNames))]
+    public void KafkaConsumerHandle_OutsideACallback_RefusesEveryBlockingOperation(string name)
     {
+        Action<ConsumerHandle> operation = OperationOf(GatedOperations(), name);
         KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-outside-a-callback");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
@@ -810,9 +832,19 @@ public sealed class PublicConsumerReentrancyHandleTests
             .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
             .GetValue(consumer)!).CurrentCommitCallbackRegistration;
 
-    private static ConsumerHandle HandleOf(IConsumer<byte[], byte[]> consumer) => consumer.Handle();
+    private static ConsumerHandle HandleOf(IConsumer<byte[], byte[]> consumer) => consumer switch
+    {
+        KafkaConsumer<byte[], byte[]> kafka => kafka.Handle(),
+        MockConsumer<byte[], byte[]> mock => mock.Handle(),
+        _ => throw new ArgumentException("Not a consumer of this library.", nameof(consumer)),
+    };
 
-    private static ConsumerHandle HandleOf(IAsyncConsumer<byte[], byte[]> consumer) => consumer.Handle();
+    private static ConsumerHandle HandleOf(IAsyncConsumer<byte[], byte[]> consumer) => consumer switch
+    {
+        AsyncKafkaConsumer<byte[], byte[]> kafka => kafka.Handle(),
+        AsyncMockConsumer<byte[], byte[]> mock => mock.Handle(),
+        _ => throw new ArgumentException("Not a consumer of this library.", nameof(consumer)),
+    };
 
     /// <summary>Runs a probe inside <c>OnPartitionsAssigned</c>.</summary>
     private sealed class ProbingListener : IConsumerRebalanceListener

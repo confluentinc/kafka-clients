@@ -1,13 +1,8 @@
 # CKRDA0013 findings kept on purpose, one key per line under a comment saying why.
 # A line that matches no finding is CKRDA0014: delete it.
 
-# T6: .NET-only consumer types. IConsumerCommon is the surface IConsumer and IAsyncConsumer share; its members
-# are compared through them. ConsumerHandle stays public (ledgers 104, 114, 163, 237).
-unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Handle
-unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Handle
-unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Handle
-unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Handle
-unmatched T:Confluent.Kafka.Consumer.ConsumerHandle
+# T6: a .NET-only consumer type. IConsumerCommon is the surface IConsumer and IAsyncConsumer share; its members
+# are compared through them.
 unmatched T:Confluent.Kafka.Consumer.IConsumerCommon
 
 # M4: Java's Headers.headers(String); C# forbids a method named like its class (CS0542).
