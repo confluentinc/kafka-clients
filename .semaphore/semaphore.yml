@@ -247,10 +247,11 @@ blocks:
     #     the gRPC arm (ctest; the pytest unit and broker-backed binding tests,
     #     the soak and verifiable-clients tests; the dotnet test unit and
     #     integration tests and the soak tests), and the Python and .NET perf
-    #     suites. Each folder's `verify` is that plus the arm. The Python and
-    #     .NET checks that are not tests (mypy, the static checks, dotnet
-    #     format, the examples' build) run in "Python additional checks" and
-    #     ".NET additional checks", in parallel, as Rust's do.
+    #     suites. Each folder's `verify` is that plus the arm. The .NET job
+    #     then runs the Native AOT check (`make -C dotnet test-aot-dotnet`).
+    #     The Python and .NET checks that are not tests (mypy, the static
+    #     checks, dotnet format, the examples' build) run in "Python additional
+    #     checks" and ".NET additional checks", in parallel, as Rust's do.
     #   - PLAINTEXT gRPC arm: `make -C c test-integration` /
     #     `make -C python test-integration` / `make -C dotnet test-integration`
     #     — only the gRPC container arm over the PLAINTEXT CONTAINER listener,
@@ -358,6 +359,8 @@ blocks:
             - which dotnet
             - dotnet --list-runtimes
             - make -C dotnet verify-except-grpc-arm
+            # The Native AOT check. Native AOT links with clang, or with gcc where clang is missing.
+            - make -C dotnet test-aot-dotnet
         - name: "verify-dotnet (Linux amd64) — plaintext gRPC arm"
           execution_time_limit:
             minutes: 45
