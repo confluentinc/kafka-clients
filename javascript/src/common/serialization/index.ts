@@ -13,14 +13,15 @@
 // limitations under the License.
 
 // The package of Java's org.apache.kafka.common.serialization: the
-// Serializer interface.
+// Serializer interface, and StringSerializer as the built-in factory
+// stringSerializer().
 //
 // Not translated: the Deserializer interface, which waits for the consumer;
-// Serde and Serdes; and the built-in serializers, whose JavaScript factories
-// (stringSerializer(), ...) wait for the list of serde factories (not decided
-// yet).
+// Serde and Serdes; and the other built-in serializers, whose JavaScript
+// factories wait for the list of serde factories (not decided yet).
 
 export type { Serializer } from './serializer';
+export { stringSerializer } from './string_serializer';
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
 // under `esModuleInterop` is a compile error rather than `undefined` (import by

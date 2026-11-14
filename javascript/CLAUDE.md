@@ -482,7 +482,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   hand-over, as the app's bytes are (rule 8). A null serializer, or none,
   sends the record's own bytes (a string encoded by `encodeLikeJava`, checked
   at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
-  type TypeScript cannot enforce). `close()` closes both serializers once
+  type TypeScript cannot enforce). `stringSerializer()`
+  (`src/common/serialization/string_serializer.ts`) is Java's
+  `StringSerializer` through `encodeLikeJava`; it takes an optional
+  `{ configs, isKey }`, Java's `configure`, so it goes in a serde config key
+  without `()`, and supports only UTF-8 (Java's names `UTF-8`, `UTF8` and
+  `unicode-1-1-utf-8`, ignoring case), since Node's other encoders don't
+  write Java's bytes; another encoding is Java's `SerializationError`
+  "Unsupported encoding <name>" *(deviation)*. The rest of the factory list
+  is not decided yet in the root conventions. `close()` closes both serializers once
   the core reports the producer closed; a construction the core fails with
   Java's relabelled "Failed to construct kafka producer" closes them too.
   **(root conflict)** The root conventions' Class family says an omitted or

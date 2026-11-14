@@ -26,6 +26,7 @@ const { ExecutionError, TimeoutError: RootTimeoutError } = require('@confluentin
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const { TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 
@@ -622,7 +623,12 @@ test("an accepted record's key and value Buffers are released when send() resolv
 
 test("strings are encoded as Java's StringSerializer encodes them: a lone surrogate as ?", { skip: SKIP, timeout: 120000 }, async () => {
   const topic = freshTopic('surrogates');
-  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-\uD800' } });
+  // stringSerializer() as a constructor argument, and in a serde config key without ().
+  const producer = new KafkaProducer({
+    configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-\uD800', 'value.serializer': stringSerializer },
+    keySerializer: stringSerializer(),
+    valueSerializer: null,
+  });
   // Java's StringSerializer bytes for each string.
   const cases = [
     ['a\uD800b', '613f62'],

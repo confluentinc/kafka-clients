@@ -19,6 +19,15 @@ export interface Serializer<in T> {
     }): Uint8Array | null | Promise<Uint8Array | null>;
 }
 
+// @public
+export function stringSerializer(): Serializer<string>;
+
+// @public
+export function stringSerializer(options: {
+    configs: Readonly<Record<string, unknown>>;
+    isKey: boolean;
+}): Serializer<string>;
+
 // (No @packageDocumentation comment for this package)
 
 ```

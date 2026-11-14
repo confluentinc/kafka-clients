@@ -28,6 +28,7 @@ const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@co
 const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const errors = require('@confluentinc/kafka-javascript/common/errors');
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
 const MAX_BLOCK_MS = 300;
@@ -1372,9 +1373,7 @@ test("a serializer argument is a serializer object or null; a function gets Pyth
   const value = { serialize: () => null };
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: value }), forms('configs, keySerializer'));
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, valueSerializer: value }), forms('configs, valueSerializer'));
-  function stringSerializer() {
-    return value;
-  }
+  // The built-in factory, given where its result goes.
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: stringSerializer, valueSerializer: null }), {
     name: 'IllegalArgumentError',
     message: "keySerializer: pass a serializer, not a function that makes one — did you forget '()'?",
@@ -1582,11 +1581,29 @@ test('a serde config function that throws is a construction failure, and the ser
   assert.deepEqual(closed, ['value']);
 });
 
+test('stringSerializer goes in a serde config key without (), configured by its encoding keys', () => {
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-16' }), (e) => {
+    assert.equal(e.constructor, KafkaError);
+    assert.equal(e.message, 'Failed to construct kafka producer');
+    assert.equal(e.cause.name, 'SerializationError');
+    assert.equal(e.cause.message, 'Unsupported encoding UTF-16');
+    return true;
+  });
+  // The key serializer reads key.serializer.encoding, the value one falls back to serializer.encoding.
+  assert.throws(
+    () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-8', 'serializer.encoding': 'latin1' }),
+    (e) => e.cause.message === 'Unsupported encoding latin1',
+  );
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+  void producer.close();
+});
+
 test("the keys a serde config function reads don't reach the core, nor do the serde keys; the consumer's serde keys do", () => {
   // The core lists the keys it does not use in one INFO line, at the RUST_LOG
   // level read when its first client is built, so a fresh process builds it.
   const script = `
     const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
     new KafkaProducer({
       'bootstrap.servers': 'localhost:1',
       'schema.registry.url': 'http://sr',
@@ -1595,6 +1612,10 @@ test("the keys a serde config function reads don't reach the core, nor do the se
         if (configs['schema.registry.url'] !== 'http://sr') throw new Error('not read');
         return { serialize: () => null };
       },
+      // The built-in factory without (), which reads its encoding keys.
+      'value.serializer': stringSerializer,
+      'value.serializer.encoding': 'UTF-8',
+      'serializer.encoding': 'utf8',
     })
       .close()
       .then(() => console.log('closed'));
@@ -1602,7 +1623,9 @@ test("the keys a serde config function reads don't reach the core, nor do the se
   const r = runNode(script, 120000, [], { RUST_LOG: 'info' });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'closed\n');
-  assert.ok(r.stderr.includes("These configurations '[key.deserializer]' were supplied but are not used yet."), r.stderr);
+  // serializer.encoding is not read: value.serializer.encoding is set, so
+  // Java's StringSerializer does not fall back to it.
+  assert.ok(r.stderr.includes("These configurations '[key.deserializer, serializer.encoding]' were supplied but are not used yet."), r.stderr);
 });
 
 // partitionsFor (Java's partitionsFor(String topic)): a Promise through the

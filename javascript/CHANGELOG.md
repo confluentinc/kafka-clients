@@ -163,6 +163,13 @@ newer.
   given where a serializer goes throws `IllegalArgumentError` "... did you
   forget '()'?". `ProducerRecord<K, V>` is generic: its key and value are
   what the serializers take, checked at `send()` when there is no serializer.
+- `stringSerializer()` (`common/serialization`), Java's `StringSerializer`
+  byte for byte: a lone surrogate is written as `?`. It takes an optional
+  `{ configs, isKey }`, Java's `configure`, so `'key.serializer':
+  stringSerializer` works without `()`, and reads `key.serializer.encoding` /
+  `value.serializer.encoding`, then `serializer.encoding`. Only UTF-8 (`UTF-8`,
+  `UTF8`, `unicode-1-1-utf-8`, in any case) is supported; another encoding
+  throws `SerializationError` "Unsupported encoding <name>".
 - `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
   in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
   `Node` (a frozen data object) and `PartitionInfo` (Java's methods, its
