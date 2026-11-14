@@ -1452,3 +1452,29 @@ test("a producer whose construction fails closes the serializers; a ConfigError 
   );
   assert.deepEqual(closed, []);
 });
+
+// partitionsFor (Java's partitionsFor(String topic)): a Promise through the
+// _cb twin, resolving to an array of PartitionInfo.
+test("partitionsFor rejects with the core's errors: a metadata timeout, Java's null topic, and its forms", async () => {
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  try {
+    const pending = producer.partitionsFor('unit-pf');
+    assert.ok(pending instanceof Promise);
+    await assert.rejects(pending, { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-pf') });
+    await assert.rejects(producer.partitionsFor({ topic: 'unit-pf' }), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-pf') });
+    // Java's Objects.requireNonNull(topic, "topic cannot be null"), the core's.
+    await assert.rejects(producer.partitionsFor(null), { constructor: TypeError, message: 'topic cannot be null' });
+    await assert.rejects(producer.partitionsFor({ topic: 5 }), { constructor: TypeError, message: 'topic must be a string' });
+    await assert.rejects(producer.partitionsFor(5), {
+      name: 'IllegalArgumentError',
+      message: 'partitionsFor() takes one of (topic); got a number',
+    });
+    await assert.rejects(producer.partitionsFor(), { name: 'IllegalArgumentError', message: 'partitionsFor() takes one of (topic); got ()' });
+    await assert.rejects(producer.partitionsFor('a', 'b'), {
+      name: 'IllegalArgumentError',
+      message: 'partitionsFor() takes one of (topic); got 2 arguments, not one object of named parameters',
+    });
+  } finally {
+    await producer.close();
+  }
+});

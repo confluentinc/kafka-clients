@@ -871,3 +871,29 @@ test('send() runs the delivery callbacks already due before handing its record o
     await producer.close();
   }
 });
+
+test("partitionsFor resolves to the topic's partitions, PartitionInfo with Node values", { skip: SKIP, timeout: 120000 }, async () => {
+  const { Node, PartitionInfo } = require('@confluentinc/kafka-javascript/common');
+  const topic = freshTopic('pf');
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+  try {
+    // The first send creates the topic (auto-creation), with one partition.
+    await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
+    const partitions = await producer.partitionsFor(topic);
+    assert.ok(Array.isArray(partitions));
+    assert.equal(partitions.length, 1);
+    const [info] = partitions;
+    assert.ok(info instanceof PartitionInfo);
+    assert.equal(info.topic(), topic);
+    assert.equal(info.partition(), 0);
+    assert.ok(info.leader() instanceof Node);
+    assert.equal(info.leader().isEmpty, false);
+    assert.deepEqual(info.replicas().map((n) => n.id), [info.leader().id]);
+    assert.ok(info.replicas()[0].equals(info.leader()));
+    assert.deepEqual(info.inSyncReplicas().map((n) => n.id), [info.leader().id]);
+    assert.deepEqual(info.offlineReplicas(), []);
+    assert.equal(info.toString(), `Partition(topic = ${topic}, partition = 0, leader = ${info.leader().id}, replicas = [${info.leader().id}], isr = [${info.leader().id}], offlineReplicas = [])`);
+  } finally {
+    await producer.close();
+  }
+});

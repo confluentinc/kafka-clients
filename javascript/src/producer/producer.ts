@@ -21,9 +21,10 @@
 // sendOffsetsToTransaction, commitTransaction and abortTransaction; for want
 // of an FFI entry point, registerMetricForSubscription,
 // unregisterMetricFromSubscription and clientInstanceId; and, not translated
-// yet, partitionsFor and metrics.
+// yet, metrics.
 
 import type { KafkaFuture } from '../common/kafka_future';
+import type { PartitionInfo } from '../common/partition_info';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
 import type { CloseArgs } from './kafka_producer';
@@ -79,6 +80,24 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * @returns resolving once the records sent before it completed
    */
   flush(): Promise<void>;
+
+  /**
+   * See `KafkaProducer.partitionsFor({ topic })`.
+   *
+   * @param options - the topic
+   * @returns resolving to the topic's partitions
+   */
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+  }): Promise<PartitionInfo[]>;
+  /**
+   * See `KafkaProducer.partitionsFor(topic)`: the topic on its own.
+   *
+   * @param topic - The topic to get partition metadata for
+   * @returns resolving to the topic's partitions
+   */
+  partitionsFor(topic: string): Promise<PartitionInfo[]>;
 
   /**
    * See `KafkaProducer.close()`.

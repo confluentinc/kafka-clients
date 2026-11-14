@@ -29,7 +29,6 @@
 // than this server inventing a result:
 //   - InitTransactions, BeginTransaction, CommitTransaction, AbortTransaction,
 //     SendOffsetsToTransaction: no transaction surface;
-//   - PartitionsFor: no partitionsFor();
 //   - Metrics: no metrics().
 // The tests needing them are skipped for this backend only, by JS_GRPC_SKIPS in
 // rust/Makefile, each with the condition for removing its skip.
@@ -62,6 +61,7 @@ const {
   int64,
   kafkaErrorToProto,
   makeLoggingDeliveryCallback,
+  partitionInfoToProto,
   protoToProducerRecord,
   recordMetadataToProto,
   serverError,
@@ -135,6 +135,7 @@ class ProducerService {
       CreateProducer: unary(this.createProducer),
       Send: unary(this.send),
       Flush: unary(this.flush),
+      PartitionsFor: unary(this.partitionsFor),
       Close: unary(this.close),
       CloseTimeout: unary(this.closeTimeout),
       GetCallbackLog: unary(this.getCallbackLog),
@@ -208,6 +209,19 @@ class ProducerService {
       return { error: kafkaErrorToProto(e) };
     }
     return {};
+  }
+
+  async partitionsFor(request) {
+    const id = idOf(request.producer_id);
+    const producer = this.#producers.get(id);
+    if (producer === undefined) return { error: unknownProducer(id) };
+    let partitions;
+    try {
+      partitions = await producer.partitionsFor(request.topic === undefined ? '' : request.topic);
+    } catch (e) {
+      return { error: kafkaErrorToProto(e) };
+    }
+    return { partitions: partitions.map(partitionInfoToProto) };
   }
 
   async close(request) {

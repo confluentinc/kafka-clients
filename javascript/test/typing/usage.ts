@@ -333,6 +333,11 @@ async function produce(): Promise<void> {
   await kafkaProducer.flush();
   // @ts-expect-error flush takes no argument
   await kafkaProducer.flush(100);
+  // partitionsFor: Java's List as an array, through a Promise.
+  expectTypeOf(kafkaProducer.partitionsFor('t')).toEqualTypeOf<Promise<PartitionInfo[]>>();
+  expectTypeOf(asInterface.partitionsFor({ topic: 't' })).toEqualTypeOf<Promise<PartitionInfo[]>>();
+  // @ts-expect-error a topic is a string
+  void kafkaProducer.partitionsFor(1);
   const closeArgs: CloseArgs = { timeout: 0 };
   await kafkaProducer.close(closeArgs);
   // @ts-expect-error undefined is no timeout: leave the argument out

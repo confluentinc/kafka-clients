@@ -170,6 +170,11 @@ newer.
   `replicas()`, `inSyncReplicas()` and `offlineReplicas()` returning a new
   array each call). The three have Java's `equals` and `hashCode`, and an
   `int` argument beyond Java's `int` is a `RangeError`.
+- `KafkaProducer.partitionsFor(topic)`, Java's `partitionsFor`: a Promise
+  through the C API's `_cb` form, resolving to an array of `PartitionInfo`
+  (Java's `List`), and rejecting with the core's errors (a metadata timeout,
+  "topic cannot be null" as a `TypeError`). The gRPC server serves its
+  `PartitionsFor` RPC.
 - `RecordMetadata` has Java's public constructor, `new RecordMetadata({
   topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,
   serializedValueSize })`, a `long` taking a bigint or a whole number; every
