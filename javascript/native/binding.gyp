@@ -54,7 +54,7 @@
         "."
       ],
       "defines": [
-        "NAPI_VERSION=8"
+        "NAPI_VERSION=9"
       ],
       "cflags_c": [
         "-std=c11",

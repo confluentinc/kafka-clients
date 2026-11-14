@@ -106,8 +106,10 @@ export interface LoadedAddon {
 /**
  * Loads the first candidate of `addonCandidates(key, devBuildDir)` that
  * `load` (`require`) can load. When none loads, throws an Error naming the
- * platform key, the supported keys and both remedies, caused by the
- * AggregateError of each candidate's failure.
+ * platform package and the usual causes (optional dependencies left out at
+ * install, a lockfile made on another OS, or a platform with no package), the
+ * supported keys and both remedies, caused by the AggregateError of each
+ * candidate's failure.
  */
 export function loadAddon(load: (id: string) => unknown, key: string, devBuildDir: string): LoadedAddon {
   const failures: unknown[] = [];
@@ -125,8 +127,13 @@ export function loadAddon(load: (id: string) => unknown, key: string, devBuildDi
         ? `${PLATFORM_PACKAGE_PREFIX}${key} is not installed or does not load`
         : `there is no ${PLATFORM_PACKAGE_PREFIX}${key}, the platform is not supported`) +
       `, and the development build ${addonCandidates(key, devBuildDir)[1]} does not load either. ` +
+      (supported
+        ? 'The usual causes: the optional dependencies were left out at install (--omit=optional), or the ' +
+          'lockfile was made on another OS, so it has no entry for this platform package. '
+        : '') +
       'Install @confluentinc/kafka-javascript on a supported platform, with its optional dependencies ' +
-      '(not --omit=optional); to install it for another machine, give npm that machine\'s `--os`, `--cpu` and ' +
+      '(not --omit=optional); to install it for another machine, or to make a lockfile that also serves ' +
+      'another OS, give npm that machine\'s `--os`, `--cpu` and ' +
       '`--libc`. Or build it from source with `make -C javascript build`, after building libconfluent_kafka ' +
       `(\`make -C rust build-all-features\`). Supported platforms: ${SUPPORTED_PLATFORMS.join(', ')}`,
     { cause: new AggregateError(failures, 'every candidate addon failed to load') },

@@ -128,7 +128,7 @@ test('the development build is loaded when the platform package does not load', 
   assert.equal(loaded.path, dev);
 });
 
-test('when nothing loads, the error names the platform, the supported ones and both remedies', () => {
+test('when nothing loads, the error names the platform package, the usual causes, the supported ones and both remedies', () => {
   const failures = [new Error('first'), new Error('second')];
   let i = 0;
   const fail = () => {
@@ -140,6 +140,10 @@ test('when nothing loads, the error names the platform, the supported ones and b
       assert.match(e.message, /^cannot load the native addon of @confluentinc\/kafka-javascript for platform linux-x64-gnu: /);
       assert.match(e.message, /@confluentinc\/kafka-javascript-linux-x64-gnu is not installed or does not load, /);
       assert.match(e.message, /the development build \/pkg\/native\/build\/Release\/confluent-kafka-javascript\.node does not load either/);
+      assert.match(
+        e.message,
+        /The usual causes: the optional dependencies were left out at install \(--omit=optional\), or the lockfile was made on another OS, so it has no entry for this platform package\. /,
+      );
       assert.match(e.message, /Install @confluentinc\/kafka-javascript on a supported platform, with its optional dependencies/);
       assert.match(e.message, /give npm that machine's `--os`, `--cpu` and `--libc`/);
       assert.match(e.message, /Or build it from source with `make -C javascript build`/);
@@ -160,6 +164,7 @@ test('when nothing loads, the error names the platform, the supported ones and b
     () => loadAddon(fail, 'win32-x64', '/pkg'),
     (e) => {
       assert.match(e.message, /there is no @confluentinc\/kafka-javascript-win32-x64, the platform is not supported/);
+      assert.doesNotMatch(e.message, /The usual causes/);
       assert.match(e.message, /Or build it from source with `make -C javascript build`/);
       assert.match(e.message, /Supported platforms: linux-x64-gnu, darwin-arm64$/);
       return true;
