@@ -24,20 +24,27 @@
 //   - `napi_unref_threadsafe_function` is called only on the close path, the
 //     functions of `CLOSE_PATH` (`tsfn-unref`), and is called there
 //     (`tsfn-unref-missing`), so a client keeps Node running exactly until
-//     the core reports it closed.
-// Not checked: that the close path runs only once the core reported the
-// client closed (javascript/CLAUDE.md boundary rule 10).
+//     the core reports it closed;
+//   - `cbq_closed` itself is called only from a close completion, the
+//     functions of `CLOSE_COMPLETIONS` (`tsfn-close-call`), so the function
+//     is unreferenced only once the core answered a close.
+// Not checked: that the completion calls it only for a close the core
+// reported (javascript/CLAUDE.md boundary rule 10).
 
 const { callSites } = require('../c_source');
 
 /** The functions that unreference the thread-safe function: the callback queue's record of a close the core reported. */
 const CLOSE_PATH = ['cbq_closed'];
 
+/** The close completions, the only callers of the close path: the core's answer to a client's close. */
+const CLOSE_COMPLETIONS = ['close_on_complete'];
+
 module.exports = {
   name: 'check-tsfn-lifetime',
-  kinds: ['tsfn-ref', 'tsfn-unref', 'tsfn-unref-missing'],
+  kinds: ['tsfn-ref', 'tsfn-unref', 'tsfn-unref-missing', 'tsfn-close-call'],
   needs: ['native'],
   CLOSE_PATH,
+  CLOSE_COMPLETIONS,
   hint:
     "Leave the client's thread-safe function referenced from its creation and unreference it only once the core " +
     'reported the client closed (root CLAUDE.md, JavaScript Binding Conventions, Lifetime, Q21).',
@@ -54,6 +61,13 @@ module.exports = {
             kind: 'tsfn-ref',
             subject: `${rel}:${call.line}`,
             message: 'references the thread-safe function again: Node-API creates it referenced, and nothing references it later',
+          });
+        } else if (CLOSE_PATH.includes(call.name) && !CLOSE_COMPLETIONS.includes(call.function)) {
+          checked++;
+          findings.push({
+            kind: 'tsfn-close-call',
+            subject: `${rel}:${call.line}`,
+            message: `calls ${call.name} in ${call.function || 'a macro'}, not in a close completion (${CLOSE_COMPLETIONS.join(', ')}): the thread-safe function is unreferenced only once the core answered the close`,
           });
         } else if (call.name === 'napi_unref_threadsafe_function') {
           checked++;

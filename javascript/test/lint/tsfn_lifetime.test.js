@@ -26,8 +26,11 @@ const RULE = 'check-tsfn-lifetime';
 const QUEUE =
   'int cbq_closed(napi_env env, Q* q) {\n  if (q->tsfn_alive) napi_unref_threadsafe_function(env, q->tsfn);\n  return 1;\n}\n';
 
-test('the thread-safe function unreferenced only by cbq_closed passes', () => {
-  const r = lint(project({ 'native/callback_queue.c': QUEUE }), [RULE]);
+const PRODUCER =
+  'static void close_on_complete(kafka_common_Error_t* error, void* opaque) {\n  cbq_closed(env, &p->queue);\n}\n';
+
+test('the thread-safe function unreferenced only by cbq_closed, called by the close completion, passes', () => {
+  const r = lint(project({ 'native/callback_queue.c': QUEUE, 'native/producer.c': PRODUCER }), [RULE]);
   assert.equal(r.status, 0, r.text);
 });
 
@@ -48,4 +51,18 @@ test('a reference, an unreference off the close path, or none on it, is a findin
   ]);
   r = lint(project({ 'native/callback_queue.c': 'int cbq_closed(napi_env env, Q* q) {\n  return 1;\n}\n' }), [RULE]);
   assert.deepEqual(findings(r), ['cbq_closed: calls no napi_unref_threadsafe_function: a closed client would keep Node running']);
+});
+
+test('cbq_closed called before the core answered the close, outside the close completion, is a finding', () => {
+  const r = lint(
+    project({
+      'native/callback_queue.c': QUEUE,
+      'native/producer.c': PRODUCER + 'napi_value js_producer_close(napi_env env, napi_callback_info info) {\n  cbq_closed(env, &p->queue);\n  return NULL;\n}\n',
+    }),
+    [RULE],
+  );
+  assert.equal(r.status, 1);
+  assert.deepEqual(findings(r), [
+    'native/producer.c:5: calls cbq_closed in js_producer_close, not in a close completion (close_on_complete): the thread-safe function is unreferenced only once the core answered the close',
+  ]);
 });
