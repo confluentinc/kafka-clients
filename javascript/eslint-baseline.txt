@@ -18,7 +18,9 @@ missing clients.producer.KafkaProducer#partitionsFor
 missing clients.producer.KafkaProducer#registerMetricForSubscription
 missing clients.producer.KafkaProducer#sendOffsetsToTransaction
 missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
-# Producer, the interface: the same members as KafkaProducer's.
+# Producer, the interface: the same members as KafkaProducer's, left out for
+# the same reason (transactions, metadata, metrics and telemetry, which the
+# preview, producer only, leaves out).
 missing clients.producer.Producer#abortTransaction
 missing clients.producer.Producer#beginTransaction
 missing clients.producer.Producer#clientInstanceId
