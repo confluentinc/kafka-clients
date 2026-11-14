@@ -374,9 +374,12 @@ blocks:
     # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
     # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
     # package with this machine's native library and installs it into a fresh
-    # project (make package-check-dotnet), which needs no Docker. Like the
-    # others it runs under this block's 30-minute limit; it took 10 minutes on
-    # 2026-10-01, before the package check, which takes about a minute.
+    # project (make package-check-dotnet), which needs no Docker. It also runs
+    # the Native AOT check (make test-aot-dotnet) and the .NET arms again against
+    # a Native AOT build of the server (make test-integration-dotnet-native-aot).
+    # Like the others it runs under this block's 30-minute limit; it took 10
+    # minutes on 2026-10-01, before the package check, which takes about a
+    # minute, and the two AOT steps.
     #
     # These jobs use PLAINTEXT only. The SSL and SASL_SSL variants of this arm
     # run on Linux. The TLS and SASL code paths are in the Rust client and are
@@ -441,6 +444,10 @@ blocks:
             # package can be packed and installed. Set on make's command line for the reason given
             # below.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make package-check-dotnet
+            # The Native AOT check: publishes a net8.0 and a net10.0 Native AOT executable with the
+            # whole library rooted, so a trim or AOT warning fails the job, then runs them. It needs
+            # no Docker. Set on make's command line for the reason given below.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make test-aot-dotnet
             - command -v colima >/dev/null 2>&1 || brew install colima
             - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
             - 'docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done'
@@ -451,6 +458,9 @@ blocks:
             # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
             # on the make's own command line.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make test-integration-dotnet-native
+            # The same arms against a Native AOT build of the gRPC server and binding, which links with
+            # Xcode's clang.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make test-integration-dotnet-native-aot
 
   - name: "Verify language bindings (Windows amd64)"
     # The .NET client on Windows, whose package carries a win-x64 and a win-x86

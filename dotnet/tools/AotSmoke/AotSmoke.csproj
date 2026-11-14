@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Native AOT check of the Confluent.Kafka library (make test-aot-dotnet). Published with PublishAot for
+    net8.0 and net10.0 with the whole Confluent.Kafka assembly rooted (TrimmerRootAssembly), so the AOT compiler
+    analyzes every member of the library, not only what this program calls, and a trim or AOT warning fails the
+    publish (TreatWarningsAsErrors). The published executables then run. Outside the solution: a Native AOT
+    publish needs the platform's C toolchain, which the solution's build does not.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.AotSmoke</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Each trim or AOT warning of the library at its own site, never folded into one per assembly. -->
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <!-- Symbols stay in the executable: stripping them needs dsymutil on macOS, which a check does not. -->
+    <StripSymbols>false</StripSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Confluent.Kafka/Confluent.Kafka.csproj" />
+    <TrimmerRootAssembly Include="Confluent.Kafka" />
+  </ItemGroup>
+
+</Project>
