@@ -71,6 +71,7 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-default-helpers',
     'check-mock-native',
     'check-encode-callers',
+    'check-commonjs-pin',
   ]);
   assert.deepEqual(shape(ESLINT_CHECKS), [
     'check-no-todo',

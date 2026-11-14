@@ -73,6 +73,7 @@ const RUNNER_CHECKS = [
   require('./rules/default_helpers'),
   require('./rules/mock_native'),
   require('./rules/encode_callers'),
+  require('./rules/commonjs_pin'),
 ];
 
 /** The ESLint rule name of check `check`: `check-java-name` -> `java-name`. */

@@ -1020,6 +1020,10 @@ The rules, each named in its finding:
   or value given without a serializer, which the serializers replace with a
   `TypeError` (Class family, Q27); the allowance fails as unused once that
   call goes.
+- `check-commonjs-pin`: `package.json` has no `"type"`, `tsconfig.json`'s
+  `module` and `moduleResolution` are `nodenext`, and each `exports` entry
+  has exactly the conditions `types` then `default` (root conventions,
+  Layout and modules, Q13).
 - `check-directives`, `check-config`: no inline ESLint configuration, a
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
