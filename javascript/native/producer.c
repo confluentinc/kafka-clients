@@ -211,6 +211,12 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
         ctx->orphaned = 1;
         ctx->next = p->orphans;
         p->orphans = ctx;
+        // Refused once the core reported the close: no delivery callback can
+        // fire for it any more, so its JS function is dropped now, as
+        // close_on_complete drops the others'. Its closure holds the
+        // KafkaProducer, which would otherwise never be collected, nor the
+        // closed producer destroyed.
+        if (cbq_is_closed(&p->queue)) delete_ref(env, &ctx->on_complete);
         return;
     }
     if (ctx->handover_failed) {
@@ -632,6 +638,12 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
         rejected = code == kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT;
     }
     int closed_now = rejected || p->queue.finalizing ? 0 : cbq_closed(env, &p->queue);
+    // The close completed every record the accumulator held, so no orphan's
+    // delivery callback can fire any more: their JS functions, whose closures
+    // hold the KafkaProducer, are dropped, so the closed producer can be
+    // collected and destroyed. Each context stays on the list until destroy.
+    if (closed_now)
+        for (SendCtx* o = p->orphans; o != NULL; o = o->next) delete_ref(env, &o->on_complete);
     if (!p->queue.finalizing) {
         napi_value argv[2];
         argv[0] = error_take_to_js(env, error);
