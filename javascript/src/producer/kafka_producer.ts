@@ -378,11 +378,13 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * one by one may then reach the producer out of call order (`await
    * send()` keeps it).
    *
-   * The client reads a `Buffer` or `Uint8Array` key or value, and what a
-   * serializer returns, after `send()` returns. Don't write to it, transfer it or resize it until the Promise
+   * The client reads a `Buffer` or `Uint8Array` key or value after `send()`
+   * returns. Don't write to it, transfer it or resize it until the Promise
    * from `send()` settles; awaiting `send()` is enough. A serializer must
    * return a new Buffer for each record. If other workers share the Buffer's
-   * memory, they mustn't write to it until then either. *(deviation: Java
+   * memory, they mustn't write to it until then either. What a serializer
+   * returns is read the same way, until the Promise from `send()` settles.
+   * *(deviation: Java
    * copies the bytes inside `send()`. Why: it saves a memory copy of each
    * Buffer, as the Python binding does.)* Header values are copied during
    * the call. Without a serializer, a string key or value is encoded to UTF-8 as Java's
@@ -400,11 +402,6 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * closed error, where Java checks the closed producer before it
    * serializes. Why: the binding keeps no state, and the conversion runs in
    * JavaScript before the call reaches the core.)*
-   *
-   * The record is typed `ProducerRecord<K | null, V | null>`: a record built
-   * with a `null` key or value is a `ProducerRecord<null, ...>`, as
-   * `ProducerRecord` has one signature per Java constructor, which binds a
-   * `null` argument to `null` rather than `never`.
    *
    * The record is typed `ProducerRecord<K | null, V | null>`: a record built
    * with a `null` key or value is a `ProducerRecord<null, ...>`, as
