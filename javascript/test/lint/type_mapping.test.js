@@ -365,7 +365,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
     lags: 'lags(): TopicPartitionMap<bigint> { return new TopicPartitionMap(); }',
     metrics: 'metrics(): MetricNameMap<Metric> { return new MetricNameMap(); }',
     labels: 'labels(): Map<string, string> { return new Map(); }',
-    label: 'label(labels: ReadonlyMap<string, string>): void { void labels; }',
+    label: 'label(labels: ReadonlyMap<string, string> | Readonly<Record<string, string>>): void { void labels; }',
   };
   const source = (members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
@@ -397,6 +397,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
     ['parts', 'parts(): Set<TopicPartition> { return new Set(); }', 'Coll.parts: return: Java Set<TopicPartition> is not TypeScript Set<TopicPartition>'],
     ['lags', 'lags(): TopicPartitionMap<number> { return new TopicPartitionMap(); }', 'Coll.lags: return: Java Map<TopicPartition, Long> is not TypeScript TopicPartitionMap<number>'],
     ['labels', 'labels(): ReadonlyMap<string, string> { return new Map(); }', 'Coll.labels: return: Java Map<String, String> is not TypeScript ReadonlyMap<string, string>'],
+    ['label', 'label(labels: Record<string, number>): void { void labels; }', 'Coll.label: parameter labels: Java Map<String, String> is not TypeScript Record<string, number>'],
     ['metrics', 'metrics(): Map<MetricName, Metric> { return new Map(); }', 'Coll.metrics: return: Java Map<MetricName, Metric> is not TypeScript Map<MetricName, Metric>'],
   ]) {
     r = lint(files({ ...GOOD, [name]: member }), [RULE]);

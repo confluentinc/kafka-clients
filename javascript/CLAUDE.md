@@ -449,9 +449,10 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
 - Collections (root conventions, Types): a Java array or collection taken is
   any iterable (`PartitionInfo`'s `Node[]`, plan §5 item 1), and one
   returned is a new array each call (`PartitionInfo.replicas()`,
-  `partitionsFor()`'s `List`). `MetricName.tags()`, Java's
-  `Map<String, String>`, is a new `Map` each call, and its constructor takes
-  a `Map`. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
+  `partitionsFor()`'s `List`). A map keyed by strings taken is a `Map` or a
+  plain object (the root's Types row "Other collections taken", Q25):
+  `MetricName`'s constructor takes its `tags` so, copied, and
+  `MetricName.tags()` returns a new `Map` each call. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
   *(js-only, on the invented-names list)*, a read-only map keyed by the
   JSON text of the group, the name and the tags sorted by key (the fields
   `MetricName.equals` compares), keeping the original `MetricName`s;

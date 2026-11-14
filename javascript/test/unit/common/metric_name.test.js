@@ -66,15 +66,29 @@ test("equals and hashCode are Java's: group, name and tags, not the description"
   assert.equal(tagged().equals(null), false);
 });
 
+test('the tags are a Map or a plain object, copied when the name is built', () => {
+  const given = new Map([['client-id', 'c']]);
+  const fromMap = new MetricName({ name: 'n', group: 'g', description: '', tags: given });
+  const fromObject = new MetricName({ name: 'n', group: 'g', description: '', tags: { 'client-id': 'c' } });
+  assert.deepEqual([...fromObject.tags()], [['client-id', 'c']]);
+  assert.equal(fromMap.equals(fromObject), true);
+  assert.equal(fromMap.hashCode(), fromObject.hashCode());
+  given.set('other', 'x');
+  assert.deepEqual([...fromMap.tags()], [['client-id', 'c']]);
+  assert.deepEqual([...new MetricName({ name: 'n', group: 'g', description: '', tags: {} }).tags()], []);
+});
+
 test("the constructor checks Java's requireNonNull and the run-time types", () => {
   for (const field of ['name', 'group', 'description', 'tags']) {
     const options = { name: 'n', group: 'g', description: 'd', tags: new Map(), [field]: null };
     assert.throws(() => new MetricName(options), { constructor: TypeError, message: `${field} must not be null` });
   }
-  assert.throws(() => new MetricName({ name: 'n', group: 'g', description: 'd', tags: [['a', 'b']] }), {
-    constructor: TypeError,
-    message: 'tags must be a Map of string to string',
-  });
+  for (const tags of [[['a', 'b']], new Map([['a', 1]]), { a: 1 }, 'a=b']) {
+    assert.throws(() => new MetricName({ name: 'n', group: 'g', description: 'd', tags }), {
+      constructor: TypeError,
+      message: 'tags must be a Map or a plain object of string to string',
+    });
+  }
   assert.throws(() => new MetricName({ name: 'n', group: 'g' }), {
     constructor: IllegalArgumentError,
     message: 'MetricName() takes one of (name, group, description, tags); got (name, group)',

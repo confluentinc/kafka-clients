@@ -55,7 +55,8 @@
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
-// | Map<String, String> (MetricName's tags)      | Map<string, string>, a ReadonlyMap taken |
+// | Map<String, String>, returned                | Map<string, string>                     |
+// | Map<String, String>, taken                   | a Map or ReadonlyMap, or a plain object (Record) of string to string |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type     |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
@@ -268,11 +269,21 @@ module.exports = {
         return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args.every((a) => a.name === 'String' && a.dims === 0)) {
-        // MetricName's tags: a Map returned, a Map or ReadonlyMap taken.
-        const n = symbolName(t);
-        if (!(n === 'Map' || (!outward && n === 'ReadonlyMap'))) return (t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs') ? true : false;
-        const [k, v] = typeArgs(t);
-        return matches(j.args[0], k) === true && matches(j.args[1], v) === true;
+        // A map keyed by strings: a Map returned; taken, a Map, a ReadonlyMap
+        // or a plain object of string to string (root CLAUDE.md, JavaScript
+        // Binding Conventions, Types, "Other collections taken").
+        if ((t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs')) return true;
+        const part = (p) => {
+          const n = symbolName(p);
+          if (n === 'Map' || (!outward && n === 'ReadonlyMap')) {
+            const [k, v] = typeArgs(p);
+            return matches(j.args[0], k) === true && matches(j.args[1], v) === true;
+          }
+          if (outward) return false;
+          const index = checker.getIndexInfoOfType(p, ts.IndexKind.String);
+          return index !== undefined && matches(j.args[1], index.type) === true;
+        };
+        return parts(t).every(part);
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'MetricName') {
         return symbolName(t) === 'MetricNameMap' && matches(j.args[1], typeArgs(t)[0]) === true;
