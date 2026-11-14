@@ -217,10 +217,11 @@ public sealed class JavaTextTests
     }
 
     [Fact]
-    public void ValueOf_ReadOnlyDictionaryOnly_IsAMap()
+    public void ValueOf_ReadOnlyDictionaryOnly_IsTheListOfItsPairs_UnlessStringToObject()
     {
-        Assert.Equal("{a=1, b=null}", JavaText.ValueOf(new ReadOnlyMap(("a", 1), ("b", null))));
-        Assert.Equal("{}", JavaText.ValueOf(EmptyReadOnlyDictionary<string, int>.Instance));
+        Assert.Equal("[[a, 1], [b, ]]", JavaText.ValueOf(new ReadOnlyMap(("a", 1), ("b", null))));
+        Assert.Equal("[]", JavaText.ValueOf(EmptyReadOnlyDictionary<string, int>.Instance));
+        Assert.Equal("{}", JavaText.ValueOf(EmptyReadOnlyDictionary<string, object?>.Instance));
     }
 
     [Fact]
