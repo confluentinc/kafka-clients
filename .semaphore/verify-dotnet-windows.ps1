@@ -19,8 +19,8 @@
 # build-dotnet-native.ps1 (its debug all-features build, the one the Linux and macOS binding tests
 # link; the package's native blocks build the release one), then builds the .NET solution and runs
 # the unit tests, which drive the mock clients, on net462, net8.0 and net10.0, all in that
-# platform's process. The broker-backed tests do not run: they need Linux containers, which the
-# Windows agents do not run.
+# platform's process, and then the Native AOT check. The broker-backed tests do not run: they need
+# Linux containers, which the Windows agents do not run.
 #
 # On a pull request the unit tests run through the test selection, as in the Linux and macOS jobs:
 # only the tests that the selection in the committed test-selection/ folder made for exactly this
@@ -105,3 +105,19 @@ if ($failed) {
     throw "The unit tests failed on $($failed -join ', ') ($Platform)"
 }
 Write-Output "The selected unit tests passed on net462, net8.0 and net10.0 ($Platform)"
+
+# The Native AOT check, as `make -C dotnet test-aot-dotnet` on Linux and macOS: publishes
+# dotnet/tools/AotSmoke as a Native AOT executable for this platform (the SDK's own, win-x64 or
+# win-x86), linked by the agent's Visual Studio C++ tools, and runs it, whatever the test selection
+# selects. CargoTargetTriple and CargoProfileDir point the library project at the native built above.
+# .NET cannot AOT compile net8.0 for x86, so the x86 job checks net10.0 only.
+$aotFrameworks = if ($Platform -eq 'x86') { @('net10.0') } else { @('net8.0', 'net10.0') }
+foreach ($tfm in $aotFrameworks) {
+    Write-Output "== Native AOT check, $tfm, $Platform"
+    $aotOut = Join-Path $ToolsDir "aot-smoke-$Platform-$tfm"
+    Remove-Item -Recurse -Force $aotOut -ErrorAction SilentlyContinue
+    Invoke-Native $dotnet @('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', $tfm,
+        '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug', '-o', $aotOut)
+    Invoke-Native (Join-Path $aotOut 'AotSmoke.exe') @()
+}
+Write-Output "The Native AOT check passed on $($aotFrameworks -join ', ') ($Platform)"

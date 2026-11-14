@@ -508,7 +508,8 @@ blocks:
     # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
     # net10.0 in a process of that platform
     # (.semaphore/verify-dotnet-windows.ps1), only those the test selection
-    # selects on a pull request, as in the other blocks. The broker-backed tests and the
+    # selects on a pull request, as in the other blocks, then the Native AOT
+    # check (net8.0 and net10.0 on x64, net10.0 on x86). The broker-backed tests and the
     # multilanguage arms run on Linux and macOS only: they need Linux
     # containers, which the Windows agents do not run. The agent's shell is
     # PowerShell, so the block starts with job-start.ps1 and records its result
