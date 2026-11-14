@@ -186,8 +186,10 @@ These decide every question, in this order:
    gets for a string key or value without a serializer is not decided yet in
    the root conventions; the producer now encodes it through the same rule.
    `check-zero-copy` and `check-string-encoding` partly enforce this (The rule
-   linter, below). Not checked: which strings go through `encodeLikeJava`,
-   and copies in other `native/` files.
+   linter, below), and an integration test checks that an accepted record's
+   Buffers are collectable once its `send()` resolved, before delivery. Not
+   checked: which strings go through `encodeLikeJava`, and copies in other
+   `native/` files.
 9. **Ownership follows the signature.** Errors from `out_err` and from `_cb`
    completions are owned: copied into a JS error (`src/internal/errors.ts`),
    then destroyed, before the Promise settles (root conventions, Errors). An
@@ -846,9 +848,13 @@ The rules, each named in its finding:
 - `check-out-err`, `check-cb-twin-only`, `check-notify-hook`,
   `check-single-drainer`, `check-completion-order`, `check-ownership`,
   `check-no-binding-queue`: boundary rules 1 to 10, in the addon.
-- `check-zero-copy`: no copy of the app's key and value on the send path, a
-  `napi_ref` on each borrowed Buffer dropped by the hand-over completion
-  (rule 8), and no copy of bytes in `src/`.
+- `check-zero-copy`: no copy of the app's key and value on the send path; a
+  `napi_ref` on each borrowed Buffer, dropped unconditionally by the
+  hand-over completion and never by the delivery callback (rule 8); and in
+  `src/` no copy of a bytes-typed value through `Buffer.from`,
+  `Buffer.copyBytesFrom`, `Buffer.concat`, `new Uint8Array`,
+  `Uint8Array.from`, `.slice()`, `.copy()` or `.set(bytes)` (a copy by
+  another means, such as a loop over the bytes, is not checked).
 - `check-string-encoding`: `encodeLikeJava` in `src/internal/encode.ts` is the
   only place a string becomes bytes (no `Buffer.from(string)`, `TextEncoder`
   or string write elsewhere).
