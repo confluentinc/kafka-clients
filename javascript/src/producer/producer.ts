@@ -17,7 +17,7 @@
 // Producer has no static member, so it has no runtime object.
 //
 // Left out, as on KafkaProducer (the producer package's documentation, in
-// index.ts): by request, initTransactions, beginTransaction,
+// index.ts): not in the preview, initTransactions, beginTransaction,
 // sendOffsetsToTransaction, commitTransaction and abortTransaction; for want
 // of an FFI entry point, registerMetricForSubscription,
 // unregisterMetricFromSubscription and clientInstanceId; and, not translated
