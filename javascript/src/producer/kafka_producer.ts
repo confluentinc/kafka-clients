@@ -27,6 +27,8 @@ import { producerClosed, producerOpened, warnPreview } from '../internal/lifecyc
 import { checkSerializer, closeSerializer, isThenable, serializedBytes } from '../internal/serde';
 import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
+import { Node } from '../common/node';
+import { PartitionInfo } from '../common/partition_info';
 import type { Serializer } from '../common/serialization/serializer';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
@@ -72,6 +74,14 @@ const SEND_FORMS = new JavaForms('send', [['record'], ['record', 'callback']], {
 });
 const CLOSE_FORMS = new JavaForms('close', [[], ['timeout']], { bareTypes: { timeout: isDurationOrNull } });
 const FLUSH_FORMS = new JavaForms('flush', [[]]);
+const PARTITIONS_FOR_FORMS = new JavaForms('partitionsFor', [['topic']], {
+  bareTypes: { topic: (value) => value === null || typeof value === 'string' },
+});
+
+/** The native layer's node fields as a Node, Java's five-parameter constructor. */
+function nodeOf(fields: { id: number; host: string | null; port: number; rack: string | null; isFenced: boolean } | null): Node | null {
+  return fields === null ? null : new Node(fields);
+}
 
 /** send()'s mark of a value its serializer has not run on yet. */
 const NOT_SERIALIZED: unique symbol = Symbol('not serialized');
@@ -655,6 +665,84 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     return new Promise<void>((resolve, reject) => {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
       native.producerFlush(this.#handle, (error) => (error !== null ? reject(error) : resolve()));
+    });
+  }
+
+  /**
+   * Get the partition metadata for the given topic. This can be used for
+   * custom partitioning.
+   *
+   * This will attempt to refresh metadata until it finds the topic in it, or
+   * the configured `max.block.ms` expires.
+   *
+   * @param options - the topic
+   * @returns resolving to the topic's partitions, a new array
+   * @throws `AuthenticationError` rejects with it if authentication fails.
+   *   See the error for more details
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   specified topic. See the error for more details
+   * @throws `InterruptError` rejects with it if the thread is interrupted
+   *   while blocked
+   * @throws `TimeoutError` rejects with it if the topic cannot be found in
+   *   metadata within `max.block.ms`
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
+   *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   * @throws `KafkaError` rejects with it for all Kafka-related errors,
+   *   including the case where this method is called after producer close
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *   are not `{topic}`
+   * @throws `TypeError` rejects with it when `topic` is null ("topic cannot be
+   *   null", the core's), `undefined` or not a string
+   *
+   * @remarks Java's blocking call returns a Promise here, and Java's `List`
+   * an array.
+   */
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+  }): Promise<PartitionInfo[]>;
+  /**
+   * Get the partition metadata for the given topic: the topic on its own,
+   * the same as `partitionsFor({topic})`.
+   *
+   * @param topic - The topic to get partition metadata for
+   * @returns resolving to the topic's partitions
+   */
+  partitionsFor(topic: string): Promise<PartitionInfo[]>;
+  partitionsFor(options: unknown): Promise<PartitionInfo[]> {
+    let topic: unknown;
+    try {
+      PARTITIONS_FOR_FORMS.match(options, arguments.length);
+      topic = PARTITIONS_FOR_FORMS.value(options, 'topic');
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
+      return Promise.reject(error);
+    }
+    // A topic that is not a string is the addon's TypeError, thrown here, so
+    // it rejects the Promise.
+    return new Promise<PartitionInfo[]>((resolve, reject) => {
+      native.producerPartitionsFor(this.#handle, topic as string | null, (error, partitions) => {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
+        if (error !== null) return reject(error);
+        try {
+          resolve(
+            (partitions ?? []).map(
+              (fields) =>
+                new PartitionInfo({
+                  topic: fields.topic,
+                  partition: fields.partition,
+                  leader: nodeOf(fields.leader),
+                  replicas: fields.replicas === null ? null : fields.replicas.map((n) => nodeOf(n) as Node),
+                  inSyncReplicas: fields.inSyncReplicas === null ? null : fields.inSyncReplicas.map((n) => nodeOf(n) as Node),
+                  offlineReplicas: fields.offlineReplicas === null ? null : fields.offlineReplicas.map((n) => nodeOf(n) as Node),
+                }),
+            ),
+          );
+        } catch (thrown) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what building the values threw (typed unknown by catch)
+          reject(thrown);
+        }
+      });
     });
   }
 
