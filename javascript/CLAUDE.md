@@ -730,10 +730,28 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   function `({ configs, isKey }) => serializer`, which the producer calls
   once, key then value, with a frozen copy of the whole configuration, each
   value as given, through a `Proxy` that records each of its keys the
-  function reads; those keys and the two serde keys are left out of the
-  configuration the core gets, as Java's `originals()` marks them used, while
-  the consumer's serde keys reach the core, which lists them as unused
-  (root conventions, Serialization, Q53). A serializer given as a
+  function reads. The two serde keys are left out of the configuration the
+  core gets, and so is each read key that is not a producer key of Java's
+  (`src/internal/producer_config_keys.ts`, generated with the
+  `ProducerConfigs` type), such as `schema.registry.url`, so that the core
+  doesn't list it as unused; the consumer's serde keys reach the core, which
+  lists them as unused (root conventions, Serialization, Q53). **(root
+  conflict)** The root text says "the binding leaves those keys out of the
+  config it sends to the core, as Java's `originals()` marks them as used",
+  which read literally drops every key the function reads, `bootstrap.servers`
+  included, so a function that spreads the configuration would leave the
+  core with none. The code follows the rule's purpose and Java: Java only
+  marks the keys it reads and never removes them, so a producer key the
+  function reads still reaches the core, and only a read key the core doesn't
+  know is left out, which is what keeps `schema.registry.url` from being
+  listed as unused. Two deviations follow from the function running before
+  the core exists, to know which keys it reads *(deviation. Why: the binding
+  calls the function before the core is built. Goes when: the FFI exposes the
+  computed client id and the configuration check before construction)*: the
+  function gets the configuration as the user gave it, without the computed
+  `client.id` Java's `originals()` carries, and a configured serializer is
+  built before the core checks the configuration, where Java checks it
+  first. A serializer given as a
   constructor argument wins, and its config key is then ignored; a null one
   is the config key's, as Java's `if (keySerializer == null)`. A function
   that throws is Java's "Failed to construct kafka producer" `KafkaError`,

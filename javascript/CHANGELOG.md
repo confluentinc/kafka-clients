@@ -237,8 +237,11 @@ newer.
   `key.serializer` and `value.serializer` take a synchronous function
   `({ configs, isKey }) => serializer`, which the producer calls once with the
   whole configuration, in place of Java's class and its `configure()`; these
-  two keys, and the keys the function reads, don't reach the core, as Java's
-  `originals()` marks them used. A class name, a serializer object or a
+  two keys don't reach the core, and neither do the keys the function reads
+  that the core doesn't know (a `schema.registry.url`), as Java's
+  `originals()` marks them used; a producer key it reads still does. The
+  function gets the configuration without Java's computed `client.id`, and
+  runs before the core checks the configuration. A class name, a serializer object or a
   function that returns a Promise there throws `ConfigError`, and a
   constructor argument wins. The `ProducerConfigs` type lists Java's producer
   keys for autocompletion and takes any other string.

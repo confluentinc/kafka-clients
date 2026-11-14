@@ -650,6 +650,31 @@ test("strings are encoded as Java's StringSerializer encodes them: a lone surrog
   }
 });
 
+test('a serde config function that reads the whole configuration leaves a working producer', { skip: SKIP, timeout: 120000 }, async () => {
+  // It spreads the configuration, reading bootstrap.servers too: the producer
+  // keys reach the core, and only schema.registry.url, which the core doesn't
+  // know, is kept from it.
+  const topic = freshTopic('spread');
+  let seen = null;
+  const producer = new KafkaProducer({
+    'bootstrap.servers': BOOTSTRAP,
+    'schema.registry.url': 'http://sr',
+    'value.serializer': ({ configs }) => {
+      seen = { ...configs };
+      return { serialize: ({ data }) => Buffer.from(JSON.stringify(data)) };
+    },
+  });
+  try {
+    assert.equal(seen['bootstrap.servers'], BOOTSTRAP);
+    const metadata = await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: 'spread' }))).get();
+    assert.equal(metadata.topic, topic);
+    const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
+    assert.deepEqual(records.map((r) => r.value.toString()), ['"spread"']);
+  } finally {
+    await producer.close();
+  }
+});
+
 test('a record\'s headers are read-only once send() has taken it', { skip: SKIP, timeout: 120000 }, async () => {
   const topic = freshTopic('sealed');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });

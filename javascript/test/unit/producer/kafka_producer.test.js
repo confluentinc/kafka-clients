@@ -1612,6 +1612,34 @@ test('stringSerializer goes in a serde config key without (), configured by its 
   void producer.close();
 });
 
+test('a serde config function that reads the whole configuration leaves out only the keys the core does not know', () => {
+  // The function spreads the configuration, reading every key: the producer
+  // keys still reach the core (the producer has its bootstrap servers and
+  // client id), and only schema.registry.url, which no producer key is, is
+  // kept from the core, so the core lists nothing as unused.
+  const script = `
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    let seen;
+    const p = new KafkaProducer({
+      'bootstrap.servers': 'localhost:1',
+      'client.id': 'spread-client',
+      'max.block.ms': 200,
+      'schema.registry.url': 'http://sr',
+      'value.serializer': ({ configs }) => {
+        seen = { ...configs };
+        return { serialize: () => null };
+      },
+    });
+    console.log(Object.keys(seen).sort().join(','));
+    console.log(p.metrics().keys().next().value.tags().get('client-id'));
+    p.close().then(() => console.log('closed'));
+  `;
+  const r = runNode(script, 120000, [], { RUST_LOG: 'info' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'bootstrap.servers,client.id,max.block.ms,schema.registry.url,value.serializer\nspread-client\nclosed\n');
+  assert.ok(!r.stderr.includes('were supplied but are not used'), r.stderr);
+});
+
 test("the keys a serde config function reads don't reach the core, nor do the serde keys; the consumer's serde keys do", () => {
   // The core lists the keys it does not use in one INFO line, at the RUST_LOG
   // level read when its first client is built, so a fresh process builds it.

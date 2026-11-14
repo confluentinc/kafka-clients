@@ -32,10 +32,46 @@ type Res<T> = anyhow::Result<T>;
 
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
-/// `src/producer/producer_configs.ts` and its content.
-pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
+/// `src/producer/producer_configs.ts` and `src/internal/producer_config_keys.ts`,
+/// with their content.
+pub(crate) fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let keys: Vec<String> = client_types(&mut reader, PRODUCER_CONFIG)?.into_keys().collect();
+    Ok(vec![configs_type(repo_root, &keys), known_keys(repo_root, &keys)])
+}
+
+/// `src/internal/producer_config_keys.ts`: the same keys at run time, which
+/// the producer keeps in the configuration the core gets even when a serde
+/// config function reads them (javascript/CLAUDE.md, the serde config keys).
+fn known_keys(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
+    let mut text = header("Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`)");
+    text.push_str(
+        "\n// The config keys Java's `ProducerConfig` defines (private): a key a serde\n\
+         // config function reads still reaches the core when it is one of them.\n\
+         \n\
+         const KEYS: ReadonlySet<string> = new Set([\n",
+    );
+    for k in keys {
+        text.push_str(&format!("  {},\n", js_str(k)));
+    }
+    text.push_str(
+        "]);\n\
+         \n\
+         /**\n \
+         * Whether `key` is a producer config key Java's `ProducerConfig` defines.\n \
+         *\n \
+         * @param key - the config key\n \
+         * @returns true for a key of Java's producer configuration\n \
+         */\n\
+         export function isProducerConfigKey(key: string): boolean {\n  \
+         return KEYS.has(key);\n\
+         }\n",
+    );
+    (repo_root.join(JS_SRC).join("internal").join("producer_config_keys.ts"), text)
+}
+
+/// `src/producer/producer_configs.ts` and its content.
+fn configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
     let mut text = header("Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`)");
     text.push_str("\nimport type { Serializer } from '../common/serialization/serializer';\n");
     text.push_str(
@@ -58,7 +94,7 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
          export type ProducerConfigs = {\n  \
          [key in\n",
     );
-    for k in &keys {
+    for k in keys {
         text.push_str(&format!("    | {}\n", js_str(k)));
     }
     text.push_str(
@@ -80,7 +116,7 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
          | null\n  \
          | undefined;\n",
     );
-    Ok((repo_root.join(JS_SRC).join("producer").join("producer_configs.ts"), text))
+    (repo_root.join(JS_SRC).join("producer").join("producer_configs.ts"), text)
 }
 
 #[cfg(test)]
@@ -97,7 +133,8 @@ mod tests {
 
     #[test]
     fn test_producer_keys() {
-        let (path, text) = output(&repo_root()).unwrap();
+        let outputs = outputs(&repo_root()).unwrap();
+        let (path, text) = &outputs[0];
         assert!(path.ends_with("javascript/src/producer/producer_configs.ts"));
         assert!(text.contains("export type ProducerConfigs = {\n  [key in\n"));
         for line in [
@@ -114,5 +151,9 @@ mod tests {
         // No ConfigDef table: the type names keys only.
         assert!(!text.contains("'LIST'"));
         assert!(!text.contains("max.poll.records"));
+        let (path, text) = &outputs[1];
+        assert!(path.ends_with("javascript/src/internal/producer_config_keys.ts"));
+        assert!(text.contains("  'bootstrap.servers',\n"));
+        assert!(text.contains("export function isProducerConfigKey(key: string): boolean {"));
     }
 }
