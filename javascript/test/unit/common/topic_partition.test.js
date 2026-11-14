@@ -88,3 +88,26 @@ test('the constructor takes Java form only, with run-time types', () => {
   assert.throws(() => new TopicPartition({ topic: 't', partition: 0.5 }), { constructor: TypeError, message: 'partition must be an integer' });
   assert.throws(() => new TopicPartition({ topic: 't', partition: null }), { constructor: TypeError, message: 'partition must be an integer' });
 });
+
+test("equals and hashCode are Java's; the partition is Java's int", () => {
+  const tp = new TopicPartition({ topic: topicName, partition: partNum });
+  // Java: new TopicPartition(...).hashCode() on the same values.
+  assert.equal(tp.hashCode(), 1528328031);
+  assert.equal(new TopicPartition({ topic: null, partition: 0 }).hashCode(), 961);
+  assert.equal(new TopicPartition({ topic: 'foo', partition: -1 }).hashCode(), 102504);
+  const same = new TopicPartition({ topic: topicName, partition: partNum });
+  assert.equal(tp.equals(same), true);
+  assert.equal(tp.equals({ obj: same }), true);
+  assert.equal(tp.equals(new TopicPartition({ topic: topicName, partition: 6 })), false);
+  assert.equal(tp.equals(new TopicPartition({ topic: 'other', partition: partNum })), false);
+  assert.equal(new TopicPartition({ topic: null, partition: 0 }).equals(new TopicPartition({ topic: null, partition: 0 })), true);
+  assert.equal(tp.equals(null), false);
+  assert.equal(tp.equals('mytopic-5'), false);
+  assert.throws(() => tp.hashCode(1), { constructor: TypeError, message: 'hashCode() only reads: it takes no argument' });
+  for (const partition of [2 ** 31, -(2 ** 31) - 1]) {
+    assert.throws(() => new TopicPartition({ topic: 't', partition }), {
+      constructor: RangeError,
+      message: 'partition must be from -2147483648 to 2147483647',
+    });
+  }
+});

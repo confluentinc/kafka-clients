@@ -224,6 +224,14 @@ export class ProducerRecord<out K = never, out V = never> {
 
 // @public
 export class RecordMetadata {
+    constructor(options: {
+        topicPartition: TopicPartition;
+        baseOffset: bigint | number;
+        batchIndex: number;
+        timestamp: bigint | number;
+        serializedKeySize: number;
+        serializedValueSize: number;
+    });
     readonly hasOffset: boolean;
     readonly hasTimestamp: boolean;
     readonly offset: bigint;

@@ -334,3 +334,66 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
   assert.equal(findings(r).length, 1, r.text);
   assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });
+
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition and MetricName collections', () => {
+  const coll = javaClass('clients.producer.Coll', {
+    overloads: [
+      method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
+      method('nodes', [], { return_type: 'Node[]' }),
+      method('names', [], { return_type: 'List<String>' }),
+      method('tags', [], { return_type: 'Set<String>' }),
+      method('parts', [], { return_type: 'Set<TopicPartition>' }),
+      method('lags', [], { return_type: 'Map<TopicPartition, Long>' }),
+      method('metrics', [], { return_type: 'Map<MetricName, ? extends Metric>' }),
+    ],
+  });
+  const extra = [
+    coll,
+    javaClass('common.Node', {}),
+    javaClass('common.TopicPartition', {}),
+    javaClass('common.MetricName', {}),
+    javaClass('common.Metric', { kind: 'interface' }),
+  ];
+  const GOOD = {
+    take: 'take(nodes: Iterable<Node>): void { void nodes; }',
+    nodes: 'nodes(): Node[] { return []; }',
+    names: 'names(): string[] { return []; }',
+    tags: 'tags(): Set<string> { return new Set(); }',
+    parts: 'parts(): TopicPartitionSet { return new TopicPartitionSet(); }',
+    lags: 'lags(): TopicPartitionMap<bigint> { return new TopicPartitionMap(); }',
+    metrics: 'metrics(): MetricNameMap<Metric> { return new MetricNameMap(); }',
+  };
+  const source = (members) =>
+    "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
+    "import type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
+    `void TopicPartition;\nexport class Coll {\n${Object.values(members).map((m) => `  ${m}\n`).join('')}}\n`;
+  const files = (members) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, ...extra]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/common/node.ts': 'export class Node { private readonly b = 1; }\n',
+      'src/common/topic_partition.ts': 'export class TopicPartition { private readonly b = 1; }\n',
+      'src/common/metric_name.ts': 'export class MetricName { private readonly b = 1; }\n',
+      'src/common/metric.ts': 'export interface Metric { metricValue(): unknown }\n',
+      'src/producer/collections.ts':
+        'export class TopicPartitionSet { private readonly b = 1; }\nexport class TopicPartitionMap<V> { private readonly v: V | null = null; }\n' +
+        'export class MetricNameMap<V> { private readonly v: V | null = null; }\n',
+      'src/producer/coll.ts': source(members),
+    });
+  let r = lint(files(GOOD), [RULE]);
+  assert.deepEqual(findings(r), [], r.text);
+  for (const [name, member, finding] of [
+    ['nodes', 'nodes(): Iterable<Node> { return []; }', 'Coll.nodes: return: Java Node[] is not TypeScript Iterable<Node>'],
+    ['names', 'names(): Iterable<string> { return []; }', 'Coll.names: return: Java List<String> is not TypeScript Iterable<string>'],
+    ['tags', 'tags(): string[] { return []; }', 'Coll.tags: return: Java Set<String> is not TypeScript string[]'],
+    ['parts', 'parts(): Set<TopicPartition> { return new Set(); }', 'Coll.parts: return: Java Set<TopicPartition> is not TypeScript Set<TopicPartition>'],
+    ['lags', 'lags(): TopicPartitionMap<number> { return new TopicPartitionMap(); }', 'Coll.lags: return: Java Map<TopicPartition, Long> is not TypeScript TopicPartitionMap<number>'],
+  ]) {
+    r = lint(files({ ...GOOD, [name]: member }), [RULE]);
+    assert.deepEqual(findings(r), [finding], member);
+  }
+});

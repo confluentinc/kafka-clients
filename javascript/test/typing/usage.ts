@@ -467,7 +467,7 @@ new ProducerConfig();
 // Made by the client only: the constructors are private, and the library's
 // own factories and methods are left out of the declarations (stripInternal).
 const fields = { topic: 't', partition: 0, hasOffset: true, offset: 0n, hasTimestamp: true, timestamp: 0n, serializedKeySize: -1, serializedValueSize: -1 };
-// @ts-expect-error RecordMetadata's constructor is private
+// @ts-expect-error RecordMetadata's public constructor is Java's, not the fields the client reads
 new RecordMetadata(fields);
 // @ts-expect-error KafkaFuture's constructor is private
 new KafkaFuture();
@@ -564,7 +564,7 @@ const otherError: TopicAuthorizationError = new SaslAuthenticationError('x');
 void otherError;
 
 // The common value types: TopicPartition and Node are data classes (readonly
-// fields), PartitionInfo keeps Java's methods and has no public constructor.
+// fields), PartitionInfo keeps Java's methods.
 const tp = new TopicPartition({ topic: 't', partition: 0 });
 expectTypeOf(tp.topic).toEqualTypeOf<string | null>();
 expectTypeOf(tp.partition).toEqualTypeOf<number>();
@@ -583,8 +583,18 @@ void new Node({ id: 1, host: 'h', port: 9092, isFenced: true });
 declare const info: PartitionInfo;
 expectTypeOf(info.topic()).toEqualTypeOf<string>();
 expectTypeOf(info.leader()).toEqualTypeOf<Node | null>();
-// @ts-expect-error PartitionInfo has no public constructor yet
+// @ts-expect-error Java's constructors take the leader and the replicas too
 void new PartitionInfo({ topic: 't' });
+// A Java Node[] taken is any iterable of Node; one returned an array.
+const builtInfo = new PartitionInfo({ topic: 't', partition: 0, leader: node, replicas: new Set([node]), inSyncReplicas: [node] });
+expectTypeOf(builtInfo.replicas()).toEqualTypeOf<Node[] | null>();
+expectTypeOf(builtInfo.equals(info)).toEqualTypeOf<boolean>();
+expectTypeOf(builtInfo.hashCode()).toEqualTypeOf<number>();
+expectTypeOf(tp.equals({ obj: tp })).toEqualTypeOf<boolean>();
+expectTypeOf(node.hashCode()).toEqualTypeOf<number>();
+// RecordMetadata's public constructor is Java's: a long takes a bigint or a number.
+const builtMetadata = new RecordMetadata({ topicPartition: tp, baseOffset: 15n, batchIndex: 3, timestamp: 1, serializedKeySize: -1, serializedValueSize: 5 });
+expectTypeOf(builtMetadata.offset).toEqualTypeOf<bigint>();
 expectTypeOf(KafkaProducer.NETWORK_THREAD_PREFIX).toEqualTypeOf<string>();
 expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
 

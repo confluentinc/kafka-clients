@@ -84,6 +84,14 @@ const ALLOWED = [
     key: 'src/producer/producer_record.ts:INT64_MAX',
     reason: "the largest timestamp Java's long carries: a range check of one record, not a cap of records",
   },
+  {
+    key: 'src/internal/java_number.ts:INT32_MAX',
+    reason: "the largest Java int: a range check of one argument, not a cap of records",
+  },
+  {
+    key: 'src/internal/java_number.ts:INT64_MAX',
+    reason: "the largest Java long: a range check of one argument, not a cap of records",
+  },
   { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
   {
     key: 'src/common/header/headers.ts:EMPTY',
