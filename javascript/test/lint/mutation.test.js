@@ -775,6 +775,17 @@ MUTATIONS.push(
     apply: (root) =>
       edit(root, 'native/callback_queue.c', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n    napi_ref_threadsafe_function(env, q->tsfn);\n'),
   },
+  {
+    rule: 'check-default-helpers',
+    what: 'a Java default method on Callback, which then lacks its helper class',
+    apply: (root) => {
+      const file = path.join(root, 'java-index.json');
+      const index = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const callback = index.classes.find((c) => c.package === 'clients.producer' && c.path.join('$') === 'Callback');
+      callback.overloads[0].default = true;
+      fs.writeFileSync(file, JSON.stringify(index));
+    },
+  },
 );
 
 for (const m of MUTATIONS) {
