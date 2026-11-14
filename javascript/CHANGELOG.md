@@ -183,7 +183,9 @@ newer.
   `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public
   constructor, its value provider, configuration and time Java types this
   client does not translate (`MetricValueProvider`, `MetricConfig` and
-  `Measurable` are placeholder types). A long value is a `bigint`. The gRPC
+  `Measurable` are placeholder types) and Java's `config()` getter; the
+  setter `config(MetricConfig)` is left out (Q30). A long value is a
+  `bigint`. The gRPC
   server serves its `Metrics` RPC.
 - `RecordMetadata` has Java's public constructor, `new RecordMetadata({
   topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,

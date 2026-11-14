@@ -17,10 +17,6 @@ export class KafkaMetric implements Metric {
         time: unknown;
     });
     config(): MetricConfig;
-    config(options: {
-        config: MetricConfig;
-    }): void;
-    config(config: MetricConfig): void;
     isMeasurable(): boolean;
     measurable(): Measurable;
     metricName(): MetricName;

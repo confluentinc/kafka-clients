@@ -358,3 +358,18 @@ test('nothing mapped fails: 0 items checked', () => {
   const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-overload-shape: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
+
+test("each LEFT_OUT form names a public form of the shipped Java index (no stale entry)", () => {
+  const { LEFT_OUT } = require('../../scripts/lint/rules/overload_shape');
+  const index = require('../../java-index.json');
+  for (const key of LEFT_OUT.keys()) {
+    const [fqn, form] = key.split('#');
+    const parts = fqn.replace(/^org\.apache\.kafka\./, '').split('.');
+    const pkg = parts.slice(0, -1).join('.');
+    const name = parts[parts.length - 1];
+    const cls = index.classes.find((c) => c.package === pkg && c.path.join('.') === name);
+    assert.ok(cls, `${key}: no Java class ${fqn}`);
+    const found = cls.overloads.some((o) => `${o.name}(${o.params.map((t) => t.replace(/<.*>$/, '')).join(',')})` === form);
+    assert.ok(found, `${key}: ${fqn} has no form ${form}`);
+  }
+});
