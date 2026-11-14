@@ -2,11 +2,13 @@
 
 A Node.js client for Apache Kafka built on the C FFI of the Confluent Kafka
 Rust client, in the same way as the Python client in `../python`. It is a
-Node-API addon written in plain C (`native/`), so one build works on every Node
-release supporting Node-API version 9 (Node.js 22.14 and later), under a thin layer written in
-TypeScript (`src/`), compiled into CommonJS with its type declarations
-(`dist/`), so it is used from CommonJS (`require`), from ES modules (`import`)
-and from TypeScript alike (see "Layout" for the import forms).
+Node-API addon written in plain C (`native/`), targeting Node-API version 9,
+so one build works on every Node release that supports it; the package itself
+needs Node.js 22.14 or later (`engines`). The addon sits under a thin layer
+written in TypeScript (`src/`), compiled into CommonJS with its type
+declarations (`dist/`), so it is used from CommonJS (`require`), from ES
+modules (`import`) and from TypeScript alike (see "Layout" for the import
+forms).
 
 Moving from 1.x (either of its APIs) or from KafkaJS: see
 [`MIGRATION.md`](MIGRATION.md), the migration guide to 4.x, which lists what
