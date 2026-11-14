@@ -70,6 +70,7 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-tsfn-lifetime',
     'check-default-helpers',
     'check-mock-native',
+    'check-encode-callers',
   ]);
   assert.deepEqual(shape(ESLINT_CHECKS), [
     'check-no-todo',
