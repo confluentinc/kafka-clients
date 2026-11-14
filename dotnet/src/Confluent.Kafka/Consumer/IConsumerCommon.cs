@@ -83,8 +83,7 @@ public interface IConsumerCommon
     IReadOnlyCollection<TopicPartition> Paused();
 
     /// <summary>
-    /// Triggers a rebalance (Java <c>enforceRebalance()</c> and <c>enforceRebalance(String reason)</c>, one method
-    /// with an optional <paramref name="reason"/>).
+    /// Triggers a rebalance (Java <c>enforceRebalance()</c>).
     /// </summary>
     /// <remarks>
     /// Under the KIP-848 group protocol it only logs and returns, as Java's <c>AsyncKafkaConsumer</c> does. As in
@@ -92,7 +91,6 @@ public interface IConsumerCommon
     /// call does not refuse it; the core still refuses it while another operation is in flight. The
     /// <see cref="KafkaException"/> below cannot occur under that protocol.
     /// </remarks>
-    /// <param name="reason">An optional human-readable reason, or <see langword="null"/>.</param>
     /// <exception cref="ConcurrentModificationException">
     /// The core refused it while another operation was in flight (the core's own check).
     /// </exception>
@@ -100,7 +98,23 @@ public interface IConsumerCommon
     /// The core reported a rebalance failure (not reachable under the current KIP-848
     /// no-op).
     /// </exception>
-    void EnforceRebalance(string? reason = null);
+    void EnforceRebalance();
+
+    /// <summary>
+    /// Triggers a rebalance, giving a <paramref name="reason"/> (Java <c>enforceRebalance(String reason)</c>).
+    /// </summary>
+    /// <remarks>
+    /// It behaves as <see cref="EnforceRebalance()"/>: under the KIP-848 group protocol it only logs and returns.
+    /// </remarks>
+    /// <param name="reason">A human-readable reason, or <see langword="null"/>.</param>
+    /// <exception cref="ConcurrentModificationException">
+    /// The core refused it while another operation was in flight (the core's own check).
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a rebalance failure (not reachable under the current KIP-848
+    /// no-op).
+    /// </exception>
+    void EnforceRebalance(string? reason);
 
     /// <summary>
     /// Returns a snapshot of the consumer's metrics (Java <c>Map&lt;MetricName, ? extends Metric&gt;

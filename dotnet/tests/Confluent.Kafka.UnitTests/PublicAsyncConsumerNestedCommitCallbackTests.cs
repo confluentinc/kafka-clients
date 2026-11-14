@@ -387,7 +387,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
 
             Task call = delivering == "Commit"
                 ? Task.Run(() => consumer.Commit(Empty(), cancel.Token))
-                : Task.Run(() => consumer.CommitAsync(Empty(), cancellationToken: cancel.Token));
+                : Task.Run(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null, cancellationToken: cancel.Token));
             await TestTimeout.Run(() => outerEnded.Task, s_deadline);
             Assert.NotSame(call, await Task.WhenAny(call, Task.Delay(s_notYetWindow)));
 

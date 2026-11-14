@@ -456,7 +456,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="KafkaException">The core could not start the commit.</exception>
     void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null);
+        IOffsetCommitCallback? callback);
 
     /// <summary>
     /// Seeks <paramref name="partition"/> to <paramref name="offset"/> (Java <c>seek(TopicPartition, long)</c>);

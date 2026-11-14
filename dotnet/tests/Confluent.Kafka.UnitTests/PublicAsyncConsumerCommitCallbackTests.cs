@@ -150,7 +150,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             Assert.Empty(Snapshot(events));
 
             CommitCallbackException propagated = await Assert.ThrowsAsync<CommitCallbackException>(
-                () => TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline));
+                () => TestTimeout.Run(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null), s_deadline));
             Assert.Same(raised, propagated);
             Assert.Equal(new[] { "boom" }, Snapshot(events));
 
@@ -181,7 +181,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             }));
 
             using CancellationTokenSource cancel = new CancellationTokenSource();
-            Task running = consumer.CommitAsync(Empty(), cancellationToken: cancel.Token);
+            Task running = consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null, cancellationToken: cancel.Token);
             await TestTimeout.Run(() => started.Task, s_deadline);
             cancel.Cancel();
             ReleaseAfter(release, TimeSpan.FromMilliseconds(50));
@@ -315,7 +315,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
                     }
                 })),
                 s_deadline);
-            await TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline);
+            await TestTimeout.Run(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null), s_deadline);
 
             KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(await TestTimeout.Run(() => raised.Task, s_deadline));
             Assert.Equal(7, timeout.Code);
@@ -714,7 +714,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             "poll" => consumer.Poll(TimeSpan.Zero),
             "commit" => consumer.Commit(Empty()),
-            "commit_nowait" => consumer.CommitAsync(Empty()),
+            "commit_nowait" => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null),
             _ => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(5))),
         };
 
