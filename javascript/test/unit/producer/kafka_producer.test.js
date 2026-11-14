@@ -1630,7 +1630,7 @@ test('a serde config function that throws is a construction failure, and the ser
   assert.deepEqual(closed, ['value']);
 });
 
-test('stringSerializer goes in a serde config key without (), configured by its encoding keys', () => {
+test('stringSerializer goes in a serde config key without (), configured by its encoding keys', async () => {
   assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-32' }), (e) => {
     assert.equal(e.constructor, KafkaError);
     assert.equal(e.message, 'Failed to construct kafka producer');
@@ -1644,7 +1644,7 @@ test('stringSerializer goes in a serde config key without (), configured by its 
     (e) => e.cause.message === 'Unsupported encoding windows-1252',
   );
   const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
-  void producer.close();
+  await producer.close();
 });
 
 test('a serde config function that reads the whole configuration leaves out only the keys the core does not know', () => {

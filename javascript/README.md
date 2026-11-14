@@ -355,7 +355,7 @@ goes in a config key without `()`:
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 
 const producer = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: stringSerializer() });
-// or, the same through the configuration:
+// or, the same through the configuration (both are a KafkaProducer<string, string> in TypeScript):
 const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
 ```
 

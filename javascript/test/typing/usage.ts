@@ -675,8 +675,29 @@ expectTypeOf(stringSerializer({ configs: { 'serializer.encoding': 'UTF-8' }, isK
 stringSerializer({ configs: {} });
 const viaFactory: ProducerConfigs = { 'key.serializer': stringSerializer, 'value.serializer': stringSerializer };
 void viaFactory;
-// A serializer from the configuration leaves the producer typed as bytes.
+// A configuration typed as ProducerConfigs has lost its functions' types:
+// the producer is typed as bytes.
 expectTypeOf(new KafkaProducer(viaFactory)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
+// The config keys bind the type their functions return, as arguments do
+// (Q27): the README's "the same through the configuration".
+expectTypeOf(
+  new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer }),
+).toEqualTypeOf<KafkaProducer<string, string>>();
+expectTypeOf(new KafkaProducer({ configs: { ...configs, 'value.serializer': stringSerializer } })).toEqualTypeOf<
+  KafkaProducer<Uint8Array, string>
+>();
+expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': null })).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
+expectTypeOf(
+  new KafkaProducer({ configs: { ...configs, 'key.serializer': stringSerializer }, keySerializer: null, valueSerializer: null }),
+).toEqualTypeOf<KafkaProducer<string, Uint8Array>>();
+async function serializersFromTheConfiguration(): Promise<void> {
+  const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+  await same.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
+  // @ts-expect-error a string serializer takes no number
+  await same.send(new ProducerRecord({ topic: 't', key: 1, value: 'v' }));
+  await same.close();
+}
+void serializersFromTheConfiguration;
 const orderSerializer: Serializer<Order> = {
   // A serializer may return a Promise, which send() awaits.
   serialize: async ({ topic, headers, data }) => {
