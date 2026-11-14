@@ -573,8 +573,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: <c>wakeup()</c> is sent, and the <see cref="Task"/> ends with
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task Commit(
@@ -591,8 +590,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: <c>wakeup()</c> is sent, and the <see cref="Task"/> ends with
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
@@ -658,8 +656,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
@@ -708,8 +705,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> or <paramref name="callback"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="offsets"/> or <paramref name="callback"/> is null, or a key's topic or a value is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
@@ -852,8 +850,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>The resolved offset and timestamp per topic-partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -875,8 +872,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>The resolved offset and timestamp per topic-partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>

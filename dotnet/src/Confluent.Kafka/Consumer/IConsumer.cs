@@ -387,8 +387,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// commits nothing.
     /// </summary>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit failure.</exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
@@ -399,8 +398,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="timeout">The maximum time to block.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
@@ -452,8 +450,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </remarks>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="callback">The callback that receives the commit's outcome, or <see langword="null"/> for none.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     /// <exception cref="KafkaException">The core could not start the commit.</exception>
@@ -557,8 +554,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
     /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an offsets-for-times failure.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -575,8 +571,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
     /// <param name="timeout">The maximum time to block.</param>
     /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">

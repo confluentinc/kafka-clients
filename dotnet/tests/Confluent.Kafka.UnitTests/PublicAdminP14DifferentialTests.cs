@@ -1376,11 +1376,15 @@ public sealed class PublicAdminP14DifferentialTests
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [nullTopic] = new OffsetAndMetadata(0L) }),
             () => async.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [nullTopic] = new OffsetAndMetadata(0L) }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }),
             () => async.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }));
+        ArgumentNullException nullValue = Assert.Throws<ArgumentNullException>(
+            () => sync.AlterConsumerGroupOffsets(
+                "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }));
+        Assert.Equal(new ArgumentNullException("offsets", "offsets must not contain null").Message, nullValue.Message);
 
         AssertThrowAlike(
             () => sync.DeleteConsumerGroupOffsets(null!, new[] { partition }),
