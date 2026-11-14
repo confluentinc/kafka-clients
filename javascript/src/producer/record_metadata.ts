@@ -80,8 +80,8 @@ export class RecordMetadata {
    * (`future.get()`) and as the `metadata` of the send's `callback`.
    *
    * @remarks
-   * *(deviation)* Java's public constructor takes a `TopicPartition`, which
-   * this client does not translate yet, so it is not translated either.
+   * Not translated yet: Java's public constructor takes a `TopicPartition`,
+   * which this client does not translate yet.
    */
   private constructor(fields: RecordMetadataFields) {
     this.topic = fields.topic;

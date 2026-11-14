@@ -16,9 +16,9 @@
  * The public classes of Java's `org.apache.kafka.clients.producer` this
  * client has.
  *
- * Left out by request: `KafkaProducer`'s transaction calls
+ * Transactions aren't in the preview: `KafkaProducer`'s transaction calls
  * (`initTransactions`, `beginTransaction`, `sendOffsetsToTransaction`,
- * `commitTransaction`, `abortTransaction`).
+ * `commitTransaction`, `abortTransaction`) come in a later release.
  *
  * Left out because the C FFI has no entry point for them:
  * `KafkaProducer.clientInstanceId`, `registerMetricForSubscription` and
