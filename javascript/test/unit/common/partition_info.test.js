@@ -106,6 +106,16 @@ test("equals and hashCode are Java's: the arrays element by element", () => {
   });
 });
 
+test('a null topic is accepted, as Java accepts it', () => {
+  const info = new PartitionInfo({ topic: null, partition: 0, leader: null, replicas: null, inSyncReplicas: null });
+  assert.equal(info.topic(), null);
+  assert.equal(info.toString(), 'Partition(topic = null, partition = 0, leader = none, replicas = [], isr = [], offlineReplicas = [])');
+  // Java: new PartitionInfo(null, 0, null, null, null).hashCode().
+  assert.equal(info.hashCode(), 887503682);
+  assert.equal(info.equals(new PartitionInfo({ topic: null, partition: 0, leader: null, replicas: null, inSyncReplicas: null })), true);
+  assert.equal(info.equals(new PartitionInfo({ topic: 't', partition: 0, leader: null, replicas: null, inSyncReplicas: null })), false);
+});
+
 test('the constructor takes Java forms only, with run-time types', () => {
   const node = new Node({ id: 1, host: 'h', port: 1 });
   assert.throws(() => new PartitionInfo({ topic: 't', partition: 0 }), {
@@ -113,7 +123,7 @@ test('the constructor takes Java forms only, with run-time types', () => {
     message: `${FORMS}; got (topic, partition)`,
   });
   const base = { topic: 't', partition: 0, leader: node, replicas: [node], inSyncReplicas: [node] };
-  assert.throws(() => new PartitionInfo({ ...base, topic: 1 }), { constructor: TypeError, message: 'topic must be a string' });
+  assert.throws(() => new PartitionInfo({ ...base, topic: 1 }), { constructor: TypeError, message: 'topic must be a string or null' });
   assert.throws(() => new PartitionInfo({ ...base, partition: 0.5 }), { constructor: TypeError, message: 'partition must be an integer' });
   assert.throws(() => new PartitionInfo({ ...base, partition: 2 ** 31 }), { constructor: RangeError, message: 'partition must be from -2147483648 to 2147483647' });
   assert.throws(() => new PartitionInfo({ ...base, leader: { id: 1 } }), { constructor: TypeError, message: 'leader must be a Node or null' });
