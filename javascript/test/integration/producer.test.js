@@ -213,18 +213,29 @@ test("a record's future waits through the FFI's get_cb and get_with_timeout_cb, 
 // A record's native future across close, collection and destroy
 // (javascript/CLAUDE.md, rule 5): read each way (never; get() once and twice;
 // a timed get that times out, then get(); a dependant; toCompletionStage()),
-// each producer closed and collected. Every producer and future is collected
-// and their threads are gone, so each future was destroyed and each wait
-// released its unit of the producer struct (a unit held for ever would keep
-// the struct, not the threads, so the threads alone prove the destroy; the
-// collection proves no wait kept its JS future). A future kept past its
-// producer's destroy still answers from its delivery.
+// each producer closed and collected. What it shows: every producer and JS
+// future is collected (no wait keeps its JS future, nor a future its
+// producer) and the producers' threads are gone (each closed producer was
+// destroyed), and a future kept past its producer's destroy still answers
+// from its delivery. Then 200 records sent one after another on one producer
+// use at most 2 slots of its table of record futures: each slot is given back
+// once JS recorded the delivery, which is when the context destroys the
+// native future (a context that never gives its slot back would take a new
+// one per record).
+//
+// Not covered: a native future never destroyed, a wait that never releases
+// its unit of the producer struct, or its reference on the send's context.
+// None has an effect JavaScript can see (a future and a context hold no
+// thread, and a unit only keeps a small struct), and the RSS they add, a few
+// hundred bytes per record, is within the noise of a bound that would not
+// flake.
 test("a record's native future is released across close, collection and destroy, whatever read it", { skip: SKIP || !['linux', 'darwin'].includes(process.platform), timeout: 180000 }, () => {
   const topic = freshTopic('destroy-futures');
   const script = `
     const { execSync } = require('node:child_process');
     const fs = require('node:fs');
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
     const threads = () =>
       process.platform === 'linux'
         ? fs.readdirSync('/proc/self/task').length
@@ -232,6 +243,14 @@ test("a record's native future is released across close, collection and destroy,
     const collected = [];
     const registry = new FinalizationRegistry((name) => collected.push(name));
     const count = (name) => collected.filter((c) => c === name).length;
+    // The slots the hand-overs give the records' futures.
+    const futureClass = Object.getPrototypeOf(KafkaFuture.completedFuture(null));
+    const setNative = futureClass.internalSetNative;
+    const slots = new Set();
+    futureClass.internalSetNative = function (producer, slot) {
+      slots.add(slot);
+      return setNative.call(this, producer, slot);
+    };
     const settle = async () => {
       for (let i = 0; i < 10; i++) {
         global.gc();
@@ -271,6 +290,14 @@ test("a record's native future is released across close, collection and destroy,
       })();
       await settle();
       console.log('futures', count('future'));
+      // Sequential records, each awaited, on one producer: a slot given back
+      // at each delivery is taken again by a later record.
+      const p = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP } });
+      await (await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: 'w' }))).get();
+      slots.clear();
+      for (let i = 0; i < 200; i++) await (await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: 's' + i }))).get();
+      console.log('slots', slots.size <= 2 ? 'at most 2' : slots.size);
+      await p.close();
       clearInterval(hold);
     })();
   `;
@@ -287,7 +314,8 @@ test("a record's native future is released across close, collection and destroy,
       // Six producers, 35 futures: all but the one kept.
       'producers 6 futures 35 threads true\n' +
       'kept true true true true\n' +
-      'futures 36\n',
+      'futures 36\n' +
+      'slots at most 2\n',
   );
 });
 
