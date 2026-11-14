@@ -97,10 +97,69 @@ const FORMS =
   '(topic, partition, timestamp, key, value), (topic, partition, key, value, headers), ' +
   '(topic, partition, key, value), (topic, key, value), (topic, value)';
 
+// Java's ProducerRecordTest.testEqualsAndHashCode. Java's value type there is
+// an Integer, which a JavaScript key or value cannot be (Data: bytes or a
+// string), so the values are the strings '1' and '2'.
+test('testEqualsAndHashCode', () => {
+  const producerRecord = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: '1' });
+  assert.ok(producerRecord.equals(producerRecord));
+  assert.equal(producerRecord.hashCode(), producerRecord.hashCode());
+
+  const equalRecord = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: '1' });
+  assert.ok(producerRecord.equals(equalRecord));
+  assert.equal(producerRecord.hashCode(), equalRecord.hashCode());
+
+  const topicMisMatch = new ProducerRecord({ topic: 'test-1', partition: 1, key: 'key', value: '1' });
+  assert.ok(!producerRecord.equals(topicMisMatch));
+
+  const partitionMismatch = new ProducerRecord({ topic: 'test', partition: 2, key: 'key', value: '1' });
+  assert.ok(!producerRecord.equals(partitionMismatch));
+
+  const keyMisMatch = new ProducerRecord({ topic: 'test', partition: 1, key: 'key-1', value: '1' });
+  assert.ok(!producerRecord.equals(keyMisMatch));
+
+  const valueMisMatch = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: '2' });
+  assert.ok(!producerRecord.equals(valueMisMatch));
+
+  const nullFieldsRecord = new ProducerRecord({ topic: 'topic', partition: null, timestamp: null, key: null, value: null, headers: null });
+  assert.ok(nullFieldsRecord.equals(nullFieldsRecord));
+  assert.equal(nullFieldsRecord.hashCode(), nullFieldsRecord.hashCode());
+});
+
+// The hash codes Java's own ProducerRecord.hashCode() gives (kafka-clients,
+// run on the same records), and equals' other cases.
+test("hashCode is Java's, and equals compares as Java's does", () => {
+  const headers = new Headers([H('k', Buffer.from([1, -1, 127, -128])), H('\u{1F600}\u00e9', null)]);
+  const r1 = new ProducerRecord({ topic: 'orders', partition: 3, timestamp: 1700000000000n, key: 'key-\u00e9', value: 'value', headers });
+  assert.equal(r1.hashCode(), 238870061);
+  assert.equal(new ProducerRecord({ topic: 't', value: null }).hashCode(), -973955989);
+  assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: 4294967296n, key: null, value: 'v' }).hashCode(), -973952330);
+  assert.equal(
+    new ProducerRecord({ topic: 't', partition: 0, timestamp: 9223372036854775807n, key: 'k', value: null }).hashCode(),
+    1173630486,
+  );
+  // A timestamp given as a number is the same Long.
+  assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: 4294967296, key: null, value: 'v' }).hashCode(), -973952330);
+  // Equal headers make equal records; other headers do not.
+  const same = new ProducerRecord({ topic: 'orders', partition: 3, timestamp: 1700000000000n, key: 'key-\u00e9', value: 'value', headers: new Headers(headers) });
+  assert.ok(r1.equals(same));
+  assert.ok(r1.equals({ o: same }));
+  assert.equal(r1.hashCode(), same.hashCode());
+  const other = new ProducerRecord({ topic: 'orders', partition: 3, timestamp: 1700000000000n, key: 'key-\u00e9', value: 'value', headers: [] });
+  assert.ok(!r1.equals(other));
+  // A byte key or value is Java's byte[]: equal only to itself.
+  const key = bytes('k');
+  assert.ok(new ProducerRecord({ topic: 't', key, value: null }).equals(new ProducerRecord({ topic: 't', key, value: null })));
+  assert.ok(!new ProducerRecord({ topic: 't', key, value: null }).equals(new ProducerRecord({ topic: 't', key: bytes('k'), value: null })));
+  // Anything else is not equal.
+  for (const o of [null, 'orders', 1, r1.toJSON()]) assert.equal(r1.equals({ o }), false);
+  assert.ok(!r1.equals(headers));
+  // The form checks.
+  assert.throws(() => r1.equals({}), { name: 'IllegalArgumentError', message: 'equals() takes one of (o); got ()' });
+  assert.throws(() => r1.hashCode(1), { name: 'TypeError', message: 'hashCode() only reads: it takes no argument' });
+});
+
 // Java's ProducerRecordTest.testInvalidRecords, with Java's messages.
-// (testEqualsAndHashCode is not translated: Java's ProducerRecord overrides
-// equals() and hashCode(), which have no JavaScript counterpart, and the
-// client's ProducerRecord defines neither.)
 test("Java's constructor checks keep Java's messages", () => {
   assert.throws(() => new ProducerRecord({ topic: null, partition: 0, key: 'key', value: 'v' }), (e) => {
     assert.ok(e instanceof IllegalArgumentError);

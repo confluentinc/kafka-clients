@@ -169,6 +169,10 @@ const LIB = {
   flush(): void {}
   extra(): void {}
   toString(): string { return ''; }
+  equals(options: { o: unknown }): boolean;
+  equals(o: unknown): boolean;
+  equals(options: unknown): boolean { void options; return false; }
+  hashCode(): number { return 0; }
   /** A JavaScript addition, on the list of invented names. */
   extraJs(): void {}
   private _native(): void {}

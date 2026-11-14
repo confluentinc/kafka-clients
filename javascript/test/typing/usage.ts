@@ -94,6 +94,14 @@ expectTypeOf(headerValue).toEqualTypeOf<Buffer | null>();
 const headerKey = asArray[0].key();
 expectTypeOf(headerKey).toEqualTypeOf<string>();
 for (const h of built.remove('a')) void h.key();
+// equals and hashCode stay methods (Java's), on the records and the headers.
+expectTypeOf(record.equals(record)).toEqualTypeOf<boolean>();
+expectTypeOf(record.equals({ o: null })).toEqualTypeOf<boolean>();
+expectTypeOf(record.hashCode()).toEqualTypeOf<number>();
+expectTypeOf(asArray[0].equals(asArray[1])).toEqualTypeOf<boolean>();
+expectTypeOf(built.hashCode()).toEqualTypeOf<number>();
+// @ts-expect-error hashCode() only reads: it takes no argument
+built.hashCode(1);
 // @ts-expect-error key() only reads: it takes no argument
 asArray[0].key(1);
 // @ts-expect-error a Header's key is a method, not a field

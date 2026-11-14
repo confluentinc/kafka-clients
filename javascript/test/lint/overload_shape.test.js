@@ -39,8 +39,8 @@ const shapeFindings = (r) => findings(r).filter((f) => !f.includes('with one opt
 test('overload sets taken as one options object, one signature per form, and the bare value of a one-parameter form, pass: the constructor, close(), close({p0}), close(p0)', () => {
   const r = lint(fixture({ 'src/producer/rec.ts': REC_PER_FORM }), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Every mapped member but ProducerConfig's (its constants only): Rec 11, Mode 6, Header 2, Future 1.
-  assert.ok(r.out.includes('✅ check-overload-shape: 22 item(s) checked'), r.text);
+  // Every mapped member but ProducerConfig's (its constants only): Rec 13, Mode 6, Header 2, Future 1.
+  assert.ok(r.out.includes('✅ check-overload-shape: 24 item(s) checked'), r.text);
 });
 
 test('one options signature for several Java forms is signature-per-form: each form has its own overload signature', () => {

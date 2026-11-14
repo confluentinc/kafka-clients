@@ -33,8 +33,8 @@ test('live API passes; a name with a live overload is live', () => {
   );
   const r = lint(fixture({}, classes), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // 7 exported types, the error included, and 22 mapped members.
-  assert.ok(r.out.includes('✅ check-no-deprecated-translation: 31 item(s) checked'), r.text);
+  // 7 exported types, the error included, and 24 mapped members.
+  assert.ok(r.out.includes('✅ check-no-deprecated-translation: 33 item(s) checked'), r.text);
 });
 
 test('a deprecated class, method and constant are findings', () => {
