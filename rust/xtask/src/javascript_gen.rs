@@ -72,7 +72,7 @@ pub(crate) fn header(from: &str) -> String {
 /// The src/ folders whose `index.ts` is hand-written (they also hold
 /// hand-written modules); the generator owns only the marked block there.
 /// `""` is `src/` itself.
-const MIXED_DIRS: &[&str] = &["", "common", "common/config", "producer"];
+const MIXED_DIRS: &[&str] = &["", "common", "common/config", "common/metrics", "producer"];
 
 /// The src/ folders whose `index.ts` is hand-written and which hold no
 /// generated module: their parents' blocks do not export them.
@@ -403,7 +403,7 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let (mut modules, registry) = crate::error_hierarchy::js::outputs(repo_root)?;
     let mut out = vec![registry];
     modules.extend(crate::config_consts::js::modules(repo_root)?);
-    out.push(crate::config_types::js::output(repo_root)?);
+    out.extend(crate::config_types::js::outputs(repo_root)?);
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for m in &modules {
         if !seen.insert((m.dir.clone(), m.stem.clone())) {

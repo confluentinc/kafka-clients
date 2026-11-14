@@ -53,14 +53,13 @@ const PAUSE =
 const TYPED_TS = `import { Rec } from './rec';
 import { Mode } from './mode';
 import { KafkaFuture } from '../common/kafka_future';
-export type Data = Uint8Array | string;
 declare class Buffer extends Uint8Array {}
-export class Typed {
+export class Typed<K = never> {
   static readonly ON: Mode = Mode.ON;
   get count(): bigint { return 1n; }
   get ready(): boolean | null { return null; }
   get label(): string { return ''; }
-  get key(): Data | null { return null; }
+  get key(): K | null { return null; }
   get bytes(): Buffer { return new Uint8Array() as Buffer; }
   future(): KafkaFuture<Rec> { return KafkaFuture.of(); }
   names(): string[] { return []; }
@@ -101,7 +100,7 @@ test('parseJava reads a Java type as written', () => {
   assert.deepEqual(parseJava('java.util.Optional<Long>'), { name: 'Optional', args: [{ name: 'Long', args: [], dims: 0 }], dims: 0 });
 });
 
-test('every row of the table maps: numbers, booleans, strings, Data, KafkaFuture, arrays, Duration, void and Promise', () => {
+test('every row of the table maps: numbers, booleans, strings, a type variable, KafkaFuture, arrays, Duration, void and Promise', () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
 });
@@ -308,4 +307,100 @@ test('where Java takes an Iterable<Header>, a [key, value] pair is no element: J
   assert.deepEqual(findings(r), [
     'Taker.take: parameter headers: Java Iterable<Header> is not TypeScript Iterable<Header | readonly [key: string, value: string | null]>',
   ]);
+});
+
+test("a serializer's serialize may also return a Promise of the bytes it takes (AWAITED_RETURNS)", () => {
+  const serializer = javaClass('common.serialization.Serializer', {
+    kind: 'interface',
+    overloads: [method('serialize', ['String', 'T'], { return_type: 'byte[]', param_names: ['topic', 'data'] })],
+  });
+  const source = (returned) =>
+    `export interface Serializer<T> {\n  serialize(options: { topic: string; data: T | null }): ${returned};\n}\n`;
+  const files = (returned) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, serializer]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/common/serialization/serializer.ts': source(returned),
+    });
+  // Taken from the user: a Uint8Array, as Java's byte[] taken is, or a Promise of one.
+  let r = lint(files('Uint8Array | null | Promise<Uint8Array | null>'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(files('Uint8Array | Promise<string>'), [RULE]);
+  assert.equal(r.status, 1, r.text);
+  assert.equal(findings(r).length, 1, r.text);
+  assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
+});
+
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition and MetricName collections', () => {
+  const coll = javaClass('clients.producer.Coll', {
+    overloads: [
+      method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
+      method('nodes', [], { return_type: 'Node[]' }),
+      method('names', [], { return_type: 'List<String>' }),
+      method('tags', [], { return_type: 'Set<String>' }),
+      method('parts', [], { return_type: 'Set<TopicPartition>' }),
+      method('lags', [], { return_type: 'Map<TopicPartition, Long>' }),
+      method('metrics', [], { return_type: 'Map<MetricName, ? extends Metric>' }),
+      method('labels', [], { return_type: 'Map<String, String>' }),
+      method('label', ['Map'], { param_types: ['Map<String, String>'], return_type: 'void', param_names: ['labels'] }),
+    ],
+  });
+  const extra = [
+    coll,
+    javaClass('common.Node', {}),
+    javaClass('common.TopicPartition', {}),
+    javaClass('common.MetricName', {}),
+    javaClass('common.Metric', { kind: 'interface' }),
+  ];
+  const GOOD = {
+    take: 'take(nodes: Iterable<Node>): void { void nodes; }',
+    nodes: 'nodes(): Node[] { return []; }',
+    names: 'names(): string[] { return []; }',
+    tags: 'tags(): Set<string> { return new Set(); }',
+    parts: 'parts(): TopicPartitionSet { return new TopicPartitionSet(); }',
+    lags: 'lags(): TopicPartitionMap<bigint> { return new TopicPartitionMap(); }',
+    metrics: 'metrics(): MetricNameMap<Metric> { return new MetricNameMap(); }',
+    labels: 'labels(): Map<string, string> { return new Map(); }',
+    label: 'label(labels: ReadonlyMap<string, string> | Readonly<Record<string, string>>): void { void labels; }',
+  };
+  const source = (members) =>
+    "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
+    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
+    `void TopicPartition;\nexport class Coll {\n${Object.values(members).map((m) => `  ${m}\n`).join('')}}\n`;
+  const files = (members) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, ...extra]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/common/node.ts': 'export class Node { private readonly b = 1; }\n',
+      'src/common/topic_partition.ts': 'export class TopicPartition { private readonly b = 1; }\n',
+      'src/common/metric_name.ts': 'export class MetricName { private readonly b = 1; }\n',
+      'src/common/metric.ts': 'export interface Metric { metricValue(): unknown }\n',
+      'src/producer/collections.ts':
+        'export class TopicPartitionSet { private readonly b = 1; }\nexport class TopicPartitionMap<V> { private readonly v: V | null = null; }\n' +
+        'export class MetricNameMap<V> { private readonly v: V | null = null; }\n',
+      'src/producer/coll.ts': source(members),
+    });
+  let r = lint(files(GOOD), [RULE]);
+  assert.deepEqual(findings(r), [], r.text);
+  for (const [name, member, finding] of [
+    ['nodes', 'nodes(): Iterable<Node> { return []; }', 'Coll.nodes: return: Java Node[] is not TypeScript Iterable<Node>'],
+    ['names', 'names(): Iterable<string> { return []; }', 'Coll.names: return: Java List<String> is not TypeScript Iterable<string>'],
+    ['tags', 'tags(): string[] { return []; }', 'Coll.tags: return: Java Set<String> is not TypeScript string[]'],
+    ['parts', 'parts(): Set<TopicPartition> { return new Set(); }', 'Coll.parts: return: Java Set<TopicPartition> is not TypeScript Set<TopicPartition>'],
+    ['lags', 'lags(): TopicPartitionMap<number> { return new TopicPartitionMap(); }', 'Coll.lags: return: Java Map<TopicPartition, Long> is not TypeScript TopicPartitionMap<number>'],
+    ['labels', 'labels(): ReadonlyMap<string, string> { return new Map(); }', 'Coll.labels: return: Java Map<String, String> is not TypeScript ReadonlyMap<string, string>'],
+    ['label', 'label(labels: Record<string, number>): void { void labels; }', 'Coll.label: parameter labels: Java Map<String, String> is not TypeScript Record<string, number>'],
+    ['metrics', 'metrics(): Map<MetricName, Metric> { return new Map(); }', 'Coll.metrics: return: Java Map<MetricName, Metric> is not TypeScript Map<MetricName, Metric>'],
+  ]) {
+    r = lint(files({ ...GOOD, [name]: member }), [RULE]);
+    assert.deepEqual(findings(r), [finding], member);
+  }
 });

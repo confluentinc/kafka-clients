@@ -33,8 +33,9 @@
 //     signature translates one form (forms whose parameters have the same
 //     names, `KafkaProducer(Map)` / `(Properties)`, being one), a form of no
 //     parameter having a signature of none (`signature-per-form` otherwise);
-//   - or one signature per Java form (`ProducerRecord`): each names
-//     exactly its form's parameters, required (`signature-form` otherwise),
+//   - or one signature per Java form (`ProducerRecord`), plus those of its
+//     null combinations (a property typed `null`, which binds `never`): each
+//     names exactly its form's parameters, required (`signature-form` otherwise),
 //     and closes every name of the other forms with a property typed `never`
 //     (`option-unclosed` otherwise);
 //   - a signature taking one parameter named as a one-parameter form's is that
@@ -55,6 +56,33 @@
 
 const { atNode } = require('../location');
 const { mappedMembers } = require('./java_members');
+
+/**
+ * The Java overload sets the root conventions translate as one method taking
+ * the longest form's parameters, with one signature, by member, with the
+ * reason: such a set is checked as that one form.
+ */
+const MERGED_FORMS = new Map([
+  [
+    'org.apache.kafka.common.serialization.Serializer#serialize',
+    "root CLAUDE.md, JavaScript Binding Conventions, Serialization: a serde has one method for Java's two serialize methods (a deviation), which the user implements",
+  ],
+]);
+/**
+ * The Java forms the root conventions leave out (Scope, Q30: a form whose
+ * only extra parameter has a type that isn't translated), by
+ * `<class fqn>#<formKey>`, with the reason: such a form is not asked for.
+ */
+const LEFT_OUT = new Map([
+  [
+    'org.apache.kafka.clients.producer.MockProducer#MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)',
+    "root CLAUDE.md, JavaScript Binding Conventions, Scope (Q30): the form's only extra parameter over the next one is cluster, so the mock's cluster is always Java's Cluster.empty()",
+  ],
+  [
+    'org.apache.kafka.common.metrics.KafkaMetric#config(MetricConfig)',
+    "root CLAUDE.md, JavaScript Binding Conventions, Scope (Q30): the setter's only extra parameter over the getter is config, and Java says it is for the server only",
+  ],
+]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 
 /**
@@ -176,6 +204,7 @@ module.exports = {
     'Translate a Java overload set as one function taking one options object named after the overloads\' ' +
     'parameters, with one TypeScript overload signature per Java form (root CLAUDE.md, JavaScript Binding ' +
     'Conventions, Signatures).',
+  LEFT_OUT,
   liveForms,
   optionName,
   formOptionNames,
@@ -202,7 +231,8 @@ module.exports = {
         translations.set(key, subject);
       }
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
-      const forms = liveForms(jm.overloads);
+      let forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
+      if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
       const allNames = formOptionNames(forms);
@@ -276,8 +306,14 @@ module.exports = {
           message: `takes no bare value, though ${javaName}'s form ${formText(f)} has one parameter: add a signature taking ${[...bareNames][0]} on its own`,
         });
       }
-      const neverProp = (prop, sig) =>
-        (checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(prop, sig.parameters[0])).flags & ts.TypeFlags.Never) !== 0;
+      // A property typed `null` is taken: the signature of a null key or value,
+      // which binds `never` (root CLAUDE.md, JavaScript Binding Conventions,
+      // Class family, Q26), names its form's parameters as the form's own does.
+      const neverProp = (prop, sig) => {
+        const type = checker.getTypeOfSymbolAtLocation(prop, sig.parameters[0]);
+        if ((type.flags & ts.TypeFlags.Null) !== 0) return false;
+        return (checker.getNonNullableType(type).flags & ts.TypeFlags.Never) !== 0;
+      };
       if (optionSigs.length > 1) {
         // One signature per Java form, so that the declarations accept a
         // form's parameters only: each names exactly its form's parameters,

@@ -53,12 +53,16 @@ These decide every question, in this order:
      read a negative value as Java's `null`, so the core cannot see it. Goes
      when: the FFI carries "absent" separately from the value.
    - **The configuration's shape**: a `Map` or another non-plain object is a
-     `TypeError`, a symbol key a `ConfigError`, and the serde config keys
-     are refused. Why: a `Map`'s entries and a symbol have no string to
-     cross as, and the serde keys' config route (a synchronous
-     `({ configs, isKey }) => serde`, root conventions, Serialization, Q53)
-     is not built yet. Goes when: never for the shape; the serde keys when
-     their route is built. No config value is checked (root conventions, Configuration).
+     `TypeError`, and a symbol key a `ConfigError`. Why: a `Map`'s entries
+     and a symbol have no string to cross as. Goes when: never. No config
+     value is checked (root conventions, Configuration), except the
+     producer's serde keys, which never reach the core: `key.serializer` and
+     `value.serializer` take a synchronous `({ configs, isKey }) => serde`
+     (root conventions, Serialization, Q53), and a class name, a serde
+     object, a class or a function that returns a Promise or no serializer
+     is a `ConfigError` saying what to pass (`src/internal/serde.ts`
+     `configuredSerializer`). Why: the binding runs the serdes, so only it
+     reads these keys. Goes when: never.
    - **A NUL byte in a string or bytes that cross as a C string** (the topic,
      the header keys, the config keys and values: `js_string_dup` and
      `js_bytes_cstring` in `native/record.c`), a `TypeError` "... without null
@@ -219,14 +223,14 @@ These decide every question, in this order:
    table): one function, `encodeLikeJava(s)` in `src/internal/encode.ts`, is
    the only place the binding turns a string into bytes, writing each lone
    surrogate as `?` as Java's `String.getBytes(UTF_8)` does (Node and
-   Node-API write U+FFFD). A key or value given as a string, the headers code
-   for header keys, and the config code once per client, for the config keys
-   and values (group IDs among them), call it, and the addon reads those
-   bytes into C strings (`native/record.c` `js_bytes_cstring`); topic names
-   skip it and cross as JS strings. The root conventions decide that a string
+   Node-API write U+FFFD). `stringSerializer()` for keys and values, the
+   headers code for header keys, and the config code once per client, for the
+   config keys and values (group IDs among them), call it, and the addon reads
+   the header and config bytes into C strings (`native/record.c`
+   `js_bytes_cstring`); topic names skip it and cross as JS strings. A string
    key or value given without a serializer throws `TypeError` pointing to
-   `stringSerializer()` (Class family, Q24, Q27); that comes with the
-   serializers, and until then the producer encodes it through the same rule.
+   `stringSerializer()` (root conventions, Class family, Q24, Q27), checked at
+   `send()` (`src/producer/producer_record.ts` `rawBytes`).
    `check-zero-copy` and `check-string-encoding` partly enforce this (The rule
    linter, below), and an integration test checks that an accepted record's
    Buffers are collectable once its `send()` resolved, before delivery. Not
@@ -332,13 +336,13 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
   its Java getter's name, `is` / `has` included (`metadata.offset`,
   `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
-  A `ProducerRecord` is frozen (`Object.freeze(this)` in its constructor,
-  as `TopicPartition` will be), so `ProducerRecord.internalToNative` reads
+  Every data class is frozen (`Object.freeze(this)` in its constructor,
+  which `check-data-objects` requires), so `ProducerRecord.internalToNative` reads
   the fields its constructor checked and checks nothing again at `send()`
   (root conventions, Q35: no repeated precondition); its `Headers` stays
   writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord` and `RecordMetadata` today. **(root conflict)** The root
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
   `RecordMetadata`, `Node`, the admin description classes) does not name
   `Header`, which its one-line test would admit; the code follows the list, so
@@ -401,10 +405,10 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
 - A `null` key or value binds `never` (root conventions, Class family, Q26),
   through extra TypeScript signatures for the null combinations, as Python's
   Binding rule adds one stub per combination beside its one stub per Java
-  overload, so the per-form rule (Q15) and the binding (Q26) both hold. It
-  applies once a class is generic over a key and a value: today neither
-  `KafkaProducer` nor `ProducerRecord` is (no serializer is translated, so a
-  key or value is `Data`), so there is nothing to bind.
+  overload, so the per-form rule (Q15) and the binding (Q26) both hold:
+  `ProducerRecord`'s constructor has, before each Java constructor's
+  signature, one with a `null` key, one with a `null` value and one with
+  both, each typed `null`, and `send` takes a `ProducerRecord<K, V>`.
 - Signatures (root conventions, Signatures): one Java overload set is one
   method taking one options object of Java's parameter names
   (`new KafkaProducer({configs})`, `send({record, callback})`,
@@ -445,8 +449,61 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   ...check: BareCheck<U>)` infers `U` from the value alone and refuses any
   other `U` through the rest parameter, which no call gives, and a member of a
   class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
-  other object goes by name there, while plain JavaScript takes it bare. The
-  serializer forms of the constructor are not translated yet.
+  other object goes by name there, while plain JavaScript takes it bare.
+- Collections (root conventions, Types): a Java array or collection taken is
+  any iterable (`PartitionInfo`'s `Node[]`, plan §5 item 1), and one
+  returned is a new array each call (`PartitionInfo.replicas()`,
+  `partitionsFor()`'s `List`). A map keyed by strings taken is a `Map` or a
+  plain object (the root's Types row "Other collections taken", Q25):
+  `MetricName`'s constructor takes its `tags` so: a `Map` is kept as given
+  and `tags()` returns it, as Java stores the map; a plain object is read
+  into a new `Map`. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
+  *(js-only, on the invented-names list)*, a read-only map keyed by the
+  JSON text of the group, the name and the tags sorted by key (the fields
+  `MetricName.equals` compares), keeping the original `MetricName`s, with a
+  `toJSON()` writing the entries by that string key, as `TopicPartitionMap`'s
+  will;
+  `check-type-mapping` holds the rows.
+- `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
+  runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
+  constructor, its untranslated `MetricValueProvider`, `MetricConfig` and
+  `Measurable` placeholder types typed `unknown`, read by their Java
+  methods), each built with a provider returning the value read. *(deviation:
+  Java's map is a live view. Why: only the clients call the addon, and
+  Python's `metrics()` is a snapshot too. Goes when: the JavaScript metrics
+  wrap the core's.)* A long value is a `bigint`.
+- Serializers (root conventions, Serialization): `Serializer` is an object
+  type in `common/serialization`, run in JavaScript inside `send()`
+  (`src/internal/serde.ts`), key then value, after the form and argument
+  checks and before the pump and the hand-over; a thenable result is
+  awaited. The binding keeps no closed state, so a serializer runs on a
+  closed producer too, and the core reports the closed producer at the
+  hand-over (rule 1). What a serializer returns is borrowed until the
+  hand-over, as the app's bytes are (rule 8). With no serializer (a null
+  one, or none, and no config key) the record's own bytes are sent, checked
+  at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
+  type TypeScript cannot enforce, and a string throws `TypeError` pointing to
+  `stringSerializer()`. `stringSerializer()`
+  (`src/common/serialization/string_serializer.ts`) is Java's
+  `StringSerializer` through `encodeLikeJava`; it takes an optional
+  `{ configs, isKey }`, Java's `configure`, so it goes in a serde config key
+  without `()`, and writes Java's six standard charsets (`US-ASCII`,
+  `ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE`, `UTF-16`) byte for byte,
+  under their canonical names and the JDK's aliases, ignoring case, as
+  `Charset.forName` matches them. `encodeLikeJava(s, charset)` writes them by
+  hand where Node's encoders differ: a character US-ASCII or ISO-8859-1
+  cannot map is `?`, a lone surrogate in UTF-16 is U+FFFD, and `UTF-16` is
+  big-endian after the BOM `FE FF`. Any other name is Java's
+  `SerializationError` "Unsupported encoding <name>" *(deviation. Why: Node
+  has no Java charset providers. Goes when: never needed for the standard
+  set)*. The rest of the factory list
+  is not decided yet in the root conventions. `close()` closes both serializers once
+  the core reports the producer closed; a construction the core fails with
+  Java's relabelled "Failed to construct kafka producer" closes them too.
+  An omitted or `null` key or value binds `never` (root conventions, Class
+  family, Q26), through extra `ProducerRecord` signatures for the null
+  combinations beside each Java constructor's, so `send` takes the
+  `ProducerRecord<K, V>` of the producer's serializers.
 - A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
   number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
   polyfill's before), recognised by its `Symbol.toStringTag` and read with
@@ -568,6 +625,47 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   hold the statics, as `Admin.create()`'s will).
 - `KafkaProducer` has `close()` and `[Symbol.asyncDispose]()`, which calls
   `close()`, so `await using` closes it.
+- `MockProducer` (`src/producer/mock_producer.ts`) wraps the FFI's
+  `MockProducer` (root conventions, Implementation over the FFI, Q62): the
+  addon builds it through `MockProducerOptionsBuilder` and
+  `MockProducer_with_options` (`autoComplete` set, the cluster left
+  `Cluster.empty()`, no partitioner and no serializers), and it is the same
+  native handle as a `KafkaProducer`'s, over its `__as_Producer` view, so
+  `send`, `flush`, `close`, `partitionsFor` and `metrics` go through the
+  producer's `_cb` twins and drain, with the same lifetime rules (rules 3, 5,
+  6, 10: no closed flag, `close()` keeps the handle, the finalizer destroys
+  only a closed mock, which `MockProducer_closed` decides, as a close that
+  threw `closeException` leaves Java's mock open). Its constructors are
+  Java's `()` and `{ autoComplete, partitioner, keySerializer,
+  valueSerializer }`, `partitioner` typed `Partitioner | null`, the
+  placeholder (Scope, Q30), and never called, as the cluster is empty; the
+  `Cluster` form is left out. A send passes the app's `ProducerRecord`: its
+  key and value cross as the `void *` addresses of a `MockRecord`'s tags,
+  which the FFI's mock keeps without reading, and the addon holds the record
+  by a reference from the send until `clear()` (for a record a hand-over
+  took) or the destroy (`native/producer.c`, `MockRecord`), so `history()`
+  returns the app's own records; no header crosses, the record keeping its
+  own, writable, as Java's mock leaves them. The serializers run in
+  JavaScript on every send, key then value, with fresh empty `Headers` (Java
+  serializes so when the cluster has no partition), awaited when they return
+  a thenable, and what they return is not kept; a null one is not run, as
+  the core's mock skips it *(deviation: Java's dereferences it. Why: the
+  mock is the core's)*. The serializers run before the core's mock checks
+  that it is closed, fenced or has a send error, which Java checks first
+  *(deviation, as for `KafkaProducer`)*. After each send, `completeNext()`
+  and `errorNext()` the mock runs the producer's pump, so a callback runs
+  inside the call that completed its record, as Java's mock runs it. Java's
+  public error fields are setters only (plan §5 item 2, Python's
+  `set_send_exception`): `setSendException`, `setFlushException`,
+  `setPartitionsForException`, `setCloseException`, over
+  `MockProducer_set_*_error`, as `errorNext(e)` is over `error_next`; the
+  addon hands the core a `LocalCallbackError` whose opaque is an
+  `InjectedError` holding the JS value, and `native/error.c` hands that very
+  value back wherever the core reports the error (root conventions, Errors,
+  Q38). Left out: transactions (by request), `setMockMetrics` (the FFI takes
+  a native `KafkaMetric_t`, which the binding cannot build), and the
+  telemetry and metric-subscription calls (no FFI); `metrics()` is therefore
+  always empty. The mock emits no preview warning.
 - A Java `long` is a `bigint` (root conventions, Types): returned always as a
   `bigint` (`RecordMetadata.offset` and `.timestamp`, `ProducerRecord.timestamp`,
   a `long` constant such as `SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN`),
@@ -669,9 +767,41 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   included, pass, and the core lists the ones it does not use. The keys and
   values cross as `encodeLikeJava`'s bytes, and the core checks types,
   ranges, enums, unknown keys and cross-key rules with Java's messages naming
-  the key. `key.serializer` and `value.serializer` throw `ConfigError`
-  pointing to the constructor arguments, whatever their value, until their
-  config route is built. The `ProducerConfigs` type, generated into
+  the key. `key.serializer` and `value.serializer` take a synchronous
+  function `({ configs, isKey }) => serializer`, which the producer calls
+  once, key then value, with a frozen copy of the whole configuration, each
+  value as given, through a `Proxy` that records each of its keys the
+  function reads. The two serde keys are left out of the configuration the
+  core gets, and so is each read key that is not a producer key, of Java's
+  or of the core's own (`partitioner.type`):
+  `src/internal/producer_config_keys.ts`, generated with the
+  `ProducerConfigs` type, from Java's `ProducerConfig` and the core's
+  `rust/src/producer/producer_config.rs`. A key such as
+  `schema.registry.url` is left out, so that the core
+  doesn't list it as unused; the consumer's serde keys reach the core, which
+  lists them as unused (root conventions, Serialization, Q53). **(root
+  conflict)** The root text says "the binding leaves those keys out of the
+  config it sends to the core, as Java's `originals()` marks them as used",
+  which read literally drops every key the function reads, `bootstrap.servers`
+  included, so a function that spreads the configuration would leave the
+  core with none. The code follows the rule's purpose and Java: Java only
+  marks the keys it reads and never removes them, so a producer key the
+  function reads still reaches the core, and only a read key the core doesn't
+  know is left out, which is what keeps `schema.registry.url` from being
+  listed as unused. Two deviations follow from the function running before
+  the core exists, to know which keys it reads *(deviation. Why: the binding
+  calls the function before the core is built. Goes when: the FFI exposes the
+  computed client id and the configuration check before construction)*: the
+  function gets the configuration as the user gave it, without the computed
+  `client.id` Java's `originals()` carries, and a configured serializer is
+  built before the core checks the configuration, where Java checks it
+  first. A serializer given as a
+  constructor argument wins, and its config key is then ignored; a null one
+  is the config key's, as Java's `if (keySerializer == null)`. A function
+  that throws is Java's "Failed to construct kafka producer" `KafkaError`,
+  with the error as its `cause`, and the serializers made so far are closed;
+  those the config functions made are closed on any construction failure,
+  since only the producer holds them. The `ProducerConfigs` type, generated into
   `src/producer/producer_configs.ts` by the `config_types` emitter
   (`rust/xtask/src/config_types/js.rs`), lists the keys Java's
   `ProducerConfig` defines (with its SSL and SASL keys) for autocompletion
@@ -700,7 +830,8 @@ The layout is the root conventions' (Layout and modules).
   function, drain, keep-alive and teardown (each client embeds a
   `CallbackQueue` and passes its own `__execute_callbacks`); `error.c`,
   `record.c` (`ProducerRecord`, the borrowed key and value, and
-  headers), `producer.c` (the `KafkaProducer` handle).
+  headers), `producer.c` (the `KafkaProducer` and `MockProducer` handles,
+  which share one native handle type).
 - `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
   per Java package (`clients` dropped), one public Java type per file,
   snake_case names. The package's own helpers are in `src/internal/` (never
@@ -748,11 +879,11 @@ The layout is the root conventions' (Layout and modules).
   to match. `dist/` is git-ignored and is what
   `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
   is removed after compiling. A Java constructor that is not public is a
-  TypeScript `private` constructor (`protected` where Java's is), and so is
-  one users must not call (`RecordMetadata`, whose Java constructor takes an
-  untranslated `TopicPartition`); there is no run-time guard (root
-  conventions, Class family). The library builds such an object through one
-  static factory, `internalCreate`, and calls its own methods on public
+  TypeScript `private` constructor (`protected` where Java's is); there is no
+  run-time guard (root conventions, Class family). The library builds such an
+  object through one static factory, `internalCreate` (`RecordMetadata`'s
+  builds it from the native layer's fields, through its public constructor
+  with a module-private mark that no caller can give), and calls its own methods on public
   classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)
   with dot access: each is a public member marked `@internal` in its TSDoc
   and named `internal...`, which tsc's `stripInternal` leaves out of the
@@ -949,7 +1080,8 @@ The rules, each named in its finding:
   `check-public-audience`, `check-no-deprecated-translation`: every export
   translates a public, live Java class by name (or is listed), in its file,
   every public member a Java member, and every public Java member is
-  translated (an enum's `java.lang.Enum` members and `toJSON()` included).
+  translated (an enum's `java.lang.Enum` members and `toJSON()` included, a
+  public mutable field as its setter `set<Field>`, plan §5 item 2).
 - `check-invented-names`: every entry of `lint-mapping.json` is needed and
   resolves, and an invented options type is named `...Args`.
 - `check-module-exports`: each package has one import path; an index
@@ -959,7 +1091,8 @@ The rules, each named in its finding:
   other class keeps methods.
 - `check-overload-shape`: one Java overload set is one method taking one
   options object of Java's parameter names, with one TypeScript overload
-  signature per Java form and the bare value of a one-parameter form.
+  signature per Java form, the signatures of its null combinations (a `null`
+  key or value, above) and the bare value of a one-parameter form.
 - `check-type-mapping`: each member's type is the one the Types table gives
   (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
   returned as a `bigint`, taken as a `bigint` or a whole `number`); a Java
@@ -1020,14 +1153,12 @@ The rules, each named in its finding:
   its constructor (through the `src/` functions it calls, as
   `check-waiting-call-promise` follows a method) or a field initializer
   reaching a `native.<fn>` use, as the mocks wrap the FFI's mocks (root
-  conventions, Implementation over the FFI, Q62). There is no mock yet.
+  conventions, Implementation over the FFI, Q62): `MockProducer` today.
 - `check-encode-callers`: only the string serializer (`src/common/serialization/`),
   the headers code (`src/common/header/`) and the config code
   (`src/internal/config.ts`) use `encodeLikeJava` (root conventions, Types,
-  Q24). `src/producer/producer_record.ts` has an allowance, for a string key
-  or value given without a serializer, which the serializers replace with a
-  `TypeError` (Class family, Q27); the allowance fails as unused once that
-  call goes.
+  Q24); a string key or value given without a serializer is a `TypeError`
+  (Class family, Q27), never encoded.
 - `check-commonjs-pin`: `package.json` has no `"type": "module"` (none, or `"commonjs"`), `tsconfig.json`'s
   `module` and `moduleResolution` are `nodenext`, and each `exports` entry
   has exactly the conditions `types` then `default` (root conventions,

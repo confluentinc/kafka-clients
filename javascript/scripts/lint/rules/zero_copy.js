@@ -138,12 +138,19 @@ const ALLOWED = [
   { key: 'native/producer.c:string_or_null:malloc#1', reason: 'the message a user callback threw or rejected with' },
   { key: 'native/producer.c:js_producer_send:calloc#1', reason: "the send's context" },
   { key: 'native/producer.c:js_producer_flush:calloc#1', reason: "the flush's context" },
+  { key: 'native/producer.c:js_producer_partitions_for:calloc#1', reason: "one partitionsFor call's context, not a record's" },
   { key: 'native/producer.c:slot_take:realloc#1', reason: "the producer's table of record futures, grown by doubling: a context pointer per slot" },
   { key: 'native/producer.c:slot_take:realloc#2', reason: "the free list of that table, grown with it" },
   { key: 'native/producer.c:js_record_future_get:calloc#1', reason: "one wait's context on a record's future" },
   { key: 'native/producer.c:js_producer_close:calloc#1', reason: "the close's context" },
   { key: 'native/producer.c:new_kafka_producer:calloc#1', reason: "the configuration's string array" },
-  { key: 'native/producer.c:js_producer_create:calloc#1', reason: 'the producer struct' },
+  { key: 'native/producer.c:producer_handle_new:calloc#1', reason: 'the producer struct' },
+  { key: 'native/producer.c:js_mock_producer_send:calloc#1', reason: "a mock's send's context" },
+  {
+    key: 'native/producer.c:js_mock_producer_send:calloc#2',
+    reason: "the record a mock keeps: a reference to the app's ProducerRecord, no copy of its key or value",
+  },
+  { key: 'native/producer.c:injected_error_new:calloc#1', reason: 'an error JS gives a mock: a reference to it, no record' },
 ];
 
 /** The text of each argument naming `field` (`&ctx->key_ref`) among the calls of `names` in `fns`. */

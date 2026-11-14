@@ -32,19 +32,18 @@ const base = {
   'src/internal/config.ts': USE('./encode'),
   'src/common/header/headers.ts': USE('../../internal/encode'),
   'src/common/serialization/string_serializer.ts': USE('../../internal/encode'),
-  'src/producer/producer_record.ts': USE('../internal/encode'),
 };
 
-test('the string serializer, the headers code, the config code and the allowed record pass', () => {
+test('the string serializer, the headers code and the config code pass', () => {
   const r = lint(project(base), [RULE]);
   assert.equal(r.status, 0, r.text);
 });
 
-test('another module, under any name, is a finding, and an allowance no longer used is one too', () => {
+test('another module, under any name, is a finding: the record encodes no string key or value', () => {
   const r = lint(
     project({
       ...base,
-      'src/producer/producer_record.ts': 'export const none = 1;\n',
+      'src/producer/producer_record.ts': USE('../internal/encode'),
       'src/producer/kafka_producer.ts':
         "import { encodeLikeJava as enc } from '../internal/encode';\nexport const k = enc('k');\nexport const f = [enc];\n",
     }),
@@ -54,6 +53,6 @@ test('another module, under any name, is a finding, and an allowance no longer u
   assert.deepEqual(findings(r), [
     'src/producer/kafka_producer.ts:2: uses encodeLikeJava: only the string serializer, the headers code and the config code turn strings into bytes',
     'src/producer/kafka_producer.ts:3: uses encodeLikeJava: only the string serializer, the headers code and the config code turn strings into bytes',
-    'src/producer/producer_record.ts: is allowed to use encodeLikeJava (it encodes a string key or value given without a serializer, which the serializers replace with a TypeError pointing to stringSerializer() (root Class family, Q24, Q27)), but no longer does: delete the allowance',
+    'src/producer/producer_record.ts:2: uses encodeLikeJava: only the string serializer, the headers code and the config code turn strings into bytes',
   ]);
 });

@@ -131,7 +131,7 @@ async function main() {
   const record = new ProducerRecord({
     topic: 'package-smoke',
     partition: null,
-    key: 'k',
+    key: Buffer.from('k'),
     value: Buffer.from('v'),
     headers: [new Header({ key: 'h', value: Buffer.from('1') }), new Header({ key: 'n', value: null })],
   });

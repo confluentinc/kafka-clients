@@ -75,6 +75,17 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
     error_discard(FFI_SET(api, kafka_common_Error_is_api_error_err(e, &ffi_err)));
     error_discard(FFI_SET(source, kafka_common_Error_source_err(e, &ffi_err)));
 
+    // An error JS gave a mock comes back as the very same value (root
+    // CLAUDE.md, JavaScript Binding Conventions, Errors, Q38).
+    if (code == kafka_common_Error_LOCAL_CALLBACK) {
+        const kafka_common_LocalCallbackError_t* local = NULL;
+        void* opaque = NULL;
+        error_discard(FFI_SET(local, kafka_common_Error_local_callback_error_err(e, &ffi_err)));
+        if (local != NULL) error_discard(FFI_SET(opaque, kafka_common_LocalCallbackError_opaque_err(local, &ffi_err)));
+        napi_value injected = opaque != NULL ? injected_error_value(env, opaque) : NULL;
+        if (injected != NULL) return injected;
+    }
+
     // apiError tells a bare KafkaException (UNKNOWN_SERVER_ERROR) from
     // UnknownServerError, which share the id.
     napi_value obj, v;

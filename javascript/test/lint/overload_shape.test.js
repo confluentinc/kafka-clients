@@ -39,8 +39,8 @@ const shapeFindings = (r) => findings(r).filter((f) => !f.includes('with one opt
 test('overload sets taken as one options object, one signature per form, and the bare value of a one-parameter form, pass: the constructor, close(), close({p0}), close(p0)', () => {
   const r = lint(fixture({ 'src/producer/rec.ts': REC_PER_FORM }), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Every mapped member but ProducerConfig's (its constants only): Rec 13, Mode 6, Header 2, Future 1.
-  assert.ok(r.out.includes('✅ check-overload-shape: 24 item(s) checked'), r.text);
+  // Every mapped member but ProducerConfig's (its constants only): Rec 14 (setMode included), Mode 6, Header 2, Future 1.
+  assert.ok(r.out.includes('✅ check-overload-shape: 25 item(s) checked'), r.text);
 });
 
 test('one options signature for several Java forms is signature-per-form: each form has its own overload signature', () => {
@@ -139,6 +139,20 @@ test("one signature per Java form: each names exactly its form's parameters", ()
   const THREE = '{ topic: string; partition?: never; key: unknown; value: unknown }';
   const TWO = '{ topic: string; partition?: never; key?: never; value: unknown }';
   let r = lint(root([FOUR, THREE, TWO]), [RULE]);
+  assert.deepEqual(shapeFindings(r), [], r.text);
+  // The signatures of a form's null combinations, a key or value typed null
+  // (which binds never), name the form's parameters: they are taken, not closed.
+  r = lint(
+    root([
+      '{ topic: string; partition: number | null; key: null; value: null }',
+      '{ topic: string; partition: number | null; key: null; value: unknown }',
+      FOUR,
+      '{ topic: string; partition?: never; key?: never; value: null }',
+      THREE,
+      TWO,
+    ]),
+    [RULE],
+  );
   assert.deepEqual(shapeFindings(r), [], r.text);
   // A form without a signature; a signature of no form; an optional parameter.
   r = lint(root([FOUR, '{ topic: string; partition: number | null; key?: never; value: unknown }', '{ topic: string; partition?: never; key?: unknown; value: unknown }']), [RULE]);
@@ -357,4 +371,19 @@ test('cannot run without the Java index', () => {
 test('nothing mapped fails: 0 items checked', () => {
   const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
   assert.ok(r.err.includes('❌ check-overload-shape: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
+});
+
+test("each LEFT_OUT form names a public form of the shipped Java index (no stale entry)", () => {
+  const { LEFT_OUT } = require('../../scripts/lint/rules/overload_shape');
+  const index = require('../../java-index.json');
+  for (const key of LEFT_OUT.keys()) {
+    const [fqn, form] = key.split('#');
+    const parts = fqn.replace(/^org\.apache\.kafka\./, '').split('.');
+    const pkg = parts.slice(0, -1).join('.');
+    const name = parts[parts.length - 1];
+    const cls = index.classes.find((c) => c.package === pkg && c.path.join('.') === name);
+    assert.ok(cls, `${key}: no Java class ${fqn}`);
+    const found = cls.overloads.some((o) => `${o.name}(${o.params.map((t) => t.replace(/<.*>$/, '')).join(',')})` === form);
+    assert.ok(found, `${key}: ${fqn} has no form ${form}`);
+  }
 });

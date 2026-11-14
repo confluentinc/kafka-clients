@@ -166,9 +166,9 @@ make test-integration-javascript         # Linux only: the server in a container
 
 The native arm loads `@grpc/grpc-js` and `@grpc/proto-loader`, two of the
 devDependencies, from `javascript/node_modules` (`npm ci`);
-`make -C javascript grpc-native` checks they are there. The transaction, `partitionsFor` and
-metrics cases are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`),
-as the producer has none of them yet.
+`make -C javascript grpc-native` checks they are there. The transaction cases
+are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`), as the
+producer has no transactions yet.
 
 ## Layout
 
@@ -239,9 +239,14 @@ first and falls back to that development build; installing the package runs no b
 ## Example
 
 ```js
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
-const producer = new KafkaProducer({ 'bootstrap.servers': 'localhost:9092' });  // or { configs: {...} }
+const producer = new KafkaProducer({
+  configs: { 'bootstrap.servers': 'localhost:9092' },
+  keySerializer: stringSerializer(),     // string keys and values; without serializers they are bytes
+  valueSerializer: stringSerializer(),
+});
 const future = await producer.send({                   // resolves at hand-over
   record: new ProducerRecord({ topic: 'demo', key: 'k1', value: 'hello' }),
   // Optional, Java's Callback.onCompletion(metadata, exception): runs before the future completes.
@@ -330,6 +335,39 @@ close of its own, in the client, and checks its timeout the same way. The
 methods returning a Promise (`send`, `flush`, `close`) never throw: every
 failure rejects their Promise.
 
+### Serializers
+
+A producer runs its serializers in JavaScript, inside `send()`. A serializer
+is an object `{ serialize({ topic, headers, data }), close?() }` (Java's two
+`serialize` methods as one), given as a constructor argument, or made by a
+synchronous function `({ configs, isKey }) => serializer` in
+`key.serializer` / `value.serializer`, which the producer calls once with the
+whole configuration, in place of Java's class and its `configure()`. A key the
+function reads that the client's core doesn't know, such as
+`schema.registry.url`, doesn't reach the core, as Java marks it used; the
+producer's own keys always do. The function gets the configuration as given,
+without Java's computed `client.id`, and runs before the core checks it. A
+constructor argument wins, and its config key is then ignored.
+`stringSerializer()` writes a string as Java's `StringSerializer` does, and
+goes in a config key without `()`:
+
+```js
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+
+const producer = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: stringSerializer() });
+// or, the same through the configuration (both are a KafkaProducer<string, string> in TypeScript):
+const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+```
+
+`stringSerializer()` writes Java's six standard charsets (`US-ASCII`,
+`ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE` and `UTF-16`, under Java's names
+and aliases) byte for byte as Java does, UTF-8 by default: a
+`key.serializer.encoding`, `value.serializer.encoding` or
+`serializer.encoding` naming another charset throws `SerializationError`
+"Unsupported encoding <name>", as Node has no Java charset providers. A class name, a
+serializer object or a function that returns a Promise in a config key
+throws `ConfigError`.
+
 ### Headers
 
 `Header` and `Headers` are in `common/header`, with Java's members. A
@@ -365,9 +403,39 @@ during `send()`, before the core waits for metadata, and the binding cannot see
 when that wait ends. Goes when: the core seals the headers itself, after its
 metadata wait)*.
 
+### MockProducer
+
+`MockProducer` is Java's mock of the producer, for testing code that uses
+Kafka. It implements `Producer`, and it is the client core's own mock, so it
+answers as the real client does, with Promises and futures. Its records are
+the app's own: `history()` returns the very `ProducerRecord`s sent, key and
+value as given, which the mock holds until `clear()`. Its serializers run on
+every send, as Java's mock runs them. A callback runs inside the mock call that
+completes its record (`send()` with `autoComplete`, `completeNext()`,
+`errorNext()` or `flush()`). Java's public error fields are setters, and each
+call throws the very error it was given:
+
+```js
+const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+
+const mock = new MockProducer({ autoComplete: false, partitioner: null, keySerializer: null, valueSerializer: null });
+const record = new ProducerRecord({ topic: 'orders', key: 'k', value: { id: 1 } });
+const future = await mock.send(record);
+mock.completeNext();
+console.log((await future.get()).offset, mock.history()[0] === record); // 0n true
+mock.setSendException(new Error('broker down')); // send() now rejects with this error
+await mock.close();
+```
+
+A mock keeps Node running until it is closed, as a producer does. Left out:
+Java's constructor taking a `Cluster` (the mock's cluster is always empty, so
+the partitioner is never called), the transaction calls, `setMockMetrics`, and
+the telemetry and metric-subscription calls (the producer package's
+documentation lists them).
+
 ### Data objects, enums and constructors
 
-`ProducerRecord` and `RecordMetadata` are data objects: Java's getters are
+`ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` are data objects: Java's getters are
 public `readonly` fields, set once in the constructor (`record.topic`,
 `metadata.offset`, `metadata.hasOffset`), so `{ ...metadata }`,
 `JSON.stringify` and `structuredClone` keep them. Java's `-1` and `null` are
@@ -378,13 +446,17 @@ given to `ProducerRecord` is a bigint or a whole number up to 2^53 - 1 (a
 larger number throws `RangeError` rather than rounding). `JSON.stringify`
 writes a bigint as a decimal string, such as `"42"`, which `BigInt()` reads
 back exactly. A Java `int`, such as a partition, stays a number, and one
-outside Java's range throws `RangeError`. A `ProducerRecord` is frozen: a
+outside Java's range throws `RangeError`. A data object is frozen: a
 field cannot be reassigned (in strict mode the assignment throws
 `TypeError`), so `send()` sends what its constructor checked. A record's
 `headers` is
 a `Headers`, a class with methods: `JSON.stringify` writes it as its array of
 headers, and `structuredClone` as an empty object. Every other
-class keeps Java's getters as methods (`future.isDone()`, `header.key()`).
+class keeps Java's getters as methods (`future.isDone()`, `header.key()`,
+`partitionInfo.replicas()`). A Java array or collection a method takes is any
+iterable (`new PartitionInfo({ ..., replicas: new Set(nodes) })`), and one it
+returns is a new array each call. `TopicPartition`, `Node` and
+`PartitionInfo` have Java's `equals` and `hashCode`.
 
 The enums, `SecurityProtocol` and `SslClientAuth`, have Java's `Enum`
 methods: `name()`, `ordinal()`, static `values()` and static
@@ -397,8 +469,10 @@ is a frozen array, and a constant `Set` (`SslConfigs.RECONFIGURABLE_CONFIGS`)
 a read-only set whose `add`, `delete` and `clear` throw
 `UnsupportedOperationError`.
 
-`RecordMetadata`, `KafkaFuture` and the enums are built by the client only:
-their constructors are private.
+`KafkaFuture` and the enums are built by the client only: their constructors
+are private. `RecordMetadata` has Java's public constructor, `new
+RecordMetadata({ topicPartition, baseOffset, batchIndex, timestamp,
+serializedKeySize, serializedValueSize })`.
 
 ### `send` in two steps
 
@@ -458,11 +532,13 @@ over a `SharedArrayBuffer` is borrowed the same way: if other workers share
 the Buffer's memory, they mustn't write to it until then either. Header
 values are copied during `send()`.
 
-**Strings are encoded as Java encodes them.** A string key or value is
-encoded to UTF-8 as Java's `StringSerializer` does (`String.getBytes(UTF_8)`):
-a lone surrogate, which UTF-8 cannot hold, becomes `?`, where Node's own
-`Buffer.from` writes U+FFFD. Header keys and config keys and values are
-encoded the same way; topic names are not.
+**Strings are encoded as Java encodes them.** A string key or value needs a
+serializer: `stringSerializer()` encodes it to UTF-8 as Java's
+`StringSerializer` does (`String.getBytes(UTF_8)`), and without one a string
+key or value throws `TypeError` pointing to it. A lone surrogate, which UTF-8
+cannot hold, becomes `?`, where Node's own `Buffer.from` writes U+FFFD.
+Header keys and config keys and values are encoded the same way; topic names
+are not.
 
 **Close every producer.** A producer keeps Node running from the moment it's
 created until `close()` closes it, as KafkaJS and 1.x do from `connect()` to
@@ -529,7 +605,7 @@ code relying on them keeps running with another meaning: check each.
 | a bare value of the wrong type threw `TypeError` | it fits no overload: `IllegalArgumentError` "… takes one of (…); got a number" |
 | a Temporal.Duration with years, months or weeks was an `IllegalArgumentError` | **silent** for `instanceof RangeError`: it is a plain `RangeError` |
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
-| `key.serializer` / `value.serializer` reached the core | they throw `ConfigError`: a serializer is a constructor argument |
+| `key.serializer` / `value.serializer` reached the core | they take a synchronous function `({ configs, isKey }) => serializer`, which the producer calls once and keeps from the core; a class name, a serializer object or a function returning a Promise throws `ConfigError` |
 | `metadata.offset` / `metadata.timestamp` / `record.timestamp` numbers | bigints, Java's `long`; a timestamp is given as a bigint or a whole number up to 2^53 - 1 |
 | a config value was checked against its key's type, and an unknown key's value had to be a string, a number or a boolean | every value is written as a string (`true` as `"true"`, numbers and bigints in decimal, arrays joined with `,`, anything else by `String()`) and the core checks it; `null` and `undefined` leave the key unset |
 | the preview warning had the code `CONFLUENT_KAFKA_PREVIEW` | it has no code: filter on its type, `ExperimentalWarning` |
@@ -545,6 +621,7 @@ code relying on them keeps running with another meaning: check each.
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
 | an argument to `flush()` | it is refused: Java's `flush()` takes none |
 | a lone surrogate in a string was written as U+FFFD | it is written as `?`, as Java's `StringSerializer` writes it |
+| a string key or value was sent as UTF-8 without a serializer | it throws `TypeError` pointing to `stringSerializer()`: pass `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()`, or bytes |
 | an idle producer let the process exit | a producer keeps Node running until `close()` closes it, and no garbage collection closes one: close every producer (or `await using` it) |
 | `KafkaFuture` had `get()`, `isDone()`, `isCompletedExceptionally()`, `isCancelled()`, `cancel()` | Java's whole `KafkaFuture`: also `get(timeout)`, `getNow`, `thenApply`, `whenComplete`, `toCompletionStage()`, `completedFuture` and `allOf`; `cancel(mayInterruptIfRunning)` takes a boolean |
 | the enums guarded their constructors with a run-time token (`RecordMetadata`'s was TypeScript `private` only) | their constructors are TypeScript `private`, with no run-time guard |
@@ -694,8 +771,9 @@ whose every Java constructor takes one (`QuotaViolationError`, ...) cannot be
 constructed: the client builds it when the core reports it. The
 configuration is checked by the client's core, which throws a `ConfigError`
 with Java's message naming the key (`{ 'linger.ms': true }` fails with "Not a
-number of type LONG"); `key.serializer` and `value.serializer` throw a
-`ConfigError` too (a serializer is a constructor argument). Any other value
+number of type LONG"); a `key.serializer` or `value.serializer` that is no
+synchronous function `({ configs, isKey }) => serializer` throws a
+`ConfigError` from the client, saying what to pass. Any other value
 of the wrong JavaScript type throws a `TypeError`, and so does a topic, header key or config key or value holding a
 null byte (`"topic must be a string without null bytes"`), which C would read
 as the end of the string; keys, values and header values are bytes and may

@@ -16,7 +16,8 @@
 
 // J3 check-java-completeness (root CLAUDE.md DoD #2: every method of the
 // translated class is implemented): every public, non-deprecated Java
-// constructor, method and `public static final` constant of a class an
+// constructor, method, `public static final` constant and public mutable
+// field (as its setter, `set<Field>`, plan §5 item 2) of a class an
 // exported class translates has its TypeScript member, by the mapping of
 // scripts/lint/java_ts.js. One finding per Java name (`missing
 // <Class>#<member>`, the overloads of a name are one TypeScript function), so
@@ -37,14 +38,16 @@
 //     (javascript/CLAUDE.md "Java shape, JS idiom"), whether or not the Java
 //     index lists them, and the invented `toJSON()`, which returns the name
 //     (root CLAUDE.md, JavaScript Binding Conventions, Class family);
-//   - an abstract class: not its constructor, which only a subclass calls.
+//   - an abstract class: not its constructor, which only a subclass calls;
+//   - a placeholder type (`export type Measurable = unknown`, PLACEHOLDERS):
+//     nothing, the Java class not being translated.
 // `equals` and `hashCode` are asked as any member is: they stay methods (root
 // CLAUDE.md, JavaScript Binding Conventions, Class family, Q29).
 // An exported interface or object type mapped to a Java class (`Header`) is
 // asked as a class is.
 
 const { atNode } = require('../location');
-const { ENUM_IMPLICIT, javaIndexOf, mappedItems, itemMembers, javaMember, shortName, constantsOnly, functionType } =
+const { ENUM_IMPLICIT, PLACEHOLDERS, javaIndexOf, mappedItems, itemMembers, javaMember, shortName, constantsOnly, functionType } =
   require('../java_ts');
 
 /** The instance method JavaScript adds to every enum (root CLAUDE.md, JavaScript Binding Conventions, Class family). */
@@ -66,6 +69,8 @@ module.exports = {
       if (item.tags.jsOnly || isError || java === null || !java.cls) continue;
       const cls = java.cls;
       if (functionType(cls)) continue;
+      // A placeholder of a type the client does not translate has no members.
+      if (PLACEHOLDERS.has(cls.path[cls.path.length - 1]) && item.kind !== 'class') continue;
       const covered = new Set();
       for (const m of itemMembers(ts, item)) {
         const jm = javaMember(index, cls, m);
@@ -82,6 +87,8 @@ module.exports = {
       const wanted = [];
       for (const f of cls.fields) {
         if (f.visibility === 'public' && f.static && f.final && !f.deprecated) wanted.push(f.name);
+        // A public mutable field is asked for as its setter (javaMember).
+        else if (f.visibility === 'public' && !f.static && !f.final && !f.deprecated) wanted.push(f.name);
       }
       if (!constantsOnly(cls)) {
         for (const o of cls.overloads) {

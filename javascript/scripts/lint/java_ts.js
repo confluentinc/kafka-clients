@@ -88,7 +88,25 @@ const CONSTANTS_ONLY = new Set([
 const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.producer.ProducerRecord',
   'org.apache.kafka.clients.producer.RecordMetadata',
+  'org.apache.kafka.common.TopicPartition',
+  'org.apache.kafka.common.Node',
 ]);
+
+/**
+ * The Java types the client does not translate, which a signature that cannot
+ * be dropped takes or returns as a placeholder typed `unknown` (root
+ * CLAUDE.md, JavaScript Binding Conventions, Scope: `export type Partitioner =
+ * unknown`): their members are not asked for.
+ */
+const PLACEHOLDERS = new Set(['Partitioner', 'MetricValueProvider', 'MetricConfig', 'Measurable']);
+
+/**
+ * The Java types that are not `@InterfaceAudience.Public`, which a public
+ * signature types `unknown` (root CLAUDE.md, JavaScript Binding Conventions,
+ * Scope: "A type that Java doesn't make public, such as `Time`, is
+ * `unknown`").
+ */
+const NOT_PUBLIC_TYPES = new Set(['Time']);
 
 /**
  * The Java functional interfaces translated as a function type
@@ -430,6 +448,17 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
   if (m.kind === 'method') {
     const found = methods(m.name);
     if (found) return found;
+    // A Java public mutable field is a setter only, `set<Field>` (plan §5
+    // item 2; Python's `set_<field>`: `MockProducer.sendException` ->
+    // `setSendException`).
+    const setterOf = /^set([A-Z]\w*)$/.exec(m.name);
+    if (setterOf !== null && !m.isStatic) {
+      const name = setterOf[1][0].toLowerCase() + setterOf[1].slice(1);
+      for (const c of chain) {
+        const f = c.fields.find((x) => x.name === name && x.visibility === 'public' && !x.final && !x.static);
+        if (f) return { kind: 'field', name, owner: c, field: f, setter: true };
+      }
+    }
     return cls.kind === 'enum' && m.name === 'toString' && fits(false) ? ENUM_TO_STRING : null;
   }
   if (m.isStatic) return field(m.name) || methods(m.name, 0);
@@ -614,6 +643,8 @@ module.exports = {
   PREFIX,
   ERROR_ALLOWANCE,
   DATA_CLASSES,
+  PLACEHOLDERS,
+  NOT_PUBLIC_TYPES,
   ENUM_IMPLICIT,
   JavaIndex,
   javaIndexOf,
