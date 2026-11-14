@@ -54,8 +54,8 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 # through `env`.
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
-.PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
-	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
+.PHONY: grpc-image grpc-image-async grpc-native grpc-native-aot rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
+	test-integration-native test-integration-native-aot build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
 	pack-dotnet package-check-dotnet coverage-dotnet test-aot-dotnet
 
@@ -99,6 +99,15 @@ grpc-image-async: rust-lib
 # pinned to Release.
 grpc-native: rust-lib
 	$(DOTNET) build -c Release $(CARGO_PROFILE_PROP) -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
+
+# The Native AOT build of the same server (GrpcServerAot,
+# Confluent.Kafka.GrpcServer.csproj) into rust/target/grpc-native/dotnet-aot, for
+# test-integration-native-aot: one executable with the native library beside it,
+# which needs no .NET runtime. A Native AOT publish needs the platform's C
+# toolchain, and fails on a trim or AOT warning (TreatWarningsAsErrors). `-c
+# Release` and $(CARGO_PROFILE_PROP) are pinned for the reason given above.
+grpc-native-aot: rust-lib
+	$(DOTNET) publish -c Release $(CARGO_PROFILE_PROP) -f net10.0 --use-current-runtime -p:GrpcServerAot=true $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet-aot
 
 # The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
 # server images, then run the `__grpc_dotnet` tests of the Rust harness against
@@ -157,6 +166,12 @@ test-integration-sasl-ssl:
 # SDK on PATH (grpc-native).
 test-integration-native: grpc-native
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet-native
+
+# The same arms against the Native AOT build of the server and binding
+# (grpc-native-aot), which the harness runs without the dotnet host. Besides the
+# .NET 10 SDK it needs the platform's C toolchain.
+test-integration-native-aot: grpc-native-aot
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet-native-aot
 
 # The Rust library the .NET binding loads, built by rust/Makefile: the debug
 # all-features build, or the release one for RUST_PROFILE=release; a cargo

@@ -208,12 +208,18 @@ impl BackendKind {
                 let server = std::env::var_os("MULTILANG_DOTNET_GRPC_SERVER")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("target/grpc-native/dotnet/Confluent.Kafka.GrpcServer.dll"));
-                require_native_artifact(self, &server, "-C dotnet grpc-native");
+                let is_assembly = server.extension().is_some_and(|extension| extension == "dll");
+                let make_target = if is_assembly {
+                    "-C dotnet grpc-native"
+                } else {
+                    "-C dotnet grpc-native-aot"
+                };
+                require_native_artifact(self, &server, make_target);
                 let flavor = match self {
                     BackendKind::DotnetAsync => "async",
                     _ => "sync",
                 };
-                let mut command = if server.extension().is_some_and(|extension| extension == "dll") {
+                let mut command = if is_assembly {
                     let dotnet = std::env::var_os("MULTILANG_DOTNET")
                         .map(PathBuf::from)
                         .unwrap_or_else(|| PathBuf::from("dotnet"));
@@ -224,7 +230,7 @@ impl BackendKind {
                     Command::new(server)
                 };
                 command.env("CONSUMER_FLAVOR", flavor);
-                (command, "-C dotnet grpc-native")
+                (command, make_target)
             },
         }
     }
