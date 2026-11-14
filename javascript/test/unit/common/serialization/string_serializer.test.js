@@ -153,6 +153,11 @@ test("stringSerializer takes Java's configure(configs, isKey) or nothing, and it
     message: 'stringSerializer() takes one of (), (configs, isKey); got (configs)',
   });
   assert.throws(() => stringSerializer({ configs: null, isKey: true }), { constructor: TypeError, message: 'configs must be an object, not null' });
+  // A Map's entries are no properties: refused rather than silently ignored.
+  assert.throws(() => stringSerializer({ configs: new Map([['serializer.encoding', 'UTF-16']]), isKey: false }), {
+    constructor: TypeError,
+    message: 'configs must be a plain object, not a Map',
+  });
   assert.throws(() => stringSerializer({ configs: {}, isKey: 1 }), { constructor: TypeError, message: 'isKey must be a boolean, not a number' });
   assert.throws(() => stringSerializer().serialize({ topic: 't', headers: new Headers(), data: 5 }), {
     constructor: TypeError,

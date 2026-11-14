@@ -76,8 +76,8 @@ export function stringSerializer(): Serializer<string>;
  *   configured encoding is not UTF-8
  * @throws `IllegalArgumentError` when the given parameters are not `{}` or
  *   `{configs, isKey}`
- * @throws `TypeError` when `configs` is not an object or `isKey` not a
- *   boolean
+ * @throws `TypeError` when `configs` is not an object (a `Map` included) or
+ *   `isKey` not a boolean
  */
 export function stringSerializer(options: {
   /** The configuration: `key.serializer.encoding`, `value.serializer.encoding` and `serializer.encoding` are read. */
@@ -91,6 +91,9 @@ export function stringSerializer(options?: unknown): Serializer<string> {
     const configs = FORMS.value(options, 'configs');
     const isKey = FORMS.value(options, 'isKey');
     if (configs === null || typeof configs !== 'object') throw new TypeError(`configs must be an object, not ${kind(configs)}`);
+    // A Map's entries are no properties: refused, as a client's configs is,
+    // so that they are not silently ignored.
+    if (configs instanceof Map) throw new TypeError('configs must be a plain object, not a Map');
     if (typeof isKey !== 'boolean') throw new TypeError(`isKey must be a boolean, not ${kind(isKey)}`);
     encoding = configure(configs as Readonly<Record<string, unknown>>, isKey);
   }
