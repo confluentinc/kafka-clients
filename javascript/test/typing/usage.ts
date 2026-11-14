@@ -151,6 +151,24 @@ async function produce(): Promise<void> {
   expectTypeOf(asInterface.flush).returns.toEqualTypeOf<Promise<void>>();
   // @ts-expect-error KafkaFuture is abstract, as Java's is
   void new KafkaFuture<number>();
+  // KafkaFuture is checked by name, not by shape: an object with its
+  // methods is no KafkaFuture.
+  const real = KafkaFuture.completedFuture(1);
+  const lookAlike = {
+    toCompletionStage: () => real.toCompletionStage(),
+    thenApply: real.thenApply.bind(real),
+    whenComplete: real.whenComplete.bind(real),
+    cancel: real.cancel.bind(real),
+    get: real.get.bind(real),
+    getNow: real.getNow.bind(real),
+    isCancelled: () => real.isCancelled(),
+    isCompletedExceptionally: () => real.isCompletedExceptionally(),
+    isDone: () => real.isDone(),
+    toString: () => real.toString(),
+  };
+  // @ts-expect-error a look-alike with KafkaFuture's methods is no KafkaFuture
+  const fakeFuture: KafkaFuture<number> = lookAlike;
+  void fakeFuture;
   // `await using` closes it: KafkaProducer is AsyncDisposable.
   const disposed = bareProducer[Symbol.asyncDispose]();
   expectTypeOf(disposed).toEqualTypeOf<Promise<void>>();

@@ -194,8 +194,7 @@ newer.
 - The error classes take only Java's constructors with a message and a cause;
   those with a payload are not translated, nor are Java's payload getters
   (`TopicAuthorizationError`'s `unauthorizedTopics()`, `RecordTooLargeError`'s
-  `recordTooLargePartitions()`, ...), the `INSTANCE` singletons
-  (`DisconnectError`, `CoordinatorNotAvailableError`) or
+  `recordTooLargePartitions()`, ...) or
   `RecordDeserializationError.DeserializationExceptionOrigin`. A class whose
   every Java constructor takes a payload (`QuotaViolationError`,
   `RecordDeserializationError`, ...) cannot be constructed yet.
