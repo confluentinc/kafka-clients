@@ -16,7 +16,7 @@
 // Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`);
 // `cargo xtask check-generated` checks it is up to date.
 
-import type { Serializer } from '../common/serialization/serializer';
+import type { Headers } from '../common/header/headers';
 
 /**
  * A producer's configuration: Java's `ProducerConfig` keys, as a plain object
@@ -170,6 +170,14 @@ type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | n
 
 // A serde config key's value: the function that makes the serializer.
 type SerializerConfig =
-  | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<never>)
+  | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnySerializer)
   | null
   | undefined;
+
+// A serializer of any data: its `data` is left out, so that a configuration
+// typed `ProducerConfigs` binds no type argument of the producer, which
+// infers them only from the functions an object literal holds.
+type AnySerializer = {
+  serialize(options: { topic: string; headers: Headers }): Uint8Array | null | Promise<Uint8Array | null>;
+  close?(): void;
+};

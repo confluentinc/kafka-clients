@@ -31,7 +31,7 @@
 // - Unknown keys pass, and the core lists the ones it does not use.
 // - The producer's own serde keys, `key.serializer` and `value.serializer`,
 //   never reach the core, and neither does a key a serde config function read
-//   (src/internal/serde.ts) that is no producer key of Java's (a
+//   (src/internal/serde.ts) that is no producer key, Java's or the core's (a
 //   `schema.registry.url`), so the core does not list it as unused, as Java's
 //   `originals()` marks it used (root CLAUDE.md, JavaScript Binding
 //   Conventions, Serialization, Q53). A producer key the function read still

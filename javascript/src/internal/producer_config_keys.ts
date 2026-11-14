@@ -13,11 +13,13 @@
 // limitations under the License.
 
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
-// Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`);
+// Java's `ProducerConfig` (with `SslConfigs` / `SaslConfigs`) and the
+// core's `rust/src/producer/producer_config.rs`;
 // `cargo xtask check-generated` checks it is up to date.
 
-// The config keys Java's `ProducerConfig` defines (private): a key a serde
-// config function reads still reaches the core when it is one of them.
+// The producer config keys (private): those Java's `ProducerConfig` defines,
+// then those only the Rust core defines. A key a serde config function
+// reads still reaches the core when it is one of them.
 
 const KEYS: ReadonlySet<string> = new Set([
   'acks',
@@ -140,13 +142,15 @@ const KEYS: ReadonlySet<string> = new Set([
   'transaction.two.phase.commit.enable',
   'transactional.id',
   'value.serializer',
+  // Defined by the Rust core only.
+  'partitioner.type',
 ]);
 
 /**
- * Whether `key` is a producer config key Java's `ProducerConfig` defines.
+ * Whether `key` is a producer config key, Java's or the core's.
  *
  * @param key - the config key
- * @returns true for a key of Java's producer configuration
+ * @returns true for a key of Java's producer configuration or the core's
  */
 export function isProducerConfigKey(key: string): boolean {
   return KEYS.has(key);
