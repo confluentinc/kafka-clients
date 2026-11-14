@@ -12,7 +12,8 @@
     "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "ProducerRecord.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
     "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
-    "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol"
+    "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "src/common/metric_name_map.ts:MetricNameMap": "the map keyed by MetricName that metrics() returns for Java's Map<MetricName, ? extends Metric>: JavaScript has no value equality for map keys (root CLAUDE.md, JavaScript Binding Conventions, Types, as TopicPartitionMap)"
   },
   "javaTargets": {
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",

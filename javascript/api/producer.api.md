@@ -47,6 +47,7 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
     flush(): Promise<void>;
+    metrics(): MetricNameMap<Metric>;
     static readonly NETWORK_THREAD_PREFIX: string;
     partitionsFor(options: {
         topic: string;
@@ -71,6 +72,7 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
     flush(): Promise<void>;
+    metrics(): MetricNameMap<Metric>;
     partitionsFor(options: {
         topic: string;
     }): Promise<PartitionInfo[]>;

@@ -72,7 +72,7 @@ pub(crate) fn header(from: &str) -> String {
 /// The src/ folders whose `index.ts` is hand-written (they also hold
 /// hand-written modules); the generator owns only the marked block there.
 /// `""` is `src/` itself.
-const MIXED_DIRS: &[&str] = &["", "common", "common/config", "producer"];
+const MIXED_DIRS: &[&str] = &["", "common", "common/config", "common/metrics", "producer"];
 
 /// The src/ folders whose `index.ts` is hand-written and which hold no
 /// generated module: their parents' blocks do not export them.

@@ -280,7 +280,7 @@ test-integration-grpc-dotnet-native:
 # arm (the consumer and admin macros do not), and
 # javascript/grpc-server/grpc_server.js registers ProducerService alone.
 #
-# FIVE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
+# THREE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
 # JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
 # __grpc_js, so no other backend loses coverage.
 #
@@ -292,18 +292,11 @@ test-integration-grpc-dotnet-native:
 # REMOVE these three when the JS producer implements transactions (and, for the
 # third, a JS consumer with a ConsumerService in grpc-server/grpc_server.js).
 #
-# The metrics tests. The JS producer has no metrics() yet, so the Metrics RPC is
-# left out. REMOVE test_produce_and_check_metrics and
-# test_metrics_follow_configuration_and_traffic when the JS producer implements
-# metrics() and grpc-server/grpc_server.js serves the Metrics RPC.
-#
-# With all of them gone, remove JS_GRPC_SKIPS (the definition below and its uses in
+# With all three gone, remove JS_GRPC_SKIPS (the definition below and its uses in
 # test-integration-grpc-js and test-integration-grpc-js-native).
 JS_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
 	--skip test_aborted_transaction_records_are_discarded \
-	--skip test_consume_transform_produce_with_offsets \
-	--skip test_produce_and_check_metrics \
-	--skip test_metrics_follow_configuration_and_traffic
+	--skip test_consume_transform_produce_with_offsets
 
 test-integration-grpc-js:
 	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_js \
