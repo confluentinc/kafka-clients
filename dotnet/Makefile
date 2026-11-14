@@ -29,7 +29,7 @@ DOTNET_CONFIG ?= Release
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
 .PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	pack-dotnet package-check-dotnet test-aot-dotnet
+	pack-dotnet package-check-dotnet test-aot-dotnet grpc-native-aot
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -69,6 +69,14 @@ grpc-image-async:
 # missing debug native instead.
 grpc-native:
 	$(DOTNET) build -c Release -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
+
+# The Native AOT build of the same server (GrpcServerAot, Confluent.Kafka.GrpcServer.csproj) into
+# rust/target/grpc-native/dotnet-aot, for the root `test-integration-dotnet-native-aot`: one executable
+# with the native library beside it, which needs no .NET runtime. A Native AOT publish needs the
+# platform's C toolchain, and fails on a trim or AOT warning (TreatWarningsAsErrors). `-c Release` is
+# pinned for the reason given above.
+grpc-native-aot:
+	$(DOTNET) publish -c Release -f net10.0 --use-current-runtime -p:GrpcServerAot=true $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet-aot
 
 # The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
 # server images, then run the `__grpc_dotnet` tests of the Rust harness against

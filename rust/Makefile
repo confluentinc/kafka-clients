@@ -25,6 +25,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
+	test-integration-grpc-dotnet-native-aot \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
 	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -214,6 +215,13 @@ test-integration-grpc-dotnet:
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+
+# The same arms against the Native AOT executable the root `build-grpc-native-dotnet-aot` builds under
+# target/grpc-native/dotnet-aot, which the harness runs without the dotnet host.
+test-integration-grpc-dotnet-native-aot:
+	MULTILANG_BACKEND_MODE=native \
+	MULTILANG_DOTNET_GRPC_SERVER=$(CURDIR)/target/grpc-native/dotnet-aot/Confluent.Kafka.GrpcServer \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
 
 # Performance integration tests. Separated from the functional suites because

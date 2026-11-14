@@ -22,8 +22,9 @@ VENV = . venv/bin/activate
 	test-integration-python-ssl test-integration-python-sasl-ssl \
 	test-integration-c-ssl test-integration-c-sasl-ssl \
 	test-integration-dotnet-ssl test-integration-dotnet-sasl-ssl \
-	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet \
+	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet build-grpc-native-dotnet-aot \
 	test-integration-python-native test-integration-c-native test-integration-dotnet-native \
+	test-integration-dotnet-native-aot \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
@@ -248,6 +249,14 @@ test-integration-c-native: build-grpc-native-c
 
 test-integration-dotnet-native: build-grpc-native-dotnet
 	$(MAKE) -C rust test-integration-grpc-dotnet-native
+
+# The .NET native arm again, against a Native AOT build of the gRPC server and binding (dotnet/'s
+# grpc-native-aot). Besides the .NET 10 SDK it needs the platform's C toolchain.
+build-grpc-native-dotnet-aot: build-rust-all-features
+	$(MAKE) -C dotnet $(ROOTS) grpc-native-aot
+
+test-integration-dotnet-native-aot: build-grpc-native-dotnet-aot
+	$(MAKE) -C rust test-integration-grpc-dotnet-native-aot
 
 # ── Performance integration tests ────────────────────────────────────────
 #
