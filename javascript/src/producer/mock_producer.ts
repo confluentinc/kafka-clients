@@ -157,12 +157,16 @@ function thrownMessage(thrown: unknown): string {
  * `send()`, `flush()`, `partitionsFor()` and `close()` return Promises, and
  * the delivery callbacks run on the JS thread, inside the mock call that
  * completes the record (`send()` with `autoComplete`, `completeNext()`,
- * `errorNext()`, `flush()`), before it returns. `history()` returns the app's
- * own records; the mock holds each until `clear()` or its native client is
+ * `errorNext()`, `flush()`), before it returns, and what a callback throws
+ * comes out of that call, as in Java. `history()` returns the app's own
+ * records; the mock holds each until `clear()` or its native client is
  * released. Like a producer, a mock keeps Node running until `close()`
  * closes it, so close every mock. The mock's cluster is always empty: Java's
  * constructor taking a `Cluster` is left out (Cluster is not translated), so
- * the partitioner is never called, as in Java.
+ * the partitioner is never called and every record goes to partition 0, as
+ * in Java. A callback's throw leaves the record's future completed
+ * *(deviation: Java's leaves it incomplete. Why: the core's mock completes
+ * it. Goes when: the core's mock leaves it incomplete)*.
  */
 export class MockProducer<K, V> implements Producer<K, V> {
   #handle: ProducerHandle;
@@ -175,6 +179,16 @@ export class MockProducer<K, V> implements Producer<K, V> {
   // Settlements waiting for the event-loop turn, or null when none is
   // scheduled: each a settle function, then the value it settles with.
   #deferred: unknown[] | null = null;
+  // The delivery functions of the sends still waiting for their completion.
+  // The addon holds each only weakly, so a closed mock nothing references is
+  // collected and its native mock destroyed, while a completeNext() after
+  // close() still runs the callback, as Java's does. clear() drops them, as
+  // Java's drops the completions.
+  readonly #pending = new Set<unknown>();
+  // What a callback threw inside the completing call (send() with
+  // autoComplete, completeNext(), errorNext(), flush()), which that call
+  // throws, as Java's mock lets it propagate; the first one of the call.
+  #callbackThrown: { readonly error: unknown } | null = null;
 
   /**
    * Create a new mock producer with invented metadata.
@@ -198,8 +212,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @remarks Java's form with a `Cluster` is left out, so the cluster is
    * always empty, as `Cluster.empty()`, and the partitioner is never
    * called, as in Java with an empty cluster. A serializer runs on every
-   * send, with empty headers, and what it returns is not kept, as in Java; a
-   * null one is not run.
+   * send, each with its own fresh empty headers, and what it returns is not
+   * kept, as in Java; a null one is not run.
    */
   constructor(options: {
     /**
@@ -306,15 +320,14 @@ export class MockProducer<K, V> implements Producer<K, V> {
     if (!(record instanceof ProducerRecord)) throw new TypeError('record must be a ProducerRecord');
     const userCallback = checkCallback(SEND_FORMS.value(options, 'callback'));
     if (this.#keySerializer === null && this.#valueSerializer === null) return this.#handOver(record, userCallback);
-    // Java's mock serializes with empty headers, its cluster having no
-    // partition, and keeps the record as it was given. A serializer that
-    // returns a plain value costs no microtask; one that returns a thenable
-    // is awaited.
-    const headers = new Headers();
-    const key: unknown = this.#keySerializer?.serialize({ topic: record.topic, headers, data: record.key });
-    if (isThenable(key)) return this.#sendAwaiting(record, userCallback, headers, key, true);
-    const value: unknown = this.#valueSerializer?.serialize({ topic: record.topic, headers, data: record.value });
-    if (isThenable(value)) return this.#sendAwaiting(record, userCallback, headers, value, false);
+    // Java's mock serializes with fresh empty headers, a new RecordHeaders for
+    // each serializer, its cluster having no partition, and keeps the record
+    // as it was given. A serializer that returns a plain value costs no
+    // microtask; one that returns a thenable is awaited.
+    const key: unknown = this.#keySerializer?.serialize({ topic: record.topic, headers: new Headers(), data: record.key });
+    if (isThenable(key)) return this.#sendAwaiting(record, userCallback, key, true);
+    const value: unknown = this.#valueSerializer?.serialize({ topic: record.topic, headers: new Headers(), data: record.value });
+    if (isThenable(value)) return this.#sendAwaiting(record, userCallback, value, false);
     return this.#handOver(record, userCallback);
   }
 
@@ -324,13 +337,12 @@ export class MockProducer<K, V> implements Producer<K, V> {
   async #sendAwaiting(
     record: ProducerRecord<unknown, unknown>,
     userCallback: Callback | null,
-    headers: Headers,
     pending: PromiseLike<unknown>,
     isKey: boolean,
   ): Promise<KafkaFuture<RecordMetadata>> {
     await pending;
     if (isKey && this.#valueSerializer !== null) {
-      const value: unknown = this.#valueSerializer.serialize({ topic: record.topic, headers, data: record.value });
+      const value: unknown = this.#valueSerializer.serialize({ topic: record.topic, headers: new Headers(), data: record.value });
       if (isThenable(value)) await value;
     }
     return this.#handOver(record, userCallback);
@@ -349,6 +361,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
     });
     let inCall = true;
     const onHandover = (error: unknown, nativeFuture: number | null): void => {
+      // A refused send has no completion: its delivery function goes.
+      if (error !== null) this.#pending.delete(onComplete);
       if (nativeFuture !== null) future.internalSetNative(this.#handle, nativeFuture);
       if (inCall && (this.#fastPathSends++ >= FAST_PATH_YIELD_EVERY || this.#deferred !== null)) {
         this.#deferSettlement(resolve, reject, future, error);
@@ -364,26 +378,52 @@ export class MockProducer<K, V> implements Producer<K, V> {
     // callback first, then the delivery recorded on the future, which
     // completes it (javascript/CLAUDE.md, rules 5 and 6).
     const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined | Promise<string | undefined> => {
-      let failure: string | undefined;
+      this.#pending.delete(onComplete);
       let returned: unknown;
       if (userCallback !== null) {
         try {
           returned = userCallback({ metadata, exception: error });
           if (returned !== undefined) return completeWhenSettled(returned, future, metadata, error);
         } catch (thrown) {
-          failure = thrownMessage(thrown);
+          // Java's mock calls onCompletion with no try: the completing call
+          // throws it (#rethrowCallback), and nothing logs it.
+          this.#callbackThrown ??= { error: thrown };
         }
       }
-      return completeRecord(future, metadata, error, failure);
+      return completeRecord(future, metadata, error, undefined);
     };
-    const { topic, partition, timestamp } = record;
+    this.#pending.add(onComplete);
+    // Java's mock with its empty cluster sends to partition 0 whatever the
+    // record says: the core's mock gets no partition, so it reports 0, and
+    // Java's offsets. history() returns the app's own record.
+    const { topic, timestamp } = record;
+    this.#callbackThrown = null;
     try {
-      native.mockProducerSend(this.#handle, topic, partition ?? -1, timestamp ?? -1n, record, onHandover, onComplete);
+      native.mockProducerSend(this.#handle, topic, -1, timestamp ?? -1n, record, onHandover, onComplete);
+    } catch (thrown) {
+      this.#pending.delete(onComplete);
+      throw thrown;
     } finally {
       inCall = false;
     }
     native.producerPump(this.#handle);
+    const thrown = this.#takeCallbackThrown();
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the user's callback threw, whatever it is (typed unknown by catch)
+    if (thrown !== null) return Promise.reject(thrown.error);
     return accepted;
+  }
+
+  // What a callback threw during the completing call, taken, or null.
+  #takeCallbackThrown(): { readonly error: unknown } | null {
+    const thrown = this.#callbackThrown;
+    this.#callbackThrown = null;
+    return thrown;
+  }
+
+  // completeNext() / errorNext() once the callbacks ran: throws what one threw.
+  #rethrowCallback(): void {
+    const thrown = this.#takeCallbackThrown();
+    if (thrown !== null) throw thrown.error;
   }
 
   // Settles a send's Promise once the event loop has turned, as
@@ -428,9 +468,17 @@ export class MockProducer<K, V> implements Producer<K, V> {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's (typed unknown by catch)
       return Promise.reject(error);
     }
+    this.#callbackThrown = null;
     return new Promise<void>((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-      native.producerFlush(this.#handle, (error) => (error !== null ? reject(error) : resolve()));
+      native.producerFlush(this.#handle, (error) => {
+        // A callback the flush completed threw: Java's flush() throws it.
+        const thrown = this.#takeCallbackThrown();
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built, or what a callback threw (typed unknown)
+        if (thrown !== null) reject(thrown.error);
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
+        else if (error !== null) reject(error);
+        else resolve();
+      });
     });
   }
 
@@ -442,10 +490,13 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @returns resolving to the topic's partitions, a new array
    * @throws `IllegalArgumentError` rejects with it when the given parameters
    *   are not `{topic}`
-   * @throws `TypeError` rejects with it when `topic` is `undefined` or not a
-   *   string
+   * @throws `TypeError` rejects with it when `topic` is null (the FFI's
+   *   "topic cannot be null"), `undefined` or not a string
    *
-   * @remarks The error set with `setPartitionsForException` rejects it as it
+   * @remarks Java's mock answers `[]` for a null topic *(deviation. Why:
+   * the FFI checks its mandatory parameters, and the binding repeats no
+   * precondition. Goes when: the FFI's mock accepts a null topic)*. The
+   * error set with `setPartitionsForException` rejects it as it
    * is.
    */
   partitionsFor(options: {
@@ -621,6 +672,9 @@ export class MockProducer<K, V> implements Producer<K, V> {
   clear(options?: unknown): void {
     CLEAR_FORMS.match(options, arguments.length);
     native.mockProducerClear(this.#handle);
+    // The core's mock dropped every waiting completion: no callback of
+    // theirs can run.
+    this.#pending.clear();
   }
 
   /**
@@ -629,6 +683,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @returns true if there was an uncompleted call to complete
    * @throws `IllegalArgumentError` when it is given an argument
    * @throws `TypeError` when it is given `undefined`
+   * @throws what the record's callback threw, as Java's mock lets it
+   *   propagate
    *
    * @remarks The record's callback runs inside the call, and its future is
    * done when it returns.
@@ -636,8 +692,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
   completeNext(): boolean;
   completeNext(options?: unknown): boolean {
     COMPLETE_NEXT_FORMS.match(options, arguments.length);
+    this.#callbackThrown = null;
     const completed = native.mockProducerCompleteNext(this.#handle, null);
     native.producerPump(this.#handle);
+    this.#rethrowCallback();
     return completed;
   }
 
@@ -649,6 +707,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `IllegalArgumentError` when the given parameters are not `{e}`
    * @throws `TypeError` when `e` is neither an `Error` nor null, or
    *   `undefined`
+   * @throws what the record's callback threw, as Java's mock lets it
+   *   propagate
    *
    * @remarks The record's callback gets the very same error, and its future's
    * `get()` rejects with an `ExecutionError` whose `cause` it is. A null `e`
@@ -670,8 +730,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
   errorNext(options: unknown): boolean {
     ERROR_NEXT_FORMS.match(options, arguments.length);
     const e = checkError(ERROR_NEXT_FORMS.value(options, 'e'), 'e');
+    this.#callbackThrown = null;
     const completed = native.mockProducerCompleteNext(this.#handle, e);
     native.producerPump(this.#handle);
+    this.#rethrowCallback();
     return completed;
   }
 

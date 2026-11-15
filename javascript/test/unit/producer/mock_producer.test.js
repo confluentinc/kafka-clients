@@ -247,7 +247,7 @@ test("history() returns the app's own records, which clear() drops, and the mock
   await producer.close();
 });
 
-test('the serializers run on every send, with empty headers, and the record keeps its own headers writable', async () => {
+test('the serializers run on every send, each with fresh empty headers, and the record keeps its own headers writable', async () => {
   const seen = [];
   const serializer = (side) => ({
     serialize: async ({ topic: t, headers, data }) => {
@@ -259,9 +259,11 @@ test('the serializers run on every send, with empty headers, and the record keep
   const producer = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: serializer('key'), valueSerializer: serializer('value') });
   const record = new ProducerRecord({ topic, partition: null, key: 'k', value: 'v', headers: [] });
   await producer.send(record);
+  // Java's mock gives each serializer a new RecordHeaders: the value
+  // serializer does not see the header the key serializer added.
   assert.deepEqual(seen, [
     ['key', topic, 'k', 0],
-    ['value', topic, 'v', 1],
+    ['value', topic, 'v', 0],
   ]);
   // Java's mock serializes with fresh headers and does not seal the record's.
   assert.equal(record.headers.toArray().length, 0);
@@ -333,14 +335,192 @@ test('a callback runs inside the call that completes its record, and metrics() i
   assert.ok(ran, 'the callback of an auto-completed send runs inside send()');
   await sending;
   assert.equal(producer.metrics().size(), 0);
-  // A callback that throws is logged by the core; the future completes all the same.
-  const future = await producer.send({
-    record: record2,
-    callback: () => {
-      throw new Error('callback');
-    },
-  });
-  assert.equal((await future.get()).offset, 1n);
   await producer[Symbol.asyncDispose]();
   assert.ok(producer.closed());
+});
+
+test("a callback that throws makes the completing call throw it, as Java's mock lets it propagate", async () => {
+  const thrown = new Error('callback');
+  const throwing = () => {
+    throw thrown;
+  };
+  // send() with autoComplete rejects with it.
+  const auto = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null });
+  await assert.rejects(auto.send({ record: record1, callback: throwing }), (e) => e === thrown);
+  // The record was sent: Java's history has it.
+  assert.equal(auto.history().length, 1);
+  await auto.send(record2);
+  await auto.close();
+  // completeNext() and errorNext() throw it; flush() rejects with it.
+  const manual = new MockProducer();
+  const futures = [];
+  for (let i = 0; i < 3; i++) futures.push(await manual.send({ record: record1, callback: throwing }));
+  assert.throws(() => manual.completeNext(), (e) => e === thrown);
+  assert.throws(() => manual.errorNext(new KafkaError('next')), (e) => e === thrown);
+  await assert.rejects(manual.flush(), (e) => e === thrown);
+  // The calls after it are not affected.
+  await manual.send(record2);
+  assert.equal(manual.completeNext(), true);
+  // The core's mock completes the future all the same (a deviation, the mock
+  // being the core's: Java's leaves it incomplete).
+  assert.equal((await futures[0].get()).offset, 0n);
+  await manual.close();
+});
+
+test("Java's empty-cluster mock sends to partition 0 whatever the record says, with its offsets", async () => {
+  const producer = new MockProducer({ autoComplete: false, partitioner: null, keySerializer: null, valueSerializer: null });
+  const explicit = new ProducerRecord({ topic, partition: 3, key: null, value: Buffer.from('a') });
+  const first = await producer.send(explicit);
+  const second = await producer.send(new ProducerRecord({ topic, value: Buffer.from('b') }));
+  let errorPartition = null;
+  await producer.send({
+    record: new ProducerRecord({ topic, partition: 5, key: null, value: Buffer.from('c') }),
+    callback: ({ metadata }) => (errorPartition = metadata.partition),
+  });
+  assert.equal(producer.completeNext(), true);
+  assert.equal(producer.completeNext(), true);
+  assert.equal(producer.errorNext(new KafkaError('e')), true);
+  const [m1, m2] = [await first.get(), await second.get()];
+  assert.deepEqual([m1.partition, m1.offset, m2.partition, m2.offset], [0, 0n, 0, 1n]);
+  assert.equal(errorPartition, 0);
+  // history() is the app's own record, its partition as given.
+  assert.equal(producer.history()[0], explicit);
+  assert.equal(producer.history()[0].partition, 3);
+  await producer.close();
+});
+
+test("a refused send is not in history() and keeps nothing: its callback never runs", async () => {
+  const producer = new MockProducer();
+  const error = new KafkaError('refused');
+  producer.setSendException(error);
+  let ran = false;
+  await assert.rejects(producer.send({ record: record1, callback: () => (ran = true) }), (e) => e === error);
+  assert.equal(ran, false);
+  assert.deepEqual(producer.history(), []);
+  await producer.close();
+});
+
+function runNode(script, timeout = 60000) {
+  const { spawnSync } = require('node:child_process');
+  const path = require('node:path');
+  return spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', script], {
+    cwd: path.join(__dirname, '..', '..', '..'),
+    encoding: 'utf8',
+    timeout,
+  });
+}
+
+// A closed mock nothing references is collected and its native mock
+// destroyed (its threads gone), whatever sends were still waiting at its
+// close or dropped by clear(): the addon holds a waiting send's delivery
+// function weakly, the mock strongly (native/producer.c, SendCtx.mock_pending).
+test('a closed mock is destroyed when collected, a send pending at close() or dropped by clear() included', { skip: !['linux', 'darwin'].includes(process.platform) }, () => {
+  const r = runNode(`
+    const { execSync } = require('node:child_process');
+    const fs = require('node:fs');
+    const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const threads = () =>
+      process.platform === 'linux'
+        ? fs.readdirSync('/proc/self/task').length
+        : execSync('ps -M -p ' + process.pid).toString().trim().split('\\n').length - 1;
+    const collected = [];
+    const registry = new FinalizationRegistry((name) => collected.push(name));
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const record = () => new ProducerRecord({ topic: 't', value: Buffer.from('v') });
+    const CASES = {
+      'pending at close': async (m) => {
+        await m.send({ record: record(), callback: () => {} });
+        await m.close();
+      },
+      'dropped by clear': async (m) => {
+        await m.send({ record: record(), callback: () => {} });
+        await m.send(record());
+        m.clear();
+        await m.close();
+      },
+    };
+    async function one(name, run) {
+      const m = new MockProducer();
+      registry.register(m, name);
+      await run(m);
+    }
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      await one('warm-up', async (m) => m.close());
+      await settle();
+      for (const [name, run] of Object.entries(CASES)) {
+        const before = threads();
+        for (let i = 0; i < 5; i++) await one(name, run);
+        await settle();
+        console.log(name, collected.filter((c) => c === name).length, threads() - before);
+      }
+      // The constraint: a completeNext() after close() still runs the callback, as Java's does.
+      const m = new MockProducer();
+      let ran = false;
+      await m.send({ record: record(), callback: () => (ran = true) });
+      await m.close();
+      global.gc();
+      console.log('completeNext after close', m.completeNext(), ran);
+      clearInterval(hold);
+    })();
+  `, 120000);
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n');
+  assert.equal(lines[2], 'completeNext after close true true', r.stdout);
+  const counts = lines.slice(0, 2).map((l) => /^(.*) (\d+) (-?\d+)$/.exec(l));
+  assert.deepEqual(counts.map((m) => m && [m[1], m[2]]), [['pending at close', '5'], ['dropped by clear', '5']], r.stdout);
+  // About 18 threads per live mock: five leaked mocks would leave about 90.
+  for (const m of counts) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
+});
+
+// An open mock keeps neither the records it refused nor the errors it was
+// given once the core is done with them (native/producer.c,
+// send_on_handover and injected_errors_sweep).
+test('an open mock releases a refused record at once, and an injected error once the core dropped it', () => {
+  const r = runNode(`
+    const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    const collected = { record: 0, error: 0 };
+    const registry = new FinalizationRegistry((what) => collected[what]++);
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    // In functions of their own, so no frame keeps the last value.
+    async function refuse(m) {
+      const record = new ProducerRecord({ topic: 't', value: Buffer.alloc(16) });
+      registry.register(record, 'record');
+      await m.send(record).catch(() => {});
+    }
+    async function inject(m, i) {
+      await m.send(new ProducerRecord({ topic: 't', value: Buffer.alloc(16) }));
+      const error = new KafkaError('next ' + i);
+      registry.register(error, 'error');
+      m.errorNext(error);
+    }
+    (async () => {
+      const m = new MockProducer();
+      m.setSendException(new KafkaError('refused'));
+      for (let i = 0; i < 20; i++) await refuse(m);
+      m.setSendException(null);
+      for (let i = 0; i < 20; i++) await inject(m, i);
+      // A mock call sweeps the errors the core no longer holds.
+      m.history();
+      m.clear();
+      await settle();
+      console.log(collected.record, collected.error);
+      await m.close();
+    })();
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  const [records, errors] = r.stdout.trim().split(' ').map(Number);
+  assert.equal(records, 20, r.stdout);
+  assert.equal(errors, 20, r.stdout);
 });

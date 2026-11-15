@@ -657,17 +657,41 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   which the FFI's mock keeps without reading, and the addon holds the record
   by a reference from the send until `clear()` (for a record a hand-over
   took) or the destroy (`native/producer.c`, `MockRecord`), so `history()`
-  returns the app's own records; no header crosses, the record keeping its
-  own, writable, as Java's mock leaves them. The serializers run in
-  JavaScript on every send, key then value, with fresh empty `Headers` (Java
-  serializes so when the cluster has no partition), awaited when they return
+  returns the app's own records; a record the mock refused is released at
+  its hand-over, with its send's context, as the core's mock refuses before
+  it keeps the record or makes a completion. No header crosses, the record
+  keeping its own, writable, as Java's mock leaves them, and no partition:
+  the core's mock reports partition 0 and Java's offsets whatever the record
+  says, as Java's empty-cluster mock sends to partition 0. A waiting send's
+  delivery function is held by the `MockProducer` (`#pending`) and only
+  weakly by the addon, so a closed mock nothing references is collected and
+  destroyed, its sends pending at the close or dropped by `clear()` freed
+  then (`Producer.mock_pending`), while a `completeNext()` after `close()`
+  still runs the callback, as Java's does; an error given to the mock is
+  released once the core holds no copy of it (`injected_errors_sweep`, run
+  by every mock call). The serializers run in
+  JavaScript on every send, key then value, each with its own fresh empty
+  `Headers` (Java's `new RecordHeaders()` per call when the cluster has no
+  partition), awaited when they return
   a thenable, and what they return is not kept; a null one is not run, as
   the core's mock skips it *(deviation: Java's dereferences it. Why: the
   mock is the core's)*. The serializers run before the core's mock checks
   that it is closed, fenced or has a send error, which Java checks first
   *(deviation, as for `KafkaProducer`)*. After each send, `completeNext()`
   and `errorNext()` the mock runs the producer's pump, so a callback runs
-  inside the call that completed its record, as Java's mock runs it. Java's
+  inside the call that completed its record, as Java's mock runs it, and
+  what a callback throws comes out of that call, as Java's `onCompletion`
+  runs with no `try`: `completeNext()` and `errorNext()` throw it, `send()`
+  (with `autoComplete`) and `flush()` reject with it, and nothing logs it.
+  The record's future completes all the same *(deviation: Java's mock leaves
+  it incomplete. Why: the core's mock completes it. Goes when: the core's
+  mock leaves it incomplete)*; a callback's Promise that rejects is logged by
+  the core, as the producer's, since it settles after the call returned.
+  `partitionsFor(null)` rejects with the FFI's `TypeError` "topic cannot be
+  null" *(deviation: Java's mock answers `[]`, as its empty cluster has no
+  topic. Why: the FFI checks its mandatory parameters, and the binding
+  repeats no precondition, Q35. Goes when: the FFI's mock accepts a null
+  topic)*. Java's
   public error fields are setters only (plan §5 item 2, Python's
   `set_send_exception`): `setSendException`, `setFlushException`,
   `setPartitionsForException`, `setCloseException`, over
