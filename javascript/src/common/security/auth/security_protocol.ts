@@ -151,7 +151,10 @@ export class SecurityProtocol {
    *
    * @param id - the protocol's id
    * @returns the protocol, or `null` when no protocol has that id
-   * @throws `TypeError` when the id is not a number
+   * @throws `IllegalArgumentError` when the given parameters are not `{id}`
+   *   (a bare value that is not a number included)
+   * @throws `TypeError` when the id is `undefined`, or `{ id }` holds a value
+   *   that is not a number
    */
   static forId(id: number): SecurityProtocol | null;
   /**
@@ -159,6 +162,8 @@ export class SecurityProtocol {
    *
    * @param options - the protocol's id
    * @returns the protocol, or `null`
+   * @throws `IllegalArgumentError` when the given parameters are not `{id}`
+   * @throws `TypeError` when `{ id }` holds a value that is not a number
    */
   static forId(options: {
     /** The protocol's id. */

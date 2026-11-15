@@ -92,6 +92,33 @@ test('overload signatures, constructor overloads, abstract and interface methods
   ]);
 });
 
+test('a declaration that returns no value, or an interface setter, needs no @returns', () => {
+  const source = [
+    'export abstract class A {', // 1
+    '  /** Fails. */', // 2
+    '  abstract fail(): never;', // 3
+    '  /** Nothing. */', // 4
+    '  abstract nothing(): undefined;', // 5
+    '  /** Later. */', // 6
+    '  abstract later(): Promise<undefined>;', // 7
+    '  /** Never settles. */', // 8
+    '  abstract hang(): Promise<never>;', // 9
+    '}', // 10
+    'export interface B {', // 11
+    '  /**', // 12
+    '   * Sets.', // 13
+    '   *', // 14
+    '   * @param v - the value', // 15
+    '   */', // 16
+    '  set value(v: number);', // 17
+    '  /** Reads. */', // 18
+    '  read(): number | undefined;', // 19
+    '}', // 20
+  ].join('\n');
+  // A value that may be undefined is still a value.
+  assert.deepEqual(findings(source), ['18 jsdoc/require-returns: Missing JSDoc @returns declaration.']);
+});
+
 test('a void or Promise<void> declaration needs no @returns, an options object one @param, a @param its hyphen, and a member no doc comment', () => {
   const source = [
     'export abstract class A {', // 1
