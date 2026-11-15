@@ -39,7 +39,13 @@ const HAS_FORMS = new JavaForms('has', [['key']], { bareTypes: { key: isKey } })
 const DELETE_FORMS = new JavaForms('delete', [['key']], { bareTypes: { key: isKey } });
 const SIZE_FORMS = new JavaForms('size', [[]], { reader: true });
 
-/** `value`, which is never `undefined`: null is Java's null. */
+/**
+ * `value`, which is never `undefined`: null is Java's null.
+ *
+ * @param value the value given
+ * @param what the argument's name, for the error
+ * @returns the value
+ */
 function valueOf<V>(value: unknown, what: string): V {
   if (value === undefined) throw new TypeError(`${what} must not be undefined: pass null for Java's null`);
   return value as V;
@@ -48,7 +54,12 @@ function valueOf<V>(value: unknown, what: string): V {
 /** The string key of a null key: no TopicPartition's key (TopicPartition.internalKey). */
 const NULL_KEY = 'null';
 
-/** The key of `tp`, which must be a TopicPartition or null. */
+/**
+ * The key of `tp`, which must be a TopicPartition or null.
+ *
+ * @param tp the partition given
+ * @returns its key
+ */
 function keyOf(tp: unknown): string {
   if (tp === null) return NULL_KEY;
   if (!(tp instanceof TopicPartition)) throw new TypeError('key must be a TopicPartition or null');

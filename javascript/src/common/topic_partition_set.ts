@@ -35,7 +35,12 @@ const SIZE_FORMS = new JavaForms('size', [[]], { reader: true });
 /** The string key of a null member: no TopicPartition's key (TopicPartition.internalKey). */
 const NULL_KEY = 'null';
 
-/** The key of `tp`, which must be a TopicPartition or null. */
+/**
+ * The key of `tp`, which must be a TopicPartition or null.
+ *
+ * @param tp the partition given
+ * @returns its key
+ */
 function keyOf(tp: unknown): string {
   if (tp === null) return NULL_KEY;
   if (!(tp instanceof TopicPartition)) throw new TypeError('value must be a TopicPartition or null');

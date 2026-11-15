@@ -56,6 +56,9 @@ export function isTemporalDuration(value: unknown): value is TemporalDurationLik
 /**
  * Whether `value` is a timeout as a bare value takes it: a number, a
  * `Temporal.Duration` or `null` (the form matcher's test, src/internal/args.ts).
+ *
+ * @param value the value to test
+ * @returns whether it is a timeout or null
  */
 export function isDurationOrNull(value: unknown): boolean {
   return value === null || typeof value === 'number' || isTemporalDuration(value);

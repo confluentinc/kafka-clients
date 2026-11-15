@@ -143,6 +143,8 @@ export class TopicPartition {
    * partition is an integer, so two topic partitions never share a key.
    * Called by `TopicPartitionMap` and `TopicPartitionSet`.
    *
+   * @returns the key of this partition in a `TopicPartitionMap`
+   *
    * @internal
    */
   internalKey(): string {

@@ -36,13 +36,21 @@ class ReadOnlySet<T> extends Set<T> {
     for (const item of items) Set.prototype.add.call(this, item);
   }
 
-  /** Throws `UnsupportedOperationError`: the set is read-only. */
+  /**
+   * Throws `UnsupportedOperationError`: the set is read-only.
+   *
+   * @param value the value not added
+   */
   override add(value: T): this {
     void value;
     throw create(UnsupportedOperationError, '');
   }
 
-  /** Throws `UnsupportedOperationError`: the set is read-only. */
+  /**
+   * Throws `UnsupportedOperationError`: the set is read-only.
+   *
+   * @param value the value not deleted
+   */
   override delete(value: T): boolean {
     void value;
     throw create(UnsupportedOperationError, '');

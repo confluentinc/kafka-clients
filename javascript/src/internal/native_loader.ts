@@ -55,6 +55,10 @@ export interface ProcessInfo {
  * network section excluded, so that no DNS lookup can block it (as Rollup's
  * loader does); `excludeNetwork` is restored afterwards. Without a report it
  * is musl when a musl dynamic loader (/lib/ld-musl-*) exists, else glibc.
+ *
+ * @param proc the process to read
+ * @param libDir lists /lib
+ * @returns the C library
  */
 export function linuxLibc(proc: ProcessInfo, libDir: () => string[] = () => readdirSync('/lib')): 'gnu' | 'musl' {
   const report = proc.report;
@@ -86,13 +90,23 @@ export function linuxLibc(proc: ProcessInfo, libDir: () => string[] = () => read
 /**
  * The platform key of this machine: `<platform>-<arch>`, plus `-gnu` or
  * `-musl` on Linux (`linux-x64-gnu`, `darwin-arm64`, `win32-x64`).
+ *
+ * @param proc the process to read
+ * @param libc finds the C library on Linux
+ * @returns the platform key
  */
 export function platformKey(proc: ProcessInfo, libc: () => 'gnu' | 'musl' = () => linuxLibc(proc)): string {
   const base = `${proc.platform}-${proc.arch}`;
   return proc.platform === 'linux' ? `${base}-${libc()}` : base;
 }
 
-/** The candidates, in order: the platform package's addon, then the development build. */
+/**
+ * The candidates, in order: the platform package's addon, then the development build.
+ *
+ * @param key the platform key
+ * @param devBuildDir the development build's directory
+ * @returns the paths to try
+ */
 export function addonCandidates(key: string, devBuildDir: string): string[] {
   return [`${PLATFORM_PACKAGE_PREFIX}${key}/${ADDON_FILE}`, join(devBuildDir, 'native', 'build', 'Release', ADDON_FILE)];
 }
@@ -110,6 +124,11 @@ export interface LoadedAddon {
  * install, a lockfile made on another OS, or a platform with no package), the
  * supported keys and both remedies, caused by the AggregateError of each
  * candidate's failure.
+ *
+ * @param load loads a candidate
+ * @param key the platform key
+ * @param devBuildDir the development build's directory
+ * @returns the addon and its path
  */
 export function loadAddon(load: (id: string) => unknown, key: string, devBuildDir: string): LoadedAddon {
   const failures: unknown[] = [];

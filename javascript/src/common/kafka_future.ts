@@ -132,7 +132,12 @@ let draining = false;
 // A drain that grew the queue past this many slots gives the storage back.
 const KEPT_SLOTS = 1024;
 
-/** `String(value)` that never throws (`Object.create(null)`, a throwing `toString`). */
+/**
+ * `String(value)` that never throws (`Object.create(null)`, a throwing `toString`).
+ *
+ * @param value the value to print
+ * @returns its text
+ */
 function text(value: unknown): string {
   try {
     return String(value);
@@ -148,6 +153,9 @@ function text(value: unknown): string {
 /**
  * Whether a thrown value is a `CancellationError`: false when its class
  * cannot be read (a revoked Proxy, a `getPrototypeOf` trap that throws).
+ *
+ * @param value the thrown value
+ * @returns whether it is a `CancellationError`
  */
 function isCancellation(value: unknown): boolean {
   try {
@@ -161,12 +169,20 @@ function isCancellation(value: unknown): boolean {
  * The message of an `ExecutionError` around `cause`, as its `(cause)` form
  * gives it: `''` for `null` (Java's null cause) and `undefined`, else its
  * `String()`, which here never throws.
+ *
+ * @param cause the cause given
+ * @returns its text
  */
 function causeText(cause: unknown): string {
   return cause === null || cause === undefined ? '' : text(cause);
 }
 
-/** Whether `state` is a cancellation, of either kind. */
+/**
+ * Whether `state` is a cancellation, of either kind.
+ *
+ * @param state the future's state
+ * @returns whether it is a cancellation
+ */
 function cancelled(state: number): boolean {
   return state >= CANCELLED;
 }
@@ -195,7 +211,12 @@ const IS_CANCELLED_FORMS = new JavaForms('isCancelled', [[]], { reader: true });
 const COMPLETED_WITH_ERROR_FORMS = new JavaForms('isCompletedExceptionally', [[]], { reader: true });
 const IS_DONE_FORMS = new JavaForms('isDone', [[]], { reader: true });
 
-/** The JavaScript type of a value, as an argument error names it. */
+/**
+ * The JavaScript type of a value, as an argument error names it.
+ *
+ * @param value the value to name
+ * @returns the name of its type
+ */
 function kind(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'an array';
@@ -205,6 +226,11 @@ function kind(value: unknown): string {
 /**
  * A function parameter: Java dereferences it when the source completes, so a
  * `null` is refused at the call (`TypeError`), as is a non-function.
+ *
+ * @param value the value given
+ * @param name the parameter's name, for the error
+ * @param shape the function's signature, for the error
+ * @returns the function
  */
 function checkFunction(value: unknown, name: string, shape: string): (...args: never[]) => unknown {
   if (value === null) throw new TypeError(`${name} must not be null`);
@@ -625,6 +651,9 @@ export abstract class KafkaFuture<T> {
    * cancelled) when `record` is true, else Java's `KafkaFutureImpl`. Called
    * by `KafkaProducer` and the tests.
    *
+   * @param record whether the future is a record's, completed by its delivery
+   * @returns a new pending future
+   *
    * @internal
    */
   static internalCreate<T>(record: boolean): KafkaFuture<T> {
@@ -794,6 +823,9 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
    * `allOf`'s future over `sources`, checked by `KafkaFuture.allOf`. A
    * source of another class (a caller's own subclass) is read through its
    * `whenComplete`.
+   *
+   * @param futures the futures to wait for
+   * @returns a future completed once all of them are
    *
    * @internal
    */
@@ -1045,14 +1077,25 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   }
 
   // Java's complete / completeExceptionally.
-  /** @internal */
+  /**
+   * @param value the value to complete with
+   * @param error the error to complete with, or undefined for none
+   * @returns whether this call completed the future
+   *
+   * @internal
+   */
   override internalComplete(value: T, error: unknown): boolean {
     if (error === null) return this.#settle(SUCCEEDED, value, false);
     return this.#completeWithError(error, false);
   }
 
   // The record's native future.
-  /** @internal */
+  /**
+   * @param producer the native producer that owns the record's future
+   * @param slot the record's slot in that producer's table
+   *
+   * @internal
+   */
   override internalSetNative(producer: ProducerHandle, slot: number): void {
     // A delivery recorded first: nothing will wait natively.
     if (this.#state !== PENDING) return;
@@ -1061,7 +1104,12 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   }
 
   // The record's delivery, as its callback saw it.
-  /** @internal */
+  /**
+   * @param value the record's metadata
+   * @param error the delivery's error, or undefined for none
+   *
+   * @internal
+   */
   override internalSetDelivery(value: T, error: unknown): void {
     // JavaScript reads the native future no more: the addon may destroy it.
     this.#native = null;

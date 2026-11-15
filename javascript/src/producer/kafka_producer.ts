@@ -93,7 +93,12 @@ const PARTITIONS_FOR_FORMS = new JavaForms('partitionsFor', [['topic']], {
   bareTypes: { topic: (value) => value === null || typeof value === 'string' },
 });
 
-/** The native layer's node fields as a Node, Java's five-parameter constructor. */
+/**
+ * The native layer's node fields as a Node, Java's five-parameter constructor.
+ *
+ * @param fields the node's fields, or null
+ * @returns the node, or null
+ */
 function nodeOf(fields: { id: number; host: string | null; port: number; rack: string | null; isFenced: boolean } | null): Node | null {
   return fields === null ? null : new Node(fields);
 }
@@ -123,12 +128,22 @@ const PUMP_EVERY = 64;
 // KafkaException("Failed to construct kafka producer", t).
 const CONSTRUCTION_FAILED = 'Failed to construct kafka producer';
 
-/** Whether `error` is the construction failure Java's constructor throws from its catch. */
+/**
+ * Whether `error` is the construction failure Java's constructor throws from its catch.
+ *
+ * @param error the error thrown
+ * @returns whether it is the construction failure
+ */
 function isConstructionFailure(error: unknown): boolean {
   return error instanceof KafkaError && error.constructor === KafkaError && error.message === CONSTRUCTION_FAILED;
 }
 
-/** The callback `send` was given, or null; throws a TypeError for a non-function. */
+/**
+ * The callback `send` was given, or null; throws a TypeError for a non-function.
+ *
+ * @param callback the callback given
+ * @returns the callback, or null
+ */
 function checkCallback(callback: unknown): Callback | null {
   if (callback === undefined || callback === null) return null;
   if (typeof callback !== 'function') throw new TypeError('callback must be a function ({ metadata, exception }) => void');
@@ -140,6 +155,12 @@ function checkCallback(callback: unknown): Callback | null {
  * completes it (Java completes the future after onCompletion returned), and
  * gives back `failure`, the text of what the callback threw, for the core to
  * log.
+ *
+ * @param future the record's future
+ * @param metadata the record's metadata
+ * @param error the delivery's error, or null
+ * @param failure the text of what the callback threw, or undefined
+ * @returns `failure`
  */
 function completeRecord(
   future: KafkaFuture<RecordMetadata>,
@@ -156,6 +177,12 @@ function completeRecord(
  * delivery recorded once it settled: resolving to undefined, or to the text of
  * the rejection, which the producer reports as a throw. It never rejects (a
  * `then` getter that throws is a rejection too).
+ *
+ * @param returned what the callback returned
+ * @param future the record's future
+ * @param metadata the record's metadata
+ * @param error the delivery's error, or null
+ * @returns a Promise of the text of the rejection, or of undefined
  */
 function completeWhenSettled(
   returned: unknown,
@@ -174,6 +201,9 @@ function completeWhenSettled(
  * onCompletion). It never throws, whatever was thrown (a revoked Proxy, an
  * Error whose `name` or `message` getter throws), so the record's future is
  * always completed.
+ *
+ * @param thrown the thrown value
+ * @returns its text
  */
 function thrownMessage(thrown: unknown): string {
   try {

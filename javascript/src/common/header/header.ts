@@ -38,6 +38,9 @@ const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 /**
  * The checked key of a header: Java's `RecordHeader` refuses a null key with
  * a `NullPointerException`, a `TypeError` here.
+ *
+ * @param key the key given
+ * @returns the key, a string
  */
 function checkKey(key: unknown): string {
   if (key === null) throw new TypeError('Null header keys are not permitted');
@@ -51,6 +54,9 @@ function checkKey(key: unknown): string {
  * `Buffer`, root CLAUDE.md, JavaScript Binding Conventions, Types). A string
  * is refused, since Java's and Python's header values are bytes: encode it
  * first.
+ *
+ * @param value the value given
+ * @returns the value as a `Buffer` over the same memory, or null
  */
 function checkValue(value: unknown): Buffer | null {
   if (value === null) return null;
@@ -126,6 +132,9 @@ export class Header {
    * The key of `header`, read from its private field: a method reassigned on
    * the instance from plain JavaScript is never called. Called by `Headers`.
    *
+   * @param header the header to read
+   * @returns its key
+   *
    * @internal
    */
   static internalKeyOf(header: Header): string {
@@ -134,6 +143,9 @@ export class Header {
 
   /**
    * The value of `header`, read from its private field. Called at send.
+   *
+   * @param header the header to read
+   * @returns its value, or null
    *
    * @internal
    */

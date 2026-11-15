@@ -31,7 +31,12 @@ const GET_FORMS = new JavaForms('get', [['key']], { bareTypes: { key: isMetricNa
 const HAS_FORMS = new JavaForms('has', [['key']], { bareTypes: { key: isMetricName } });
 const SIZE_FORMS = new JavaForms('size', [[]], { reader: true });
 
-/** The key of `name`, which must be a MetricName. */
+/**
+ * The key of `name`, which must be a MetricName.
+ *
+ * @param name the name given
+ * @returns its key
+ */
 function keyOf(name: unknown): string {
   if (!(name instanceof MetricName)) throw new TypeError('key must be a MetricName');
   return name.internalKey();

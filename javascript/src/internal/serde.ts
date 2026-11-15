@@ -29,6 +29,10 @@ import { SerializerDefaults } from './serializer_defaults';
  * null for Java's null (or one not given): the bytes the record holds then
  * cross as they are.
  *
+ * @param value the serializer given, or null
+ * @param name the argument's name, for the error
+ * @returns the serializer, or null
+ *
  * @throws `IllegalArgumentError` for a function that is no serializer, the
  *   factory rather than what it returns (Python's hint)
  * @throws `TypeError` for any other value that is no serializer
@@ -48,7 +52,12 @@ export function checkSerializer(value: unknown, name: string): Serializer<unknow
   return value as Serializer<unknown>;
 }
 
-/** Whether `value` is a class, which is no serde config function. */
+/**
+ * Whether `value` is a class, which is no serde config function.
+ *
+ * @param value the function to test
+ * @returns whether it is a class
+ */
 function isClass(value: (...args: never[]) => unknown): boolean {
   try {
     return /^class[\s{]/.test(Function.prototype.toString.call(value));
@@ -57,7 +66,12 @@ function isClass(value: (...args: never[]) => unknown): boolean {
   }
 }
 
-/** Whether `value` is an object or a function with a `serialize` method, and a `close` method or none. */
+/**
+ * Whether `value` is an object or a function with a `serialize` method, and a `close` method or none.
+ *
+ * @param value the value to test
+ * @returns whether it is a serializer
+ */
 function isSerializer(value: unknown): value is Serializer<unknown> {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
   const { serialize, close } = value as { serialize?: unknown; close?: unknown };
@@ -77,6 +91,11 @@ function isSerializer(value: unknown): value is Serializer<unknown> {
  * used. The configuration is the user's, without Java's computed
  * `client.id`, and the function runs before the core checks it
  * *(deviation: the core doesn't exist yet; javascript/CLAUDE.md)*.
+ *
+ * @param configs the producer's configuration
+ * @param key the serde config key
+ * @param read collects the keys the function reads
+ * @returns the serializer, or null
  *
  * @throws `ConfigError` when the value is a class name (a string), a
  *   serializer object, a class or any other value that is no function, or
@@ -129,7 +148,12 @@ export function configuredSerializer(
   return out;
 }
 
-/** Whether `value` is a thenable, which the producer awaits. */
+/**
+ * Whether `value` is a thenable, which the producer awaits.
+ *
+ * @param value the value to test
+ * @returns whether it is a thenable
+ */
 export function isThenable(value: unknown): value is PromiseLike<unknown> {
   return (
     value !== null &&
@@ -143,6 +167,10 @@ export function isThenable(value: unknown): value is PromiseLike<unknown> {
  * until the hand-over, like the app's bytes): a `Uint8Array` (a `Buffer` is
  * one) or null.
  *
+ * @param out what the serializer returned
+ * @param name the serializer's name, for the error
+ * @returns the bytes, or null
+ *
  * @throws `TypeError` for any other value
  */
 export function serializedBytes(out: unknown, name: string): Uint8Array | null {
@@ -155,6 +183,9 @@ export function serializedBytes(out: unknown, name: string): Uint8Array | null {
  * serializer without `close()` is closed by doing nothing, and what one
  * throws, or the rejection of a Promise it returns, goes to
  * `process.emitWarning`, never to the caller.
+ *
+ * @param serializer the serializer, or null
+ * @param name the serializer's name, for the warning
  */
 export function closeSerializer(serializer: Serializer<unknown> | null, name: string): void {
   if (serializer === null) return;
@@ -173,7 +204,12 @@ export function closeSerializer(serializer: Serializer<unknown> | null, name: st
   }
 }
 
-/** The text of a thrown value; it never throws. */
+/**
+ * The text of a thrown value; it never throws.
+ *
+ * @param thrown the thrown value
+ * @returns its text
+ */
 function describe(thrown: unknown): string {
   try {
     if (thrown instanceof Error) return `${String(thrown.name)}: ${String(thrown.message)}`;
