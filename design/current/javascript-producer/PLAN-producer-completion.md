@@ -110,8 +110,10 @@ Phase A's send path (zero copy, no closed state, frozen records).
 
 The rules say "Code is generated wherever it can be". "Each Java class is one **generated** snake_case file",
 `check-generated` covers "the form tables", and Q4 adds generated C wrappers with their TypeScript types. Today
-only the errors, the config constants and `config_types.ts` are generated. The class modules, form tables, C
-wrappers and `native_types.ts` are hand-written.
+only the errors (with `src/internal/error_registry.ts` and `native/error_payload.c`, which reads an error's payload),
+the config constants and the producer's configuration keys (`src/producer/producer_configs.ts` and
+`src/internal/producer_config_keys.ts`) are generated. The class modules, form tables, C wrappers and
+`native_types.ts` are hand-written.
 
 - **C1 (L):** a design note, then an xtask generator for the addon's C wrappers and
   `src/internal/native_types.ts`. Branded handle types. A test that the addon's exports equal the declared
