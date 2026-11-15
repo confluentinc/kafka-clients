@@ -1409,7 +1409,8 @@ The rules, each named in its finding:
 - The tests run on Jest (root conventions, Tests, Q66; `jest.config.cjs`),
   one project per Makefile target (`static`, `lint`, `unit`, `typing`,
   `verifiable-clients`, `integration`; `make test-unit` runs
-  `jest --selectProjects unit`, `JEST_ARGS` passes more). They run in plain
+  `jest --selectProjects unit`; `JEST_ARGS` passes more, before the project,
+  so `make test-unit JEST_ARGS=<test file>` runs only that file). They run in plain
   Node.js, not in Jest's vm contexts: the runner, `test/jest_runner.mjs`,
   runs jest-light-runner's test worker in a fresh child process per file, as
   `node --test` did. A vm context would hand the tests another realm than the
