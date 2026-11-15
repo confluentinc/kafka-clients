@@ -121,12 +121,20 @@ function isCoreArgs(args: readonly unknown[]): args is readonly [CoreArgs] {
  * Whether a constructor's arguments are `create`'s (an error the core or the
  * binding builds, whatever its class): an abstract base's guard lets them
  * through.
+ *
+ * @param args the constructor's arguments
+ * @returns whether they are `create`'s
  */
 export function isCreate(args: readonly unknown[]): boolean {
   return isCoreArgs(args);
 }
 
-/** The FFI id `cls` itself declares (its own static `_ffiId`), or `undefined`. */
+/**
+ * The FFI id `cls` itself declares (its own static `_ffiId`), or `undefined`.
+ *
+ * @param cls the error class
+ * @returns its own FFI id, or undefined
+ */
 export function ownFfiId(cls: ErrorClassLike): number | undefined {
   return Object.hasOwn(cls, '_ffiId') ? ((cls as WithFfiId)._ffiId as number) : undefined;
 }
@@ -134,6 +142,9 @@ export function ownFfiId(cls: ErrorClassLike): number | undefined {
 /**
  * The FFI id of `cls`: its own or its nearest ancestor's (the static `_ffiId`
  * it inherits), `undefined` when none has one.
+ *
+ * @param cls the error class
+ * @returns its FFI id, or undefined
  */
 export function ffiIdOf(cls: ErrorClassLike): number | undefined {
   const id = (cls as WithFfiId)._ffiId;
@@ -143,17 +154,31 @@ export function ffiIdOf(cls: ErrorClassLike): number | undefined {
 /**
  * The FFI id the core reported for `error` (its own `_ffiId`), when `create`
  * was given one that differs from its class's; `undefined` otherwise.
+ *
+ * @param error the error
+ * @returns its own FFI id, or undefined
  */
 export function instanceFfiId(error: object): number | undefined {
   return Object.hasOwn(error, '_ffiId') ? ((error as WithFfiId)._ffiId as number) : undefined;
 }
 
-/** Registers the Java constructor forms of a generated class, in Java declaration order. */
+/**
+ * Registers the Java constructor forms of a generated class, in Java declaration order.
+ *
+ * @param cls the error class
+ * @param forms its constructor forms
+ * @param payload its payload fields
+ */
 export function setForms(cls: ErrorClassLike, forms: readonly ErrorForm[], payload: ErrorPayload = {}): void {
   registered.set(cls, { name: cls.name, forms, payload, matcher: null });
 }
 
-/** The nearest class at or above `cls` with registered forms. */
+/**
+ * The nearest class at or above `cls` with registered forms.
+ *
+ * @param cls the error class
+ * @returns the class's registration, or undefined
+ */
 function formsOf(cls: unknown): Registered | undefined {
   for (let c: unknown = cls; typeof c === 'function' && c !== Error; c = Object.getPrototypeOf(c)) {
     const found = registered.get(c);
@@ -162,7 +187,12 @@ function formsOf(cls: unknown): Registered | undefined {
   return undefined;
 }
 
-/** The JavaScript type of a value, as an argument error names it. */
+/**
+ * The JavaScript type of a value, as an argument error names it.
+ *
+ * @param value the value to name
+ * @returns the name of its type
+ */
 function kind(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'an array';
@@ -185,6 +215,9 @@ function isErrorOrNull(value: unknown): boolean {
  * The matcher of `r`'s forms, built on first use (`args` is required here,
  * not at load: it reports a form error with `IllegalArgumentError`, a
  * generated class, so a static import would be a cycle).
+ *
+ * @param r the class's registration
+ * @returns its form matcher
  */
 function matcherOf(r: Registered): JavaForms {
   if (r.matcher !== null) return r.matcher;
@@ -219,6 +252,10 @@ function matcherOf(r: Registered): JavaForms {
  * The arguments of `Error`'s constructor for a call of `new cls(...args)`:
  * Java's message (`null` reads as `''`) and, for a form that takes a cause,
  * `{cause}`.
+ *
+ * @param cls the error class
+ * @param args the constructor's arguments
+ * @returns the message and the `super()` options
  *
  * @throws `IllegalArgumentError` when the given parameters are no form's
  * @throws `TypeError` when a parameter is given as `undefined` or has the
@@ -276,6 +313,9 @@ export function errorArgs(cls: ErrorClassLike, args: readonly unknown[]): [strin
  * The payload fields of `self`, a newly constructed error: what its form
  * set, or, for an error `create` built, what the core reported. Its classes'
  * constructors read their own fields from it.
+ *
+ * @param self the error
+ * @returns its payload
  */
 export function payloadOf(self: object): Readonly<Record<string, unknown>> {
   return fieldsOf.get(self) ?? {};
@@ -284,6 +324,9 @@ export function payloadOf(self: object): Readonly<Record<string, unknown>> {
 /**
  * Sets `name` on a newly constructed error of class `cls` (`new.target`):
  * the class name, JavaScript's convention.
+ *
+ * @param self the error
+ * @param cls its class
  */
 export function init(self: Error, cls: ErrorClassLike): void {
   Object.defineProperty(self, 'name', { value: cls.name, enumerable: false, configurable: true, writable: true });
@@ -300,6 +343,13 @@ export function init(self: Error, cls: ErrorClassLike): void {
  * reported, kept for this error when it differs from its class's. `payload`
  * is the core's payload of the error, by Java field name, as native/error.c
  * reads it; a field it lacks keeps its class's default.
+ *
+ * @param cls the error class
+ * @param message the error's message
+ * @param cause the error's cause, or undefined for none
+ * @param id the FFI id the core reported
+ * @param payload the core's payload, by Java field name
+ * @returns the error
  */
 export function create<T extends Error>(
   cls: abstract new (...args: never[]) => T,
@@ -322,7 +372,12 @@ export function create<T extends Error>(
   return error;
 }
 
-/** The Java forms `cls` itself registered (the tests read them), or `undefined`. */
+/**
+ * The Java forms `cls` itself registered (the tests read them), or `undefined`.
+ *
+ * @param cls the error class
+ * @returns its forms, or undefined
+ */
 export function ownForms(cls: ErrorClassLike): readonly ErrorForm[] | undefined {
   return registered.get(cls)?.forms;
 }

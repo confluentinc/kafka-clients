@@ -39,7 +39,13 @@ const OFFLINE_REPLICAS_FORMS = new JavaForms('offlineReplicas', [[]], { reader: 
 const EQUALS_FORMS = new JavaForms('equals', [['obj']]);
 const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
-/** A Java `Node[]` argument: null, or an iterable of `Node` (or null, as a Java array holds), copied. */
+/**
+ * A Java `Node[]` argument: null, or an iterable of `Node` (or null, as a Java array holds), copied.
+ *
+ * @param value the argument given
+ * @param what the argument's name, for the error
+ * @returns a copy of the nodes, or null
+ */
 function checkNodes(value: unknown, what: string): readonly (Node | null)[] | null {
   if (value === null) return null;
   if (typeof value !== 'object' || typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {

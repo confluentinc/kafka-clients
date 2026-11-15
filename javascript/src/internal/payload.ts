@@ -94,6 +94,11 @@ export const object: Kind = { take: same, core: same, copy: same };
  * An iterable argument read once, as Java's copy reads its collection: null
  * stays null, a string is refused (Java cannot take one for a
  * `Collection<String>`, and JavaScript would iterate its characters).
+ *
+ * @param value the argument given
+ * @param name the argument's name, for the error
+ * @param what what the elements are, for the error
+ * @returns its elements, or null
  */
 function iterableOf(value: unknown, name: string, what: string): unknown[] | null {
   if (value === null) return null;
@@ -108,6 +113,11 @@ function iterableOf(value: unknown, name: string, what: string): unknown[] | nul
  * The elements of a collection argument, each one `test` accepts or null; an
  * `undefined` element throws, as Java has no such value (root CLAUDE.md,
  * JavaScript Binding Conventions, Signatures, Q18).
+ *
+ * @param items the elements
+ * @param name the argument's name, for the error
+ * @param what what the elements are, for the error
+ * @param test whether an element has the right type
  */
 function checkElements(items: readonly unknown[], name: string, what: string, test: (x: unknown) => boolean): void {
   for (const x of items) {
@@ -130,13 +140,24 @@ export const stringSet: Kind = {
 
 const isTopicPartition = (x: unknown): boolean => x instanceof TopicPartition;
 
-/** A `TopicPartitionSet` of `items`, each a TopicPartition or null. */
+/**
+ * A `TopicPartitionSet` of `items`, each a TopicPartition or null.
+ *
+ * @param items the elements
+ * @param name the argument's name, for the error
+ * @returns the set
+ */
 function topicPartitionSetOf(items: readonly unknown[], name: string): TopicPartitionSet {
   checkElements(items, name, 'TopicPartition', isTopicPartition);
   return new TopicPartitionSet(items as Array<TopicPartition | null>);
 }
 
-/** The `TopicPartition` the native layer reads as `[topic, partition]`. */
+/**
+ * The `TopicPartition` the native layer reads as `[topic, partition]`.
+ *
+ * @param raw what the native layer gave
+ * @returns the partition
+ */
 function coreTopicPartition(raw: unknown): TopicPartition {
   const [topic, partition] = raw as [string | null, number];
   return new TopicPartition({ topic, partition });
@@ -172,6 +193,10 @@ export const topicPartitionList: Kind = {
  * Java's `Set.copyOf(x)` of a collection of TopicPartition: a
  * `TopicPartitionSet`. Java dereferences `x` and refuses a null element:
  * `TypeError` "<name> must not be null" / "<name> must not contain null".
+ *
+ * @param x the collection given
+ * @param name the argument's name, for the error
+ * @returns the set
  */
 export function topicPartitionSetCopyOf(x: unknown, name: string): TopicPartitionSet {
   if (x === null) throw new TypeError(`${name} must not be null`);
@@ -231,6 +256,9 @@ export const kafkaMetric: Kind = {
 /**
  * Java's `Collections.singleton(x)` of a TopicPartition, as a
  * `TopicPartitionSet`: a null `x` is its one member, as Java's set holds it.
+ *
+ * @param x the partition, or null
+ * @returns the set
  */
 export function singleton(x: unknown): TopicPartitionSet {
   return new TopicPartitionSet([x as TopicPartition | null]);
@@ -241,6 +269,10 @@ export function singleton(x: unknown): TopicPartitionSet {
  * `x.keySet()`): `TypeError` "<name> must not be null" for null, as Java's
  * NullPointerException (root CLAUDE.md, JavaScript Binding Conventions,
  * Errors, Q36).
+ *
+ * @param x the value given
+ * @param name the argument's name, for the error
+ * @returns the value
  */
 export function nonNull<T>(x: T | null, name: string): T {
   if (x === null) throw new TypeError(`${name} must not be null`);
@@ -251,6 +283,9 @@ export function nonNull<T>(x: T | null, name: string): T {
  * The check of a payload getter, a method that only reads: an argument is a
  * `TypeError` (root CLAUDE.md, JavaScript Binding Conventions, Class family,
  * Q17).
+ *
+ * @param method the method's name, for the error
+ * @param count the number of arguments given
  */
 export function readOnly(method: string, count: number): void {
   if (count > 0) throw new TypeError(`${method}() only reads: it takes no argument`);
@@ -293,7 +328,12 @@ interface EnumClass {
   values(): unknown[];
 }
 
-/** An enum class's kind: a constant of it or null; the core gives its ordinal. */
+/**
+ * An enum class's kind: a constant of it or null; the core gives its ordinal.
+ *
+ * @param cls the enum class
+ * @returns its kind
+ */
 export function enumOf(cls: EnumClass): Kind {
   return {
     take(value, name) {

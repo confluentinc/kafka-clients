@@ -794,6 +794,10 @@ export class ProducerRecord<out K = never, out V = never> {
    * anything else a `TypeError`, a string's pointing to `stringSerializer()`
    * (the headers are then left writable).
    *
+   * @param key the serialized key, or null; the record's key when left out
+   * @param value the serialized value, or null; the record's value when left out
+   * @returns the native send's arguments
+   *
    * @internal
    */
   internalToNative(key?: Uint8Array | null, value?: Uint8Array | null): NativeRecord {

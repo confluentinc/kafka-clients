@@ -26,7 +26,12 @@ import { encodeLikeJava } from '../../internal/encode';
 import { objectHashCode, objectsEquals, sameClass } from '../../internal/java_object';
 import { Header } from './header';
 
-/** Whether `value` is an object with a callable `[Symbol.iterator]` (an array, a `Headers`, a `Set`, ...). */
+/**
+ * Whether `value` is an object with a callable `[Symbol.iterator]` (an array, a `Headers`, a `Set`, ...).
+ *
+ * @param value the value to test
+ * @returns whether it is an iterable object
+ */
 function isIterableObject(value: unknown): boolean {
   return (
     (typeof value === 'object' || typeof value === 'function') &&
@@ -35,7 +40,12 @@ function isIterableObject(value: unknown): boolean {
   );
 }
 
-/** Whether `value` is a key, a string, or Java's null. */
+/**
+ * Whether `value` is a key, a string, or Java's null.
+ *
+ * @param value the value to test
+ * @returns whether it is a header key
+ */
 function isKey(value: unknown): boolean {
   return value === null || typeof value === 'string';
 }
@@ -64,7 +74,12 @@ const EMPTY: readonly Header[] = Object.freeze([]);
 /** A header as the native send takes it: key and value bytes. */
 type NativeHeader = [Uint8Array, Uint8Array | null];
 
-/** RecordHeaders.checkKey, plus the type a JavaScript caller can get wrong. */
+/**
+ * RecordHeaders.checkKey, plus the type a JavaScript caller can get wrong.
+ *
+ * @param key the key given
+ * @returns the key, a string
+ */
 function checkKey(key: unknown): string {
   if (key === null) throw illegalArgument('key cannot be null.');
   if (typeof key !== 'string') throw new TypeError('key must be a string');
@@ -75,6 +90,9 @@ function checkKey(key: unknown): string {
  * One taken element: a `Header` as it is (Java's RecordHeaders keeps the given
  * object). A null element is Java's
  * `Objects.requireNonNull(header, "Header cannot be null.")`.
+ *
+ * @param item an element of the iterable given
+ * @returns the element as a `Header`
  */
 function headerOf(item: unknown): Header {
   if (item instanceof Header) return item;
@@ -83,7 +101,12 @@ function headerOf(item: unknown): Header {
   throw new TypeError('a header must be a Header');
 }
 
-/** The headers `headers` holds, taken as Java's RecordHeaders(Iterable) takes them. */
+/**
+ * The headers `headers` holds, taken as Java's RecordHeaders(Iterable) takes them.
+ *
+ * @param headers the iterable of headers given, or null
+ * @returns the headers it holds, in order
+ */
 function taken(headers: unknown): readonly Header[] {
   if (headers === null) return EMPTY;
   if (headers instanceof Headers) return headers.internalHeaders().length === 0 ? EMPTY : headers.internalHeaders().slice();
@@ -174,6 +197,9 @@ export class Headers implements Iterable<Header> {
    * New, writable headers holding what `headers` holds, as Java's
    * `ProducerRecord` takes them (`new RecordHeaders(headers)`): null is none,
    * a `Headers` is copied. Throws the constructor's errors.
+   *
+   * @param headers the headers given to a record
+   * @returns a `Headers` holding them
    *
    * @internal
    */
@@ -451,6 +477,8 @@ export class Headers implements Iterable<Header> {
   /**
    * The headers themselves, not a copy: read, never changed, by the caller.
    *
+   * @returns the headers held, in order
+   *
    * @internal
    */
   internalHeaders(): readonly Header[] {
@@ -461,6 +489,8 @@ export class Headers implements Iterable<Header> {
    * The `[key, value]` pairs the native send takes, or null for none: each
    * key's bytes as Java encodes it (`encodeLikeJava`: Node-API would write
    * U+FFFD for a lone surrogate).
+   *
+   * @returns the headers in the native layer's form, or null when there are none
    *
    * @internal
    */
