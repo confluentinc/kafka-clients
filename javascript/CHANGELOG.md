@@ -137,9 +137,16 @@ newer.
   `new Headers([...])` store copies. A header read back from a `Headers` that
   can still change, such as your own before `send()`, is a copy, which stays
   as it is when the `Headers` changes; one read from a read-only `Headers` is
-  a view, with no copy, which keeps it alive. A header key holding a NUL now
-  throws `TypeError` when the header is made, not at `send()`, and `key()`
-  reads a lone surrogate back as `?`.
+  a view, with no copy, which keeps it alive, and stays valid after a refused
+  `add` or `remove`. A header key holding a NUL now throws `TypeError` when
+  the header is made, not at `send()`, and so does one given to `add`,
+  `remove`, `lastHeader` or an iterated `headers(key)`, where Java takes the
+  key; `key()` reads a lone surrogate back as `?`. On read-only headers
+  `remove(null)` throws the client core's `IllegalArgumentError` "key cannot
+  be null.", where Java checks the read-only state first. Iterating a
+  `Headers` or `headers(key)` reads the headers when the iterator is made, so
+  a change during an iteration is not seen and throws nothing, where Java's
+  iterators throw `ConcurrentModificationException`.
 - A header value is bytes (`Uint8Array` or `null`), as in Java and Python: a
   string header value throws `TypeError` (encode it first,
   `Buffer.from(value, 'utf8')`), where development builds took a string.

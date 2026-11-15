@@ -126,7 +126,10 @@ rules and readings. Newest entries are at the end; dates are in IST.
       ```
 
       Java allows this, so it isn't misuse. Only a `Headers` that can still change is affected: an app's own `Headers`
-      before `send()`. A consumed record's headers, and a `Headers` sealed by `send()`, never change.
+      before `send()`. A consumed record's headers, and a `Headers` sealed by `send()`, never change, but the FFI
+      still frees a handle's views on every mutating call (`add_*`, `remove`), a refused one included, as its module
+      docs say ("until the next mutating call on the same handle"). So the binding never makes such a call on read-only
+      headers (below).
     - **The decision:** a `Header` handed out from a changeable `Headers` is the binding's own copy of that header's key
       and value. A read-only `Headers` hands out views. This needs no core change, and the `Header` stays valid as Java's
       does. The alternative, an FFI that hands out headers that stay valid, would be a core change.
@@ -155,14 +158,24 @@ rules and readings. Newest entries are at the end; dates are in IST.
       - A key crosses as `encodeLikeJava`'s bytes in a C string, so a NUL is refused when the header is made (it
         used to be at `send()`), and `key()` reads a lone surrogate back as `?`, where Java's `RecordHeader` keeps
         the `String` (a recorded deviation).
-      - The core reports the null checks with Java's text (a null header, key or header key). Java's `remove`
-        checks the read-only state before the key, the FFI the other way: for a key the core or the binding
-        refuses, `remove` first asks read-only headers to remove nothing, which the core refuses with its own
-        error.
+      - The core reports the null checks with Java's text (a null header, key or header key).
+      - On read-only headers, `add` and `remove` go, with their arguments unchanged, to the shared empty read-only
+        `RecordHeaders`, which hands out no view, so the core's error comes from a handle whose views nothing holds
+        and the views the app holds stay valid, as Java's `Header` does after a refused change. It is a check of the
+        binding's own (`javascript/CLAUDE.md`, boundary rule 1), which goes when the FFI keeps a handle's views
+        across a refused call. A suggestion for the core team, not made here: the FFI could drop the views only once
+        a mutation has succeeded (`HeadersInner::headers_mut` would stop clearing, and the three mutating functions
+        would clear only on `Ok`), and its module docs would then say "until the next successful mutation".
+        `set_read_only` already keeps them, so a record sent twice keeps its views.
+      - Java's `remove` checks the read-only state before the key, the FFI the key first, so on read-only headers
+        `remove(null)` is the FFI's `IllegalArgumentError` "key cannot be null." where Java's is
+        `IllegalStateException` (a recorded deviation: root §4 has the FFI check a NULL argument first, and Q35 has the
+        binding repeat no precondition; it goes when the FFI checks the read-only state first).
       - `headerStats()`, a test-only registration, counts the handles made and freed, the copies and the views.
         `test/unit/common/header/headers.test.js` proves the two cases of option 1 through it and, in a
         `--expose-gc` child under `MallocScribble`, that a view keeps its `Headers` alive, a value `Buffer` its
-        `Header`, and that every handle is freed exactly once.
+        `Header`, that the views of a sent record's headers stay valid through refused `add` and `remove` calls and a
+        second send, and that every handle is freed exactly once.
       - Not built: a consumed record's `Headers`, over `kafka_consumer_ConsumerRecord_headers`, which comes with
         the consumer. The row on plain `[key, value]` pairs stays parked: `ProducerRecord` takes `Header`
         objects only, as before.
