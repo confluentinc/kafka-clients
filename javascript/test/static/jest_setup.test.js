@@ -45,7 +45,14 @@ test('done never called fails at the timeout', (done) => {}, 200);
 test('async done fails', async (done) => {});
 test('async done with a timeout fails', async (done) => {}, 2000);
 test('a done that returns a Promise fails', (done) => Promise.resolve());
-test.each([[1], [2]])('each %i passes', (n) => { if (n > 2) throw new Error('n'); });
+test.each([[1, 'one'], [2, 'two']])('each %i passes', (n, name) => {
+  if (!['1 one', '2 two'].includes(\`\${n} \${name}\`)) throw new Error(\`row \${n} \${name}\`);
+});
+test.each([[3]])('each %i with a timeout passes', (n) => { if (n !== 3) throw new Error(String(n)); }, 2000);
+test.each\`
+  a    | b
+  \${1} | \${2}
+\`('table $a $b passes', ({ a, b }) => { if (!(a === 1 && b === 2)) throw new Error(\`table \${a} \${b}\`); });
 test.each([[1]])('each %i with done passes', (n, done) => { setTimeout(done, 10); });
 test.each([[1]])('each %i done(error) fails', (n, done) => { setTimeout(() => done(new Error('row ' + n)), 10); });
 test.each([[1]])('each %i timeout fails', (n) => sleep(2000), 200);
@@ -74,6 +81,21 @@ test('another test is skipped', () => {});
 /** @typedef {{ ancestorTitles: string[], title: string, status: string, failureMessages: string[] }} Assertion */
 /** @typedef {{ name: string, status: string, message: string, assertionResults: Assertion[] }} FileResult */
 
+/**
+ * The first project of jest.config.cjs, every `<rootDir>` in it replaced with
+ * the client's directory, so that the settings still point there once the
+ * fixtures' directory is the root.
+ *
+ * @returns {Record<string, unknown>} the project's settings
+ */
+function projectConfig() {
+  const { projects } = /** @type {{ projects: Record<string, unknown>[] }} */ (require('../../jest.config.cjs'));
+  /** @type {(value: unknown) => unknown} */
+  const resolve = (value) =>
+    typeof value === 'string' ? value.replaceAll('<rootDir>', ROOT) : Array.isArray(value) ? value.map(resolve) : value;
+  return Object.fromEntries(Object.entries(projects[0]).map(([key, value]) => [key, resolve(value)]));
+}
+
 /** @type {Map<string, FileResult>} */
 const results = new Map();
 /** @type {string | null} */
@@ -83,10 +105,12 @@ beforeAll(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jest-setup-'));
   for (const [name, source] of Object.entries(FIXTURES)) fs.writeFileSync(path.join(dir, name), source);
   const out = path.join(dir, 'results.json');
+  // The fixtures run with jest.config.cjs's own project settings (its runner,
+  // its setup and whatever it adds later), its <rootDir> made the client's
+  // directory, so that only the root and the test files change.
   const config = {
+    ...projectConfig(),
     rootDir: dir,
-    runner: path.join(ROOT, 'test', 'jest_runner.mjs'),
-    setupFilesAfterEnv: [path.join(ROOT, 'test', 'jest_setup.js')],
     testMatch: ['<rootDir>/*.test.js'],
   };
   const r = spawnSync(
@@ -172,6 +196,8 @@ test('test.each passes its rows, takes done, and applies its timeout', () => {
   const tests = outcomes('plain.test.js');
   assertOutcome(tests, 'each 1 passes', 'passed');
   assertOutcome(tests, 'each 2 passes', 'passed');
+  assertOutcome(tests, 'each 3 with a timeout passes', 'passed');
+  assertOutcome(tests, 'table 1 2 passes', 'passed');
   assertOutcome(tests, 'each 1 with done passes', 'passed');
   assertOutcome(tests, 'each 1 done(error) fails', 'failed', 'row 1');
   assertOutcome(tests, 'each 1 timeout fails', 'failed', 'Exceeded timeout of 200 ms for a test.');
