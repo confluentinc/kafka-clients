@@ -28,6 +28,7 @@ const { Header, Headers } = require('@confluentinc/kafka-javascript/common/heade
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
+const { createFuture } = require('../_internal');
 
 /** @typedef {import('@confluentinc/kafka-javascript/producer').Callback} Callback */
 /** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
@@ -113,7 +114,7 @@ const N = 300;
       assert.equal(await future.get(1000), metadata);
       assert.equal(future.getNow(null), metadata);
       assert.equal(await future.toCompletionStage(), metadata);
-      // @ts-expect-error published type narrower than the run time: getNow takes any value if absent, here a number for a bigint
+      // @ts-expect-error a number for a bigint future's valueIfAbsent, which Java's getNow(T) refuses: the run time returns what it is given
       assert.equal(future.thenApply((m) => m.offset).getNow(-1), metadata.offset);
       assert.equal(await KafkaFuture.allOf([future]).get(), null);
       // A record's future is never cancelled.
@@ -175,10 +176,8 @@ const N = 300;
       const sibling = future.thenApply((m) => m.topic);
       // A cancel() inside a dependant's action finishes the cancelled future's
       // own dependants, and an allOf over it, before it returns.
-      // The library's own factory, which the published types leave out.
-      const other = /** @type {typeof KafkaFuture & { internalCreate<T>(record: boolean): KafkaFuture<T> }} */ (KafkaFuture).internalCreate(
-        false,
-      );
+      // The library's own factory (test/_internal.js).
+      const other = createFuture(false);
       const otherDep = other.whenComplete(() => {});
       const otherAll = KafkaFuture.allOf([other]);
       /** @type {boolean[]} */
@@ -220,7 +219,7 @@ const N = 300;
       });
       future.whenComplete(() => order.push('dependant'));
       assert.equal(future.isDone(), false);
-      // @ts-expect-error published type narrower than the run time: getNow takes any value if absent, here a string for a RecordMetadata
+      // @ts-expect-error a string for a RecordMetadata future's valueIfAbsent, which Java's getNow(T) refuses: the run time returns what it is given
       assert.equal(future.getNow('absent'), 'absent');
       // The FFI keeps the time of a timed wait: no JavaScript timer runs.
       const setTimeoutBefore = globalThis.setTimeout;

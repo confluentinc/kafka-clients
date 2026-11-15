@@ -188,7 +188,7 @@ test('OffsetOutOfRangeError: offsetOutOfRangePartitions and partitions(), its ke
   assert.ok(e instanceof InvalidOffsetError);
   assert.equal(new OffsetOutOfRangeError({ message: 'm', offsetOutOfRangePartitions: offsets }).message, 'm');
   // Java's keySet() dereferences the field.
-  // @ts-expect-error published type narrower than the run time: offsetOutOfRangePartitions takes null, as Java's field does
+  // @ts-expect-error null partitions, by the nullability rule: Java only stores it, so the types forbid null, while the run time stores it as Java does
   const empty = new OffsetOutOfRangeError({ message: 'm', offsetOutOfRangePartitions: null });
   assert.throws(() => empty.partitions(), { constructor: TypeError, message: 'offsetOutOfRangePartitions must not be null' });
   // @ts-expect-error a message alone, which OffsetOutOfRangeError has no form for: the form check throws IllegalArgumentError
@@ -224,7 +224,7 @@ test('NoOffsetForPartitionError: one partition or a collection, kept as a TopicP
     message: 'partition must be a TopicPartition',
   });
   // Java's Collections.singleton(null) holds the null.
-  // @ts-expect-error published type narrower than the run time: partition takes null, as Java's Collections.singleton(null) does
+  // @ts-expect-error a null partition, by the nullability rule: Java only stores it, so the types forbid null, while the run time stores it as Java does
   const none = new NoOffsetForPartitionError({ partition: null });
   assert.equal(none.message, 'Undefined offset with no reset policy for partition: null');
   assert.equal(none.partitions().size(), 1);
@@ -337,11 +337,11 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
         partition: tp('t', 1),
         offset: 0,
         timestamp: 0,
-        // @ts-expect-error published type narrower than the run time: timestampType takes null
+        // @ts-expect-error a null timestampType, by the nullability rule: Java only stores it, so the types forbid null, while the run time stores it as Java does
         timestampType: null,
         keyBuffer: null,
         valueBuffer: null,
-        // @ts-expect-error published type narrower than the run time: headers takes null
+        // @ts-expect-error null headers, by the nullability rule: Java only stores it, so the types forbid null, while the run time stores it as Java does
         headers: null,
         message: null,
         cause: null,

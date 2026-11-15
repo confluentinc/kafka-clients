@@ -46,18 +46,17 @@ const {
   TimeoutError,
 } = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+const { createFuture, internalFuture } = require('../../_internal');
 
 // Java's get(5, TimeUnit.MINUTES).
 const WAIT = 5 * 60 * 1000;
 
 /**
  * Java's KafkaFutureImpl: a KafkaFuture with its library-only
- * internalComplete, which the declarations leave out.
+ * internalComplete (test/_internal.js).
  *
  * @template T
- * @typedef {import('@confluentinc/kafka-javascript/common').KafkaFuture<T> & {
- *   internalComplete(value: T | null, error: unknown): boolean;
- * }} FutureImpl
+ * @typedef {import('../../_internal').InternalFuture<T>} FutureImpl
  */
 
 /**
@@ -83,8 +82,7 @@ class CompletionError extends Error {
  * @returns {FutureImpl<T>}
  */
 function newFuture() {
-  // @ts-expect-error the library-only factory, left out of the declarations: the test builds Java's KafkaFutureImpl with it
-  return KafkaFuture.internalCreate(false);
+  return createFuture(false);
 }
 
 /**
@@ -299,7 +297,7 @@ test('testCompleteFutures', async () => {
 
   const future456 = KafkaFuture.completedFuture(456);
   // completedFuture's future is Java's KafkaFutureImpl too: internalComplete is there.
-  assert.equal(complete(/** @type {FutureImpl<number>} */ (future456), 789), false);
+  assert.equal(complete(internalFuture(future456), 789), false);
   assert.equal(future456.cancel(true), false);
   assert.equal(await future456.get(), 456);
   assertIsSuccessful(future456);
@@ -698,7 +696,7 @@ test('each member takes the bare value or its options object, as Java names the 
   assert.equal(/** @type {KafkaFuture<number | null>} */ (KafkaFuture.completedFuture(null)).getNow(1), null);
   // Anything but a plain object may be given bare: a class instance, an array, a primitive.
   const instance = new (class Box {})();
-  // @ts-expect-error published type narrower than the run time: a class instance may be given bare, the declarations take only built-in values bare
+  // @ts-expect-error a class instance given bare: tsc cannot tell a class instance from a plain object, which the run time reads as the options object, so the types take it only by name, as { value }; plain JavaScript may pass it bare
   assert.equal(KafkaFuture.completedFuture(instance).getNow(null), instance);
   const array = [1, 2];
   assert.equal(KafkaFuture.completedFuture(array).getNow(null), array);
@@ -712,7 +710,7 @@ test('each member takes the bare value or its options object, as Java names the 
   assert.deepEqual(seen, [2, null]);
   assert.equal(future.getNow({ valueIfAbsent: 0 }), 2);
   assert.equal(newFuture().getNow({ valueIfAbsent: plain }), plain);
-  // @ts-expect-error published type narrower than the run time: a class instance may be given bare, the declarations take only built-in values bare
+  // @ts-expect-error a class instance given bare: tsc cannot tell a class instance from a plain object, which the run time reads as the options object, so the types take it only by name, as { value }; plain JavaScript may pass it bare
   assert.equal(newFuture().getNow(instance), instance);
   assert.equal(/** @type {FutureImpl<number[]>} */ (newFuture()).getNow(array), array);
   assert.equal(await future.get({ timeout: 10 }), 2);
@@ -880,8 +878,7 @@ test("undefined is refused, null is Java's null", async () => {
 
 test("a record's future is Java's FutureRecordMetadata: never cancelled", async () => {
   /** @type {FutureImpl<string>} */
-  // @ts-expect-error the library-only factory, left out of the declarations: the test builds a record's future with it
-  const record = KafkaFuture.internalCreate(true);
+  const record = createFuture(true);
   assert.equal(record.cancel(true), false);
   assert.equal(record.cancel({ mayInterruptIfRunning: false }), false);
   assertIsNotCompleted(record);
