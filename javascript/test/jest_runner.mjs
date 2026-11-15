@@ -28,16 +28,37 @@ import Tinypool from 'tinypool';
 // version package.json pins exactly (0.8.2). A version bump must check both.
 const WORKER = new URL('./worker-runner.js', import.meta.resolve('jest-light-runner'));
 
+/** @typedef {import('@jest/test-result').Test} Test */
+/** @typedef {import('@jest/test-result').TestResult} TestResult */
+/** @typedef {import('@jest/types').Config.GlobalConfig} GlobalConfig */
+/** @typedef {import('@jest/types').Config.ProjectConfig} ProjectConfig */
+/** @typedef {(message: unknown) => void} Listener */
+
 export default class IsolatedLightRunner {
+  /** @type {GlobalConfig} */
   #globalConfig;
 
+  /** @param {GlobalConfig} globalConfig */
   constructor(globalConfig) {
     this.#globalConfig = globalConfig;
   }
 
+  /**
+   * @param {Array<Test>} tests
+   * @param {unknown} watcher
+   * @param {(test: Test) => Promise<void>} onStart
+   * @param {(test: Test, result: TestResult) => Promise<void>} onResult
+   * @param {(test: Test, error: unknown) => Promise<void>} onFailure
+   * @returns {Promise<void>}
+   */
   async runTests(tests, watcher, onStart, onResult, onFailure) {
     const { maxWorkers } = this.#globalConfig;
+    /** @type {Map<ProjectConfig, {pool: Tinypool, run: (path: string) => Promise<TestResult>}>} */
     const pools = new Map();
+    /**
+     * @param {ProjectConfig} projectConfig
+     * @returns {{pool: Tinypool, run: (path: string) => Promise<TestResult>}}
+     */
     const poolOf = (projectConfig) => {
       if (!pools.has(projectConfig)) {
         const workerData = { globalConfig: this.#globalConfig, projectConfig, runtime: 'child_process' };
@@ -47,17 +68,25 @@ export default class IsolatedLightRunner {
           isolateWorkers: true,
           minThreads: 0,
           maxThreads: maxWorkers,
-          env: process.env,
+          // Tinypool's type has no undefined values; Node's environment has none either.
+          env: /** @type {Record<string, string>} */ (process.env),
           trackUnmanagedFds: false,
         });
         // The worker asks for its configuration once it starts
         // (jest-light-runner's protocol for a child process).
+        /**
+         * @param {string} path
+         * @returns {Promise<TestResult>}
+         */
         const run = (path) => {
+          /** @type {Set<Listener>} */
           const listeners = new Set();
           const channel = {
+            /** @param {Listener} listener */
             onMessage(listener) {
               listeners.add(listener);
             },
+            /** @param {unknown} message */
             postMessage(message) {
               if (message !== 'jest-light-runner-get-worker-data') return;
               for (const listener of listeners) {
@@ -70,7 +99,9 @@ export default class IsolatedLightRunner {
         };
         pools.set(projectConfig, { pool, run });
       }
-      return pools.get(projectConfig);
+      const entry = pools.get(projectConfig);
+      if (entry === undefined) throw new Error('the pool of a project was not created');
+      return entry;
     };
 
     // At most maxWorkers files at once, each reported as started when it does.

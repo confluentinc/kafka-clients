@@ -29,7 +29,14 @@ const { ROOT, shellQuote } = require(SCRIPT);
 // Arguments a shell would split, substitute or unquote.
 const ARGS = ['a b', '$(echo substituted)', '`echo substituted`', "it's", '"double"', '$HOME', '', 'back\\slash'];
 
-/** Runs `fn` with `TSC` set to `value` (unset when undefined), restoring it after. */
+/**
+ * Runs `fn` with `TSC` set to `value` (unset when undefined), restoring it after.
+ *
+ * @template T
+ * @param {string | undefined} value
+ * @param {() => T} fn
+ * @returns {T}
+ */
 function withTsc(value, fn) {
   const saved = process.env.TSC;
   if (value === undefined) delete process.env.TSC;
@@ -62,9 +69,12 @@ test('a TSC override is a command line; every argument reaches the compiler lite
 });
 
 test('the default compiler is run directly, with no shell', () => {
+  /** @typedef {[string, Array<string>, {shell?: unknown}]} SpawnCall */
+  /** @type {Array<SpawnCall>} */
   const calls = [];
   const original = childProcess.spawnSync;
-  childProcess.spawnSync = (...callArgs) => {
+  // @ts-expect-error a stub with only the fields runTsc reads: the test records the arguments runTsc passes
+  childProcess.spawnSync = (/** @type {SpawnCall} */ ...callArgs) => {
     calls.push(callArgs);
     return { status: 0, stdout: 'ok', stderr: '' };
   };

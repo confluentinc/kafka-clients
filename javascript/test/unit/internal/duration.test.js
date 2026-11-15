@@ -28,8 +28,11 @@ const { Temporal: Polyfill } = require('@js-temporal/polyfill');
 const { durationToMillis, UNBOUNDED_MILLIS } = require('../../../dist/internal/duration');
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 
+/** @type {Array<[string, typeof Polyfill]>} */
 const TEMPORALS = [['the polyfill', Polyfill]];
-if (globalThis.Temporal !== undefined) TEMPORALS.push(['the built-in Temporal', globalThis.Temporal]);
+// The built-in Temporal where Node has one; the library types have none.
+const global = /** @type {typeof globalThis & {Temporal?: typeof Polyfill}} */ (globalThis);
+if (global.Temporal !== undefined) TEMPORALS.push(['the built-in Temporal', global.Temporal]);
 
 const NOT_A_DURATION = 'timeout must be a number of milliseconds or a Temporal.Duration';
 
@@ -122,6 +125,7 @@ for (const [label, Temporal] of TEMPORALS) {
       assert.throws(
         () => durationToMillis(Temporal.Duration.from(fields), 'timeout'),
         (e) => {
+          assert.ok(e instanceof Error);
           assert.equal(e.constructor, RangeError);
           assert.ok(!(e instanceof IllegalArgumentError));
           assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
@@ -142,12 +146,13 @@ for (const [label, Temporal] of TEMPORALS) {
 
 test('a Temporal.Duration is recognised by its toStringTag alone', () => {
   // Another realm's, or another polyfill's, Duration: what the helper reads.
+  /** @param {number} millis */
   const foreign = (millis) => ({
     [Symbol.toStringTag]: 'Temporal.Duration',
     years: 0,
     months: 0,
     weeks: 0,
-    total: ({ unit }) => (unit === 'millisecond' ? millis : NaN),
+    total: (/** @type {{unit: string}} */ { unit }) => (unit === 'millisecond' ? millis : NaN),
   });
   assert.equal(durationToMillis(foreign(42.9), 'timeout'), 42);
   assert.throws(() => durationToMillis(foreign(2 ** 64), 'timeout'), {

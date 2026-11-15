@@ -28,6 +28,7 @@ const path = require('node:path');
 const ROOT = path.join(__dirname, '..', '..');
 const TYPEDOC = path.join(ROOT, 'node_modules', '.bin', 'typedoc');
 
+/** @type {string} */
 let out;
 afterEach(() => fs.rmSync(out, { recursive: true, force: true }));
 
@@ -47,7 +48,7 @@ test('the reference builds, a page per import path, without the @internal member
   // The producer package's @packageDocumentation lists what it leaves out.
   const producer = fs.readFileSync(path.join(out, 'modules', 'producer.html'), 'utf8');
   assert.match(producer, /left out/);
-  const pages = fs.readdirSync(out, { recursive: true }).filter((f) => f.endsWith('.html'));
+  const pages = fs.readdirSync(out, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.html'));
   for (const f of pages) {
     const html = fs.readFileSync(path.join(out, f), 'utf8');
     assert.doesNotMatch(html, /\binternal(Create|ToNative|Complete|SetDelivery|SetNative)\b/, `${f} shows an @internal member`);

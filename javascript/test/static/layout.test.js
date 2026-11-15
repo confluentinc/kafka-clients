@@ -30,8 +30,15 @@ const ROOT = path.join(__dirname, '..', '..');
 const LIB = path.join(ROOT, 'src');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
-/** Every path under `dir`, relative to it, recursively; directories end with `/`. */
+/**
+ * Every path under `dir`, relative to it, recursively; directories end with `/`.
+ *
+ * @param {string} dir
+ * @param {string} [base]
+ * @returns {Array<string>}
+ */
 function walk(dir, base = dir) {
+  /** @type {Array<string>} */
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -45,7 +52,11 @@ function walk(dir, base = dir) {
 const libPaths = walk(LIB);
 const libDirs = ['', ...libPaths.filter((p) => p.endsWith('/'))];
 const libFiles = libPaths.filter((p) => !p.endsWith('/'));
-/** Whether `rel` (relative to src/) is private: under src/internal/, the package's own helpers. */
+/**
+ * Whether `rel` (relative to src/) is private: under src/internal/, the package's own helpers.
+ *
+ * @param {string} rel
+ */
 const isPrivate = (rel) => rel.split('/')[0] === 'internal';
 
 test('src/ holds only .ts sources, snake_case, private ones under src/internal/', () => {
@@ -76,13 +87,18 @@ const moduleDirs = libDirs.filter((d) => d !== '' && !isPrivate(d)).map((d) => d
  * emitted), exactly once. A namespace re-export (`export * as x from './x'`)
  * fails: each package is reached by its own import path only (root
  * conventions, Layout and modules).
+ *
+ * @param {string} dir
+ * @returns {Array<{kind: string, names: Array<string>, path: string}>}
  */
 function parseIndex(dir) {
+  /** @type {string} */
   const code = stripComments(fs.readFileSync(path.join(LIB, dir, 'index.ts'), 'utf8'));
   const statements = code
     .split(';')
     .map((s) => s.trim())
     .filter((s) => s !== '');
+  /** @type {Array<{kind: string, names: Array<string>, path: string}>} */
   const reexports = [];
   let markers = 0;
   for (const statement of statements) {
@@ -113,9 +129,12 @@ function parseIndex(dir) {
  * Checks `src/<dir>index.ts`: each re-export names a public .ts of the folder
  * itself (never a child folder, never a file of another folder), and no name
  * twice.
+ *
+ * @param {string} dir
  */
 function checkIndex(dir) {
   const reexports = parseIndex(dir);
+  /** @type {Array<string>} */
   const bound = [];
   for (const r of reexports) {
     assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `src/${dir}index.ts re-exports ${r.path}, not a file of its own folder`);
@@ -163,6 +182,7 @@ test('a module folder index.ts re-exports public files of its own folder, and no
   }
 });
 
+/** @param {Array<string>} args */
 const git = (args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
 const NOT_GIT = git(['rev-parse', '--is-inside-work-tree']).status !== 0;
 if (NOT_GIT) console.log('skipping the build-output check: not a git checkout');
@@ -207,6 +227,7 @@ test('the generated modules carry the license and the GENERATED, DO NOT EDIT hea
 
 test('package.json exports every module folder, with its compiled types, and nothing else', () => {
   // dist/ is src/ compiled (tsconfig.json: rootDir src, outDir dist).
+  /** @type {Record<string, {types: string, default: string}>} */
   const expected = {};
   for (const dir of libDirs) {
     if (isPrivate(dir)) continue;
@@ -222,6 +243,7 @@ test('package.json typesVersions maps every module subpath to its index.d.ts', (
   // `exports` is read only by TypeScript's node16, nodenext and bundler
   // resolution; typesVersions gives the subpaths their types under node10, the
   // default for `"module": "commonjs"`.
+  /** @type {Record<string, Array<string>>} */
   const expected = {};
   for (const dir of moduleDirs) expected[dir] = [`dist/${dir}/index.d.ts`];
   assert.deepEqual(pkg.typesVersions, { '*': expected });
@@ -293,7 +315,11 @@ test('package.json files hold the compiled library, not the build inputs, the te
   // (check-npm.py path-folders: <path>/package.json pointing into dist/), for
   // TypeScript setups that do not read `exports`.
   const tops = [...new Set(moduleDirs.map((d) => `${d.split('/')[0]}/`))].sort();
-  assert.deepEqual(pkg.files.filter((f) => tops.includes(f)).sort(), tops, 'files names the folders behind the import paths');
+  assert.deepEqual(
+    pkg.files.filter((/** @type {string} */ f) => tops.includes(f)).sort(),
+    tops,
+    'files names the folders behind the import paths',
+  );
   // Apache Kafka's credit line, which the package carries as Kafka's NOTICE asks.
   assert.ok(pkg.files.includes('NOTICE'));
   assert.match(
@@ -317,6 +343,9 @@ test('only native/util.h includes the bindings header', () => {
  * ignored), relative to the package root: an installed or built tree
  * (node_modules/, native/build/) is not a source.
  * Outside a git checkout, every file under them but node_modules/ and build/.
+ *
+ * @param {Array<string>} dirs
+ * @returns {Array<string>}
  */
 function sourceFiles(dirs) {
   const listed = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...dirs], {
@@ -326,6 +355,7 @@ function sourceFiles(dirs) {
   if (listed.status === 0) {
     return [...new Set(listed.stdout.split('\0').filter(Boolean))].filter((f) => fs.existsSync(path.join(ROOT, f))).sort();
   }
+  /** @param {string} rel */
   const skipped = (rel) => rel.split('/').some((s) => s === 'node_modules' || s === 'build');
   return dirs.flatMap((d) => walk(path.join(ROOT, d)).map((f) => `${d}/${f}`)).filter((f) => !f.endsWith('/') && !skipped(f));
 }
@@ -363,6 +393,7 @@ test('a relative CONFLUENT_KAFKA_LIB_DIR or CONFLUENT_KAFKA_INCLUDE_DIR is relat
     const m = new RegExp(`"${variable}": "<!\\(node -p \\\\"(.*)\\\\"\\)"`).exec(gyp);
     assert.ok(m, `native/binding.gyp has no ${variable} command`);
     const expression = m[1].replace(/\\"/g, '"');
+    /** @param {string | undefined} value */
     const run = (value) => {
       const childEnv = { ...process.env };
       delete childEnv[env];

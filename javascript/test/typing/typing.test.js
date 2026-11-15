@@ -38,8 +38,15 @@ if (SKIP) console.log(`skipping the typing tests: ${SKIP}`);
 const LIB = path.join(ROOT, 'src');
 const DIST = path.join(ROOT, 'dist');
 
-/** Every file under `dir`, relative to it with `/` separators, recursively. */
+/**
+ * Every file under `dir`, relative to it with `/` separators, recursively.
+ *
+ * @param {string} dir
+ * @param {string} [base]
+ * @returns {Array<string>}
+ */
 function walk(dir, base = dir) {
+  /** @type {Array<string>} */
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -49,7 +56,11 @@ function walk(dir, base = dir) {
   return out.sort();
 }
 
-/** Whether `rel` (relative to src/ or dist/) is a private module: under internal/. */
+/**
+ * Whether `rel` (relative to src/ or dist/) is a private module: under internal/.
+ *
+ * @param {string} rel
+ */
 const isPrivate = (rel) => rel.split('/')[0] === 'internal';
 
 test('every public module is declared, no private one is, and no declaration refers to a private module', () => {
@@ -244,6 +255,10 @@ test("the declarations keep private constructors and leave out the library's own
       path.join(dir, 'node.mts'),
       "import producer from '@confluentinc/kafka-javascript/producer';\nconst p: typeof producer.KafkaProducer = producer.KafkaProducer;\nvoid p;\n",
     );
+    /**
+     * @param {string} name
+     * @param {Array<string>} files
+     */
     const interop = (name, files) =>
       writeConfig(path.join(dir, name), {
         compilerOptions: {

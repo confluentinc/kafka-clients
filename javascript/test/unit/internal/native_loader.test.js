@@ -30,7 +30,12 @@ const {
   platformKey,
 } = require('../../../dist/internal/native_loader');
 
-/** A process report whose header has `glibcVersionRuntime` (or not), recording excludeNetwork at the call. */
+/**
+ * A process report whose header has `glibcVersionRuntime` (or not), recording excludeNetwork at the call.
+ *
+ * @param {{glibcVersionRuntime?: string}} header
+ * @param {Array<boolean>} [seen]
+ */
 function reportOf(header, seen = []) {
   return {
     excludeNetwork: false,
@@ -76,6 +81,7 @@ test("the supported platforms are the preview's, one folder each in npm/", () =>
 });
 
 test('glibc is read from the process report with the network section excluded, then restored', () => {
+  /** @type {Array<boolean>} */
   const seen = [];
   const report = reportOf({ glibcVersionRuntime: '2.28' }, seen);
   const noLib = () => assert.fail('/lib is not read when the report answers');
@@ -119,8 +125,10 @@ test('the platform package comes first, then the development build', () => {
 });
 
 test('the platform package is loaded when it loads, and the development build is not tried', () => {
+  /** @type {Array<string>} */
   const tried = [];
   const loaded = loadAddon(
+    /** @param {string} id */
     (id) => {
       tried.push(id);
       return { from: id };
@@ -133,9 +141,11 @@ test('the platform package is loaded when it loads, and the development build is
 });
 
 test('the development build is loaded when the platform package does not load', () => {
+  /** @type {Array<string>} */
   const tried = [];
   const dev = path.join('/pkg', 'native', 'build', 'Release', ADDON_FILE);
   const loaded = loadAddon(
+    /** @param {string} id */
     (id) => {
       tried.push(id);
       if (id !== dev) throw Object.assign(new Error(`Cannot find module '${id}'`), { code: 'MODULE_NOT_FOUND' });
@@ -157,6 +167,7 @@ test('when nothing loads, the error names the platform package, the usual causes
   assert.throws(
     () => loadAddon(fail, 'linux-x64-gnu', '/pkg'),
     (e) => {
+      assert.ok(e instanceof Error);
       assert.match(e.message, /^cannot load the native addon of @confluentinc\/kafka-javascript for platform linux-x64-gnu: /);
       assert.match(e.message, /@confluentinc\/kafka-javascript-linux-x64-gnu is not installed or does not load, /);
       assert.match(e.message, /the development build \/pkg\/native\/build\/Release\/confluent-kafka-javascript\.node does not load either/);
@@ -183,6 +194,7 @@ test('when nothing loads, the error names the platform package, the usual causes
   assert.throws(
     () => loadAddon(fail, 'win32-x64', '/pkg'),
     (e) => {
+      assert.ok(e instanceof Error);
       assert.match(e.message, /there is no @confluentinc\/kafka-javascript-win32-x64, the platform is not supported/);
       assert.doesNotMatch(e.message, /The usual causes/);
       assert.match(e.message, /Or build it from source with `make -C javascript build`/);
