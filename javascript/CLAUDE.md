@@ -1476,10 +1476,13 @@ The rules, each named in its finding:
   reused for the next file keeps what a file changed in it (a second copy's
   error classes in the addon). The tests use `test()` and `node:assert/strict`;
   a timeout is the last argument of `test`, `it`, `test.each`'s test,
-  `test.only` and the hooks, which `test/jest_setup.js` applies (the light
-  runner registers it but does not enforce it), and refuses for
-  `test.concurrent` and `test.failing`; a `done` test or hook ends when it
-  calls `done`, a conditional skip
+  `test.only`, `fit` and the hooks, which `test/jest_setup.js` applies (the
+  light runner registers it but does not enforce it), and refuses for
+  `test.concurrent`; `test.failing` is refused whatever it is given, as the
+  light runner runs it as a plain test; a `done` test or hook ends when it
+  calls `done`, and one that also returns something fails with Jest's
+  message, with a timeout or not (`test/static/jest_setup.test.js` runs each
+  form through Jest and checks its outcome); a conditional skip
   is `(SKIP ? test.skip : test)(...)` with the reason printed once by the
   file, and cleanup is `afterEach`. ts-jest is not used: the light runner
   transforms nothing, and the tests are JavaScript. The integration tests run
