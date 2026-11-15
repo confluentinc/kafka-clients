@@ -27,18 +27,23 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const root = require('@confluentinc/kafka-javascript');
-/** The package of a src/ folder, by its own import path (no index re-exports another). */
+/**
+ * The package of a src/ folder, by its own import path (no index re-exports another).
+ *
+ * @param {string} folder
+ * @returns {Record<string, unknown>}
+ */
 const pkg = (folder) => require(folder === '' ? '@confluentinc/kafka-javascript' : `@confluentinc/kafka-javascript/${folder}`);
 const common = {
-  ...pkg('common'),
-  config: pkg('common/config'),
-  errors: pkg('common/errors'),
-  metrics: pkg('common/metrics'),
-  requests: pkg('common/requests'),
-  protocol: { types: pkg('common/protocol/types') },
+  .../** @type {typeof import('@confluentinc/kafka-javascript/common')} */ (pkg('common')),
+  config: /** @type {typeof import('@confluentinc/kafka-javascript/common/config')} */ (pkg('common/config')),
+  errors: /** @type {typeof import('@confluentinc/kafka-javascript/common/errors')} */ (pkg('common/errors')),
+  metrics: /** @type {typeof import('@confluentinc/kafka-javascript/common/metrics')} */ (pkg('common/metrics')),
+  requests: /** @type {typeof import('@confluentinc/kafka-javascript/common/requests')} */ (pkg('common/requests')),
+  protocol: { types: /** @type {typeof import('@confluentinc/kafka-javascript/common/protocol/types')} */ (pkg('common/protocol/types')) },
 };
-const producer = pkg('producer');
-const consumer = pkg('consumer');
+const producer = /** @type {typeof import('@confluentinc/kafka-javascript/producer')} */ (pkg('producer'));
+const consumer = /** @type {typeof import('@confluentinc/kafka-javascript/consumer')} */ (pkg('consumer'));
 const { ERRORS, FFI_NAMES } = require('../../../dist/internal/error_registry');
 const {
   LOCAL_NULL_POINTER,
@@ -51,6 +56,8 @@ const {
 const { create, ownFfiId, ownForms } = require('../../../dist/internal/throwable');
 
 const { javaClass } = require('../../_java_source');
+
+/** A form a class registered: its parameters, its message and its payload fields. @typedef {readonly [params: ReadonlyArray<string>, message: unknown, fields?: unknown]} ErrorForm */
 
 const { KafkaError } = common;
 const {
@@ -90,7 +97,12 @@ const JDK_FORMS = new Map([
 // (Java 11's `CancellationException extends IllegalStateException`).
 const JDK_PARENTS = new Map([['java.util.concurrent.CancellationException', 'java.lang.IllegalStateException']]);
 
-/** Whether Java parameter type `t` is the cause: a Throwable, whatever its class (InterruptedException). */
+/**
+ * Whether Java parameter type `t` is the cause: a Throwable, whatever its class (InterruptedException).
+ *
+ * @param {string} t
+ * @returns {boolean}
+ */
 function throwable(t) {
   return t === 'Throwable' || /Exception$/.test(t);
 }
@@ -100,13 +112,18 @@ function throwable(t) {
  * (protected too, of an abstract class) that take only a String and a
  * Throwable, as parameter sets, read from the Java index. A constructor with
  * any other parameter takes a payload and has no form.
+ *
+ * @param {string} fqn
+ * @returns {Array<Array<string>>}
  */
 function javaForms(fqn) {
-  if (JDK_FORMS.has(fqn)) return JDK_FORMS.get(fqn);
+  const jdk = JDK_FORMS.get(fqn);
+  if (jdk !== undefined) return jdk;
   const cls = javaClass(fqn);
   const simple = cls.path[cls.path.length - 1];
   const visible = cls.abstract ? ['public', 'protected'] : ['public'];
   const ctors = cls.overloads.filter((o) => o.name === simple && o.return_type === null && visible.includes(o.visibility));
+  /** @type {Array<Array<string>>} */
   const forms = [];
   for (const o of ctors) {
     if (o.deprecated) continue;
@@ -125,8 +142,12 @@ function javaForms(fqn) {
  * the form's parameter set (`message,cause`) -> the text of the string
  * literals its `super(...)` / `this(...)` call starts with
  * (`super("Failing batch since transaction was aborted")`).
+ *
+ * @param {string} fqn
+ * @returns {Map<string, string>}
  */
 function javaFixedTexts(fqn) {
+  /** @type {Map<string, string>} */
   const texts = new Map();
   if (fqn.startsWith('java.')) return texts;
   const cls = javaClass(fqn);
@@ -139,13 +160,23 @@ function javaFixedTexts(fqn) {
   return texts;
 }
 
-/** Whether Java class `fqn` is abstract. */
+/**
+ * Whether Java class `fqn` is abstract.
+ *
+ * @param {string} fqn
+ * @returns {boolean}
+ */
 function isAbstract(fqn) {
   if (fqn.startsWith('java.')) return false;
   return javaClass(fqn).abstract;
 }
 
-/** Whether a form is a message and cause form: no payload parameter. */
+/**
+ * Whether a form is a message and cause form: no payload parameter.
+ *
+ * @param {ReadonlyArray<string>} params
+ * @returns {boolean}
+ */
 function plainForm(params) {
   return params.every((p) => p === 'message' || p === 'cause');
 }
@@ -154,6 +185,9 @@ function plainForm(params) {
  * A form as a form error lists it: a one-parameter form of a message or a
  * cause as its value, any other as its options object (an error's payload is
  * given by name only, root CLAUDE.md, JavaScript Binding Conventions, Errors).
+ *
+ * @param {ReadonlyArray<string>} params
+ * @returns {string}
  */
 function shapeOf(params) {
   return params.length > 1 || !plainForm(params) ? `({ ${params.join(', ')} })` : `(${params.join(', ')})`;
@@ -183,7 +217,12 @@ const PAYLOAD_MEMBERS = new Map([
   ],
 ]);
 
-/** Java's public instance methods of class `fqn` (getters and overrides), from the Java index. */
+/**
+ * Java's public instance methods of class `fqn` (getters and overrides), from the Java index.
+ *
+ * @param {string} fqn
+ * @returns {Array<string>}
+ */
 function javaPayloadGetters(fqn) {
   if (fqn.startsWith('java.')) return [];
   const cls = javaClass(fqn);
@@ -193,12 +232,23 @@ function javaPayloadGetters(fqn) {
   ];
 }
 
-/** An instance of `cls`, as the core reports one. */
+/**
+ * An instance of `cls`, as the core reports one.
+ *
+ * @param {new (...args: never[]) => Error} cls
+ * @returns {Error}
+ */
 function instance(cls) {
+  // @ts-expect-error published type narrower than the run time: dist/internal/throwable.js drops the optional marks of create's cause, id and payload
   return create(cls, 'm');
 }
 
-/** The FQN of Java's `extends` parent of `fqn`, from the Java index: a JDK class (`RuntimeException`) in java.lang. */
+/**
+ * The FQN of Java's `extends` parent of `fqn`, from the Java index: a JDK class (`RuntimeException`) in java.lang.
+ *
+ * @param {string} fqn
+ * @returns {string}
+ */
 function javaParent(fqn) {
   const cls = javaClass(fqn);
   assert.ok(cls.supertypes.length > 0, `${fqn} has no extends clause`);
@@ -208,7 +258,12 @@ function javaParent(fqn) {
   return parent.includes('.') ? parent : `java.lang.${parent}`;
 }
 
-/** The src/ folder of a Java package: `clients` dropped, `java.*` at the root. */
+/**
+ * The src/ folder of a Java package: `clients` dropped, `java.*` at the root.
+ *
+ * @param {string} fqn
+ * @returns {string}
+ */
 function folderOf(fqn) {
   const pkg = fqn.slice(0, fqn.lastIndexOf('.'));
   if (pkg.startsWith('java.')) return '';
@@ -223,8 +278,9 @@ test("every Java class has its class, whose parent is the Java parent's class", 
   assert.equal(BY_JAVA.size, 176);
   for (const [java, cls] of BY_JAVA) {
     const parent = Object.getPrototypeOf(cls);
-    if (JDK_PARENTS.has(java)) {
-      assert.equal(parent, BY_JAVA.get(JDK_PARENTS.get(java)), java);
+    const jdkParent = JDK_PARENTS.get(java);
+    if (jdkParent !== undefined) {
+      assert.equal(parent, BY_JAVA.get(jdkParent), java);
       continue;
     }
     if (java.startsWith('java.') || java === 'org.apache.kafka.common.KafkaException') {
@@ -241,7 +297,9 @@ test("every Java class has its class, whose parent is the Java parent's class", 
 test('every error class the package defines is a generated one', () => {
   // Walk every import path of the package for Error subclasses: none is
   // invented. No index re-exports another, so each path is visited.
+  /** @type {Set<unknown>} */
   const found = new Set();
+  /** @param {object} ns */
   const visit = (ns) => {
     for (const value of Object.values(ns)) {
       if (typeof value === 'function' && value.prototype instanceof Error) found.add(value);
@@ -255,7 +313,7 @@ test('every error class the package defines is a generated one', () => {
 
 test('a class keeps its Java name with the Exception suffix as Error, in the folder of its Java package', () => {
   for (const [module, name, java] of ERRORS) {
-    const simple = java.split('.').pop();
+    const simple = java.slice(java.lastIndexOf('.') + 1);
     assert.equal(name, simple.endsWith('Exception') ? `${simple.slice(0, -'Exception'.length)}Error` : simple, java);
     const folder = folderOf(java);
     const stem = name.replace(/(?<=[a-z0-9])(?=[A-Z])/g, '_').toLowerCase();
@@ -356,18 +414,21 @@ test('an error has no public field but name, message and cause: classify with in
     }
     assert.deepEqual(Object.getOwnPropertyNames(e).sort(), ['message', 'name', 'stack'], cls.name);
     // Java's payload getters are methods over private fields (Q39).
-    const payload = PAYLOAD_MEMBERS.get(JAVA_OF.get(cls)) ?? [];
+    const java = JAVA_OF.get(cls);
+    assert.ok(java !== undefined, cls.name);
+    const payload = PAYLOAD_MEMBERS.get(java) ?? [];
     assert.deepEqual(Object.getOwnPropertyNames(cls.prototype).sort(), ['constructor', ...payload].sort(), cls.name);
     // Every Java public method the class declares is a member, but Java's
     // fillInStackTrace() (a JVM stack-trace override JavaScript has no
     // counterpart of), and an abstract base's abstract getter, which has no
     // body.
     const untranslated = new Set(['fillInStackTrace']);
-    if (isAbstract(JAVA_OF.get(cls))) continue;
-    for (const m of javaPayloadGetters(JAVA_OF.get(cls))) {
+    if (isAbstract(java)) continue;
+    for (const m of javaPayloadGetters(java)) {
       if (!untranslated.has(m)) assert.ok(payload.includes(m), `${cls.name}.${m}`);
     }
   }
+  // @ts-expect-error published type narrower than the run time: dist/internal/throwable.js drops the optional marks of create's id and payload
   const withCause = create(KafkaError, 'm', null);
   assert.deepEqual(Object.getOwnPropertyNames(withCause).sort(), ['cause', 'message', 'name', 'stack']);
 });
@@ -375,7 +436,10 @@ test('an error has no public field but name, message and cause: classify with in
 test("every class takes Java's message and cause forms, both ways", () => {
   for (const cls of errorClasses()) {
     const java = JAVA_OF.get(cls);
-    const forms = (ownForms(cls) ?? []).map(([params]) => params).filter(plainForm);
+    assert.ok(java !== undefined, cls.name);
+    /** @type {ReadonlyArray<ErrorForm>} */
+    const own = ownForms(cls) ?? [];
+    const forms = own.map(([params]) => params).filter(plainForm);
     assert.deepEqual(forms.map((f) => f.join(',')).sort(), [...new Set(javaForms(java).map((f) => f.join(',')))].sort(), java);
   }
 });
@@ -384,9 +448,11 @@ test("each form gives Java's message and cause, and a call no form takes is refu
   const cause = new TopicAuthorizationError('inner');
   for (const cls of errorClasses()) {
     const java = JAVA_OF.get(cls);
+    assert.ok(java !== undefined, cls.name);
     // An abstract base refuses to be constructed (the test below), but its
     // forms are what a subclass takes: check them through a throwaway one.
     const target = isAbstract(java) ? class Sub extends cls {} : cls;
+    /** @type {ReadonlyArray<ErrorForm>} */
     const registered = ownForms(cls) ?? [];
     if (registered.length === 0) {
       assert.throws(() => new target({ message: 'm' }), {
@@ -411,7 +477,9 @@ test("each form gives Java's message and cause, and a call no form takes is refu
       // Java's message, from Java's source, not from the generated table: a
       // fixed text where the constructor passes one, else the message, the
       // cause's toString() for (cause), Java's null ('') for ().
+      /** @type {string | undefined} */
       const fixed = javaFixedTexts(java).get(params.join(','));
+      /** @type {string} */
       const want =
         fixed !== undefined ? fixed : params.includes('message') ? 'm' : params.includes('cause') ? 'TopicAuthorizationError: inner' : '';
       assert.equal(e.message, want, `${cls.name}(${params})`);
@@ -458,6 +526,7 @@ test('the abstract bases are Java-abstract, have no id and cannot be constructed
   // reports the id of its nearest class with one (ApiError's: an abstract
   // base has none).
   assert.equal(new Mine().message, '');
+  // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
   assert.throws(() => new Mine({ reason: 'r' }), {
     name: 'IllegalArgumentError',
     message: 'RetriableError() takes one of (), (message), (cause), ({ message, cause }); got (reason)',
@@ -490,6 +559,7 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.equal(new KafkaError({ message: null }).message, '');
   assert.equal(new KafkaError().message, '');
   // undefined is never "not given", where Java has a no-argument form too.
+  // @ts-expect-error undefined for the message: the undefined check throws TypeError
   assert.throws(() => new KafkaError(undefined), {
     name: 'TypeError',
     message: "message must not be undefined. Leave the argument out, or pass null for Java's null",
@@ -512,52 +582,64 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.equal(new ExecutionError(cause).message, 'TopicAuthorizationError: inner');
   assert.equal(new ExecutionError(null).cause, null);
   assert.equal(new ExecutionError({ message: 'x', cause }).message, 'x');
+  // @ts-expect-error a message alone, which ExecutionError has no form for: the form check throws IllegalArgumentError
   assert.throws(() => new ExecutionError('x'), {
     name: 'IllegalArgumentError',
     message: 'ExecutionError() takes one of (cause), ({ message, cause }); got a string',
   });
+  // @ts-expect-error no argument, which ExecutionError has no form for: the form check throws IllegalArgumentError
   assert.throws(() => new ExecutionError(), {
     name: 'IllegalArgumentError',
     message: 'ExecutionError() takes one of (cause), ({ message, cause }); got ()',
   });
+  // @ts-expect-error a number: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaError(5), {
     name: 'IllegalArgumentError',
     message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got a number',
   });
+  // @ts-expect-error a number for the message: the type check throws TypeError
   assert.throws(() => new KafkaError({ message: 5 }), { name: 'TypeError', message: 'message must be a string, not number' });
+  // @ts-expect-error undefined for the message key: the undefined check throws TypeError
   assert.throws(() => new KafkaError({ message: undefined }), {
     name: 'TypeError',
     message: "message must not be undefined. Leave the key out, or pass null for Java's null",
   });
+  // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaError({ message: 'm', reason: 'r' }), {
     name: 'IllegalArgumentError',
     message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got (message, reason)',
   });
   // The ES2022 `new Error(message, { cause })`, and any second argument, is
   // the form check's error, listing the class's forms.
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaError('m', { cause }), {
     name: 'IllegalArgumentError',
     message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments',
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaError({ message: 'm' }, undefined), {
     name: 'IllegalArgumentError',
     message: 'KafkaError() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments',
   });
+  // @ts-expect-error three arguments: the form check throws IllegalArgumentError
   assert.throws(() => new TopicAuthorizationError('m', cause, 3), {
     name: 'IllegalArgumentError',
     message:
       'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 3 arguments',
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new common.errors.CoordinatorNotAvailableError('m', cause), {
     name: 'IllegalArgumentError',
     message: 'CoordinatorNotAvailableError() takes one of (message), ({ message, cause }); got 2 arguments',
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new IllegalStateError('m', cause), {
     name: 'IllegalArgumentError',
     message: 'IllegalStateError() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments',
   });
   // A form Java does not have is refused: TopicAuthorizationException has no
   // (String, Throwable) constructor.
+  // @ts-expect-error a form Java does not have: the form check throws IllegalArgumentError
   assert.throws(() => new TopicAuthorizationError({ message: 'm', cause }), {
     name: 'IllegalArgumentError',
     message:
@@ -588,6 +670,7 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.ok(new consumer.CommitFailedError().message.startsWith('Commit cannot be completed since the group has already rebalanced'));
   assert.equal(new consumer.CommitFailedError('mine').message, 'mine');
   // A class whose every Java constructor takes a payload takes it by name only.
+  // @ts-expect-error a message alone, which LogTruncationError has no form for: the form check throws IllegalArgumentError
   assert.throws(() => new consumer.LogTruncationError('m'), {
     name: 'IllegalArgumentError',
     message:
@@ -596,8 +679,15 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.equal(Object.keys(new KafkaError('m')).includes('name'), false);
 });
 
-/** Whether `error`'s stack has a frame, and its first frame is not in throwable.ts (the caller's). */
+/**
+ * Whether `error`'s stack has a frame, and its first frame is not in throwable.ts (the caller's).
+ *
+ * @param {Error} error
+ * @param {string} what
+ * @returns {asserts error is Error & {stack: string}}
+ */
 function assertCallerFrames(error, what) {
+  assert.ok(error.stack !== undefined, `${what}: no stack`);
   const frames = error.stack.split('\n').filter((line) => line.trimStart().startsWith('at '));
   assert.ok(frames.length > 0, `${what}: no stack frame in ${error.stack}`);
   assert.ok(!frames[0].includes('throwable'), `${what}: the first frame is create's own: ${frames[0]}`);
@@ -611,6 +701,7 @@ test("errors built without their constructor keep the caller's stack frames", as
   // A form error of the matcher.
   let form;
   try {
+    // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
     new producer.ProducerRecord({ topik: 't', value: 'v' });
   } catch (e) {
     form = e;
@@ -723,7 +814,9 @@ test("every error class's form error lists its forms as JavaScript calls them, b
     const forms = ownForms(cls);
     if (forms === undefined || forms.length === 0) continue;
     // An abstract base's forms are its subclasses': check them through one.
-    const target = isAbstract(JAVA_OF.get(cls)) ? class Sub extends cls {} : cls;
+    const java = JAVA_OF.get(cls);
+    assert.ok(java !== undefined, cls.name);
+    const target = isAbstract(java) ? class Sub extends cls {} : cls;
     const shapes = [...forms]
       .map(([params]) => params)
       .sort((a, b) => a.length - b.length)

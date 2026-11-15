@@ -23,12 +23,20 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { checkConfigs, configEntries: entriesAsBytes, decimal } = require('../../../dist/internal/config');
+const { checkConfigs, configEntries: untypedEntries, decimal } = require('../../../dist/internal/config');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 
-/** The `[key, value]` pairs as strings: configEntries hands the addon encodeLikeJava's bytes. */
+// src/internal/config.ts's signature, which the compiled JavaScript does not carry.
+const entriesAsBytes = /** @type {(configs: unknown, leftOut?: ReadonlySet<string>) => Array<[Buffer, Buffer]>} */ (untypedEntries);
+
+/**
+ * The `[key, value]` pairs as strings: configEntries hands the addon encodeLikeJava's bytes.
+ *
+ * @param {unknown} configs
+ * @returns {Array<[string, string]>}
+ */
 function configEntries(configs) {
   return entriesAsBytes(configs).map(([key, value]) => {
     assert.ok(Buffer.isBuffer(key) && Buffer.isBuffer(value));
@@ -93,6 +101,7 @@ test("configs is a plain object: a Map is refused, and a symbol key rejected wit
     name: 'TypeError',
     message: 'configs must be a plain object, not a class instance',
   });
+  // @ts-expect-error a Map for the configs: the plain-object check throws TypeError
   assert.throws(() => new KafkaProducer({ configs: new Map([['bootstrap.servers', 'localhost:9092']]) }), {
     name: 'TypeError',
     message: 'configs must be a plain object, not a Map',
@@ -184,14 +193,17 @@ test('the checked configuration is a frozen copy, a __proto__ key a key', () => 
 });
 
 test("the core checks the values, with Java's messages naming the key", () => {
-  for (const [configs, message] of [
+  /** @type {Array<[import('@confluentinc/kafka-javascript/producer').ProducerConfigs, string]>} */
+  const cases = [
     [{ 'linger.ms': true }, 'Invalid value true for configuration linger.ms: Not a number of type LONG'],
     [{ 'batch.size': 42.5 }, 'Invalid value 42.5 for configuration batch.size: Not a number of type INT'],
+    // @ts-expect-error an object for a LONG: the core's type check throws ConfigError
     [{ 'linger.ms': {} }, 'Invalid value [object Object] for configuration linger.ms: Not a number of type LONG'],
     [{ 'linger.ms': 2n ** 63n }, 'Invalid value 9223372036854775808 for configuration linger.ms: Not a number of type LONG'],
     [{ 'enable.idempotence': 1 }, 'Invalid value 1 for configuration enable.idempotence: Expected value to be either true or false'],
     [{ acks: 5 }, 'Invalid value 5 for configuration acks: String must be one of: all, -1, 0, 1'],
-  ]) {
+  ];
+  for (const [configs, message] of cases) {
     assert.throws(
       () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', ...configs } }),
       (e) => {
@@ -206,6 +218,7 @@ test("the core checks the values, with Java's messages naming the key", () => {
 });
 
 test('an unknown key, a kafkaJS block included, reaches the core, which builds the producer', async () => {
+  // @ts-expect-error published type narrower than the run time: a config value that is an object, a 1.x kafkaJS block, is written as text
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': 'localhost:1', 'not.a.key': 'x', kafkaJS: { brokers: ['localhost:9092'] } },
   });

@@ -50,6 +50,11 @@ const { Header, Headers } = require('@confluentinc/kafka-javascript/common/heade
 const { TimestampType } = require('@confluentinc/kafka-javascript/common/record');
 const { fromNative } = require('../../../dist/internal/errors');
 
+/**
+ * @param {string} topic
+ * @param {number} partition
+ * @returns {TopicPartition}
+ */
 const tp = (topic, partition) => new TopicPartition({ topic, partition });
 
 test("TopicAuthorizationError: Java's three constructors and unauthorizedTopics()", () => {
@@ -79,33 +84,40 @@ test("TopicAuthorizationError: Java's three constructors and unauthorizedTopics(
     message: 'unauthorizedTopics must be an iterable of strings, not string',
   });
   // undefined is no element (root Signatures, Q18), and an element is a string or null.
+  // @ts-expect-error undefined in the topics: the element check throws TypeError
   assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: ['a', undefined] }), {
     constructor: TypeError,
     message: "unauthorizedTopics must not hold undefined: pass null for Java's null",
   });
+  // @ts-expect-error a number in the topics: the element check throws TypeError
   assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: [1] }), {
     constructor: TypeError,
     message: 'unauthorizedTopics must hold only strings or null, not a number',
   });
+  // @ts-expect-error undefined in the partitions: the element check throws TypeError
   assert.throws(() => new NoOffsetForPartitionError({ partitions: [undefined] }), {
     constructor: TypeError,
     message: "partitions must not hold undefined: pass null for Java's null",
   });
+  // @ts-expect-error a number for the topics: the iterable check throws TypeError
   assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: 5 }), {
     constructor: TypeError,
     message: 'unauthorizedTopics must be an iterable of strings',
   });
   // A payload is given by name only; a form error lists the forms by count, ties in Java's order.
+  // @ts-expect-error a bare array: the form check throws IllegalArgumentError
   assert.throws(() => new TopicAuthorizationError(['a']), {
     constructor: IllegalArgumentError,
     message: 'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got an array',
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new TopicAuthorizationError({ message: 'm', unauthorizedTopics: [] }, 2), {
     constructor: IllegalArgumentError,
     message:
       'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 2 arguments',
   });
   // A getter only reads.
+  // @ts-expect-error an argument to a getter: the read-only check throws TypeError
   assert.throws(() => built.unauthorizedTopics(1), {
     constructor: TypeError,
     message: 'unauthorizedTopics() only reads: it takes no argument',
@@ -128,6 +140,7 @@ test('InvalidTopicError: the message and cause forms set an empty set; the paylo
   const both = new InvalidTopicError({ message: 'm', invalidTopics: ['x'] });
   assert.equal(both.message, 'm');
   assert.deepEqual(both.invalidTopics(), new Set(['x']));
+  // @ts-expect-error a form Java does not have: the form check throws IllegalArgumentError
   assert.throws(() => new InvalidTopicError({ cause, invalidTopics: [] }), {
     constructor: IllegalArgumentError,
     message:
@@ -137,6 +150,7 @@ test('InvalidTopicError: the message and cause forms set an empty set; the paylo
 
 test('RecordTooLargeError: recordTooLargePartitions is a TopicPartitionMap<bigint>, null by default', () => {
   assert.equal(new RecordTooLargeError('m').recordTooLargePartitions(), null);
+  /** @type {TopicPartitionMap<bigint | number>} */
   const given = new TopicPartitionMap([[tp('t', 0), 5]]);
   const e = new RecordTooLargeError({ message: 'too large', recordTooLargePartitions: given });
   const got = e.recordTooLargePartitions();
@@ -144,8 +158,9 @@ test('RecordTooLargeError: recordTooLargePartitions is a TopicPartitionMap<bigin
   // A long taken as a number is a bigint; the map is a copy.
   assert.equal(got.get(tp('t', 0)), 5n);
   given.set(tp('t', 1), 6n);
-  assert.equal(e.recordTooLargePartitions().size(), 1);
+  assert.equal(e.recordTooLargePartitions()?.size(), 1);
   // Only a TopicPartitionMap is taken, with a hint for a Map.
+  // @ts-expect-error a Map for a TopicPartitionMap: the class check throws TypeError
   assert.throws(() => new RecordTooLargeError({ message: 'm', recordTooLargePartitions: new Map([[tp('t', 0), 1n]]) }), {
     constructor: TypeError,
     message:
@@ -173,8 +188,10 @@ test('OffsetOutOfRangeError: offsetOutOfRangePartitions and partitions(), its ke
   assert.ok(e instanceof InvalidOffsetError);
   assert.equal(new OffsetOutOfRangeError({ message: 'm', offsetOutOfRangePartitions: offsets }).message, 'm');
   // Java's keySet() dereferences the field.
+  // @ts-expect-error published type narrower than the run time: offsetOutOfRangePartitions takes null, as Java's field does
   const empty = new OffsetOutOfRangeError({ message: 'm', offsetOutOfRangePartitions: null });
   assert.throws(() => empty.partitions(), { constructor: TypeError, message: 'offsetOutOfRangePartitions must not be null' });
+  // @ts-expect-error a message alone, which OffsetOutOfRangeError has no form for: the form check throws IllegalArgumentError
   assert.throws(() => new OffsetOutOfRangeError('m'), {
     constructor: IllegalArgumentError,
     message:
@@ -191,19 +208,23 @@ test('NoOffsetForPartitionError: one partition or a collection, kept as a TopicP
   assert.equal(many.message, 'Undefined offset with no reset policy for partitions: [t-0, t-1, t-0]');
   assert.equal(many.partitions().size(), 2);
   // Set.copyOf dereferences the collection and refuses a null element.
+  // @ts-expect-error null for the partitions: the null check throws TypeError
   assert.throws(() => new NoOffsetForPartitionError({ partitions: null }), {
     constructor: TypeError,
     message: 'partitions must not be null',
   });
+  // @ts-expect-error null in the partitions: the element check throws TypeError
   assert.throws(() => new NoOffsetForPartitionError({ partitions: [null] }), {
     constructor: TypeError,
     message: 'partitions must not contain null',
   });
+  // @ts-expect-error a string for a TopicPartition: the class check throws TypeError
   assert.throws(() => new NoOffsetForPartitionError({ partition: 't-0' }), {
     constructor: TypeError,
     message: 'partition must be a TopicPartition',
   });
   // Java's Collections.singleton(null) holds the null.
+  // @ts-expect-error published type narrower than the run time: partition takes null, as Java's Collections.singleton(null) does
   const none = new NoOffsetForPartitionError({ partition: null });
   assert.equal(none.message, 'Undefined offset with no reset policy for partition: null');
   assert.equal(none.partitions().size(), 1);
@@ -226,10 +247,12 @@ test("LogTruncationError: Java's two constructors, divergentOffsets() a TopicPar
   assert.equal(e.partitions().toString(), '[t-0]');
   assert.equal(new LogTruncationError({ message: 'm', fetchOffsets, divergentOffsets }).message, 'm');
   // Collections.unmodifiableMap dereferences the map.
+  // @ts-expect-error null for the divergent offsets: the null check throws TypeError
   assert.throws(() => new LogTruncationError({ fetchOffsets, divergentOffsets: null }), {
     constructor: TypeError,
     message: 'divergentOffsets must not be null',
   });
+  // @ts-expect-error a bigint value for an OffsetAndMetadata: the value check throws TypeError
   assert.throws(() => new LogTruncationError({ fetchOffsets, divergentOffsets: new TopicPartitionMap([[tp('t', 0), 1n]]) }), {
     constructor: TypeError,
     message: 'a value of divergentOffsets must be an OffsetAndMetadata',
@@ -245,8 +268,8 @@ test("LogTruncationError: Java's two constructors, divergentOffsets() a TopicPar
   assert.ok(
     core
       .divergentOffsets()
-      .get(tp('t', 0))
-      .equals(new OffsetAndMetadata({ offset: 9n, metadata: 'm' })),
+      ?.get(tp('t', 0))
+      ?.equals(new OffsetAndMetadata({ offset: 9n, metadata: 'm' })),
   );
 });
 
@@ -288,7 +311,7 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
   // A ByteBuffer is a Buffer over the same memory, as Java keeps the buffer.
   assert.ok(Buffer.isBuffer(e.keyBuffer()));
   key[0] = 9;
-  assert.equal(e.keyBuffer()[0], 9);
+  assert.equal(e.keyBuffer()?.[0], 9);
   assert.equal(e.valueBuffer(), null);
   assert.equal(e.headers(), headers);
   // An iterable of Header is a new Headers.
@@ -304,18 +327,21 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
     message: null,
     cause: null,
   });
-  assert.equal(listed.headers().lastHeader('h').key(), 'h');
+  assert.equal(listed.headers().lastHeader('h')?.key(), 'h');
   assert.equal(listed.message, '');
   assert.throws(
     () =>
       new RecordDeserializationError({
+        // @ts-expect-error a string for the origin: the enum check throws TypeError
         origin: 'KEY',
         partition: tp('t', 1),
         offset: 0,
         timestamp: 0,
+        // @ts-expect-error published type narrower than the run time: timestampType takes null
         timestampType: null,
         keyBuffer: null,
         valueBuffer: null,
+        // @ts-expect-error published type narrower than the run time: headers takes null
         headers: null,
         message: null,
         cause: null,
@@ -325,6 +351,7 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
       message: 'origin must be a DeserializationExceptionOrigin',
     },
   );
+  // @ts-expect-error no payload: the form check throws IllegalArgumentError
   assert.throws(() => new RecordDeserializationError({ message: 'm', cause }), { constructor: IllegalArgumentError });
   // The core's payload.
   const core = fromNative({
@@ -358,10 +385,12 @@ test('the String payloads: groupId, resource; GroupAuthorizationError.forGroupId
     assert.equal(e.groupId(), 'g');
   }
   assert.equal(GroupAuthorizationError.forGroupId(null).message, 'Not authorized to access group: null');
+  // @ts-expect-error a number for the group id: the form check throws IllegalArgumentError
   assert.throws(() => GroupAuthorizationError.forGroupId(5), {
     constructor: IllegalArgumentError,
     message: 'forGroupId() takes one of (groupId); got a number',
   });
+  // @ts-expect-error a number for the group id: the type check throws TypeError
   assert.throws(() => new GroupAuthorizationError({ message: 'm', groupId: 5 }), {
     constructor: TypeError,
     message: 'groupId must be a string or null',
@@ -415,6 +444,7 @@ test("ConfigError: Java's (name, value) and (name, value, message) build the mes
   assert.equal(new ConfigError({ name: 'a', value: null, message: 'bad' }).message, 'Invalid value null for configuration a: bad');
   assert.equal(new ConfigError({ name: 'a', value: 1, message: null }).message, 'Invalid value 1 for configuration a');
   assert.equal(new ConfigError('plain').message, 'plain');
+  // @ts-expect-error a name without a value: the form check throws IllegalArgumentError
   assert.throws(() => new ConfigError({ name: 'a' }), {
     constructor: IllegalArgumentError,
     message: 'ConfigError() takes one of (message), ({ name, value }), ({ name, value, message }); got (name)',

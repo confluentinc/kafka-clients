@@ -20,9 +20,66 @@
 
 const { committedJavaIndex } = require('../scripts/lint/java_index');
 
-/** The index's class `fqn` (`org.apache.kafka.….Outer$Inner`); fails when the index has none. */
+/**
+ * A field of a class in the index.
+ *
+ * @typedef {object} JavaField
+ * @property {string} name
+ * @property {string | null} type
+ * @property {string} visibility
+ * @property {boolean} static
+ * @property {boolean} final
+ * @property {boolean} deprecated
+ * @property {string} [value] its literal, for a constant
+ */
+
+/**
+ * A method or constructor of a class in the index.
+ *
+ * @typedef {object} JavaOverload
+ * @property {string} name
+ * @property {Array<string>} params
+ * @property {Array<string>} param_names
+ * @property {Array<string>} param_types
+ * @property {string | null} return_type null for a constructor
+ * @property {string} visibility
+ * @property {boolean} static
+ * @property {boolean} default
+ * @property {boolean} deprecated
+ * @property {boolean} [abstract]
+ * @property {string} [fixed_message]
+ */
+
+/**
+ * A class of the index.
+ *
+ * @typedef {object} JavaClass
+ * @property {string} fqn
+ * @property {string} package
+ * @property {Array<string>} path
+ * @property {string} kind
+ * @property {string} visibility
+ * @property {boolean} abstract
+ * @property {boolean} deprecated
+ * @property {boolean} public_audience
+ * @property {boolean} unsupported_package
+ * @property {Array<string>} supertypes
+ * @property {Array<string | null>} supertype_fqns
+ * @property {Array<JavaOverload>} overloads
+ * @property {Array<JavaField>} fields
+ * @property {Array<string>} enum_constants
+ */
+
+/**
+ * The index's class `fqn` (`org.apache.kafka.….Outer$Inner`); fails when the index has none.
+ *
+ * @param {string} fqn
+ * @returns {JavaClass}
+ */
 function javaClass(fqn) {
-  const cls = committedJavaIndex().classes.find((c) => c.fqn === fqn);
+  /** @type {Array<JavaClass>} */
+  const classes = committedJavaIndex().classes;
+  const cls = classes.find((c) => c.fqn === fqn);
   if (cls === undefined) throw new Error(`the Java index has no class ${fqn}`);
   return cls;
 }
@@ -37,7 +94,9 @@ function javaClass(fqn) {
  */
 function javaStringConstants(fqn) {
   const cls = javaClass(fqn);
-  const literals = cls.fields.filter((f) => f.value !== undefined).map((f) => [f.name, f.value]);
+  /** @type {Array<[string, string]>} */
+  const literals = [];
+  for (const f of cls.fields) if (f.value !== undefined) literals.push([f.name, f.value]);
   const deprecated = new Set(cls.fields.filter((f) => f.deprecated).map((f) => f.name));
   return { literals, deprecated };
 }

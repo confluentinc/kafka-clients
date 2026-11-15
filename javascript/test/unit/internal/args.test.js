@@ -39,7 +39,12 @@ const RECORD_FORMS =
   '(topic, partition, timestamp, key, value), (topic, partition, key, value, headers), ' +
   '(topic, partition, key, value), (topic, key, value), (topic, value)';
 
-/** An IllegalArgumentError with exactly `message`, Java's built-in (not a KafkaError). */
+/**
+ * An IllegalArgumentError with exactly `message`, Java's built-in (not a KafkaError).
+ *
+ * @param {string} message
+ * @returns {(e: unknown) => true}
+ */
 function illegal(message) {
   return (e) => {
     assert.ok(e instanceof IllegalArgumentError);
@@ -74,11 +79,13 @@ test("null is Java's null, which is given; a parameter given as undefined is a T
   assert.equal(RECORD.match({ topic: null, value: null }, 1), 5);
   assert.equal(RECORD.match({ topic: 't', partition: null, key: null, value: 'v' }, 1), 3);
   // undefined is not "left out" (leave the key out): a TypeError naming the parameter.
-  for (const [forms, args, name] of [
+  /** @type {Array<[JavaForms, object, string]>} */
+  const cases = [
     [CLOSE, { timeout: undefined }, 'timeout'],
     [RECORD, { topic: 't', partition: undefined, value: 'v' }, 'partition'],
     [RECORD, { topic: undefined, value: 'v' }, 'topic'],
-  ]) {
+  ];
+  for (const [forms, args, name] of cases) {
     assert.throws(() => forms.match(args, 1), {
       name: 'TypeError',
       message: `${name} must not be undefined. Leave the key out, or pass null for Java's null`,
@@ -127,12 +134,14 @@ test('only own enumerable keys are names, and value() reads only those', () => {
   assert.equal(RECORD.value(plain, 'partition'), undefined);
   assert.equal(CLOSE.match({ [Symbol('timeout')]: 5 }, 1), 0);
   // A polluted Object.prototype is no parameter either.
+  // @ts-expect-error a key added to Object.prototype: the own-key check does not read it
   Object.prototype.partition = 0;
   try {
     const args = { topic: 't', value: 'v' };
     assert.equal(RECORD.match(args, 1), 5);
     assert.equal(RECORD.value(args, 'partition'), undefined);
   } finally {
+    // @ts-expect-error the key added to Object.prototype above, removed again
     delete Object.prototype.partition;
   }
   // An object that is not a plain one is no options object: without a
@@ -159,9 +168,9 @@ test('a one-parameter form takes the bare value: anything but a plain object', (
 });
 
 test('one-parameter forms of different names take a bare value told apart by its type, with bareTypes', () => {
-  const isError = (v) => v instanceof Error;
+  const isError = (/** @type {unknown} */ v) => v instanceof Error;
   const ERROR = new JavaForms('E', [['message', 'cause'], ['message'], ['cause'], []], {
-    bareTypes: { message: (v) => v === null || typeof v === 'string', cause: isError },
+    bareTypes: { message: (/** @type {unknown} */ v) => v === null || typeof v === 'string', cause: isError },
   });
   const cause = new Error('c');
   assert.equal(ERROR.match('m', 1), 1);
@@ -225,7 +234,7 @@ test('without a one-parameter form, an argument that is not a plain object is th
 
 test('a lone one-parameter form with a test takes only the values it accepts', () => {
   const SEND = new JavaForms('send', [['record'], ['record', 'callback']], {
-    bareTypes: { record: (v) => v === null || v instanceof Map },
+    bareTypes: { record: (/** @type {unknown} */ v) => v === null || v instanceof Map },
   });
   assert.equal(SEND.match(new Map(), 1), 0);
   assert.equal(SEND.match(null, 1), 0);
@@ -265,14 +274,14 @@ test("callShapes lists an error constructor's forms as JavaScript calls them", (
   const E = new JavaForms('E', [['message', 'cause'], ['message'], ['cause'], []], {
     order: ['message', 'cause'],
     callShapes: true,
-    bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error },
+    bareTypes: { message: (/** @type {unknown} */ v) => typeof v === 'string', cause: (/** @type {unknown} */ v) => v instanceof Error },
   });
   assert.throws(() => E.match('m', 2), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments'));
   assert.throws(() => E.match({ reason: 1 }, 1), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got (reason)'));
   // Ties keep Java's order.
   const F = new JavaForms('F', [['cause'], ['message']], {
     callShapes: true,
-    bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error },
+    bareTypes: { message: (/** @type {unknown} */ v) => typeof v === 'string', cause: (/** @type {unknown} */ v) => v instanceof Error },
   });
   assert.throws(() => F.match(5, 1), illegal('F() takes one of (cause), (message); got a number'));
 });

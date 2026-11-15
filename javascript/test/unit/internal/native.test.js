@@ -32,7 +32,9 @@ test('producerClose takes a bigint timeout exactly, and refuses one beyond 64 bi
     message: 'close timeoutMs must fit a signed 64-bit integer',
   });
   const result = await new Promise((resolve) => {
-    native.producerClose(handle, 9223372036854775807n, (error, destroyed) => resolve({ error, destroyed }));
+    native.producerClose(handle, 9223372036854775807n, (/** @type {unknown} */ error, /** @type {unknown} */ destroyed) =>
+      resolve({ error, destroyed }),
+    );
   });
   assert.deepEqual(result, { error: null, destroyed: true });
 });
