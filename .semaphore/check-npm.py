@@ -243,6 +243,8 @@ def committed_platform_manifest(platform):
         "license": package.get("license"),
         "repository": platform_repository(platform),
         "main": ADDON,
+        # The main package's: publint asks each package to name its module type.
+        "type": package.get("type"),
         "files": PLATFORM_FILES_FIELD,
         "engines": package.get("engines"),
         **PLATFORMS[platform],
@@ -768,7 +770,8 @@ def check_platform(platform, files, version, dev, published):
     if not isinstance(manifest, dict):
         return [f"{label} is not an object"]
     problems += manifest_problems(label, manifest, version, platform_repository(platform))
-    expected = {"name": f"{MAIN_PACKAGE}-{platform}", "main": ADDON, "files": PLATFORM_FILES_FIELD, **PLATFORMS[platform]}
+    expected = {"name": f"{MAIN_PACKAGE}-{platform}", "main": ADDON, "type": "commonjs", "files": PLATFORM_FILES_FIELD,
+                **PLATFORMS[platform]}
     for field, value in expected.items():
         if manifest.get(field) != value:
             problems.append(f"{label} has {field} {manifest.get(field)!r}, not {value!r}")
