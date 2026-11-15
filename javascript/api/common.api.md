@@ -223,15 +223,15 @@ export class TopicPartition {
 export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
     [Symbol.iterator](): IterableIterator<[TopicPartition, V]>;
     constructor();
-    constructor(entries: Iterable<readonly [TopicPartition, V]>);
+    constructor(entries: Iterable<readonly [TopicPartition | null, V]>);
     clear(): void;
-    delete(key: TopicPartition): boolean;
+    delete(key: TopicPartition | null): boolean;
     entries(): IterableIterator<[TopicPartition, V]>;
     forEach(callback: (value: V, key: TopicPartition, map: TopicPartitionMap<V>) => void): void;
-    get(key: TopicPartition): V | null;
-    has(key: TopicPartition): boolean;
+    get(key: TopicPartition | null): V | null;
+    has(key: TopicPartition | null): boolean;
     keys(): IterableIterator<TopicPartition>;
-    set(key: TopicPartition, value: V): this;
+    set(key: TopicPartition | null, value: V): this;
     size(): number;
     toJSON(): Record<string, unknown>;
     toString(): string;
@@ -242,14 +242,14 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
 export class TopicPartitionSet implements Iterable<TopicPartition> {
     [Symbol.iterator](): IterableIterator<TopicPartition>;
     constructor();
-    constructor(values: Iterable<TopicPartition>);
-    add(value: TopicPartition): this;
+    constructor(values: Iterable<TopicPartition | null>);
+    add(value: TopicPartition | null): this;
     clear(): void;
-    delete(value: TopicPartition): boolean;
+    delete(value: TopicPartition | null): boolean;
     forEach(callback: (value: TopicPartition, key: TopicPartition, set: TopicPartitionSet) => void): void;
-    has(value: TopicPartition): boolean;
+    has(value: TopicPartition | null): boolean;
     size(): number;
-    toJSON(): TopicPartition[];
+    toJSON(): Array<TopicPartition | null>;
     toString(): string;
     values(): IterableIterator<TopicPartition>;
 }
