@@ -467,7 +467,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   the invented-names list)* (root conventions, Class family and Types, Q25):
   each wraps a `Map` keyed by `'<topic>:<partition>'` (`'orders:3'`; the
   partition alone for a null topic, and the partition is an integer, so two
-  topic partitions never share a key), keeps the original `TopicPartition`s,
+  topic partitions never share a key; a `null` key or member, which Java's
+  `HashMap` and `HashSet` hold, is the string key `'null'`, which no
+  `TopicPartition` gives, and prints as Java's `null`), keeps the original `TopicPartition`s,
   which `keys()`, `entries()` and iteration return, and does not extend `Map`
   or `Set`. Both are mutable (`set` / `add`, `delete`, `clear`), `size()` is a
   method, as `MetricNameMap`'s, `get()` returns `null` for a missing key,
