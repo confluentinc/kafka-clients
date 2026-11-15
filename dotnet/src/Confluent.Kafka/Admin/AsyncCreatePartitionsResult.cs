@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.CreatePartitions"/> — Java's
+/// The result of <see cref="IAsyncAdmin.CreatePartitions(IReadOnlyDictionary{string, NewPartitions}, CreatePartitionsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.CreatePartitionsResult</c>: one future per topic.
 /// </summary>
 /// <remarks>

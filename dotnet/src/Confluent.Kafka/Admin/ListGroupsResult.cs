@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ListGroups"/>, Java's <c>ListGroupsResult</c>: three views of
+/// The result of <see cref="IAdmin.ListGroups(ListGroupsOptions)"/>, Java's <c>ListGroupsResult</c>: three views of
 /// one listing. <see cref="All"/> fails if any broker answered with an error, <see cref="Valid"/>
 /// yields the listings regardless, and <see cref="Errors"/> yields the errors.
 /// </summary>

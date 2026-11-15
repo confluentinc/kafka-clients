@@ -48,7 +48,6 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public void DescribeConfigs_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack((DescribeConfigsOptions?)null));
         Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new DescribeConfigsOptions()));
         Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new DescribeConfigsOptions().TimeoutMs(null)));
     }
@@ -93,7 +92,6 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public void IncrementalAlterConfigs_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)0), ReadBack((AlterConfigsOptions?)null));
         Assert.Equal((-1, (sbyte)0), ReadBack(new AlterConfigsOptions()));
         Assert.Equal((-1, (sbyte)0), ReadBack(new AlterConfigsOptions().TimeoutMs(null)));
     }
@@ -214,7 +212,7 @@ public sealed class AdminConfigsSubmitArgumentTests
                     new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), OpType.SET),
                 },
             };
-        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, null));
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, new AlterConfigsOptions()));
 
         Assert.Equal(new[] { s_topicResource }, result.Values().Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -250,7 +248,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(
-            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(), null));
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(), new AlterConfigsOptions()));
 
         Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -271,7 +269,7 @@ public sealed class AdminConfigsSubmitArgumentTests
                 new ConfigResource((ConfigResourceType)64, "x"),
                 new ConfigResource(ConfigResourceType.UNKNOWN, "x"),
             },
-            null));
+            new DescribeConfigsOptions()));
 
         Assert.Equal(3, result.Values().Count);
         Assert.Contains(s_topicResource, result.Values().Keys);
@@ -285,22 +283,22 @@ public sealed class AdminConfigsSubmitArgumentTests
 
     private static Task CreateTopic(NativeAdminClient admin) =>
         TestTimeout.Run(
-            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, null)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
     private static Task Alter(
         NativeAdminClient admin, IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs) =>
         TestTimeout.Run(
-            () => AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, null)).All().Get(),
+            () => AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, new AlterConfigsOptions())).All().Get(),
             s_deadline);
 
     private static Task<Config> Describe(NativeAdminClient admin, ConfigResource resource) =>
         TestTimeout.Run(
-            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values()[resource].Get(),
+            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions())).Values()[resource].Get(),
             s_deadline);
 
     private static (int TimeoutMs, sbyte IncludeSynonyms, sbyte IncludeDocumentation) ReadBack(
-        DescribeConfigsOptions? options)
+        DescribeConfigsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeConfigsOptions(options);
         try
@@ -320,7 +318,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         }
     }
 
-    private static (int TimeoutMs, sbyte ValidateOnly) ReadBack(AlterConfigsOptions? options)
+    private static (int TimeoutMs, sbyte ValidateOnly) ReadBack(AlterConfigsOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterConfigsOptions(options);
         try

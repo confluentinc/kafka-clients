@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.ListTopics"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.ListTopics(ListTopicsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListTopicsOptions</c>.
 /// </summary>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks"/>

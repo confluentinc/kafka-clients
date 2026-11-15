@@ -47,7 +47,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { binding }, options: null));
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { binding }, options: new CreateAclsOptions()));
 
         AclBinding key = Assert.Single(result.Values()).Key;
         Assert.Equal(binding, key);
@@ -68,7 +68,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { first, second }, options: null));
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { first, second }, options: new CreateAclsOptions()));
 
         Assert.Equal(first, Assert.Single(result.Values()).Key);
         await AssertNotImplemented(result.Values()[second].Get());
@@ -87,7 +87,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { filter }, options: null));
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { filter }, options: new DeleteAclsOptions()));
 
         AclBindingFilter key = Assert.Single(result.Values()).Key;
         Assert.Equal(filter, key);
@@ -108,7 +108,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { first, second }, options: null));
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { first, second }, options: new DeleteAclsOptions()));
 
         Assert.Equal(first, Assert.Single(result.Values()).Key);
         await AssertNotImplemented(result.Values()[second].Get());

@@ -66,7 +66,9 @@ public sealed class PublicAdminListTopicsTests
         try
         {
             Seed(admin);
-            ListTopicsResult result = admin.ListTopics(OptionsFor(listInternal));
+            ListTopicsResult result = listInternal is null
+                ? admin.ListTopics()
+                : admin.ListTopics(OptionsFor(listInternal.Value));
 
             AssertSeeded((IReadOnlyDictionary<string, TopicListing>)BlockingCall.RunGet(() => result.NamesToListings().Get())!);
             AssertListings((IReadOnlyCollection<TopicListing>)BlockingCall.RunGet(() => result.Listings().Get())!);
@@ -88,7 +90,9 @@ public sealed class PublicAdminListTopicsTests
         try
         {
             Seed(admin);
-            AsyncListTopicsResult result = admin.ListTopics(OptionsFor(listInternal));
+            AsyncListTopicsResult result = listInternal is null
+                ? admin.ListTopics()
+                : admin.ListTopics(OptionsFor(listInternal.Value));
 
             AssertSeeded(await TestTimeout.Run(() => result.NamesToListings().Get(), BlockingCall.Deadline));
             AssertListings(await TestTimeout.Run(() => result.Listings().Get(), BlockingCall.Deadline));
@@ -382,7 +386,6 @@ public sealed class PublicAdminListTopicsTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)0), ReadBack(null));
         Assert.Equal((-1, (sbyte)0), ReadBack(new ListTopicsOptions()));
         Assert.Empty(new ListTopicsOptions().Setters.InOrder);
     }
@@ -445,8 +448,8 @@ public sealed class PublicAdminListTopicsTests
         Assert.Equal(1, destroyed);
     }
 
-    private static ListTopicsOptions? OptionsFor(bool? listInternal) =>
-        listInternal is null ? null : new ListTopicsOptions().ListInternal(listInternal.Value);
+    private static ListTopicsOptions OptionsFor(bool listInternal) =>
+        new ListTopicsOptions().ListInternal(listInternal);
 
     private static object Create(string kind) => kind switch
     {
@@ -571,7 +574,7 @@ public sealed class PublicAdminListTopicsTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference AbandonRawResult(MockAdminClient admin, StrongBox<int> destroyed)
     {
-        IntPtr options = NativeAdminClient.NewListTopicsOptions(null);
+        IntPtr options = NativeAdminClient.NewListTopicsOptions(new ListTopicsOptions());
         IntPtr raw;
         try
         {
@@ -627,7 +630,7 @@ public sealed class PublicAdminListTopicsTests
         while (!done() && elapsed.Elapsed < BlockingCall.Deadline);
     }
 
-    private static (int TimeoutMs, sbyte ListInternal) ReadBack(ListTopicsOptions? options)
+    private static (int TimeoutMs, sbyte ListInternal) ReadBack(ListTopicsOptions options)
     {
         IntPtr native = NativeAdminClient.NewListTopicsOptions(options);
         try

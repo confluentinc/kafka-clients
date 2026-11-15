@@ -107,7 +107,7 @@ public sealed class PublicAdminP14SurfaceTests
         List<MethodInfo> sync = Rpcs(typeof(IAdmin));
         List<MethodInfo> async = Rpcs(typeof(IAsyncAdmin));
 
-        Assert.Equal(49, sync.Count);
+        Assert.Equal(98, sync.Count);
         Assert.Equal(
             sync.Select(RpcSignature).OrderBy(static s => s, StringComparer.Ordinal),
             async.Select(RpcSignature).OrderBy(static s => s, StringComparer.Ordinal));
@@ -134,8 +134,8 @@ public sealed class PublicAdminP14SurfaceTests
             typeof(IAsyncAdmin).GetMethod(
                 nameof(IAsyncAdmin.Close), new[] { typeof(TimeSpan), typeof(CancellationToken) })!.ReturnType);
 
-        Assert.Equal(51, typeof(IAdmin).GetMethods(PublicDeclared).Length);
-        Assert.Equal(51, typeof(IAsyncAdmin).GetMethods(PublicDeclared).Length);
+        Assert.Equal(100, typeof(IAdmin).GetMethods(PublicDeclared).Length);
+        Assert.Equal(100, typeof(IAsyncAdmin).GetMethods(PublicDeclared).Length);
 
         Assert.Equal(new[] { typeof(IDisposable).FullName }, InterfaceNames(typeof(IAdmin)));
         Assert.Equal(

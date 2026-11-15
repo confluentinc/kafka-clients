@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.AlterUserScramCredentials"/> — Java's
+/// The result of <see cref="IAsyncAdmin.AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsResult</c>: one future
 /// <b>per user</b>.
 /// </summary>

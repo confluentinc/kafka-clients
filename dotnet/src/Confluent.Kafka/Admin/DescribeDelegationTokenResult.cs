@@ -21,7 +21,7 @@ using Token = Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeDelegationToken"/> — Java's
+/// The result of <see cref="IAdmin.DescribeDelegationToken(DescribeDelegationTokenOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenResult</c>: one future over the
 /// whole token list. Java declares no <c>all()</c> here.
 /// </summary>

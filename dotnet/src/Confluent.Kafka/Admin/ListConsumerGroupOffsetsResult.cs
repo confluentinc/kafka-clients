@@ -24,7 +24,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions?)"/> — Java's
+/// The result of <see cref="IAdmin.ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>: one future per group id, whose value maps each
 /// partition to its committed offset, or to <see langword="null"/> when the partition has none.
 /// </summary>

@@ -19,7 +19,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.AbortTransaction"/> — Java's
+/// The result of <see cref="IAsyncAdmin.AbortTransaction(AbortTransactionSpec, AbortTransactionOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AbortTransactionResult</c>.
 /// </summary>
 /// <remarks>

@@ -913,10 +913,12 @@ out of date). The rule:
     only that method (`IConsumerRebalanceListenerWithPartitionsLost : IConsumerRebalanceListener`). The
     extension method calls the object's own method when it implements that interface, and runs Java's default
     otherwise; a user replaces the default by implementing that interface instead of the main one. Java's
-    `Admin` defaults that only convert their arguments stay members of `IAdmin` and `IAsyncAdmin`, whose
-    clients are their only implementers (allowlisted). A Java interface's static method goes in an
-    `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`, and on C#
-    14 `IAdmin.Create(…)`. An overloaded default gets one interface per overload, named after the parameter the
+    `Admin` defaults that only convert their arguments or fill in the options (`createTopics(newTopics)` passes
+    `new CreateTopicsOptions()`) stay members of `IAdmin` and `IAsyncAdmin`, one member per Java overload with no
+    optional parameter, each client writing the default's body; their clients are their only implementers
+    (allowlisted). A default Java adds to `Admin` later follows the rest of this rule. A Java interface's static
+    method goes in an `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`,
+    and on C# 14 `IAdmin.Create(…)`. An overloaded default gets one interface per overload, named after the parameter the
     overload adds: `ISerializerWithHeaders<T>` for `serialize(String, Headers, T)`; when two overloads add a parameter
     of the same name, its type is added too. Java's `close()` is not a rule-10 default: `Closeable` is `IDisposable`
     (rule 7), which an implementer adds beside the interface, and there is no `I…WithClose`. Because the analyzer does
