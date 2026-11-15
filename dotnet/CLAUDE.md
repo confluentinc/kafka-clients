@@ -1609,6 +1609,7 @@ Never build .NET before Rust — the native won't exist.
 | Build the native | `cargo build --features ffi [--release]` |
 | Build the binding | `dotnet build` (copies the native to output) |
 | Unit tests (**no broker**) | `dotnet test` (`MockProducer` / `MockConsumer`) |
+| Unit-test coverage | `make coverage-dotnet` (repository root; report in `dotnet/artifacts/coverage/report`) |
 | Rust tests | `cargo test` |
 | Format / lint (Rust) | `cargo xtask format` / `cargo xtask lint` |
 | Format (C#) | `dotnet format` |
@@ -1653,7 +1654,9 @@ runs the arms again over SSL and SASL_SSL. On macOS, CI runs `make test-dotnet-m
 unit tests, without the integration tests, as Python's macOS job runs `test-unit` only), then starts
 Colima and runs `make test-integration-dotnet-native`: the arms with the gRPC server as a native
 process, with no perf stage. The arms skip no test. The gRPC server's own unit tests are a local
-gate, outside CI: `make -C dotnet test-grpc-server-dotnet`.
+gate, outside CI: `make -C dotnet test-grpc-server-dotnet`. A separate Linux job,
+`coverage-dotnet (Linux amd64)`, runs `make coverage-dotnet` and keeps the unit tests' coverage
+report as the workflow artifact `coverage/dotnet.tar.gz`; it reports only and fails on no coverage level.
 
 ### 7.6 The gRPC test server (`grpc-server/`)
 
