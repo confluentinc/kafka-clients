@@ -112,12 +112,18 @@ test('parseProperties keeps a lone surrogate', () => {
 });
 
 test('printJson writes one compact line', () => {
+  /** @type {Array<[number, string]>} */
   const written = [];
   const original = fs.writeSync;
-  fs.writeSync = (fd, buffer) => {
-    written.push([fd, Buffer.from(buffer).toString('utf8')]);
-    return buffer.length;
-  };
+  // A stub with the one form printJson calls, writeSync(fd, buffer).
+  fs.writeSync = /** @type {typeof fs.writeSync} */ (
+    /** @type {unknown} */ (
+      (/** @type {number} */ fd, /** @type {Uint8Array} */ buffer) => {
+        written.push([fd, Buffer.from(buffer).toString('utf8')]);
+        return buffer.length;
+      }
+    )
+  );
   try {
     printJson({ timestamp: 1, name: 'x', key: null });
   } finally {
@@ -127,12 +133,18 @@ test('printJson writes one compact line', () => {
 });
 
 test("printJson writes a bigint, Java's long, as the exact JSON number Jackson writes", () => {
+  /** @type {string[]} */
   const written = [];
   const original = fs.writeSync;
-  fs.writeSync = (fd, buffer) => {
-    written.push(Buffer.from(buffer).toString('utf8'));
-    return buffer.length;
-  };
+  // A stub with the one form printJson calls, writeSync(fd, buffer).
+  fs.writeSync = /** @type {typeof fs.writeSync} */ (
+    /** @type {unknown} */ (
+      (/** @type {number} */ fd, /** @type {Uint8Array} */ buffer) => {
+        written.push(Buffer.from(buffer).toString('utf8'));
+        return buffer.length;
+      }
+    )
+  );
   try {
     printJson({ offset: 9007199254740993n, partition: 0 });
   } finally {
@@ -142,14 +154,21 @@ test("printJson writes a bigint, Java's long, as the exact JSON number Jackson w
 });
 
 test('printJson reports data it cannot write as JSON', () => {
+  /** @type {string[]} */
   const written = [];
   const original = fs.writeSync;
-  fs.writeSync = (fd, buffer) => {
-    written.push(Buffer.from(buffer).toString('utf8'));
-    return buffer.length;
-  };
+  // A stub with the one form printJson calls, writeSync(fd, buffer).
+  fs.writeSync = /** @type {typeof fs.writeSync} */ (
+    /** @type {unknown} */ (
+      (/** @type {number} */ fd, /** @type {Uint8Array} */ buffer) => {
+        written.push(Buffer.from(buffer).toString('utf8'));
+        return buffer.length;
+      }
+    )
+  );
   try {
     // A cycle: JSON.stringify throws on it.
+    /** @type {{ offset: bigint, self?: unknown }} */
     const data = { offset: 1n };
     data.self = data;
     printJson(data);

@@ -36,6 +36,10 @@ function nowMillis() {
  * "name"})` puts `timestamp` then `name` first, and the event's own properties
  * follow in declaration order (a JavaScript object keeps the order its string
  * keys were added in).
+ *
+ * @param {string} name the event's name
+ * @param {Record<string, unknown>} [fields] its own properties
+ * @returns {{ timestamp: number, name: string } & Record<string, unknown>} the event
  */
 function event(name, fields = {}) {
   return { timestamp: nowMillis(), name, ...fields };

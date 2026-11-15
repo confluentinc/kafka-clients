@@ -28,11 +28,20 @@
 
 const { IllegalStateError } = require('@confluentinc/kafka-javascript');
 
+/** @typedef {import('@confluentinc/kafka-javascript/producer').ProducerRecord<unknown, unknown>} Record */
+/** @typedef {{ topic: string, partition: number, offset: number, timestamp?: number }} Metadata */
+/** @typedef {(result: { metadata: Metadata, exception: unknown }) => void} Callback */
+/** @typedef {{ record: Record, callback: Callback | null }} Completion */
+
 class MockProducer {
+  /** @param {{ autoComplete?: boolean }} [options] */
   constructor({ autoComplete = true } = {}) {
     this.autoComplete = autoComplete;
+    /** @type {unknown} */
     this.sendError = null;
+    /** @type {Record[]} */
     this.records = [];
+    /** @type {Completion[]} */
     this.pending = [];
     this.nextOffset = 0;
     this.isClosed = false;
@@ -48,11 +57,19 @@ class MockProducer {
     return this.isClosed;
   }
 
-  /** Java's MockProducer.sendException, thrown by the next sends. */
+  /**
+   * Java's MockProducer.sendException, thrown by the next sends.
+   *
+   * @param {unknown} error the error, or null for none
+   */
   setSendError(error) {
     this.sendError = error;
   }
 
+  /**
+   * @param {{ record: Record, callback?: Callback | null }} options
+   * @returns {Promise<null>}
+   */
   send({ record, callback = null }) {
     if (this.isClosed) return Promise.reject(new IllegalStateError('MockProducer is already closed.'));
     if (this.sendError !== null) return Promise.reject(this.sendError);
@@ -71,7 +88,12 @@ class MockProducer {
     return true;
   }
 
-  /** Java's MockProducer.errorNext(e): whether a record was pending. */
+  /**
+   * Java's MockProducer.errorNext(e): whether a record was pending.
+   *
+   * @param {unknown} error the record's error
+   * @returns {boolean}
+   */
   errorNext(error) {
     const completion = this.pending.shift();
     if (completion === undefined) return false;
@@ -83,6 +105,10 @@ class MockProducer {
     this.isClosed = true;
   }
 
+  /**
+   * @param {Completion} completion
+   * @param {unknown} error
+   */
   #complete({ record, callback }, error) {
     const metadata =
       error === null
