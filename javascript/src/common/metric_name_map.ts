@@ -68,10 +68,20 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    * Creates a map holding the given entries (a later entry with an equal key
    * replaces an earlier one).
    *
-   * @param entries - the `[MetricName, value]` entries
+   * @param options - the entries
    * @throws `IllegalArgumentError` when it is given more than one argument
    * @throws `TypeError` when `entries` is `undefined` or not an iterable, or
    *   an entry is not a `[MetricName, value]` pair
+   */
+  constructor(options: {
+    /** The `[MetricName, value]` entries. */
+    entries: Iterable<readonly [MetricName, V]>;
+  });
+  /**
+   * Creates a map holding the given entries: the entries on their own, the
+   * same as `new MetricNameMap({entries})`.
+   *
+   * @param entries - the `[MetricName, value]` entries
    */
   constructor(entries: Iterable<readonly [MetricName, V]>);
   constructor(entries?: unknown) {
@@ -102,13 +112,26 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   /**
    * The value of the entry whose key equals `key`.
    *
-   * @param key - the metric name
+   * @param options - the key
    * @returns the value, or null when there is none, as Java's `Map.get`
    *   returns
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    * @throws `TypeError` when the key is not a MetricName
    */
-  get(key: MetricName): V | null {
+  get(options: {
+    /** The metric name. */
+    key: MetricName;
+  }): V | null;
+  /**
+   * The value of the entry whose key equals `key`: the key on its own, the same as
+   * `get({key})`.
+   *
+   * @param key - the metric name
+   * @returns the value, or null when there is none, as Java's `Map.get`
+   *   returns
+   */
+  get(key: MetricName): V | null;
+  get(key: unknown): V | null {
     GET_FORMS.match(key, arguments.length);
     const entry = this.#entries.get(keyOf(GET_FORMS.value(key, 'key')));
     return entry === undefined ? null : entry[1];
@@ -117,12 +140,24 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   /**
    * Whether an entry's key equals `key`.
    *
-   * @param key - the metric name
+   * @param options - the key
    * @returns true when there is such an entry
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    * @throws `TypeError` when the key is not a MetricName
    */
-  has(key: MetricName): boolean {
+  has(options: {
+    /** The metric name. */
+    key: MetricName;
+  }): boolean;
+  /**
+   * Whether an entry's key equals `key`: the key on its own, the same as
+   * `has({key})`.
+   *
+   * @param key - the metric name
+   * @returns true when there is such an entry
+   */
+  has(key: MetricName): boolean;
+  has(key: unknown): boolean {
     HAS_FORMS.match(key, arguments.length);
     return this.#entries.has(keyOf(HAS_FORMS.value(key, 'key')));
   }

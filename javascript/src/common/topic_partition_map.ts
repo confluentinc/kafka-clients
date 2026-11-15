@@ -91,12 +91,21 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
    * Creates a map holding the given entries (a later entry with an equal key
    * replaces an earlier one).
    *
-   * @param entries - the `[TopicPartition, value]` entries, such as another
-   *   `TopicPartitionMap`
+   * @param options - the entries
    * @throws `IllegalArgumentError` when it is given more than one argument
    * @throws `TypeError` when `entries` is `undefined` or not an iterable, or
    *   an entry is not a `[TopicPartition, value]` pair, or its value is
    *   `undefined`
+   */
+  constructor(options: {
+    /** The `[TopicPartition, value]` entries, such as another `TopicPartitionMap`. */
+    entries: Iterable<readonly [TopicPartition | null, V]>;
+  });
+  /**
+   * Creates a map holding the given entries: the entries on their own, the
+   * same as `new TopicPartitionMap({entries})`.
+   *
+   * @param entries - the `[TopicPartition, value]` entries, such as another `TopicPartitionMap`
    */
   constructor(entries: Iterable<readonly [TopicPartition | null, V]>);
   constructor(entries?: unknown) {
@@ -129,13 +138,26 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
   /**
    * The value of the entry whose key equals `key`.
    *
-   * @param key - the topic partition, or null
+   * @param options - the key
    * @returns the value, or null when there is none, as Java's `Map.get`
    *   returns
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    * @throws `TypeError` when the key is neither a TopicPartition nor null
    */
-  get(key: TopicPartition | null): V | null {
+  get(options: {
+    /** The topic partition, or null. */
+    key: TopicPartition | null;
+  }): V | null;
+  /**
+   * The value of the entry whose key equals `key`: the key on its own, the same as
+   * `get({key})`.
+   *
+   * @param key - the topic partition, or null
+   * @returns the value, or null when there is none, as Java's `Map.get`
+   *   returns
+   */
+  get(key: TopicPartition | null): V | null;
+  get(key: unknown): V | null {
     GET_FORMS.match(key, arguments.length);
     const entry = this.#entries.get(keyOf(GET_FORMS.value(key, 'key')));
     return entry === undefined ? null : entry[1];
@@ -144,12 +166,24 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
   /**
    * Whether an entry's key equals `key`.
    *
-   * @param key - the topic partition, or null
+   * @param options - the key
    * @returns true when there is such an entry
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    * @throws `TypeError` when the key is neither a TopicPartition nor null
    */
-  has(key: TopicPartition | null): boolean {
+  has(options: {
+    /** The topic partition, or null. */
+    key: TopicPartition | null;
+  }): boolean;
+  /**
+   * Whether an entry's key equals `key`: the key on its own, the same as
+   * `has({key})`.
+   *
+   * @param key - the topic partition, or null
+   * @returns true when there is such an entry
+   */
+  has(key: TopicPartition | null): boolean;
+  has(key: unknown): boolean {
     HAS_FORMS.match(key, arguments.length);
     return this.#entries.has(keyOf(HAS_FORMS.value(key, 'key')));
   }
@@ -176,12 +210,24 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
   /**
    * Removes the entry whose key equals `key`.
    *
-   * @param key - the topic partition, or null
+   * @param options - the key
    * @returns true when there was such an entry
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    * @throws `TypeError` when the key is neither a TopicPartition nor null
    */
-  delete(key: TopicPartition | null): boolean {
+  delete(options: {
+    /** The topic partition, or null. */
+    key: TopicPartition | null;
+  }): boolean;
+  /**
+   * Removes the entry whose key equals `key`: the key on its own, the same as
+   * `delete({key})`.
+   *
+   * @param key - the topic partition, or null
+   * @returns true when there was such an entry
+   */
+  delete(key: TopicPartition | null): boolean;
+  delete(key: unknown): boolean {
     DELETE_FORMS.match(key, arguments.length);
     return this.#entries.delete(keyOf(DELETE_FORMS.value(key, 'key')));
   }

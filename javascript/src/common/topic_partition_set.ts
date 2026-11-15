@@ -70,11 +70,20 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
    * Creates a set holding the given topic partitions (an equal one later is
    * the same member).
    *
-   * @param values - the topic partitions, such as an array or another
-   *   `TopicPartitionSet`
+   * @param options - the topic partitions
    * @throws `IllegalArgumentError` when it is given more than one argument
    * @throws `TypeError` when `values` is `undefined` or not an iterable, or a
    *   member is not a TopicPartition
+   */
+  constructor(options: {
+    /** The topic partitions, such as an array or another `TopicPartitionSet`. */
+    values: Iterable<TopicPartition | null>;
+  });
+  /**
+   * Creates a set holding the given topic partitions: the values on their
+   * own, the same as `new TopicPartitionSet({values})`.
+   *
+   * @param values - the topic partitions, such as an array or another `TopicPartitionSet`
    */
   constructor(values: Iterable<TopicPartition | null>);
   constructor(values?: unknown) {
@@ -104,12 +113,24 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
   /**
    * Whether a member equals `value`.
    *
-   * @param value - the topic partition, or null
+   * @param options - the value
    * @returns true when there is such a member
    * @throws `IllegalArgumentError` when the given parameters are not `{value}`
    * @throws `TypeError` when the value is neither a TopicPartition nor null
    */
-  has(value: TopicPartition | null): boolean {
+  has(options: {
+    /** The topic partition, or null. */
+    value: TopicPartition | null;
+  }): boolean;
+  /**
+   * Whether a member equals `value`: the value on its own, the same as
+   * `has({value})`.
+   *
+   * @param value - the topic partition, or null
+   * @returns true when there is such a member
+   */
+  has(value: TopicPartition | null): boolean;
+  has(value: unknown): boolean {
     HAS_FORMS.match(value, arguments.length);
     return this.#members.has(keyOf(HAS_FORMS.value(value, 'value')));
   }
@@ -118,12 +139,24 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
    * Adds `value`, unless a member equals it (that member is kept, as Java's
    * `HashSet.add` keeps it).
    *
-   * @param value - the topic partition, or null
+   * @param options - the value
    * @returns this set
    * @throws `IllegalArgumentError` when the given parameters are not `{value}`
    * @throws `TypeError` when the value is neither a TopicPartition nor null
    */
-  add(value: TopicPartition | null): this {
+  add(options: {
+    /** The topic partition, or null. */
+    value: TopicPartition | null;
+  }): this;
+  /**
+   * Adds `value`, unless a member equals it (that member is kept, as Java's: the value on its own, the same as
+   * `add({value})`.
+   *
+   * @param value - the topic partition, or null
+   * @returns this set
+   */
+  add(value: TopicPartition | null): this;
+  add(value: unknown): this {
     ADD_FORMS.match(value, arguments.length);
     const tp = ADD_FORMS.value(value, 'value');
     const key = keyOf(tp);
@@ -134,12 +167,24 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
   /**
    * Removes the member that equals `value`.
    *
-   * @param value - the topic partition, or null
+   * @param options - the value
    * @returns true when there was such a member
    * @throws `IllegalArgumentError` when the given parameters are not `{value}`
    * @throws `TypeError` when the value is neither a TopicPartition nor null
    */
-  delete(value: TopicPartition | null): boolean {
+  delete(options: {
+    /** The topic partition, or null. */
+    value: TopicPartition | null;
+  }): boolean;
+  /**
+   * Removes the member that equals `value`: the value on its own, the same as
+   * `delete({value})`.
+   *
+   * @param value - the topic partition, or null
+   * @returns true when there was such a member
+   */
+  delete(value: TopicPartition | null): boolean;
+  delete(value: unknown): boolean {
     DELETE_FORMS.match(value, arguments.length);
     return this.#members.delete(keyOf(DELETE_FORMS.value(value, 'value')));
   }
