@@ -161,7 +161,7 @@ test('a type off the table is a type-mismatch; a Java type with no row is unmapp
 });
 
 test('a Duration is a number of milliseconds or a Temporal.Duration, nothing else', () => {
-  const pause = (type) => TYPED_TS.replace(PAUSE, `  pause(timeout: ${type}): void { void timeout; }`);
+  const pause = (/** @type {string} */ type) => TYPED_TS.replace(PAUSE, `  pause(timeout: ${type}): void { void timeout; }`);
   // A Temporal.Duration alone, without a number, is not Java's Duration as the client takes it.
   let r = lint(fixture({ 'src/producer/typed.ts': pause('{ total(options: { unit: "millisecond" }): number }') }), [RULE]);
   assert.deepEqual(findings(r), [
@@ -209,7 +209,7 @@ test("KafkaFuture's rows: CompletionStage, its nested function types, Throwable,
     ],
   });
   const DURATION = "number | { readonly [Symbol.toStringTag]: 'Temporal.Duration'; total(options: { unit: 'millisecond' }): number }";
-  const ts = (edit = (x) => x) =>
+  const ts = (edit = (/** @type {string} */ x) => x) =>
     edit(
       'type BareValue = string | number | null;\n' +
         'type BareCheck<U> = [U] extends [BareValue] ? [] : [never];\n' +
@@ -223,7 +223,7 @@ test("KafkaFuture's rows: CompletionStage, its nested function types, Throwable,
         '  static allOf(futures: ReadonlyArray<KafkaFuture<unknown>>): KafkaFuture<void> { void futures; return null as unknown as KafkaFuture<void>; }\n}\n' +
         'export declare namespace KafkaFuture {\n  export type BaseFunction<A, B> = (a: A) => B;\n  export type BiConsumer<A, B> = (a: A, b: B) => void;\n}\n',
     );
-  const files = (source) =>
+  const files = (/** @type {string} */ source) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': javaIndex([...CLASSES, TYPED, futureClass]),
@@ -264,17 +264,25 @@ test('a Java parameter named check is compared, as any other: only a BareCheck r
   // Java's tags(String[] check) and label(String prefix, String[] check),
   // translated as rest parameters: of the right type they pass, of the wrong
   // one they are a mismatch, whatever the name.
-  const cls = (name) =>
+  const cls = (/** @type {string} */ name) =>
     javaClass('clients.producer.Tagged', {
       overloads: [
         method('tags', ['String[]'], { return_type: 'void', param_names: [name] }),
         method('label', ['String', 'String[]'], { return_type: 'void', param_names: ['prefix', name] }),
       ],
     });
+  /**
+   * @param {string} name
+   * @param {string} elem
+   */
   const source = (name, elem) =>
     'export class Tagged {\n' +
     `  tags(...${name}: ${elem}[]): void { void ${name}; }\n` +
     `  label(prefix: string, ...${name}: ${elem}[]): void { void [prefix, ${name}]; }\n}\n`;
+  /**
+   * @param {string} name
+   * @param {string} elem
+   */
   const files = (name, elem) =>
     project({
       'tsconfig.json': TSCONFIG,
@@ -311,10 +319,10 @@ test('where Java takes an Iterable<Header>, a [key, value] pair is no element: J
   const taker = javaClass('clients.producer.Taker', {
     overloads: [method('take', ['Iterable'], { param_types: ['Iterable<Header>'], return_type: 'void', param_names: ['headers'] })],
   });
-  const source = (element) =>
+  const source = (/** @type {string} */ element) =>
     "import type { Header } from '../common/header/header';\n" +
     `export class Taker {\n  take(headers: Iterable<${element}>): void { void headers; }\n}\n`;
-  const files = (element) =>
+  const files = (/** @type {string} */ element) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': javaIndex([...classes, taker]),
@@ -338,9 +346,9 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
     kind: 'interface',
     overloads: [method('serialize', ['String', 'T'], { return_type: 'byte[]', param_names: ['topic', 'data'] })],
   });
-  const source = (returned) =>
+  const source = (/** @type {string} */ returned) =>
     `export interface Serializer<T> {\n  serialize(options: { topic: string; data: T | null }): ${returned};\n}\n`;
-  const files = (returned) =>
+  const files = (/** @type {string} */ returned) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': javaIndex([...classes, serializer]),
@@ -391,13 +399,13 @@ test('a Java array or collection taken is any iterable; one returned is an array
     labels: 'labels(): Map<string, string> { return new Map(); }',
     label: 'label(labels: ReadonlyMap<string, string> | Readonly<Record<string, string>>): void { void labels; }',
   };
-  const source = (members) =>
+  const source = (/** @type {Record<string, string>} */ members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
     "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
     `void TopicPartition;\nexport class Coll {\n${Object.values(members)
       .map((m) => `  ${m}\n`)
       .join('')}}\n`;
-  const files = (members) =>
+  const files = (/** @type {Record<string, string>} */ members) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': javaIndex([...classes, ...extra]),

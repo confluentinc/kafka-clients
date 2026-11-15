@@ -80,7 +80,7 @@ test('only the Java defaults the TypeScript interface keeps as optional members 
       method('close', [], { default: true }),
     ],
   });
-  const files = (helper) =>
+  const files = (/** @type {string} */ helper) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': javaIndex([...CLASSES, serializer]),

@@ -143,7 +143,7 @@ test('prototypes: the header functions with their parameters, typedefs and comme
   });
   assert.deepEqual(p.get('kafka_x_last'), { name: 'kafka_x_last', returnType: 'const kafka_common_Error_t *', params: [], doc: '' });
   assert.deepEqual(
-    p.get('kafka_x_flush_cb').params.map((x) => x.name),
+    p.get('kafka_x_flush_cb').params.map((/** @type {{ type: string, name: string }} */ x) => x.name),
     ['self_', 'cb', 'opaque'],
   );
 });

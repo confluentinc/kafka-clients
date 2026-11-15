@@ -26,6 +26,10 @@ const { TSCONFIG, project, lint, findings } = require('./_project');
 const RULE = 'check-java-line';
 
 /** The references of `text` with `context` the comment line before it. */
+/**
+ * @param {string} text
+ * @param {string} context
+ */
 const refsIn = (text, context) =>
   javaLineRefsRun([context, text])
     .filter(([line]) => line === 1)
@@ -87,7 +91,7 @@ test('the at forms', () => {
 });
 
 /** `parts` joined: a reference split so this file's own comments and strings stay clean. */
-const j = (...parts) => parts.join('');
+const j = (/** @type {string[]} */ ...parts) => parts.join('');
 
 test('the rule: one finding per file, comments of TypeScript, JavaScript and C, never strings or regexes', () => {
   const root = project({

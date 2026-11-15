@@ -71,7 +71,13 @@ const CLOSE =
   '  return NULL;\n' +
   '}\n';
 
-/** The fixture with `producer` in place of the producer's source (`QUEUE` the queue's unless given). */
+/**
+ * The fixture with `producer` in place of the producer's source (`QUEUE` the queue's unless given).
+ *
+ * @param {string} producer
+ * @param {string} [queue]
+ * @returns {import('./_project').Report}
+ */
 function run(producer, queue = QUEUE) {
   return lint(project({ 'confluent_kafka_bindings.h': HEADER, 'native/callback_queue.c': queue, 'native/producer.c': producer }), [RULE]);
 }
@@ -136,7 +142,7 @@ test('a _cb call not right after a cbq_call_begin of its own, or a cbq_call_begi
   let r = run(FLUSH_COMPLETE + FLUSH.replace('  cbq_call_begin(env, &p->queue);\n', '') + CLOSE);
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [`native/producer.c:8: ${UNCOUNTED}`]);
-  const flush = (body) =>
+  const flush = (/** @type {string} */ body) =>
     FLUSH_COMPLETE +
     FLUSH.replace('  cbq_call_begin(env, &p->queue);\n  kafka_x_P_flush_cb(p->view, flush_on_complete, ctx);\n', body) +
     CLOSE;
@@ -161,7 +167,8 @@ test('a _cb call not right after a cbq_call_begin of its own, or a cbq_call_begi
   r = run(flush(`  cbq_call_begin(env, &p->queue);\n  cbq_call_begin(env, &p->queue);\n${CALL}`));
   assert.deepEqual(findings(r), [`native/producer.c:8: js_flush ${STRAY_BEGIN}`]);
   // Under a condition the call is not under, braced or not, or the call under one the begin is not under.
-  for (const [body, found] of [
+  /** @type {[string, string[]][]} */
+  const conditions = [
     [
       `  if (p->owners > 2) cbq_call_begin(env, &p->queue);\n${CALL}`,
       [`native/producer.c:8: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`],
@@ -174,7 +181,8 @@ test('a _cb call not right after a cbq_call_begin of its own, or a cbq_call_begi
       `  cbq_call_begin(env, &p->queue);\n  if (p->owners > 2) ${CALL.trimStart()}`,
       [`native/producer.c:8: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`],
     ],
-  ]) {
+  ];
+  for (const [body, found] of conditions) {
     r = run(flush(body));
     assert.deepEqual(findings(r), found);
   }
@@ -189,7 +197,7 @@ test('a _cb call not right after a cbq_call_begin of its own, or a cbq_call_begi
 });
 
 test('a completion that does not end its count once, last, on every path, or an end anywhere else, is a finding', () => {
-  const ending = (body) =>
+  const ending = (/** @type {string} */ body) =>
     FLUSH_COMPLETE.replace('  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n  cbq_call_end(env, &p->queue);\n', body);
   // None, and two.
   let r = run(ending('  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n') + FLUSH + CLOSE);
@@ -211,10 +219,12 @@ test('a completion that does not end its count once, last, on every path, or an 
     'native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line 2) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release may follow it',
   ]);
   // Under a condition, braced or not.
-  for (const [body, line] of [
+  /** @type {[string, number][]} */
+  const conditions = [
     ['  call_ref(env, ctx->done, 1, &arg, NULL);\n  if (ctx->done != NULL) cbq_call_end(env, &p->queue);\n', 3],
     ['  call_ref(env, ctx->done, 1, &arg, NULL);\n  if (ctx->done != NULL) {\n    cbq_call_end(env, &p->queue);\n  }\n', 4],
-  ]) {
+  ];
+  for (const [body, line] of conditions) {
     r = run(ending(body) + FLUSH + CLOSE);
     assert.deepEqual(findings(r), [
       `native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line ${line}) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release may follow it`,

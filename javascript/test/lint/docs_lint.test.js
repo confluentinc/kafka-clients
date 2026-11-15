@@ -31,11 +31,16 @@ const { config, KAFKA_RULES } = require('../../scripts/lint/eslint/config');
 
 const ROOT = path.join(os.tmpdir(), 'docs-lint-fixture');
 
-/** The docs lint's findings on `source`, as `<line> <rule>: <message>`. */
+/**
+ * The docs lint's findings on `source`, as `<line> <rule>: <message>`.
+ *
+ * @param {string} source
+ * @returns {string[]}
+ */
 function findings(source) {
   const linter = new Linter({ cwd: ROOT });
   const off = Object.fromEntries(Object.keys(KAFKA_RULES).map((id) => [id, 'off']));
-  const cfg = [...config(ROOT, { typed: false }), { rules: off }];
+  const cfg = /** @type {Linter.Config[]} */ ([...config(ROOT, { typed: false }), { rules: off }]);
   return linter
     .verify(source, cfg, path.join(ROOT, 'src', 'fixture.ts'))
     .map((m) => {

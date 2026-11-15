@@ -127,7 +127,7 @@ test('every export the type checker lists is seen: re-exports, ambient classes, 
 
 test('a file holds one public Java type: Header beside ProducerRecord is a finding too', () => {
   const header = '/** A header. */\nexport type Header = { key: string };\n';
-  const lists = (...modules) =>
+  const lists = (/** @type {string[]} */ ...modules) =>
     mapping({
       ...LISTS,
       javaTargets: {

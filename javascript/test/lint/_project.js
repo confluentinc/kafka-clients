@@ -33,6 +33,108 @@ const { BASELINE, configure, projectOf } = require('../../scripts/lint/eslint/an
 const { config, KAFKA_RULES } = require('../../scripts/lint/eslint/config');
 const plugin = require('../../scripts/lint/eslint/plugin');
 
+/**
+ * A finding a rule reports (scripts/lint/rules/*.js): its kind, subject and message.
+ *
+ * @typedef {object} Finding
+ * @property {string} kind
+ * @property {string} subject
+ * @property {string} message
+ */
+
+/**
+ * Where ESLint reports a finding (the analysis's `locate`).
+ *
+ * @typedef {object} Where
+ * @property {string | null} file
+ * @property {number} line
+ * @property {number} column
+ * @property {boolean} global
+ * @property {boolean} [atStart]
+ */
+
+/** @typedef {Finding & { where: Where }} LocatedFinding */
+
+/**
+ * What a rule's `check` returns.
+ *
+ * @typedef {object} CheckResult
+ * @property {Finding[]} findings
+ * @property {number} [checked]
+ */
+
+/**
+ * A rule of the linter (scripts/lint/rules/*.js), or a test's copy of one.
+ *
+ * @typedef {object} Check
+ * @property {string} name
+ * @property {string} [hint]
+ * @property {string} [PART]
+ * @property {string[]} [needs]
+ * @property {string[]} [kinds]
+ * @property {(ctx: import('../../scripts/lint/context').Context) => CheckResult} check
+ */
+
+/**
+ * The analysis's outcome of a rule: its located findings, or why it cannot run or checks nothing.
+ *
+ * @typedef {object} AnalysisResult
+ * @property {LocatedFinding[]} findings
+ * @property {number} [checked]
+ * @property {string} [cannot]
+ * @property {string} [nothing]
+ */
+
+/**
+ * A section of the report (the runner's `evaluate`).
+ *
+ * @typedef {object} Section
+ * @property {string} name
+ * @property {string} [hint]
+ * @property {Finding[]} [findings]
+ * @property {number} [checked]
+ * @property {string} [cannot]
+ * @property {string} [nothing]
+ */
+
+/**
+ * The project of the analysis, as the tests read it (scripts/lint/eslint/analysis.js).
+ *
+ * @typedef {object} AnalysisProject
+ * @property {() => Set<string>} linted
+ * @property {(check: Check) => AnalysisResult} result
+ * @property {() => (Finding & { text: string, global: boolean })[]} baselineReports
+ */
+
+/**
+ * An ESLint message with the root-relative file it is on.
+ *
+ * @typedef {import('eslint').Linter.LintMessage & { rel: string, suppressed?: boolean, messageId?: string }} FileMessage
+ */
+
+/**
+ * A report of `lint` / `lintRunner`: the exit status, the lines written to each stream, and all of them.
+ *
+ * @typedef {object} Report
+ * @property {number} status
+ * @property {string[]} out
+ * @property {string[]} err
+ * @property {string} text
+ */
+
+/**
+ * The options of `lint`, `lintRunner` and `eslintMessages`.
+ *
+ * @typedef {object} LintOptions
+ * @property {string} [headerPath]
+ * @property {string} [javaIndexPath]
+ * @property {() => unknown} [loadTypescript]
+ * @property {Check[]} [rules]
+ * @property {Check[]} [set]
+ * @property {string[]} [disable]
+ * @property {boolean} [noBaseline]
+ */
+
 /** A tsconfig.json like the client's, for the rules that build the TypeScript program. */
 const TSCONFIG = JSON.stringify({
   compilerOptions: { strict: true, target: 'es2022', lib: ['es2022'], module: 'node16', rootDir: 'src', noEmit: true },
@@ -47,12 +149,18 @@ const FIXME_MARK = 'FIX' + 'ME';
 const CLAUDE_MD = { 'CLAUDE.md': `No ${TODO_MARK} or ${FIXME_MARK}.\n` };
 
 /** The temporary directories made, removed when the test process exits. */
+/** @type {string[]} */
 const made = [];
 process.on('exit', () => {
   for (const dir of made) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** A new temporary directory holding `files` (relative path to text; `undefined` leaves one out); returns its path. */
+/**
+ * A new temporary directory holding `files` (relative path to text; `undefined` leaves one out); returns its path.
+ *
+ * @param {Record<string, string | undefined>} files
+ * @returns {string}
+ */
 function project(files) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'js-lint-'));
   made.push(root);
@@ -64,7 +172,13 @@ function project(files) {
   return root;
 }
 
-/** Copies directory or file `rel` of `from` into `to`. */
+/**
+ * Copies directory or file `rel` of `from` into `to`.
+ *
+ * @param {string} from
+ * @param {string} to
+ * @param {string} rel
+ */
 function copy(from, to, rel) {
   fs.cpSync(path.join(from, rel), path.join(to, rel), { recursive: true });
 }
@@ -107,7 +221,13 @@ const ORDER = [
   'check-config',
 ];
 
-/** `checks` with a test's copy (`rules`, by name) in place of each it replaces, keeping a part's file split. */
+/**
+ * `checks` with a test's copy (`rules`, by name) in place of each it replaces, keeping a part's file split.
+ *
+ * @param {Check[]} checks
+ * @param {Check[]} [rules]
+ * @returns {Check[]}
+ */
 function withOverrides(checks, rules = []) {
   return checks.map((c) => {
     const o = rules.find((r) => r.name === c.name);
@@ -123,6 +243,13 @@ function withOverrides(checks, rules = []) {
  * builds its own program); returns the sections in the runner's shape, each
  * checked against the analysis: ESLint must report a finding with a place
  * once, and a finding about the project once on every file it lints.
+ *
+ * @param {string} root
+ * @param {Check[]} selected
+ * @param {Check[]} all
+ * @param {LintOptions} options
+ * @param {boolean} everything
+ * @returns {Section[]}
  */
 function eslintSections(root, selected, all, options, everything) {
   configure(root, {
@@ -132,10 +259,12 @@ function eslintSections(root, selected, all, options, everything) {
     loadTypescript: options.loadTypescript,
     baseline: !options.noBaseline,
   });
-  const project = projectOf(root);
+  const project = /** @type {AnalysisProject} */ (projectOf(root));
   const on = new Set(selected.map((c) => `kafka/${eslintName(c)}`));
   if (everything) on.add('kafka/baseline');
+  /** @type {Map<string, FileMessage[]>} */
   const byRule = new Map();
+  /** @type {string[]} */
   const fatal = [];
   for (const m of verifyAll(root, project, on)) {
     if (m.fatal || !m.ruleId) {
@@ -143,10 +272,15 @@ function eslintSections(root, selected, all, options, everything) {
       continue;
     }
     if (!byRule.has(m.ruleId)) byRule.set(m.ruleId, []);
-    byRule.get(m.ruleId).push(m);
+    /** @type {FileMessage[]} */ (byRule.get(m.ruleId)).push(m);
   }
+  /** @type {Section[]} */
   const sections = [];
   const files = project.linted().size;
+  /**
+   * @param {string} id
+   * @param {{ kind: string, text: string, global?: boolean, atStart?: boolean }[]} want
+   */
   const expect = (id, want) => {
     const got = (byRule.get(id) || []).map((m) => `${m.messageId}\u0000${m.message}`).sort();
     const exp = want.flatMap((w) => Array((w.global ? files : 1) + (w.atStart ? 1 : 0)).fill(`${w.kind}\u0000${w.text}`)).sort();
@@ -189,11 +323,18 @@ function eslintSections(root, selected, all, options, everything) {
  * Lints every file ESLint reads in `root` with the `kafka` rules `on` (ids)
  * enabled and the others off, through ESLint's Linter and the client's
  * configuration, untyped: each message with its root-relative file (`rel`).
+ *
+ * @param {string} root
+ * @param {AnalysisProject} project
+ * @param {Set<string>} on
+ * @returns {FileMessage[]}
  */
 function verifyAll(root, project, on) {
   const rules = Object.fromEntries(Object.keys(KAFKA_RULES).map((id) => [id, on.has(id) ? 'error' : 'off']));
-  const linter = new Linter({ cwd: root });
-  const cfg = [...config(root, { typed: false }), { rules }];
+  // ESLint's types leave out the Linter's getSuppressedMessages, which it has.
+  const linter = /** @type {Linter & { getSuppressedMessages(): Linter.SuppressedLintMessage[] }} */ (new Linter({ cwd: root }));
+  const cfg = /** @type {Linter.Config[]} */ ([...config(root, { typed: false }), { rules }]);
+  /** @type {FileMessage[]} */
   const out = [];
   for (const rel of [...project.linted()].sort()) {
     const file = path.join(root, rel);
@@ -208,6 +349,10 @@ function verifyAll(root, project, on) {
  * ESLint's messages over `root` with every `kafka` rule on (`options` as
  * `lint`'s: `headerPath`, `rules`, `noBaseline`): `{rel, line, ruleId,
  * messageId, message}`, for the tests of where a finding is reported.
+ *
+ * @param {string} root
+ * @param {LintOptions} [options]
+ * @returns {FileMessage[]}
  */
 function eslintMessages(root, options = {}) {
   configure(root, {
@@ -216,10 +361,16 @@ function eslintMessages(root, options = {}) {
     javaIndexPath: options.javaIndexPath,
     baseline: !options.noBaseline,
   });
-  return verifyAll(root, projectOf(root), new Set(Object.keys(KAFKA_RULES))).filter((m) => !m.suppressed);
+  return verifyAll(root, /** @type {AnalysisProject} */ (projectOf(root)), new Set(Object.keys(KAFKA_RULES))).filter((m) => !m.suppressed);
 }
 
-/** Merges the two halves of a rule split by file type into one section. */
+/**
+ * Merges the two halves of a rule split by file type into one section.
+ *
+ * @param {Section | undefined} a
+ * @param {Section | undefined} b
+ * @returns {Section | Section[] | undefined}
+ */
 function merge(a, b) {
   if (a === undefined) return b;
   if (b === undefined) return a;
@@ -241,12 +392,21 @@ function merge(a, b) {
  * type runs in both and is reported as one): `{status, out, err, text}`,
  * `out` and `err` the lines of the runner's report format, and `text` both,
  * in order. `options.disable` names rules to turn off.
+ *
+ * @param {string} root
+ * @param {string[]} [args]
+ * @param {LintOptions} [options]
+ * @returns {Report}
  */
 function lint(root, args = [], options = {}) {
+  /** @type {string[]} */
   const out = [];
+  /** @type {string[]} */
   const err = [];
+  /** @type {string[]} */
   const all = [];
-  const w = (to) => (line) => {
+  /** @param {string[]} to */
+  const w = (to) => (/** @type {string} */ line) => {
     to.push(line);
     all.push(line);
   };
@@ -255,21 +415,22 @@ function lint(root, args = [], options = {}) {
   const bad = args.find((a) => !a.startsWith('check-') && a !== '--no-baseline');
   let runnerChecks = withOverrides(RUNNER_CHECKS, opts.rules);
   let eslintChecks = withOverrides(ESLINT_CHECKS, opts.rules);
-  if (opts.set !== undefined) {
+  const set = opts.set;
+  if (set !== undefined) {
     // `set`: the whole rule set, each rule on its tool's side; a rule of
     // neither (a test's own) is the runner's.
-    const names = (list) => new Set(list.map((c) => c.name));
+    const names = (/** @type {Check[]} */ list) => new Set(list.map((c) => c.name));
     const [r, e] = [names(RUNNER_CHECKS), names(ESLINT_CHECKS)];
     eslintChecks = withOverrides(
-      ESLINT_CHECKS.filter((c) => opts.set.some((x) => x.name === c.name)),
-      opts.set,
+      ESLINT_CHECKS.filter((c) => set.some((x) => x.name === c.name)),
+      set,
     );
     runnerChecks = [
       ...withOverrides(
-        RUNNER_CHECKS.filter((c) => opts.set.some((x) => x.name === c.name)),
-        opts.set,
+        RUNNER_CHECKS.filter((c) => set.some((x) => x.name === c.name)),
+        set,
       ),
-      ...opts.set.filter((x) => !r.has(x.name) && !e.has(x.name)),
+      ...set.filter((x) => !r.has(x.name) && !e.has(x.name)),
     ];
   }
   const only = names[0];
@@ -284,6 +445,7 @@ function lint(root, args = [], options = {}) {
   const disabled = opts.disable || [];
   // ESLint's half first: a rule split by file type lists its TypeScript and
   // JavaScript findings before the runner's (src/ before native/).
+  /** @type {Section[][]} */
   const bySide = [];
   if ((only === undefined && eslintChecks.length > 0) || inEslint) {
     const selected = eslintChecks.filter((c) => (only === undefined || c.name === only) && !disabled.includes(c.name));
@@ -295,8 +457,11 @@ function lint(root, args = [], options = {}) {
       root,
       rules: runnerChecks,
     });
+    // A usage error took the branch above: the runner has sections here.
+    assert.ok(result.sections);
     bySide.push(result.sections.filter((x) => !disabled.includes(x.name)));
   }
+  /** @type {Section[]} */
   const sections = [];
   const custom = runnerChecks.map((c) => c.name).filter((n) => !ORDER.includes(n));
   // Every rule's section is printed: a rule missing from ORDER would vanish from the report.
@@ -306,18 +471,29 @@ function lint(root, args = [], options = {}) {
     const found = bySide.map((list) => list.filter((s) => s.name === name)).flat();
     if (found.length === 0) continue;
     const merged = found.length === 1 ? found[0] : merge(found[0], found[1]);
+    assert.ok(merged !== undefined);
     sections.push(...(Array.isArray(merged) ? merged : [merged]));
   }
   const status = print(sections, w(out), w(err));
   return { status, out, err, text: all.join('\n') };
 }
 
-/** The findings lines of a report (those indented by two spaces), without the indent. */
+/**
+ * The findings lines of a report (those indented by two spaces), without the indent.
+ *
+ * @param {Report} report
+ * @returns {string[]}
+ */
 function findings(report) {
   return report.err.filter((l) => l.startsWith('  ')).map((l) => l.slice(2));
 }
 
-/** The names of the rules a report failed. */
+/**
+ * The names of the rules a report failed.
+ *
+ * @param {Report} report
+ * @returns {string[]}
+ */
 function failedRules(report) {
   return report.err
     .map((l) => /^❌ (check-[\w-]+|kafka\/[\w-]+):/.exec(l))
@@ -325,19 +501,29 @@ function failedRules(report) {
     .map((m) => m[1]);
 }
 
-/** Runs the runner alone, with `options.rules` as its whole rule set: the runner's own report. */
+/**
+ * Runs the runner alone, with `options.rules` as its whole rule set: the runner's own report.
+ *
+ * @param {string} root
+ * @param {string[]} [args]
+ * @param {LintOptions} [options]
+ * @returns {Report}
+ */
 function lintRunner(root, args = [], options = {}) {
+  /** @type {string[]} */
   const out = [];
+  /** @type {string[]} */
   const err = [];
+  /** @type {string[]} */
   const all = [];
   const status = run(args, {
     root,
     headerPath: path.join(root, 'confluent_kafka_bindings.h'),
-    out: (line) => {
+    out: (/** @type {string} */ line) => {
       out.push(line);
       all.push(line);
     },
-    err: (line) => {
+    err: (/** @type {string} */ line) => {
       err.push(line);
       all.push(line);
     },
@@ -352,11 +538,16 @@ function lintRunner(root, args = [], options = {}) {
  * real tree starts clean while the real tree still has findings the rules
  * report on code that does not follow them yet: a test on the copy then sees
  * only what it changes. Never used on the real tree. Returns the lines added.
+ *
+ * @param {string} root
+ * @returns {Record<string, string[]>}
  */
 function baselineCurrent(root) {
   const header = path.join(root, 'confluent_kafka_bindings.h');
   const ctx = new Context({ root, headerPath: fs.existsSync(header) ? header : undefined });
+  /** @param {Check[]} checks */
   const keys = (checks) => {
+    /** @type {Set<string>} */
     const out = new Set();
     for (const c of checks) {
       if ((c.needs || []).some((n) => ctx.missing(n) !== null)) continue;
@@ -364,11 +555,12 @@ function baselineCurrent(root) {
     }
     return [...out];
   };
+  /** @type {Record<string, string[]>} */
   const added = {};
-  for (const [file, checks] of [
+  for (const [file, checks] of /** @type {[string, Check[]][]} */ ([
     ['eslint-baseline.txt', ESLINT_CHECKS],
     ['lint-baseline.txt', RUNNER_CHECKS],
-  ]) {
+  ])) {
     const listed = fs.existsSync(path.join(root, file))
       ? new Set(
           fs

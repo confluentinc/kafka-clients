@@ -23,7 +23,7 @@ const { TSCONFIG, project, lint, findings } = require('./_project');
 const RULE = 'check-encode-callers';
 
 const ENCODE = 'export function encodeLikeJava(s: string): Uint8Array {\n  return new Uint8Array(s.length);\n}\n';
-const USE = (from) => `import { encodeLikeJava } from '${from}';\nexport const b = encodeLikeJava('x');\n`;
+const USE = (/** @type {string} */ from) => `import { encodeLikeJava } from '${from}';\nexport const b = encodeLikeJava('x');\n`;
 
 const base = {
   'tsconfig.json': TSCONFIG,
