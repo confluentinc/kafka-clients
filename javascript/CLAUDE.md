@@ -1049,9 +1049,11 @@ The layout is the root conventions' (Layout and modules).
   `@java` or `@jsOnly` tag. Each module's header comment lists the Java
   overloads it leaves out; the producer package's is its `index.ts`'s
   `@packageDocumentation` TSDoc, so the declarations show it (the API report
-  records only that the package has one). The root conventions add a docs lint, the `require-param` and
+  records only that the package has one). The docs lint, the `require-param` and
   `require-returns` rules of `eslint-plugin-jsdoc` (Documentation, Q64, Q74),
-  and an HTML reference built with TypeDoc; neither is set up yet. `make
+  runs in `make lint-rules` (The rule linter), and an HTML reference is built
+  with TypeDoc (root conventions, Documentation, Q64), which is not set up
+  yet. `make
   build` (`build-ts`) compiles `src/` into `dist/` (`.js`, `.d.ts`, both with
   maps): CommonJS (`module: nodenext`, the package having no `"type"`, root
   conventions, Layout and modules), so `require` loads it and an ES module
@@ -1235,7 +1237,12 @@ from the sources, as `cargo xtask lint-custom` checks the Rust crate's
 (`design/current/javascript-rule-linter/PLAN.md`). It has two halves: ESLint
 (`eslint.config.cjs`, the `kafka/` rules, with `eslint-baseline.txt`) runs the
 rules that read TypeScript, beside typescript-eslint's recommended
-type-checked rules on `src/` (`no-floating-promises` among them); the runner
+type-checked rules on `src/` (`no-floating-promises` among them) and the docs
+lint, `eslint-plugin-jsdoc`'s `require-param` and `require-returns` on `src/`
+(root conventions, Documentation, Q64, Q74): a doc comment names each
+parameter and what the function returns, an options object as one parameter
+(`checkDestructured` off), and a generated file gets its tags from its
+generator; which members need a doc comment is not the lint's; the runner
 (`scripts/lint_rules.js`, with `lint-baseline.txt`) runs the addon's C rules
 and the other files. `make test-lint` runs the linter's own tests
 (`test/lint/`): each rule's tests over a fixture, and a mutation test that

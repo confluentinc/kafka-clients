@@ -56,6 +56,10 @@ export class SecurityProtocol {
 
   /**
    * Made by this class only (the enum's constants).
+   *
+   * @param ordinal the constant's position in Java's declaration, its `ordinal()`
+   * @param id Java's `id`
+   * @param name the constant's name, its `name()`
    */
   private constructor(ordinal: number, id: number, name: string) {
     this.id = id;

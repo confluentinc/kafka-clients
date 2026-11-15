@@ -52,7 +52,12 @@ function typeName(value: unknown): string {
   return typeof value;
 }
 
-/** A value as Java's `String.valueOf` writes it in a ConfigException message. */
+/**
+ * A value as Java's `String.valueOf` writes it in a ConfigException message.
+ *
+ * @param value the config value
+ * @returns its text
+ */
 function shown(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   try {
@@ -62,7 +67,12 @@ function shown(value: unknown): string {
   }
 }
 
-/** Whether `key` is one of the producer's own serde keys, which never reach the core. */
+/**
+ * Whether `key` is one of the producer's own serde keys, which never reach the core.
+ *
+ * @param key the config key
+ * @returns whether it is a serde key
+ */
 function isSerializerKey(key: string): boolean {
   return key === 'key.serializer' || key === 'value.serializer';
 }
@@ -75,6 +85,9 @@ const NONE: ReadonlySet<string> = new Set();
  * `'1000000000000000000000'`, `1e-7` is `'0.0000001'`): the text Java's
  * `ConfigDef` parses. `NaN` and the infinities are written as JavaScript
  * writes them, for the core to refuse.
+ *
+ * @param n the number to write
+ * @returns its decimal text
  */
 export function decimal(n: number): string {
   const text = String(n);
@@ -96,6 +109,9 @@ export function decimal(n: number): string {
  * One config value as the string the FFI takes: `true` as `'true'`, numbers
  * and bigints in decimal, an array's items each written so and joined with
  * commas, anything else by `String()`.
+ *
+ * @param value the config value
+ * @returns the string the core gets
  */
 function configValue(value: unknown): string {
   switch (typeof value) {
@@ -120,6 +136,9 @@ function configValue(value: unknown): string {
  * config keys, each value as it was given. A `Map` (or any other object that
  * is not a plain one) is refused, so that its entries are not silently
  * ignored, and so is a key that is not a string.
+ *
+ * @param configs the configuration given
+ * @returns the configuration, a plain object
  */
 export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>> {
   // Java's constructor copies the map (new HashMap<>(configs)): a
@@ -159,6 +178,10 @@ export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>
  * are the producer's own serde keys and the keys in `leftOut`, those a serde
  * config function read, except the producer keys of Java's, which the core
  * uses.
+ *
+ * @param configs the configuration given
+ * @param leftOut the keys not to send to the core
+ * @returns the keys and values to send, encoded
  */
 export function configEntries(configs: unknown, leftOut: ReadonlySet<string> = NONE): Array<[Buffer, Buffer]> {
   const checked = checkConfigs(configs);

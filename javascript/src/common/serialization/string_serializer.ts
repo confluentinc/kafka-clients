@@ -33,6 +33,10 @@ const FORMS = new JavaForms('stringSerializer', [[], ['configs', 'isKey']]);
  * a value that is not a string is ignored, as Java ignores one that is not a
  * `String`, and so is none (UTF-8).
  *
+ * @param configs the serializer's configuration
+ * @param isKey whether the serializer is for keys
+ * @returns the charset to encode with
+ *
  * @throws `SerializationError` "Unsupported encoding <name>" for a name that
  *   is not one of Java's standard charsets
  */

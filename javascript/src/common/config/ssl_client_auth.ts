@@ -47,6 +47,9 @@ export class SslClientAuth {
 
   /**
    * Made by this class only (the enum's constants).
+   *
+   * @param ordinal the constant's position in Java's declaration, its `ordinal()`
+   * @param name the constant's name, its `name()`
    */
   private constructor(ordinal: number, name: string) {
     this.#name = name;

@@ -226,6 +226,8 @@ export class MetricName {
    * The key of a `MetricNameMap`: the group, the name and the tags sorted by
    * key, the fields `equals` compares. Called by `MetricNameMap`.
    *
+   * @returns the key of this name in a `MetricNameMap`
+   *
    * @internal
    */
   internalKey(): string {

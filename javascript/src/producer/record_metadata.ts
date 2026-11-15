@@ -173,6 +173,9 @@ export class RecordMetadata {
    * The metadata of a delivered record, from the fields the native layer read.
    * Called by `src/internal/native.ts`.
    *
+   * @param fields the native layer's fields
+   * @returns the metadata
+   *
    * @internal
    */
   static internalCreate(fields: RecordMetadataFields): RecordMetadata {

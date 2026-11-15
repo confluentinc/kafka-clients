@@ -25,6 +25,10 @@ const INT64_MAX = 2n ** 63n - 1n;
 /**
  * A Java `int` argument named `what`.
  *
+ * @param value the value given
+ * @param what the argument's name, for the error
+ * @returns the number
+ *
  * @throws `TypeError` when it is not a whole number
  * @throws `RangeError` when it is beyond Java's `int`
  */
@@ -36,6 +40,10 @@ export function checkInt(value: unknown, what: string): number {
 
 /**
  * A Java `long` argument named `what`, as a bigint.
+ *
+ * @param value the value given
+ * @param what the argument's name, for the error
+ * @returns the value as a bigint
  *
  * @throws `TypeError` when it is neither a bigint nor a whole number
  * @throws `RangeError` when it is a bigint beyond Java's `long`, or a number

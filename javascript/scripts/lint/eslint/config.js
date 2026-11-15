@@ -18,8 +18,12 @@
 // (design/current/javascript-rule-linter/PLAN.md §3), for the client
 // directory `root` (eslint.config.cjs passes its own): the `kafka` rules on
 // every TypeScript and JavaScript file, typescript-eslint's
-// recommended type-checked rules on src/, typed through tsconfig.json.
+// recommended type-checked rules on src/, typed through tsconfig.json, and
+// the docs lint on src/: eslint-plugin-jsdoc's `require-param` and
+// `require-returns` (root CLAUDE.md, JavaScript Binding Conventions,
+// Documentation, Q64, and Build, packaging and release, Q74).
 
+const jsdoc = require('eslint-plugin-jsdoc');
 const tseslint = require('typescript-eslint');
 
 const plugin = require('./plugin');
@@ -49,6 +53,20 @@ function config(root, { typed = true } = {}) {
     { files: ['**/*.mjs'], languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } },
     { files: ['**/*.ts'], languageOptions: { parser: tseslint.parser } },
     ...typedConfigs,
+    {
+      // A doc comment names each parameter with `@param` and what the function
+      // returns with `@returns`. An options object is one parameter, described
+      // as a whole (Documentation, Q64): its destructured keys are documented
+      // on its options type, so `checkDestructured` is off. Only an existing
+      // doc comment is checked: which members need one is not this lint's.
+      files: ['src/**/*.ts'],
+      plugins: { jsdoc },
+      settings: { jsdoc: { mode: 'typescript' } },
+      rules: {
+        'jsdoc/require-param': ['error', { checkDestructured: false }],
+        'jsdoc/require-returns': 'error',
+      },
+    },
     {
       files: ['**/*.ts', '**/*.js', '**/*.cjs', '**/*.mjs'],
       plugins: { kafka: plugin },

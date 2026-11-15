@@ -53,6 +53,11 @@ export class TimestampType {
 
   /**
    * Made by this class only (the enum's constants).
+   *
+   * @param ordinal the constant's position in Java's declaration, its `ordinal()`
+   * @param name the constant's name, its `name()`
+   * @param id Java's `id`
+   * @param text Java's `name`, which `toString()` returns
    */
   private constructor(ordinal: number, name: string, id: number, text: string) {
     this.id = id;

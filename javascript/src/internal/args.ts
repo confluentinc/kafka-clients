@@ -57,6 +57,9 @@ export type Form = readonly string[];
  * The JavaScript type of a value, as a form error names it, in Python's form:
  * `a string`, `a number`, `an array`, `null`, `a Map` (an object, by its
  * class).
+ *
+ * @param value the value to name
+ * @returns the name of its type
  */
 export function kind(value: unknown): string {
   if (value === null) return 'null';
@@ -121,14 +124,25 @@ export interface JavaFormsOptions {
   readonly optionsOnly?: readonly string[];
 }
 
-/** Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null. */
+/**
+ * Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null.
+ *
+ * @param value the value to test
+ * @returns whether it is a plain object
+ */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object') return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 
-/** Whether `name` is an own enumerable property of `args`, what counts as given. */
+/**
+ * Whether `name` is an own enumerable property of `args`, what counts as given.
+ *
+ * @param args the options object
+ * @param name the parameter's name
+ * @returns whether the parameter is given
+ */
 function given(args: object, name: string): boolean {
   return Object.prototype.propertyIsEnumerable.call(args, name);
 }
