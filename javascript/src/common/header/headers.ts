@@ -13,17 +13,33 @@
 // limitations under the License.
 
 // Java's Headers, with the constructors, toString() and read-only state of its
-// one concrete class, the internal RecordHeaders (as the Python client's
-// Headers): mutable until its record is sent, read-only after, as Java's
-// KafkaProducer.doSend seals the record's headers (`setReadOnly`).
+// one concrete class, the internal RecordHeaders: mutable until its record is
+// sent, read-only after, as Java's KafkaProducer.doSend seals the record's
+// headers (`setReadOnly`).
+//
+// It wraps the FFI's RecordHeaders (root CLAUDE.md, JavaScript Binding
+// Conventions, Serialization, Q31): every method goes to the addon
+// (native/headers.c), so the core holds the headers and refuses a change once
+// they are read-only, with Java's text. Option 1 (owner's decision,
+// design/current/javascript-producer/DECISIONS.md, entry 21): a Header read
+// from headers that can still change is the binding's own copy, which stays
+// valid after the headers change; one read from read-only headers is a view,
+// with no copy, which keeps them alive.
+//
+// Headers that never held a header have no native RecordHeaders of their own:
+// they read one shared empty RecordHeaders, which nothing changes, until the
+// first add makes their own, and sealing them gives them one shared empty
+// read-only RecordHeaders, which the core keeps unchangeable. So a record sent
+// with no headers makes no native object for them.
 //
 // Where headers are taken (this constructor, `ProducerRecord`'s `headers`),
-// each element is a `Header`, as Java takes them.
+// each element is a `Header`, as Java takes them; the core copies them.
 
 import { JavaForms } from '../../internal/args';
-import { illegalArgument, illegalState } from '../../internal/errors';
 import { encodeLikeJava } from '../../internal/encode';
 import { objectHashCode, objectsEquals, sameClass } from '../../internal/java_object';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
+import native = require('../../internal/native');
 import { Header } from './header';
 
 /**
@@ -65,30 +81,54 @@ const TO_ARRAY_FORMS = new JavaForms('toArray', [[]], { reader: true });
 const EQUALS_FORMS = new JavaForms('equals', [['o']]);
 const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
-// RecordHeaders.canWrite's message.
-const CLOSED = 'RecordHeaders has been closed.';
+/** The key of a remove that removes nothing: an empty key's bytes. */
+const NO_KEY = new Uint8Array(0);
 
-/** The headers of a `Headers` that has none, shared until the first `add`. */
-const EMPTY: readonly Header[] = Object.freeze([]);
-
-/** A header as the native send takes it: key and value bytes. */
-type NativeHeader = [Uint8Array, Uint8Array | null];
+/** The shared empty RecordHeaders that headers with none of their own read: nothing changes it. */
+let emptyWritable: object | null = null;
+/** The shared empty read-only RecordHeaders of headers sealed before their first add. */
+let emptySealed: object | null = null;
 
 /**
- * RecordHeaders.checkKey, plus the type a JavaScript caller can get wrong.
+ * The shared empty RecordHeaders, made on first use.
  *
- * @param key the key given
- * @returns the key, a string
+ * @returns its native handle
  */
-function checkKey(key: unknown): string {
-  if (key === null) throw illegalArgument('key cannot be null.');
-  if (typeof key !== 'string') throw new TypeError('key must be a string');
-  return key;
+function writableEmpty(): object {
+  if (emptyWritable === null) emptyWritable = native.headersNew(null, 0);
+  return emptyWritable;
 }
 
 /**
- * One taken element: a `Header` as it is (Java's RecordHeaders keeps the given
- * object). A null element is Java's
+ * The shared empty read-only RecordHeaders, made on first use.
+ *
+ * @returns its native handle
+ */
+function sealedEmpty(): object {
+  if (emptySealed === null) {
+    const sealed = native.headersNew(null, 0);
+    native.headersSetReadOnly(sealed);
+    emptySealed = sealed;
+  }
+  return emptySealed;
+}
+
+/**
+ * A key as it crosses to the core: encodeLikeJava's bytes (Node-API would
+ * write U+FFFD for a lone surrogate), or null, which the core refuses with
+ * Java's IllegalArgumentException "key cannot be null.".
+ *
+ * @param key the key given
+ * @returns its bytes, or null
+ */
+function keyBytes(key: unknown): Uint8Array | null {
+  if (key === null) return null;
+  if (typeof key !== 'string') throw new TypeError('key must be a string');
+  return encodeLikeJava(key);
+}
+
+/**
+ * One taken element: a `Header`. A null element is Java's
  * `Objects.requireNonNull(header, "Header cannot be null.")`.
  *
  * @param item an element of the iterable given
@@ -102,24 +142,15 @@ function headerOf(item: unknown): Header {
 }
 
 /**
- * The headers `headers` holds, taken as Java's RecordHeaders(Iterable) takes them.
+ * The headers the addon handed out, as `Header` objects.
  *
- * @param headers the iterable of headers given, or null
- * @returns the headers it holds, in order
+ * @param handles the native headers
+ * @returns them as `Header` objects, in order
  */
-function taken(headers: unknown): readonly Header[] {
-  if (headers === null) return EMPTY;
-  if (headers instanceof Headers) return headers.internalHeaders().length === 0 ? EMPTY : headers.internalHeaders().slice();
-  if (typeof headers !== 'object' || typeof (headers as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
-    throw new TypeError('headers must be a Headers, or an iterable of Header');
-  }
-  const out: Header[] = [];
-  if (Array.isArray(headers)) {
-    for (let i = 0; i < headers.length; i++) out.push(headerOf(headers[i]));
-  } else {
-    for (const item of headers as Iterable<unknown>) out.push(headerOf(item));
-  }
-  return out.length === 0 ? EMPTY : out;
+function wrapAll(handles: object[]): Header[] {
+  const out = new Array<Header>(handles.length);
+  for (let i = 0; i < handles.length; i++) out[i] = Header.internalOf(handles[i]);
+  return out;
 }
 
 /**
@@ -132,13 +163,16 @@ function taken(headers: unknown): readonly Header[] {
  *   is internal; this class is both, with `RecordHeaders`' constructors and
  *   `toString()`. The headers of a record become read-only when the record is
  *   sent: `add` and `remove` then throw `IllegalStateError` "RecordHeaders
- *   has been closed.".
+ *   has been closed.". *(js-only)* The headers are the core's native
+ *   `RecordHeaders`. A `Header` read from headers that can still change is a
+ *   copy, which stays as it is when they change, as Java's does; one read
+ *   from read-only headers is a view, with no copy, which keeps them alive.
  */
 export class Headers implements Iterable<Header> {
-  // A shared empty array until the first add; then the class's own array.
-  #headers: readonly Header[];
-  // RecordHeaders' isReadOnly.
-  #readOnly = false;
+  // The native RecordHeaders (native/headers.c), whose finalizer drops it;
+  // null until the first add (the shared empty one is read), or the shared
+  // empty read-only one once sealed before it.
+  #native: object | null = null;
 
   /**
    * Creates empty headers, Java's `RecordHeaders()`.
@@ -146,12 +180,14 @@ export class Headers implements Iterable<Header> {
   constructor();
   /**
    * Creates headers holding the given headers in their order, Java's
-   * `RecordHeaders(Header[])`. The `Header` objects are kept, not copied;
-   * null is no headers.
+   * `RecordHeaders(Header[])`; null is no headers.
    *
    * @param options - the headers
    * @throws `TypeError` when a header is null ("Header cannot be null.") or
    *   not a `Header`
+   *
+   * @remarks *(js-only)* The core copies each header: the `Header` objects
+   * given stay the app's own, where Java's keeps them.
    */
   constructor(options: {
     /** The headers, an array of `Header`, or null. */
@@ -187,7 +223,34 @@ export class Headers implements Iterable<Header> {
   constructor(headers: Iterable<Header> | null);
   constructor(options?: unknown) {
     const headers = CONSTRUCTOR_FORMS.match(options, arguments.length) === 0 ? undefined : CONSTRUCTOR_FORMS.value(options, 'headers');
-    this.#headers = headers === undefined ? EMPTY : taken(headers);
+    if (headers !== undefined) this.#native = Headers.#taken(headers);
+  }
+
+  /**
+   * The native RecordHeaders holding what `headers` holds, taken as Java's
+   * RecordHeaders(Header[]) and RecordHeaders(Iterable<Header>) take them, or
+   * null for none.
+   *
+   * @param headers the headers given, or null
+   * @returns their native RecordHeaders, or null
+   */
+  static #taken(headers: unknown): object | null {
+    if (headers === null) return null;
+    if (headers instanceof Headers) {
+      const source = headers.#native;
+      return source === null || source === emptySealed ? null : native.headersCopy(source);
+    }
+    if (typeof headers !== 'object' || typeof (headers as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
+      throw new TypeError('headers must be a Headers, or an iterable of Header');
+    }
+    const handles: object[] = [];
+    if (Array.isArray(headers)) {
+      for (let i = 0; i < headers.length; i++) handles.push(Header.internalNativeOf(headerOf(headers[i])));
+    } else {
+      for (const item of headers as Iterable<unknown>) handles.push(Header.internalNativeOf(headerOf(item)));
+    }
+    if (handles.length === 0) return null;
+    return native.headersNew(handles, Array.isArray(headers) ? 1 : 2);
   }
 
   /**
@@ -202,8 +265,19 @@ export class Headers implements Iterable<Header> {
    */
   static internalTaken(headers: unknown): Headers {
     const out = new Headers();
-    if (headers !== null) out.#headers = taken(headers);
+    out.#native = Headers.#taken(headers);
     return out;
+  }
+
+  // The RecordHeaders to read.
+  #read(): object {
+    return this.#native ?? writableEmpty();
+  }
+
+  // The RecordHeaders to change: their own, made on the first add.
+  #write(): object {
+    if (this.#native === null) this.#native = native.headersNew(null, 0);
+    return this.#native;
   }
 
   /**
@@ -217,6 +291,9 @@ export class Headers implements Iterable<Header> {
    *   not a `Header`
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{header}` or `{key, value}`
+   *
+   * @remarks *(js-only)* The headers hold a copy of the header: the `Header`
+   * given stays the app's own.
    */
   add(options: {
     /** The Header to be added. */
@@ -250,22 +327,19 @@ export class Headers implements Iterable<Header> {
    */
   add(header: Header): Headers;
   add(options: unknown): Headers {
-    let header: unknown;
     if (ADD_FORMS.match(options, arguments.length) === 0) {
-      header = ADD_FORMS.value(options, 'header');
-      if (header === null) throw new TypeError('Header cannot be null.');
-      if (!(header instanceof Header)) throw new TypeError('header must be a Header');
+      const header = ADD_FORMS.value(options, 'header');
+      if (header !== null && !(header instanceof Header)) throw new TypeError('header must be a Header');
+      // A null header is the core's error, Java's "Header cannot be null.".
+      native.headersAdd(this.#write(), header === null ? null : Header.internalNativeOf(header));
     } else {
       // Java's add(key, value) is add(new RecordHeader(key, value)): the
-      // header's checks come first.
-      header = new Header({
-        key: ADD_FORMS.value(options, 'key') as string,
-        value: ADD_FORMS.value(options, 'value') as Uint8Array | null,
-      });
+      // header's checks come first, a null key the core's error whatever the
+      // value.
+      const key = keyBytes(ADD_FORMS.value(options, 'key'));
+      const value = key === null ? null : Header.internalValueBytes(ADD_FORMS.value(options, 'value'));
+      native.headersAddKeyValue(this.#write(), key, value);
     }
-    this.#canWrite();
-    if (this.#headers === EMPTY) this.#headers = [header as Header];
-    else (this.#headers as Header[]).push(header as Header);
     return this;
   }
 
@@ -294,12 +368,16 @@ export class Headers implements Iterable<Header> {
   remove(key: string): Headers;
   remove(options: unknown): Headers {
     REMOVE_FORMS.match(options, arguments.length);
-    this.#canWrite();
-    const key = checkKey(REMOVE_FORMS.value(options, 'key'));
-    if (this.#headers.some((h) => Header.internalKeyOf(h) === key)) {
-      const kept = this.#headers.filter((h) => Header.internalKeyOf(h) !== key);
-      this.#headers = kept.length === 0 ? EMPTY : kept;
-    }
+    const key = REMOVE_FORMS.value(options, 'key');
+    const own = this.#native;
+    // Java's canWrite() comes before its checkKey(), the FFI's key check
+    // before its read-only one: for a key the core or the binding refuses,
+    // read-only headers are first asked to remove nothing, which the core
+    // refuses with its own error, changing nothing.
+    if (typeof key !== 'string' && own !== null && native.headersIsReadOnly(own)) native.headersRemove(own, NO_KEY);
+    // Headers with none of their own remove nothing from the shared empty
+    // ones; only a null key is an error there.
+    native.headersRemove(own ?? writableEmpty(), keyBytes(key));
     return this;
   }
 
@@ -312,6 +390,12 @@ export class Headers implements Iterable<Header> {
    * @throws `IllegalArgumentError` when the key is null ("key cannot be
    *   null."), or the given parameters are not `{key}`
    * @throws `TypeError` when the key is not a string or is `undefined`
+   *
+   * @remarks *(js-only)* While the headers can still change (before their
+   * record is sent), the header is the binding's own copy of the key and
+   * value, which stays as it is when the headers change, as Java's does.
+   * Once they are read-only, it is a view of the header inside them, with no
+   * copy, which keeps them alive.
    */
   lastHeader(options: {
     /** The key to get the last header for; must not be null. */
@@ -328,10 +412,8 @@ export class Headers implements Iterable<Header> {
   lastHeader(key: string): Header | null;
   lastHeader(options: unknown): Header | null {
     LAST_HEADER_FORMS.match(options, arguments.length);
-    const key = checkKey(LAST_HEADER_FORMS.value(options, 'key'));
-    const headers = this.#headers;
-    for (let i = headers.length - 1; i >= 0; i--) if (Header.internalKeyOf(headers[i]) === key) return headers[i];
-    return null;
+    const handle = native.headersLastHeader(this.#read(), keyBytes(LAST_HEADER_FORMS.value(options, 'key')));
+    return handle === null ? null : Header.internalOf(handle);
   }
 
   /**
@@ -345,6 +427,9 @@ export class Headers implements Iterable<Header> {
    * @throws `IllegalArgumentError` when the key is null ("key cannot be
    *   null."), or the given parameters are not `{key}`
    * @throws `TypeError` when the key is not a string or is `undefined`
+   *
+   * @remarks *(js-only)* Each header is a copy while the headers can still
+   * change, and a view once they are read-only, as `lastHeader` says.
    */
   headers(options: {
     /** The key to return the headers for; must not be null. */
@@ -360,12 +445,14 @@ export class Headers implements Iterable<Header> {
   headers(key: string): Iterable<Header>;
   headers(options: unknown): Iterable<Header> {
     HEADERS_FORMS.match(options, arguments.length);
-    const key = checkKey(HEADERS_FORMS.value(options, 'key'));
+    const key = keyBytes(HEADERS_FORMS.value(options, 'key'));
+    // Java's checkKey(key) runs at the call: a null key is the core's error now.
+    if (key === null) native.headersHeaders(this.#read(), null);
     // eslint-disable-next-line @typescript-eslint/no-this-alias -- the iterable reads the headers when it is iterated, as Java's headers(key) iterates the live list
     const self = this;
     return {
-      *[Symbol.iterator](): Iterator<Header> {
-        for (const header of self.#headers) if (Header.internalKeyOf(header) === key) yield header;
+      [Symbol.iterator](): Iterator<Header> {
+        return wrapAll(native.headersHeaders(self.#read(), key))[Symbol.iterator]();
       },
     };
   }
@@ -376,20 +463,28 @@ export class Headers implements Iterable<Header> {
    * @returns the headers as an array, mutating this array will not affect the
    *   Headers, if NO headers are present an empty array is returned.
    * @throws `TypeError` when it is given an argument: it only reads
+   *
+   * @remarks *(js-only)* Each header is a copy while the headers can still
+   * change, and a view once they are read-only, as `lastHeader` says.
    */
   toArray(): Header[] {
     // Java's toArray() takes nothing: an argument is refused, never dropped.
     TO_ARRAY_FORMS.match(undefined, arguments.length);
-    return this.#headers.slice();
+    return this.#native === null ? [] : wrapAll(native.headersToArray(this.#native));
   }
 
   /**
-   * The headers, in the order they were added in.
+   * The headers, in the order they were added in, as they are when the
+   * iterator is made.
    *
    * @returns an iterator over the headers
+   *
+   * @remarks *(js-only)* Each header is a copy while the headers can still
+   * change, and a view once they are read-only, as `lastHeader` says.
    */
   [Symbol.iterator](): Iterator<Header> {
-    return this.#headers[Symbol.iterator]();
+    const headers = this.#native === null ? [] : wrapAll(native.headersIterator(this.#native));
+    return headers[Symbol.iterator]();
   }
 
   /**
@@ -419,8 +514,8 @@ export class Headers implements Iterable<Header> {
     const o = EQUALS_FORMS.value(options, 'o');
     if (this === o) return true;
     if (!sameClass(this, o)) return false;
-    const mine = this.#headers;
-    const theirs = (o as Headers).#headers;
+    const mine = this.#list();
+    const theirs = (o as Headers).#list();
     if (mine.length !== theirs.length) return false;
     for (let i = 0; i < mine.length; i++) if (!objectsEquals(mine[i], theirs[i])) return false;
     return true;
@@ -436,7 +531,7 @@ export class Headers implements Iterable<Header> {
   hashCode(): number {
     HASH_CODE_FORMS.match(undefined, arguments.length);
     let h = 1;
-    for (const header of this.#headers) h = (Math.imul(31, h) + objectHashCode(header)) | 0;
+    for (const header of this.#list()) h = (Math.imul(31, h) + objectHashCode(header)) | 0;
     return h;
   }
 
@@ -448,7 +543,10 @@ export class Headers implements Iterable<Header> {
    * @returns the headers' text
    */
   toString(): string {
-    return `RecordHeaders(headers = [${this.#headers.map((h) => h.toString()).join(', ')}], isReadOnly = ${this.#readOnly})`;
+    const readOnly = this.#native !== null && native.headersIsReadOnly(this.#native);
+    return `RecordHeaders(headers = [${this.#list()
+      .map((h) => h.toString())
+      .join(', ')}], isReadOnly = ${readOnly})`;
   }
 
   /**
@@ -458,55 +556,38 @@ export class Headers implements Iterable<Header> {
    * @returns the headers, in the order they were added in
    *
    * @remarks *(js-only)* JavaScript's JSON protocol: without it the headers,
-   * held in a private field, would be written as `{}`.
+   * a native handle in a private field, would be written as `{}`.
    */
   toJSON(): Header[] {
-    return this.#headers.slice();
+    return this.#list();
+  }
+
+  // The headers, as toArray() reads them.
+  #list(): Header[] {
+    return this.#native === null ? [] : wrapAll(native.headersToArray(this.#native));
   }
 
   /**
    * Java's `RecordHeaders.setReadOnly()`: `KafkaProducer.send` seals the
-   * record's headers, after the checks and before the hand-over.
+   * record's headers once the serializers have run, before the hand-over.
    *
    * @internal
    */
   internalSetReadOnly(): void {
-    this.#readOnly = true;
+    if (this.#native === null) this.#native = sealedEmpty();
+    else native.headersSetReadOnly(this.#native);
   }
 
   /**
-   * The headers themselves, not a copy: read, never changed, by the caller.
+   * The native RecordHeaders the native send copies into the record, or null
+   * when the headers have none of their own (no header was ever added).
    *
-   * @returns the headers held, in order
-   *
-   * @internal
-   */
-  internalHeaders(): readonly Header[] {
-    return this.#headers;
-  }
-
-  /**
-   * The `[key, value]` pairs the native send takes, or null for none: each
-   * key's bytes as Java encodes it (`encodeLikeJava`: Node-API would write
-   * U+FFFD for a lone surrogate).
-   *
-   * @returns the headers in the native layer's form, or null when there are none
+   * @returns the native headers, or null
    *
    * @internal
    */
-  internalToNative(): NativeHeader[] | null {
-    const headers = this.#headers;
-    if (headers.length === 0) return null;
-    const out: NativeHeader[] = new Array<NativeHeader>(headers.length);
-    for (let i = 0; i < headers.length; i++) {
-      const header = headers[i];
-      out[i] = [encodeLikeJava(Header.internalKeyOf(header)), Header.internalValueOf(header)];
-    }
-    return out;
-  }
-
-  // RecordHeaders.canWrite.
-  #canWrite(): void {
-    if (this.#readOnly) throw illegalState(CLOSED);
+  internalNative(): object | null {
+    const own = this.#native;
+    return own === emptySealed ? null : own;
   }
 }

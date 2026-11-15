@@ -194,8 +194,12 @@ test("the constructor takes Java's three forms, as {headers} or bare; null is no
   assert.deepEqual(new Headers().toArray(), []);
   assert.deepEqual(new Headers(null).toArray(), []);
   assert.deepEqual(new Headers({ headers: null }).toArray(), []);
-  assert.equal(new Headers({ headers: [h] }).toArray()[0], h);
-  assert.equal(new Headers(new Set([h])).toArray()[0], h);
+  // The core copies each header: equal, not the same object.
+  for (const taken of [new Headers({ headers: [h] }), new Headers(new Set([h]))]) {
+    const [first] = taken.toArray();
+    assert.ok(first.equals(h));
+    assert.notEqual(first, h);
+  }
   // undefined is never "not given".
   assert.throws(() => new Headers(undefined), {
     name: 'TypeError',
@@ -347,4 +351,194 @@ test("equals and hashCode are RecordHeaders'", () => {
   assert.ok(new Headers().equals(new Headers([])));
   for (const o of [null, [h1, h2], 'headers']) assert.equal(headers.equals({ o }), false);
   assert.throws(() => headers.equals(), { name: 'IllegalArgumentError', message: 'equals() takes one of (o); got ()' });
+});
+
+// Option 1 (design/current/javascript-producer/DECISIONS.md, entry 21): the
+// headers are the core's native RecordHeaders. A Header read from headers
+// that can still change is the binding's own copy; one read from read-only
+// headers is a view of the native header, with no copy. The addon's counts
+// (headerStats(), test-only) show which.
+
+const native = require('../../../../dist/internal/native');
+
+/** How the addon's counts moved while `fn` ran. */
+function counted(fn) {
+  const before = native.headerStats();
+  const result = fn();
+  const after = native.headerStats();
+  const delta = {};
+  for (const name of Object.keys(after)) delta[name] = after[name] - before[name];
+  return { result, delta };
+}
+
+test('a Header read from headers that can still change is a copy, which keeps its key and value after they change', () => {
+  const headers = new Headers();
+  headers.add({ key: 'trace', value: bytes('t1') });
+  headers.add({ key: 'span', value: bytes('s1') });
+  const { result: read, delta } = counted(() => ({
+    last: headers.lastHeader('trace'),
+    array: headers.toArray(),
+    iterated: [...headers],
+    byKey: [...headers.headers('span')],
+  }));
+  // One copy per header handed out (1 + 2 + 2 + 1), and no view.
+  assert.equal(delta.headerCopies, 6);
+  assert.equal(delta.headerViews, 0);
+  const value = read.last.value();
+  // The headers change: Java's Header stays as it was, and so does the copy.
+  headers.add({ key: 'trace', value: bytes('t2') });
+  headers.remove('span');
+  for (let i = 0; i < 100; i++) headers.add({ key: `k${i}`, value: Buffer.alloc(64, i) });
+  headers.remove('trace');
+  assertHeader('trace', 't1', read.last);
+  assert.equal(read.last.value(), value);
+  assert.deepEqual(value, bytes('t1'));
+  assertHeader('trace', 't1', read.array[0]);
+  assertHeader('span', 's1', read.array[1]);
+  assertHeader('span', 's1', read.iterated[1]);
+  assertHeader('span', 's1', read.byKey[0]);
+  assert.equal(headers.lastHeader('trace'), null);
+});
+
+test('a Header read from read-only headers is a view of the native header, with no copy', () => {
+  const headers = new Headers();
+  headers.add({ key: 'trace', value: bytes('t1') });
+  headers.add({ key: 'span', value: null });
+  headers.internalSetReadOnly();
+  const { result: read, delta } = counted(() => ({
+    last: headers.lastHeader('trace'),
+    array: headers.toArray(),
+    iterated: [...headers],
+    byKey: [...headers.headers('span')],
+  }));
+  assert.equal(delta.headerCopies, 0);
+  assert.equal(delta.headerViews, 6);
+  // The value is a Buffer over the native header's bytes, not a copy of them.
+  const { result: value, delta: valueDelta } = counted(() => read.last.value());
+  assert.deepEqual(value, bytes('t1'));
+  assert.equal(valueDelta.valueExternal, 1);
+  assert.equal(valueDelta.valueCopied, 0);
+  assertHeader('trace', 't1', read.array[0]);
+  assert.equal(read.iterated[1].key(), 'span');
+  assert.equal(read.byKey[0].value(), null);
+  // A view reads what a copy reads: equal headers.
+  const copy = new Headers(headers).lastHeader('trace');
+  assert.ok(copy.equals(read.last));
+  assert.equal(copy.hashCode(), read.last.hashCode());
+});
+
+test("add(header) stores a copy: the app's Header stays its own", () => {
+  const mine = header('k', 'v');
+  const headers = new Headers();
+  headers.add(mine);
+  headers.remove('k');
+  assertHeader('k', 'v', mine);
+  assert.equal(getCount(headers), 0);
+  // And the header can go into other headers, or be added twice.
+  headers.add(mine).add(mine);
+  assert.equal(getCount(headers), 2);
+  assert.notEqual(headers.lastHeader('k'), mine);
+});
+
+// The lifetimes of the native headers (native/headers.c): a Header view
+// keeps its read-only Headers' native list alive, a value Buffer keeps its
+// header's native bytes alive, and every handle is destroyed exactly once,
+// when the last of them is collected. Run in a child with --expose-gc (and,
+// on macOS, MallocScribble, which fills freed memory, so a read of a freed
+// header shows), counting through the addon's headerStats().
+
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
+
+const PACKAGE_ROOT = path.join(__dirname, '..', '..', '..', '..');
+
+const PROBE = `
+const assert = require('node:assert/strict');
+const native = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'internal', 'native'))});
+const { Header, Headers } = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'common', 'header'))});
+
+// A few collections, with timer turns between them so the finalizers run
+// (an external Buffer's runs from a later task than a wrapped object's).
+async function collect() {
+  for (let i = 0; i < 10; i++) {
+    globalThis.gc();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function churn() {
+  for (let round = 0; round < 50; round++) {
+    const h = new Headers([new Header({ key: 'a', value: Buffer.alloc(32, round) })]);
+    h.add({ key: 'b', value: null });
+    h.toArray();
+    if (round % 2 === 0) h.internalSetReadOnly();
+    for (const x of h) x.value();
+    [...new Headers(h).headers('a')];
+  }
+}
+
+(async () => {
+  // The module's shared empty headers, made on first use, live for the process.
+  new Headers().internalSetReadOnly();
+  new Headers().lastHeader('warm');
+  await collect();
+  const base = native.headerStats();
+  const live = () => {
+    const s = native.headerStats();
+    return {
+      headers: (s.headersMade - base.headersMade) - (s.headersFreed - base.headersFreed),
+      header: (s.headerMade - base.headerMade) - (s.headerFreed - base.headerFreed),
+    };
+  };
+
+  // A view keeps its Headers alive, and a value Buffer its header.
+  let headers = new Headers();
+  headers.add({ key: 'trace', value: Buffer.from('abcdefgh') });
+  headers.internalSetReadOnly();
+  let view = headers.lastHeader('trace');
+  headers = null;
+  await collect();
+  assert.deepEqual(live(), { headers: 1, header: 1 }, 'the view keeps its Headers');
+  assert.equal(view.key(), 'trace');
+  let value = view.value();
+  view = null;
+  await collect();
+  assert.deepEqual(live(), { headers: 1, header: 1 }, 'the value keeps its header and its Headers');
+  assert.equal(value.toString(), 'abcdefgh');
+  value = null;
+  await collect();
+  assert.deepEqual(live(), { headers: 0, header: 0 }, 'all freed once nothing holds them');
+
+  // A copy holds nothing of its Headers: they go while it stays.
+  headers = new Headers();
+  headers.add({ key: 'k', value: Buffer.from('copied') });
+  let copy = headers.lastHeader('k');
+  headers = null;
+  await collect();
+  assert.deepEqual(live(), { headers: 0, header: 1 }, 'a copy does not keep its Headers');
+  assert.equal(copy.value().toString(), 'copied');
+  copy = null;
+
+  // Many of each, dropped (in a function of their own, whose frame then holds
+  // none): every handle destroyed exactly once.
+  churn();
+  await collect();
+  assert.deepEqual(live(), { headers: 0, header: 0 }, 'every handle freed');
+  const s = native.headerStats();
+  assert.ok(s.headersFreed <= s.headersMade && s.headerFreed <= s.headerMade, 'nothing freed twice');
+  console.log('ok');
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+`;
+
+test('a Header keeps its Headers alive, a value Buffer its Header, and each handle is destroyed once', () => {
+  const r = spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', PROBE], {
+    encoding: 'utf8',
+    env: { ...process.env, MallocScribble: '1', MallocGuardEdges: '1' },
+    timeout: 60000,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'ok\n');
 });

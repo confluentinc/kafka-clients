@@ -836,8 +836,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/common/header/headers.ts',
-        'out[i] = [encodeLikeJava(Header.internalKeyOf(header)), Header.internalValueOf(header)];',
-        'out[i] = [new TextEncoder().encode(Header.internalKeyOf(header)), Header.internalValueOf(header)];',
+        "  if (typeof key !== 'string') throw new TypeError('key must be a string');\n  return encodeLikeJava(key);",
+        "  if (typeof key !== 'string') throw new TypeError('key must be a string');\n  return new TextEncoder().encode(key);",
       ),
   },
   {

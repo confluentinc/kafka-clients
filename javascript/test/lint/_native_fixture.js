@@ -31,9 +31,14 @@ static napi_value js_probe(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
+static napi_value js_header_stats(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
 napi_value addon_init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
+        {"headerStats", NULL, js_header_stats, NULL, NULL, NULL, napi_default, NULL},
         {"flush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
         {"pump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
         {"setFactories", NULL, js_setup, NULL, NULL, NULL, napi_default, NULL},
@@ -65,6 +70,7 @@ napi_value js_setup(napi_env env, napi_callback_info info) {
 
 const NATIVE_TS = `interface Native {
   probe(): boolean;
+  headerStats(): object;
   flush(done: () => void): void;
   pump(): void;
   setFactories(): void;
@@ -97,6 +103,7 @@ const FILES = {
   'src/internal/native.ts': NATIVE_TS,
   'src/producer/producer.ts': PRODUCER_TS,
   'test/unit/internal/native.test.js': "const native = require('../../../dist/internal/native');\nnative.probe();\n",
+  'test/unit/common/header/headers.test.js': "const native = require('../../../../dist/internal/native');\nnative.headerStats();\n",
 };
 
 module.exports = { FILES, ADDON, PRODUCER_C, NATIVE_TS, PRODUCER_TS };
