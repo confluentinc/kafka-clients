@@ -52,21 +52,24 @@ module.exports = {
       if (!cls.public_audience) {
         findings.push({
           kind: 'not-public-audience',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `translates ${shortName(cls)}, which is not @InterfaceAudience.Public in Kafka ${ref}`,
         });
       }
       if (cls.package.split('.').some((s) => s.includes('internal'))) {
         findings.push({
           kind: 'internal-package',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `translates ${shortName(cls)}, whose package ${cls.package} is internal`,
         });
       }
       if (cls.unsupported_package) {
         findings.push({
           kind: 'unsupported-package',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `translates ${shortName(cls)}, whose package ${cls.package} is not a supported Kafka API`,
         });
       }
@@ -74,13 +77,13 @@ module.exports = {
     for (const { item, m, jm } of mappedMembers(ctx)) {
       if (jm === null) continue;
       checked += 1;
-      const visibilities =
-        jm.kind === 'field' ? [jm.field.visibility] : jm.overloads.map((o) => o.visibility);
+      const visibilities = jm.kind === 'field' ? [jm.field.visibility] : jm.overloads.map((o) => o.visibility);
       if (!visibilities.includes('public')) {
         const what = jm.kind === 'constructors' ? 'constructor' : jm.kind === 'field' ? 'field' : 'method';
         findings.push({
           kind: 'member-not-public',
-          subject: `${item.name}.${m.name}`, at: atNode(ctx, m.node),
+          subject: `${item.name}.${m.name}`,
+          at: atNode(ctx, m.node),
           message: `translates the ${[...new Set(visibilities)].join(' / ')} ${what} ${shortName(jm.owner)}#${jm.name}`,
         });
       }

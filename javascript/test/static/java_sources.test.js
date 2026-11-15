@@ -36,7 +36,6 @@
 // path segment, so need no entry. This file is not read: its fixtures are
 // the dodges it tests.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -63,10 +62,7 @@ const RULES = Object.keys(require('../../scripts/lint/eslint/plugin').rules);
  * `kafka/x`), JSON-escaped or not, or the prefix `kafka/` in prose, followed
  * by a space or a backtick (`a kafka/ rule`).
  */
-const RULE_MENTION = new RegExp(
-  `kafka\\\\?/(?:(?:${[...RULES, '<rule>', '<name>', 'x', 'y'].join('|')})(?![\\w-])|(?=[\\s\`]))`,
-  'g',
-);
+const RULE_MENTION = new RegExp(`kafka\\\\?/(?:(?:${[...RULES, '<rule>', '<name>', 'x', 'y'].join('|')})(?![\\w-])|(?=[\\s\`]))`, 'g');
 
 /**
  * A path segment `kafka`: next to a `/` or `\\` (`../kafka`, `kafka/clients`,
@@ -79,7 +75,13 @@ const KAFKA_SEGMENT = /[/\\]kafka(?![\w.:-])|(?<![\w.-])kafka[/\\]|^kafka$/;
 /** In a line of a Makefile or a script, also a quoted word `kafka`. */
 const KAFKA_LINE = new RegExp(`${KAFKA_SEGMENT.source.replace('^kafka$', '[\'"]kafka[\'"]')}`);
 
-/** Whether `text` names kafka as a path, its rule mentions aside. */
+/**
+ * Whether `text` names kafka as a path, its rule mentions aside.
+ *
+ * @param {string} text
+ * @param {RegExp} [pattern]
+ * @returns {boolean}
+ */
 const namesKafka = (text, pattern = KAFKA_SEGMENT) => pattern.test(text.replace(RULE_MENTION, ''));
 
 /** The word `xtask`. */
@@ -91,7 +93,12 @@ const XTASK = /\bxtask\b/;
  */
 const XTASK_INSTRUCTION = /`cargo xtask java-api` from rust\//g;
 
-/** Whether `text` runs an xtask, the instruction aside. */
+/**
+ * Whether `text` runs an xtask, the instruction aside.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
 const runsXtask = (text) => XTASK.test(text.replace(XTASK_INSTRUCTION, ''));
 
 /**
@@ -109,8 +116,14 @@ const ALLOWED = [
   ['scripts/lint/java_index.js', 'cargo xtask java-api', 'the command a message tells the user to run'],
 ];
 
-/** Every file under `dir`, relative to the client's directory. */
+/**
+ * Every file under `dir`, relative to the client's directory.
+ *
+ * @param {string} dir
+ * @returns {Array<string>}
+ */
 function files(dir) {
+  /** @type {Array<string>} */
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -123,18 +136,26 @@ function files(dir) {
   return out;
 }
 
-/** Every string literal and template part of a script, outside comments. */
+/**
+ * Every string literal and template part of a script, outside comments.
+ *
+ * @param {string} rel
+ * @param {string} text
+ * @returns {Array<{text: string, line: number}>}
+ */
 function scriptStrings(rel, text) {
   const kind = /\.[cm]?ts$/.test(rel) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
   const source = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true, kind);
+  /** @type {Array<{text: string, line: number}>} */
   const out = [];
+  /** @param {import('typescript').Node} node */
   const visit = (node) => {
     if (
       ts.isStringLiteral(node) ||
       ts.isNoSubstitutionTemplateLiteral(node) ||
-      node.kind === ts.SyntaxKind.TemplateHead ||
-      node.kind === ts.SyntaxKind.TemplateMiddle ||
-      node.kind === ts.SyntaxKind.TemplateTail
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
     ) {
       out.push({ text: node.text, line: source.getLineAndCharacterOfPosition(node.getStart()).line + 1 });
     }
@@ -142,6 +163,7 @@ function scriptStrings(rel, text) {
   };
   // A template's head, middles and tail are not children forEachChild walks
   // as nodes of their own kind in every version: read the spans too.
+  /** @param {import('typescript').Node} node */
   const visitTemplate = (node) => {
     if (ts.isTemplateExpression(node)) {
       out.push({ text: node.head.text, line: source.getLineAndCharacterOfPosition(node.head.getStart()).line + 1 });
@@ -163,15 +185,28 @@ function scriptStrings(rel, text) {
   });
 }
 
-/** The lines of a Makefile, script or Dockerfile, without their `#` comments. */
+/**
+ * The lines of a Makefile, script or Dockerfile, without their `#` comments.
+ *
+ * @param {string} text
+ * @returns {Array<{text: string, line: number}>}
+ */
 function codeLines(text) {
   return text.split('\n').map((l, i) => ({ text: l.replace(/(^|\s)#.*$/, ''), line: i + 1 }));
 }
 
-/** The findings of one file: `<file>:<line>: <what>`. */
+/**
+ * The findings of one file: `<file>:<line>: <what>`.
+ *
+ * @param {string} rel
+ * @param {string} text
+ * @returns {Array<string>}
+ */
 function findings(rel, text) {
-  const base = rel.split('/').pop();
+  const base = rel.slice(rel.lastIndexOf('/') + 1);
+  /** @type {Array<string>} */
   const out = [];
+  /** @param {string} s */
   const allowed = (s) => ALLOWED.some(([file, literal]) => file === rel && literal === s);
   if (SCRIPT.test(base)) {
     for (const s of scriptStrings(rel, text)) {
@@ -180,9 +215,8 @@ function findings(rel, text) {
       if (runsXtask(s.text)) out.push(`${rel}:${s.line}: runs an xtask: ${JSON.stringify(s.text)}`);
     }
   } else if (OTHER.test(base) || base === 'package.json') {
-    const lines = base === 'package.json'
-      ? Object.values(JSON.parse(text).scripts || {}).map((s) => ({ text: s, line: 0 }))
-      : codeLines(text);
+    const lines =
+      base === 'package.json' ? Object.values(JSON.parse(text).scripts || {}).map((s) => ({ text: s, line: 0 })) : codeLines(text);
     for (const l of lines) {
       if (namesKafka(l.text, KAFKA_LINE)) out.push(`${rel}:${l.line}: names kafka as a path: ${l.text.trim()}`);
       if (XTASK.test(l.text)) out.push(`${rel}:${l.line}: runs an xtask: ${l.text.trim()}`);
@@ -193,7 +227,7 @@ function findings(rel, text) {
 
 test('no file of the client names the kafka submodule or runs an xtask: Java comes from java-index.json', () => {
   const all = files(ROOT).filter((rel) => rel !== SELF);
-  const read = all.filter((rel) => SCRIPT.test(rel.split('/').pop()) || OTHER.test(rel.split('/').pop()));
+  const read = all.filter((rel) => SCRIPT.test(rel.slice(rel.lastIndexOf('/') + 1)) || OTHER.test(rel.slice(rel.lastIndexOf('/') + 1)));
   assert.ok(read.length > 100, `${read.length} files read`);
   const found = [];
   for (const rel of all) found.push(...findings(rel, fs.readFileSync(path.join(ROOT, rel), 'utf8')));
@@ -212,11 +246,11 @@ test('the dodges are found: a kafka path built from parts, a relative one, an xt
   const script = [
     "const path = require('node:path');",
     "const fs = require('node:fs');",
-    "// A comment may say kafka/clients/src and cargo xtask java-api.",
+    '// A comment may say kafka/clients/src and cargo xtask java-api.',
     "const KAFKA = path.join(REPO, 'kafka');",
     "fs.readFileSync(path.join(KAFKA, 'gradle.properties'), 'utf8');",
     "const up = path.resolve(REPO, '../kafka');",
-    "const src = `${REPO}/kafka/clients/src`;",
+    'const src = `${REPO}/kafka/clients/src`;',
     "spawnSync('cargo', ['xtask', 'java-api']);",
     "const ok = ['kafka/java-name', 'kafka/baseline: stale', '@confluentinc/kafka-javascript', 'confluent-kafka-javascript.node'];",
   ].join('\n');

@@ -29,16 +29,22 @@
 //   above 2^53 goes as its exact digits), anything else by `String()` (an
 //   object as `[object Object]`), for the core to check.
 // - Unknown keys pass, and the core lists the ones it does not use.
-// - `key.serializer` and `value.serializer` throw `ConfigError`, whatever
-//   their value, until their route is built: a serializer is a constructor
-//   argument (`keySerializer`, `valueSerializer`), never a configuration value
-//   *(deviation. Why: JavaScript cannot load a class by name synchronously)*.
+// - The producer's own serde keys, `key.serializer` and `value.serializer`,
+//   never reach the core, and neither does a key a serde config function read
+//   (src/internal/serde.ts) that is no producer key, Java's or the core's (a
+//   `schema.registry.url`), so the core does not list it as unused, as Java's
+//   `originals()` marks it used (root CLAUDE.md, JavaScript Binding
+//   Conventions, Serialization, Q53). A producer key the function read still
+//   reaches the core, since Java only marks it (javascript/CLAUDE.md, the
+//   serde config keys, a root conflict). The consumer's serde keys
+//   (`key.deserializer`, ...) pass, and the core lists them as unused.
 // - Keys and values cross as bytes, encoded once per client by
 //   `encodeLikeJava` (src/internal/encode.ts): a lone surrogate becomes `?`,
 //   as Java's UTF-8 encoding writes it.
 
 import { ConfigError } from '../common/config/config_error';
 import { encodeLikeJava } from './encode';
+import { isProducerConfigKey } from './producer_config_keys';
 
 function typeName(value: unknown): string {
   if (value === null) return 'null';
@@ -46,7 +52,12 @@ function typeName(value: unknown): string {
   return typeof value;
 }
 
-/** A value as Java's `String.valueOf` writes it in a ConfigException message. */
+/**
+ * A value as Java's `String.valueOf` writes it in a ConfigException message.
+ *
+ * @param value - the config value
+ * @returns its text
+ */
 function shown(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   try {
@@ -56,18 +67,27 @@ function shown(value: unknown): string {
   }
 }
 
-/** The constructor argument of a key whose value is a serializer, or null for another key. */
-function serializerArgument(key: string): string | null {
-  if (key === 'key.serializer') return 'keySerializer';
-  if (key === 'value.serializer') return 'valueSerializer';
-  return null;
+/**
+ * Whether `key` is one of the producer's own serde keys, which never reach the core.
+ *
+ * @param key - the config key
+ * @returns whether it is a serde key
+ */
+function isSerializerKey(key: string): boolean {
+  return key === 'key.serializer' || key === 'value.serializer';
 }
+
+/** No key left out. */
+const NONE: ReadonlySet<string> = new Set();
 
 /**
  * `n` written in decimal, never in exponent form (`1e21` is
  * `'1000000000000000000000'`, `1e-7` is `'0.0000001'`): the text Java's
  * `ConfigDef` parses. `NaN` and the infinities are written as JavaScript
  * writes them, for the core to refuse.
+ *
+ * @param n - the number to write
+ * @returns its decimal text
  */
 export function decimal(n: number): string {
   const text = String(n);
@@ -89,6 +109,9 @@ export function decimal(n: number): string {
  * One config value as the string the FFI takes: `true` as `'true'`, numbers
  * and bigints in decimal, an array's items each written so and joined with
  * commas, anything else by `String()`.
+ *
+ * @param value - the config value
+ * @returns the string the core gets
  */
 function configValue(value: unknown): string {
   switch (typeof value) {
@@ -109,13 +132,15 @@ function configValue(value: unknown): string {
 }
 
 /**
- * The `[key, value]` byte pairs of `configs` (`encodeLikeJava`'s bytes of the
- * strings), a plain object of Java's producer config keys, each value written
- * as a string. `null` and `undefined` values are dropped, as an absent key. A
- * `Map` (or any other object that is not a plain one) is refused, so that its
- * entries are not silently ignored.
+ * `configs` checked, as a frozen copy: a plain object of Java's producer
+ * config keys, each value as it was given. A `Map` (or any other object that
+ * is not a plain one) is refused, so that its entries are not silently
+ * ignored, and so is a key that is not a string.
+ *
+ * @param configs - the configuration given
+ * @returns the configuration, a plain object
  */
-export function configEntries(configs: unknown): Array<[Buffer, Buffer]> {
+export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>> {
   // Java's constructor copies the map (new HashMap<>(configs)): a
   // NullPointerException for a null one.
   if (configs === null) throw new TypeError('configs must not be null');
@@ -138,16 +163,33 @@ export function configEntries(configs: unknown): Array<[Buffer, Buffer]> {
       throw new ConfigError(`Invalid value ${shown(value)} for configuration ${String(key)}: Key must be a string.`);
     }
   }
-  const out: Array<[Buffer, Buffer]> = [];
+  const copy: Record<string, unknown> = {};
+  // defineProperty, so that a `__proto__` key is a key, not the prototype.
   for (const [key, value] of entries as Array<[string, unknown]>) {
-    const argument = serializerArgument(key);
-    if (argument !== null && value !== undefined) {
-      throw new ConfigError(
-        `${key} is not a configuration of this client: a serializer is the ${argument} argument of the ` +
-          'constructor, never a configuration value',
-      );
-    }
-    if (value === null || value === undefined) continue;
+    Object.defineProperty(copy, key, { value, enumerable: true, writable: true, configurable: true });
+  }
+  return Object.freeze(copy);
+}
+
+/**
+ * The `[key, value]` byte pairs of `configs` (`encodeLikeJava`'s bytes of the
+ * strings), checked as `checkConfigs` checks them, each value written as a
+ * string. `null` and `undefined` values are dropped, as an absent key, and so
+ * are the producer's own serde keys and the keys in `leftOut`, those a serde
+ * config function read, except the producer keys of Java's, which the core
+ * uses.
+ *
+ * @param configs - the configuration given
+ * @param leftOut - the keys not to send to the core
+ * @returns the keys and values to send, encoded
+ */
+export function configEntries(configs: unknown, leftOut: ReadonlySet<string> = NONE): Array<[Buffer, Buffer]> {
+  const checked = checkConfigs(configs);
+  const out: Array<[Buffer, Buffer]> = [];
+  for (const key of Object.keys(checked)) {
+    const value = checked[key];
+    if (value === null || value === undefined || isSerializerKey(key)) continue;
+    if (leftOut.has(key) && !isProducerConfigKey(key)) continue;
     // Encoded once per client, as Java encodes a string (src/internal/encode.ts).
     out.push([encodeLikeJava(key), encodeLikeJava(configValue(value))]);
   }

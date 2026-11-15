@@ -16,7 +16,6 @@
 
 // N9 check-string-encoding (scripts/lint/rules/string_encoding.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');

@@ -18,28 +18,40 @@
  *
  * Transactions aren't in the preview: `KafkaProducer`'s transaction calls
  * (`initTransactions`, `beginTransaction`, `sendOffsetsToTransaction`,
- * `commitTransaction`, `abortTransaction`) come in a later release.
+ * `commitTransaction`, `abortTransaction`) come in a later release, and so
+ * do `MockProducer`'s (those five, `fenceProducer`, `transactionInitialized`,
+ * `transactionInFlight`, `transactionCommitted`, `transactionAborted`,
+ * `sentOffsets`, `commitCount`, `uncommittedRecords`,
+ * `consumerGroupOffsetsHistory`, `uncommittedOffsets` and their error
+ * fields).
  *
  * Left out because the C FFI has no entry point for them:
  * `KafkaProducer.clientInstanceId`, `registerMetricForSubscription` and
- * `unregisterMetricFromSubscription`.
+ * `unregisterMetricFromSubscription`, and `MockProducer`'s
+ * `clientInstanceId`, `disableTelemetry`, `injectTimeoutException`,
+ * `setClientInstanceId`, `registerMetricForSubscription`,
+ * `unregisterMetricFromSubscription` and `addedMetrics`.
+ * `MockProducer.setMockMetrics` is left out too: the FFI takes a native
+ * `KafkaMetric`, which the binding cannot build.
  *
- * Not translated yet: `KafkaProducer`'s constructors taking serializers
- * (`Map`/`Properties`, `Serializer`, `Serializer`), `partitionsFor`,
- * `metrics`, and its constants `NETWORK_THREAD_PREFIX` and
- * `PRODUCER_METRIC_GROUP_NAME`; `RecordMetadata`'s public constructor, which
- * takes a `TopicPartition`.
+ * Left out because it takes an untranslated type (Q30):
+ * `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`, so a
+ * mock's cluster is always Java's `Cluster.empty()`.
+ *
+ * Serializers: whether a serializer's methods must all be async is not
+ * decided yet (Q50).
  *
  * @packageDocumentation
  */
 
 export { KafkaProducer } from './kafka_producer';
+export { MockProducer } from './mock_producer';
+export type { Partitioner } from './partitioner';
 export type { Producer } from './producer';
 export type { CloseArgs } from './kafka_producer';
 export type { ProducerConfigs } from './producer_configs';
 export type { Callback } from './callback';
 export { ProducerRecord } from './producer_record';
-export type { Data } from './producer_record';
 export { RecordMetadata } from './record_metadata';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { BufferExhaustedError } from './buffer_exhausted_error';

@@ -19,17 +19,24 @@
 // writes every value as the string the FFI takes, drops null and undefined,
 // and passes every key to the core, which checks them with Java's messages.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { configEntries: entriesAsBytes, decimal } = require('../../../dist/internal/config');
+const { checkConfigs, configEntries: untypedEntries, decimal } = require('../../../dist/internal/config');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 
-/** The `[key, value]` pairs as strings: configEntries hands the addon encodeLikeJava's bytes. */
+// The compiled JavaScript carries no signature: configEntries is typed by its source's.
+const entriesAsBytes = /** @type {typeof import('../../../src/internal/config').configEntries} */ (untypedEntries);
+
+/**
+ * The `[key, value]` pairs as strings: configEntries hands the addon encodeLikeJava's bytes.
+ *
+ * @param {unknown} configs
+ * @returns {Array<[string, string]>}
+ */
 function configEntries(configs) {
   return entriesAsBytes(configs).map(([key, value]) => {
     assert.ok(Buffer.isBuffer(key) && Buffer.isBuffer(value));
@@ -94,6 +101,7 @@ test("configs is a plain object: a Map is refused, and a symbol key rejected wit
     name: 'TypeError',
     message: 'configs must be a plain object, not a class instance',
   });
+  // @ts-expect-error a Map for the configs: the plain-object check throws TypeError
   assert.throws(() => new KafkaProducer({ configs: new Map([['bootstrap.servers', 'localhost:9092']]) }), {
     name: 'TypeError',
     message: 'configs must be a plain object, not a Map',
@@ -108,11 +116,14 @@ test("configs is a plain object: a Map is refused, and a symbol key rejected wit
     name: 'ConfigError',
     message: 'Invalid value x for configuration Symbol(k): Key must be a string.',
   });
-  assert.throws(() => configEntries({ 'linger.ms': true, [Symbol('k')]: 'x' }), (e) => {
-    assert.ok(e instanceof ConfigError);
-    assert.equal(e.message, 'Invalid value x for configuration Symbol(k): Key must be a string.');
-    return true;
-  });
+  assert.throws(
+    () => configEntries({ 'linger.ms': true, [Symbol('k')]: 'x' }),
+    (e) => {
+      assert.ok(e instanceof ConfigError);
+      assert.equal(e.message, 'Invalid value x for configuration Symbol(k): Key must be a string.');
+      return true;
+    },
+  );
   assert.throws(() => configEntries(null), { name: 'TypeError', message: 'configs must not be null' });
   assert.throws(() => configEntries([]), { name: 'TypeError', message: 'configs must be a plain object, not array' });
 });
@@ -135,35 +146,64 @@ test('numbers are written in decimal, never in exponent form', () => {
   }
 });
 
-test('key.serializer and value.serializer are refused, whatever their value, pointing to the constructor arguments', () => {
-  for (const [key, argument] of [
-    ['key.serializer', 'keySerializer'],
-    ['value.serializer', 'valueSerializer'],
-  ]) {
-    for (const value of ['org.apache.kafka.common.serialization.StringSerializer', null, 5]) {
-      assert.throws(() => configEntries({ [key]: value }), (e) => {
-        assert.ok(e instanceof ConfigError, key);
-        assert.equal(
-          e.message,
-          `${key} is not a configuration of this client: a serializer is the ${argument} argument of the constructor, never a configuration value`,
-        );
-        return true;
-      });
-    }
-    // undefined leaves the key out, as for every key.
-    assert.deepEqual(configEntries({ [key]: undefined }), []);
-  }
+test("the producer's own serde keys and the keys a serde function read never reach the core; the consumer's do", () => {
+  const make = () => ({ serialize: () => null });
+  assert.deepEqual(
+    configEntries({ 'key.serializer': make, 'value.serializer': 'org.example.Serializer', 'key.deserializer': 'org.example.D', a: 1 }),
+    [
+      ['key.deserializer', 'org.example.D'],
+      ['a', '1'],
+    ],
+  );
+  // A read key the core doesn't know is left out; a producer key of Java's
+  // reaches the core all the same, as Java only marks it used.
+  const read = new Set(['schema.registry.url', 'bootstrap.servers', 'client.id']);
+  assert.deepEqual(
+    entriesAsBytes({ 'schema.registry.url': 'http://sr', 'bootstrap.servers': 'b:1', 'client.id': 'c', b: 2 }, read).map(([k, v]) => [
+      k.toString(),
+      v.toString(),
+    ]),
+    [
+      ['bootstrap.servers', 'b:1'],
+      ['client.id', 'c'],
+      ['b', '2'],
+    ],
+  );
+  // So does a producer key only the core defines.
+  assert.deepEqual(
+    entriesAsBytes({ 'partitioner.type': 'RoundRobinPartitioner' }, new Set(['partitioner.type'])).map(([k, v]) => [
+      k.toString(),
+      v.toString(),
+    ]),
+    [['partitioner.type', 'RoundRobinPartitioner']],
+  );
+});
+
+test('the checked configuration is a frozen copy, a __proto__ key a key', () => {
+  const given = JSON.parse('{"__proto__": "x", "a": 1}');
+  const checked = checkConfigs(given);
+  assert.ok(Object.isFrozen(checked));
+  assert.notEqual(checked, given);
+  assert.equal(Object.getPrototypeOf(checked), Object.prototype);
+  assert.deepEqual(Object.keys(checked), ['__proto__', 'a']);
+  assert.deepEqual(configEntries(given), [
+    ['__proto__', 'x'],
+    ['a', '1'],
+  ]);
 });
 
 test("the core checks the values, with Java's messages naming the key", () => {
-  for (const [configs, message] of [
+  /** @type {Array<[import('@confluentinc/kafka-javascript/producer').ProducerConfigs, string]>} */
+  const cases = [
     [{ 'linger.ms': true }, 'Invalid value true for configuration linger.ms: Not a number of type LONG'],
     [{ 'batch.size': 42.5 }, 'Invalid value 42.5 for configuration batch.size: Not a number of type INT'],
+    // @ts-expect-error an object for a LONG: the core's type check throws ConfigError
     [{ 'linger.ms': {} }, 'Invalid value [object Object] for configuration linger.ms: Not a number of type LONG'],
     [{ 'linger.ms': 2n ** 63n }, 'Invalid value 9223372036854775808 for configuration linger.ms: Not a number of type LONG'],
     [{ 'enable.idempotence': 1 }, 'Invalid value 1 for configuration enable.idempotence: Expected value to be either true or false'],
     [{ acks: 5 }, 'Invalid value 5 for configuration acks: String must be one of: all, -1, 0, 1'],
-  ]) {
+  ];
+  for (const [configs, message] of cases) {
     assert.throws(
       () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', ...configs } }),
       (e) => {
@@ -178,6 +218,7 @@ test("the core checks the values, with Java's messages naming the key", () => {
 });
 
 test('an unknown key, a kafkaJS block included, reaches the core, which builds the producer', async () => {
+  // @ts-expect-error an object for a config value, which ConfigValue refuses: the run time writes it as text, [object Object] (Q52)
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': 'localhost:1', 'not.a.key': 'x', kafkaJS: { brokers: ['localhost:9092'] } },
   });
@@ -248,8 +289,5 @@ test('an undefined SSL password is reported as unused', () => {
   });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'closed\n');
-  assert.ok(
-    r.stderr.includes("These configurations '[ssl.keystore.password]' were supplied but are not used yet."),
-    r.stderr,
-  );
+  assert.ok(r.stderr.includes("These configurations '[ssl.keystore.password]' were supplied but are not used yet."), r.stderr);
 });

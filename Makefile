@@ -90,8 +90,9 @@ build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
 # The Node.js client (javascript/). `verify` runs its build, its rule linter,
-# its type check and its unit tests (test-javascript-unit, through `test`, and
-# lint-javascript), so it needs Node.js 22.14 or newer and `npm ci` in
+# its format check, its type checks (of the sources and of the tests) and its
+# unit tests (test-javascript-unit, through `test`, and lint-javascript), so it
+# needs Node.js 22.14 or newer and `npm ci` in
 # javascript/ first (typescript and eslint are devDependencies); its
 # broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
 # verify-javascript-macos-docker, in .semaphore/semaphore.yml). Its build is the
@@ -428,12 +429,16 @@ test-javascript: build-javascript
 
 # The Node.js client's tests that need no broker, the part of `test` (and so
 # of `verify`): the static tests (header conformance, the package layout, the
-# release scripts), the unit tests, and the type check, `tsc --strict` over
-# the sources (the build) and over the type tests (test-typing, against the
-# compiled declarations), with the interface check of the declarations and the
-# exports map against the committed API report (check-api).
+# release scripts), the unit tests, and the type checks, `tsc --strict` over
+# the sources (the build), over the type tests (test-typing, against the
+# compiled declarations) and over every test file (typecheck-tests), with the
+# interface check of the declarations and the exports map against the
+# committed API report (check-api). The type check of the tests reads the
+# compiled declarations, so it runs here, in the one sub-make that builds
+# dist/, never beside it: under `make -j` a second build would delete dist/
+# while these tests read it.
 test-javascript-unit: build-javascript
-	$(MAKE) -C javascript $(ROOTS) test-static test-unit test-typing check-api
+	$(MAKE) -C javascript $(ROOTS) test-static test-unit test-typing check-api typecheck-tests
 
 # macOS variant of test-javascript: the unit tests only, as
 # test-python-macos-docker runs pytest test/unit only. On macOS the gRPC
@@ -446,8 +451,11 @@ test-javascript-macos-docker: build-javascript
 # devDependency, so `npm ci` in javascript/ first, as for the build. It reads
 # the bindings header the Rust build writes and the committed Java index
 # (javascript/java-index.json, `cargo xtask java-api`), not the kafka submodule.
+# It never builds or reads javascript/dist/, so it runs beside the tests under
+# `make -j`; the type check of the tests, which needs dist/, is in
+# test-javascript-unit.
 lint-javascript: build-rust-all-features
-	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint
+	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint format-check
 
 verify-javascript: test-javascript lint-javascript
 

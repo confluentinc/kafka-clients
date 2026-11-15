@@ -19,7 +19,6 @@
 // arguments, the report, the inputs a rule needs, the split between the two
 // tools, and the real tree.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -33,8 +32,14 @@ const { project, lint, lintRunner } = require('./_project');
 
 const ROOT = path.join(__dirname, '..', '..');
 
-/** Checks the shape of `rules` and returns their names. */
+/**
+ * Checks the shape of `rules` and returns their names.
+ *
+ * @param {import('./_project').Check[]} rules
+ * @returns {string[]}
+ */
 function shape(rules) {
+  /** @type {string[]} */
   const names = [];
   for (const rule of rules) {
     assert.match(rule.name, /^check-[a-z-]+$/);
@@ -94,10 +99,22 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-config',
   ]);
   // The three rules split by file type: each half reads its own files.
-  const half = (list, name) => list.find((r) => r.name === name).PART;
+  /**
+   * @param {import('./_project').Check[]} list
+   * @param {string} name
+   */
+  const half = (list, name) => {
+    const rule = list.find((r) => r.name === name);
+    assert.ok(rule, name);
+    return rule.PART;
+  };
   assert.deepEqual(
     ['check-no-todo', 'check-exception-word', 'check-java-line'].map((n) => [half(ESLINT_CHECKS, n), half(RULES, n)]),
-    [['code', 'other'], ['ts', 'c'], ['ts', 'c']],
+    [
+      ['code', 'other'],
+      ['ts', 'c'],
+      ['ts', 'c'],
+    ],
   );
   // Only the rules that read TypeScript are ESLint's; the runner keeps the addon's (and no TypeScript-only rule).
   const tsOnly = ESLINT_CHECKS.filter((c) => !Object.prototype.hasOwnProperty.call(c, 'PART')).map((c) => c.name);
@@ -116,16 +133,22 @@ test('the ESLint plugin: one `kafka/` rule per ESLint check, named after it, plu
 test('a usage error exits 2', () => {
   let r = lint(project({}), ['--bogus']);
   assert.equal(r.status, 2);
-  assert.deepEqual(r.err, [
-    'unknown lint_rules argument `--bogus`; usage: node scripts/lint_rules.js [check-<name>] [--no-baseline]',
-  ]);
+  assert.deepEqual(r.err, ['unknown lint_rules argument `--bogus`; usage: node scripts/lint_rules.js [check-<name>] [--no-baseline]']);
   r = lint(project({}), ['check-nothing']);
   assert.equal(r.status, 2);
   assert.deepEqual(r.err, ['no rule named `check-nothing`']);
 });
 
 test('a rule that throws fails with the reason, and the others still run', () => {
-  const boom = { name: 'check-boom', kinds: ['boom'], needs: [], hint: '', check: () => { throw new Error('bad input'); } };
+  const boom = {
+    name: 'check-boom',
+    kinds: ['boom'],
+    needs: [],
+    hint: '',
+    check: () => {
+      throw new Error('bad input');
+    },
+  };
   const ok = { name: 'check-ok', kinds: ['ok'], needs: [], hint: '', check: () => ({ findings: [], checked: 3 }) };
   const r = lintRunner(project({}), [], { rules: [boom, ok] });
   assert.equal(r.status, 1);
@@ -136,6 +159,7 @@ test('a rule that throws fails with the reason, and the others still run', () =>
 test('a rule that reports no positive item count fails', () => {
   const silent = { name: 'check-silent', kinds: ['s'], needs: [], hint: '', check: () => ({ findings: [] }) };
   const broken = { name: 'check-broken', kinds: ['b'], needs: [], hint: '', check: () => ({ checked: 1 }) };
+  // @ts-expect-error a check with no findings list: the runner reports that it cannot run
   const r = lintRunner(project({}), [], { rules: [silent, broken] });
   assert.equal(r.status, 1);
   assert.deepEqual(r.err, [
@@ -224,19 +248,21 @@ test('the real tree passes with the checked-in baselines: the runner, and ESLint
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
 });
 
-test('the real tree without baselines: exactly the findings the baselines list, all ESLint\'s', () => {
+test("the real tree without baselines: exactly the findings the baselines list, all ESLint's", () => {
   const r = spawnSync(process.execPath, [path.join(ROOT, 'node_modules', '.bin', 'eslint'), '.', '-f', 'json'], {
     cwd: ROOT,
     encoding: 'utf8',
     env: { ...process.env, KAFKA_LINT_NO_BASELINE: '1' },
     maxBuffer: 64 * 1024 * 1024,
   });
-  const keys = JSON.parse(r.stdout)
+  // ESLint's json formatter: one entry per file, with its messages.
+  const report = /** @type {{ messages: { ruleId: string | null, messageId?: string, message: string }[] }[]} */ (JSON.parse(r.stdout));
+  const keys = report
     .flatMap((f) => f.messages)
     .filter((m) => m.ruleId && m.ruleId.startsWith('kafka/'))
     .map((m) => `${m.messageId} ${m.message.slice(0, m.message.indexOf(': '))}`)
     .sort();
-  const listed = (file) =>
+  const listed = (/** @type {string} */ file) =>
     fs
       .readFileSync(path.join(ROOT, file), 'utf8')
       .split('\n')
@@ -244,6 +270,9 @@ test('the real tree without baselines: exactly the findings the baselines list, 
       .filter((l) => l !== '' && !l.startsWith('#'));
   assert.deepEqual(keys, listed('eslint-baseline.txt').sort());
   assert.deepEqual(listed('lint-baseline.txt'), []);
-  const runner = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lint_rules.js'), '--no-baseline'], { cwd: ROOT, encoding: 'utf8' });
+  const runner = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lint_rules.js'), '--no-baseline'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
   assert.equal(runner.status, 0, `${runner.stdout}${runner.stderr}`);
 });

@@ -21,7 +21,6 @@
 // over a fake recorded release against a stub `npm`: a first publish, a rerun,
 // and its read-back of the dist-tags.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -45,10 +44,16 @@ const MAIN = '@confluentinc/kafka-javascript';
 const VERSION = '4.4.0-beta.1';
 const PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
 
-test("check-npm.py dist-tag: beta for a pre-release, never latest; latest for a release; legacy for 1.x", () => {
+test('check-npm.py dist-tag: beta for a pre-release, never latest; latest for a release; legacy for 1.x', () => {
+  /** @param {Array<string>} args */
   const run = (...args) =>
     spawnSync(PYTHON, [path.join(REPO, '.semaphore', 'check-npm.py'), 'dist-tag', ...args], { encoding: 'utf8', cwd: REPO });
-  for (const [version, tag] of [['4.4.0-beta.1', 'beta'], ['4.4.0-rc.1', 'beta'], ['4.5.0', 'latest'], ['1.6.1', 'legacy']]) {
+  for (const [version, tag] of [
+    ['4.4.0-beta.1', 'beta'],
+    ['4.4.0-rc.1', 'beta'],
+    ['4.5.0', 'latest'],
+    ['1.6.1', 'legacy'],
+  ]) {
     const r = run(version);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, `${tag}\n`, version);
@@ -103,6 +108,9 @@ esac
  * the run, ending with those tags (`published` false), with `token` as
  * NPM_TOKEN (`null`: unset; `undefined` would take the default). Returns the
  * result and the stub's logged publish calls.
+ *
+ * @param {(name: string) => Record<string, string>} tags
+ * @param {{version?: string, published?: boolean, token?: string | null, check?: boolean}} [options]
  */
 function runPublish(tags, { version = VERSION, published = true, token = 'npm_token', check = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-npm-'));
@@ -112,8 +120,10 @@ function runPublish(tags, { version = VERSION, published = true, token = 'npm_to
     const state = path.join(dir, 'state');
     for (const d of [release, bin, state]) fs.mkdirSync(d);
     const sums = [];
-    const packages = [...PLATFORMS.map((p) => [`${MAIN}-${p}`, `confluentinc-kafka-javascript-${p}-${version}.tgz`]),
-      [MAIN, `confluentinc-kafka-javascript-${version}.tgz`]];
+    const packages = [
+      ...PLATFORMS.map((p) => [`${MAIN}-${p}`, `confluentinc-kafka-javascript-${p}-${version}.tgz`]),
+      [MAIN, `confluentinc-kafka-javascript-${version}.tgz`],
+    ];
     for (const [name, file] of packages) {
       const data = Buffer.from(`tarball of ${name}`);
       fs.writeFileSync(path.join(release, file), data);
@@ -124,9 +134,13 @@ function runPublish(tags, { version = VERSION, published = true, token = 'npm_to
       fs.writeFileSync(`${key}${suffix || '.'}tags`, JSON.stringify(tags(name)));
       fs.writeFileSync(path.join(state, `tarball_${file}`), key);
     }
-    fs.writeFileSync(path.join(release, 'SHA256SUMS'), `${sums.sort((a, b) => (a.split('  ')[1] < b.split('  ')[1] ? -1 : 1)).join('\n')}\n`);
+    fs.writeFileSync(
+      path.join(release, 'SHA256SUMS'),
+      `${sums.sort((a, b) => (a.split('  ')[1] < b.split('  ')[1] ? -1 : 1)).join('\n')}\n`,
+    );
     fs.writeFileSync(path.join(bin, 'npm'), STUB_NPM, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\n', { mode: 0o755 });
+    /** @type {NodeJS.ProcessEnv} */
     const env = {
       ...process.env,
       PATH: `${bin}${path.delimiter}${process.env.PATH}`,
@@ -145,6 +159,10 @@ function runPublish(tags, { version = VERSION, published = true, token = 'npm_to
   }
 }
 
+/**
+ * @param {string} name
+ * @returns {Record<string, string>}
+ */
 const GOOD = (name) => (name === MAIN ? { latest: '1.6.0', alpha: '1.0.0-alpha.1', beta: VERSION } : { latest: VERSION, beta: VERSION });
 
 test('publish-npm.sh publishes the platform packages, then the main package, under beta, with no provenance', () => {
@@ -201,7 +219,10 @@ test('publish-npm.sh puts a release on latest', () => {
 test('publish-npm.sh refuses a 1.x version, whose fixes go out under legacy from the earlier client', () => {
   const r = runPublish(GOOD, { version: '1.6.1' });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^publish-npm: 1\.6\.1 is below 4\.0\.0; the versions of @confluentinc\/kafka-javascript below 4 are the earlier client's/);
+  assert.match(
+    r.stderr,
+    /^publish-npm: 1\.6\.1 is below 4\.0\.0; the versions of @confluentinc\/kafka-javascript below 4 are the earlier client's/,
+  );
   assert.deepEqual(r.calls, []);
 });
 

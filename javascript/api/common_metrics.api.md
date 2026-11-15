@@ -8,10 +8,43 @@
 export const __esModule: true;
 
 // @public
-export class QuotaViolationError extends KafkaError {
-    protected constructor(...args: unknown[]);
+export class KafkaMetric implements Metric {
+    constructor(options: {
+        lock: unknown;
+        metricName: MetricName;
+        valueProvider: MetricValueProvider;
+        config: MetricConfig;
+        time: unknown;
+    });
+    config(): MetricConfig;
+    isMeasurable(): boolean;
+    measurable(): Measurable;
+    metricName(): MetricName;
+    metricValue(): unknown;
+    toString(): string;
 }
 
-// (No @packageDocumentation comment for this package)
+// @public
+export type Measurable = unknown;
+
+// @public
+export type MetricConfig = unknown;
+
+// @public
+export type MetricValueProvider = unknown;
+
+// @public
+export class QuotaViolationError extends KafkaError {
+    constructor(options: {
+        metric: KafkaMetric; /** Java's `double value`. */
+        value: number; /** Java's `double bound`. */
+        bound: number;
+        name?: never;
+    });
+    bound(): number;
+    metric(): KafkaMetric | null;
+    toString(): string;
+    value(): number;
+}
 
 ```

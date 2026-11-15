@@ -46,7 +46,6 @@
 // SaslConfigsTest, 11 tests: skipped (test/unit/common/config/ssl_configs.test.js
 // says why).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { javaStringConstants } = require('../../_java_source');
@@ -60,11 +59,11 @@ test('every literal constant of ProducerConfig matches Java; a deprecated one is
   assert.ok(deprecated.has('PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG'));
   for (const [name, value] of literals) {
     if (deprecated.has(name)) assert.ok(!(name in ProducerConfig), name);
-    else assert.equal(ProducerConfig[name], value, name);
+    else assert.equal(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (ProducerConfig))[name], value, name);
   }
 });
 
-test("the constants Java takes from CommonClientConfigs and AbstractConfig", () => {
+test('the constants Java takes from CommonClientConfigs and AbstractConfig', () => {
   assert.equal(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, 'bootstrap.servers');
   assert.equal(ProducerConfig.SECURITY_PROVIDERS_CONFIG, 'security.providers');
   assert.equal(ProducerConfig.CONFIG_PROVIDERS_CONFIG, 'config.providers');
@@ -72,6 +71,7 @@ test("the constants Java takes from CommonClientConfigs and AbstractConfig", () 
 });
 
 test('ProducerConfig is not instantiable', () => {
+  // @ts-expect-error a private constructor: the constructor throws TypeError
   assert.throws(() => new ProducerConfig({ 'bootstrap.servers': 'x' }), {
     name: 'TypeError',
     message: 'ProducerConfig is not instantiable: its ConfigDef machinery is not translated; a configuration is a plain object of its keys',
@@ -79,19 +79,42 @@ test('ProducerConfig is not instantiable', () => {
 });
 
 const REJECTED = [
-  ['ProducerConfigTest.testInvalidCompressionType', ProducerConfig.COMPRESSION_TYPE_CONFIG, 'abc', 'String must be one of: none, gzip, snappy, lz4, zstd'],
-  ['ProducerConfigTest.testInvalidSecurityProtocol', 'security.protocol', 'abc', 'String must be one of (case insensitive): SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT'],
-  ['ProducerConfigTest.testInvalidMetadataRecoveryStrategy', 'metadata.recovery.strategy', 'abc', 'String must be one of (case insensitive): REBOOTSTRAP, NONE'],
-  ['ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy', ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG, 'abc', 'String must be one of (case insensitive): FULL, INCREMENTAL'],
+  [
+    'ProducerConfigTest.testInvalidCompressionType',
+    ProducerConfig.COMPRESSION_TYPE_CONFIG,
+    'abc',
+    'String must be one of: none, gzip, snappy, lz4, zstd',
+  ],
+  [
+    'ProducerConfigTest.testInvalidSecurityProtocol',
+    'security.protocol',
+    'abc',
+    'String must be one of (case insensitive): SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT',
+  ],
+  [
+    'ProducerConfigTest.testInvalidMetadataRecoveryStrategy',
+    'metadata.recovery.strategy',
+    'abc',
+    'String must be one of (case insensitive): REBOOTSTRAP, NONE',
+  ],
+  [
+    'ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy',
+    ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+    'abc',
+    'String must be one of (case insensitive): FULL, INCREMENTAL',
+  ],
 ];
 
 for (const [label, key, value, message] of REJECTED) {
   test(`${label}: the producer refuses ${key}=${value}`, () => {
-    assert.throws(() => new KafkaProducer({ ...BOOTSTRAP, [key]: value }), (e) => {
-      assert.ok(e instanceof ConfigError, `${e}`);
-      assert.equal(e.message, `Invalid value ${value} for configuration ${key}: ${message}`);
-      return true;
-    });
+    assert.throws(
+      () => new KafkaProducer({ ...BOOTSTRAP, [key]: value }),
+      (e) => {
+        assert.ok(e instanceof ConfigError, `${e}`);
+        assert.equal(e.message, `Invalid value ${value} for configuration ${key}: ${message}`);
+        return true;
+      },
+    );
   });
 }
 

@@ -24,8 +24,9 @@
 // mapped to a Java class is checked as a class is. A member on the list of
 // invented names (lint-mapping.json's `invented`) is exempt, one in its
 // `javaTargets` maps to the `<fqn>#<member>` listed. An error class keeps the
-// fields javascript/CLAUDE.md "Errors" lists instead of Java's members; a
-// function type (`Callback`) has none to map.
+// fields javascript/CLAUDE.md "Errors" lists, its Java singletons and the
+// methods translating its payload (Q39), and no other member; a function type
+// (`Callback`) has none to map.
 
 const { atNode } = require('../location');
 const {
@@ -85,9 +86,9 @@ module.exports = {
   kinds: ['no-java-member', 'static-mismatch', 'not-static-final', 'error-member'],
   needs: ['program', 'java'],
   hint:
-    'Give the member its Java member\'s name (a Java getter is a readonly field on a data class and a method ' +
-    'of Java\'s name elsewhere, a `public static final` a `static readonly`), or list it with its reason in ' +
-    'lint-mapping.json\'s `invented`, the list of invented names ' +
+    "Give the member its Java member's name (a Java getter is a readonly field on a data class and a method " +
+    "of Java's name elsewhere, a `public static final` a `static readonly`), or list it with its reason in " +
+    "lint-mapping.json's `invented`, the list of invented names " +
     '(javascript/CLAUDE.md "Java shape, JS idiom").',
   mappedMembers,
   check(ctx) {
@@ -101,7 +102,8 @@ module.exports = {
       if (other !== null) {
         findings.push({
           kind: 'static-mismatch',
-          subject: memberName(item, m), at: atNode(ctx, m.node),
+          subject: memberName(item, m),
+          at: atNode(ctx, m.node),
           message: m.isStatic
             ? `is static, but ${shortName(other.owner)}#${other.name} is an instance member`
             : `is an instance member, but ${shortName(other.owner)}#${other.name} is static`,
@@ -124,7 +126,8 @@ module.exports = {
       } else if (m.isStatic && m.kind === 'property' && jm.kind === 'field' && !(jm.field.static && jm.field.final)) {
         findings.push({
           kind: 'not-static-final',
-          subject: memberName(item, m), at: atNode(ctx, m.node),
+          subject: memberName(item, m),
+          at: atNode(ctx, m.node),
           message: `is static, but ${shortName(jm.owner)}#${jm.name} is not a static final field`,
         });
       }
@@ -138,10 +141,17 @@ module.exports = {
         // (`DisconnectException.INSTANCE`), static properties of the class.
         const jm = java && java.cls && m.isStatic && m.kind === 'property' ? javaMember(index, java.cls, m) : null;
         const singleton = jm !== null && jm.kind === 'field' && jm.owner === java.cls && jm.field.static && jm.field.final;
-        if (!singleton && !ERROR_ALLOWANCE.members.has(m.name)) {
+        // The payload (root CLAUDE.md, JavaScript Binding Conventions,
+        // Errors, Q39): a method translating a Java method of the class's
+        // chain of its own static-ness (a payload getter, a static factory,
+        // a toString() override).
+        const method = java && java.cls && m.kind === 'method' ? javaMember(index, java.cls, m) : null;
+        const payload = method !== null && method.kind === 'methods';
+        if (!singleton && !payload && !ERROR_ALLOWANCE.members.has(m.name)) {
           findings.push({
             kind: 'error-member',
-            subject: memberName(item, m), at: atNode(ctx, m.node),
+            subject: memberName(item, m),
+            at: atNode(ctx, m.node),
             message: `is not one of the error fields (${[...ERROR_ALLOWANCE.members].join(', ')}): ${ERROR_ALLOWANCE.reason}`,
           });
         }

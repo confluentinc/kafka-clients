@@ -61,9 +61,7 @@ module.exports = {
   },
   kinds: ['todo', 'todo-unused-exemption'],
   needs: [],
-  hint:
-    `Finish the work the ${MARKERS.join(' / ')} marks, or delete the note: ` +
-    'nothing is left for later (root CLAUDE.md §7).',
+  hint: `Finish the work the ${MARKERS.join(' / ')} marks, or delete the note: ` + 'nothing is left for later (root CLAUDE.md §7).',
   check(ctx) {
     const findings = [];
     const used = new Set();
