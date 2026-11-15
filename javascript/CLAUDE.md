@@ -1435,14 +1435,22 @@ The rules, each named in its finding:
   visible message, unless `KAFKA_BOOTSTRAP_SERVERS` is set.
 - `tsc --strict` runs over the tests (root conventions, Tests, Q67, and
   Build, packaging and release, Q74): `make typecheck-tests`
-  (`scripts/typecheck_tests.js`, in the root `lint-javascript`, so in
-  `verify`) checks every file under `test/` with `test/tsconfig.json`, the
-  JavaScript tests through `checkJs` under the library's own settings, the
-  package's import paths typed by `dist/`'s declarations (after `build-ts`),
-  as a user's code is. It fails on any finding under `test/`; the files the
-  tests require from elsewhere (`scripts/`, `grpc-server/`, the undeclared
-  `dist/internal/*.js`) are read but not failed on, since `checkJs` has no
-  per-file exclusion. ts-jest is not used (the light runner transforms
+  (`scripts/typecheck_tests.js`, in `make test` and the root
+  `test-javascript-unit`, so in `verify`: the sub-make that builds `dist/`,
+  so no second build deletes it under `make -j`) checks every test file,
+  under `test/` and `verifiable_clients/test/`, of every JavaScript and
+  TypeScript extension, with `test/tsconfig.json` (whose `include` the script
+  checks against its list; a `.d.ts` there is refused, as `skipLibCheck`
+  skips it), the JavaScript tests through `checkJs` under the library's own
+  settings, the package's import paths typed by `dist/`'s declarations (after
+  `build-ts`), as a user's code is. It fails on any finding in a test file;
+  the files the tests require from elsewhere (`scripts/`, `grpc-server/`, the
+  verifiable clients, the undeclared `dist/internal/*.js`) are read but not
+  failed on, by a path filter in the script, which checks every test file
+  with no opt-in comment and edits no file that is not a test. A call into
+  `dist/internal/` is typed by inference over the compiled JavaScript, except
+  where a test takes the signature from `src/` (`typeof import(...)` of the
+  `.ts` source). ts-jest is not used (the light runner transforms
   nothing, and the tests stay JavaScript), so the tests are typed with JSDoc:
   precise types, never `any` (`unknown` and narrowing where a value's type is
   not known), a nullable value narrowed by an assertion the test makes
