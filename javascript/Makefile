@@ -257,7 +257,16 @@ pack:
 	rm -rf $(PACK_DIR)
 	cd $(REPO_ROOT) && sh .semaphore/pack-npm.sh --dev $(PACK_DIR)
 
+# publint (root conventions, Build, packaging and release, Q74) lints each
+# tarball first: an error, a warning or a suggestion fails it.
+PUBLINT ?= node_modules/.bin/publint
 pack-check: pack
+	@for tarball in $(PACK_DIR)/*.tgz; do \
+	  out=$$($(NODE) $(PUBLINT) run --strict "$$tarball" 2>&1); status=$$?; \
+	  printf '%s\n' "$$out"; \
+	  [ $$status -eq 0 ] || exit 1; \
+	  case "$$out" in *Suggestions:*|*Warnings:*|*Errors:*) echo "publint: $$tarball has findings" >&2; exit 1;; esac; \
+	done
 	cd $(REPO_ROOT) && sh .semaphore/test-npm.sh $(PACK_DIR) $(HOST_PLATFORM)
 
 clean:
