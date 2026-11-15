@@ -304,7 +304,10 @@ async function produce(): Promise<void> {
   KafkaFuture.completedFuture({ key: 'k', value: 'v' });
   // @ts-expect-error generic code passes its value by name: a T may be a plain object
   const wrap = <V>(x: V): KafkaFuture<V> => KafkaFuture.completedFuture(x);
-  void wrap;
+  // By name, an unconstrained generic value type-checks.
+  const wrapByName = <V>(x: V): KafkaFuture<V> => KafkaFuture.completedFuture({ value: x });
+  expectTypeOf(wrapByName(1)).toEqualTypeOf<KafkaFuture<number>>();
+  void [wrap, wrapByName];
   if (now !== null) {
     // @ts-expect-error an instance of the caller's class is passed to getNow by name in TypeScript
     future.getNow(now);
