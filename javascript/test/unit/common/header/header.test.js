@@ -18,7 +18,6 @@
 // RecordHeaderTest; RecordHeadersTest's assertions on a single header are
 // here too).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { Header } = require('@confluentinc/kafka-javascript/common/header');

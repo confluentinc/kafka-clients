@@ -16,7 +16,6 @@
 
 // J1 check-java-name (scripts/lint/rules/java_name.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

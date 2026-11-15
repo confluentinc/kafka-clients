@@ -36,7 +36,7 @@ name: build-test-release
 #   2. "Verify Rust and language bindings (macOS arm64)" -- native Rust unit +
 #      integration + perf on s1-macos-15-arm64-8, and verify-c (ctest),
 #      verify-python (pytest test/unit), verify-dotnet (dotnet test, net8.0 +
-#      net10.0) and verify-javascript (node --test test/unit), each followed by
+#      net10.0) and verify-javascript (Jest's unit project), each followed by
 #      the gRPC multilanguage arm with the gRPC server running as a native host
 #      process (MULTILANG_BACKEND_MODE=native), which tests the macOS build of
 #      each binding. dependencies-macos.sh brings up Docker via Colima for the
@@ -265,7 +265,7 @@ blocks:
     # CONTAINER listener for the active protocol:
     #   - PLAINTEXT: `make -C c verify` / `make -C python verify` / `make -C dotnet verify`
     #     / `make verify-javascript` — the binding's tests (ctest / pytest /
-    #     dotnet test / node --test unit tests, the PLAINTEXT gRPC arm, the
+    #     dotnet test / Jest unit tests, the PLAINTEXT gRPC arm, the
     #     Python and .NET perf suites, and the Node.js client's static, typing
     #     and broker-backed tests). The Python and .NET checks that are not tests
     #     (mypy, the static checks, dotnet format, the examples' build) run in
@@ -447,7 +447,7 @@ blocks:
     # verify-rust runs the native Rust unit, integration and perf tests
     # (`make -C rust verify-macos`). verify-c runs the C ctest suite;
     # verify-python runs pytest test/unit; verify-dotnet runs the .NET unit
-    # tests; verify-javascript runs node --test test/unit. Each binding job then
+    # tests; verify-javascript runs Jest's unit project. Each binding job then
     # runs its binding's gRPC multilanguage arm (__grpc_c / __grpc_python /
     # __grpc_dotnet / __grpc_js) with the gRPC server as a native host process
     # rather than a container. Containers on macOS run Linux, so a container

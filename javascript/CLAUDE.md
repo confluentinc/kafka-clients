@@ -1429,7 +1429,26 @@ The rules, each named in its finding:
 - `test/static/header_conformance.test.js` asserts that every `kafka_*`
   function `native/*.c` calls is declared in the bindings header and is not a
   plain name that has an `_err` twin. Keep it passing when adding calls.
-- Tests use `node --test` only (the test runner is not decided yet in the
-  root conventions; the lean is `node:test`). The integration tests are
-  skipped, with a visible message, unless `KAFKA_BOOTSTRAP_SERVERS` is set.
+- The tests run on Jest (root conventions, Tests, Q66; `jest.config.cjs`),
+  one project per Makefile target (`static`, `lint`, `unit`, `typing`,
+  `verifiable-clients`, `integration`; `make test-unit` runs
+  `jest --selectProjects unit`, `JEST_ARGS` passes more). They run in plain
+  Node.js, not in Jest's vm contexts: the runner, `test/jest_runner.mjs`,
+  runs jest-light-runner's test worker in a fresh child process per file, as
+  `node --test` did. A vm context would hand the tests another realm than the
+  addon's (its arrays and `TypeError`s fail `deepStrictEqual` and
+  `instanceof`), its own module resolver (no exports-map refusal of a deep
+  import, no ES module `import()`, no second copy of the package) and no
+  `require` of an ES module, which the linter's tests need; and a process
+  reused for the next file keeps what a file changed in it (a second copy's
+  error classes in the addon). The tests use `test()` and `node:assert/strict`;
+  a timeout is `test`'s third argument, which `test/jest_setup.js` applies
+  (the light runner registers it but does not enforce it), a conditional skip
+  is `(SKIP ? test.skip : test)(...)` with the reason printed once by the
+  file, and cleanup is `afterEach`. ts-jest is not used: the light runner
+  transforms nothing, and the tests are JavaScript. The integration tests run
+  in band (`--runInBand`), one file at a time, and are skipped, with a
+  visible message, unless `KAFKA_BOOTSTRAP_SERVERS` is set. `tsc --strict`
+  over the tests (root conventions, Tests, Q67) is not set up yet: under
+  `checkJs` the JavaScript tests have about 2,400 errors to fix.
 - Assert the core's exact error messages in tests.

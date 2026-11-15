@@ -21,7 +21,6 @@
 // stand-in for grpc-js's call objects, and a whole producer workload against
 // an unreachable broker. Needs the compiled library (dist/).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 

@@ -17,7 +17,6 @@
 // The mapping lists of lint-mapping.json, invented and javaTargets
 // (scripts/lint/rules/invented_names.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

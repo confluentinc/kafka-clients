@@ -16,7 +16,6 @@
 
 // check-commonjs-pin (scripts/lint/rules/commonjs_pin.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { project, lint, findings } = require('./_project');

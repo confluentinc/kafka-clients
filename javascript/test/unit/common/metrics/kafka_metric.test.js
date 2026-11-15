@@ -19,7 +19,6 @@
 // with milliseconds(). Not translated: testMeasurableValueReturnsZeroWhenNotMeasurable,
 // whose measurableValue(long) is package-private in Java.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');

@@ -26,7 +26,6 @@
 // tsc runs are skipped, with a visible message, when tsc (a devDependency,
 // `TSC`) cannot be run.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -114,7 +113,7 @@ test('the declarations keep private constructors and leave out the library\'s ow
   }
 });
 
-test('the declarations type-check under --strict', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check under --strict', () => {
   const config = writeConfig(path.join(ROOT, 'build', 'typing'), {
     compilerOptions: {
       strict: true,
@@ -134,7 +133,7 @@ test('the declarations type-check under --strict', { skip: SKIP }, () => {
 
 // The same declarations, resolved as a project on `nodenext` resolves them,
 // the setting the library itself builds with (tsconfig.json).
-test('the declarations type-check under --strict with "module": "nodenext"', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check under --strict with "module": "nodenext"', () => {
   const config = writeConfig(path.join(ROOT, 'build', 'typing-nodenext'), {
     compilerOptions: {
       strict: true,
@@ -152,7 +151,7 @@ test('the declarations type-check under --strict with "module": "nodenext"', { s
   assert.equal(r.status, 0, r.output);
 });
 
-test('the declarations type-check under "module": "commonjs" (node10 resolution, typesVersions)', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check under "module": "commonjs" (node10 resolution, typesVersions)', () => {
   // node10 ignores `exports` and has no self-reference: a consumer project
   // finds the package under its node_modules/, so the test builds one, with
   // the package linked in and a copy of usage.ts.
@@ -178,7 +177,7 @@ test('the declarations type-check under "module": "commonjs" (node10 resolution,
   assert.equal(r.status, 0, r.output);
 });
 
-test('the declarations type-check with no ambient types and an ES2020 lib', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check with no ambient types and an ES2020 lib', () => {
   // `"types": []`: Buffer comes from the declarations' own reference to
   // @types/node; ES2020 predates Error.cause, which KafkaError declares.
   const config = writeConfig(path.join(ROOT, 'build', 'typing-es2020'), {
@@ -198,7 +197,7 @@ test('the declarations type-check with no ambient types and an ES2020 lib', { sk
   assert.equal(r.status, 0, r.output);
 });
 
-test('a default import fails to compile under esModuleInterop; named, namespace and Node ESM default imports compile', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('a default import fails to compile under esModuleInterop; named, namespace and Node ESM default imports compile', () => {
   // tsc's CommonJS output sets `exports.__esModule`, so the interop helpers
   // (TypeScript's esModuleInterop, Babel) read `module.exports.default`, which
   // does not exist. Every index.ts declares `__esModule`, so TypeScript rejects

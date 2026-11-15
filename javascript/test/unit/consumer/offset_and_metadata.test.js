@@ -20,7 +20,6 @@
 // Java's object serialization, which JavaScript has no counterpart of;
 // testSerializationRoundtrip is a JSON round trip, as TopicPartition's.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

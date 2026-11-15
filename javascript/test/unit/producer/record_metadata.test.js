@@ -20,7 +20,6 @@
 // reads (the offset already summed by the core, hasOffset false where Java's
 // base offset is -1).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

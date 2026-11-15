@@ -16,7 +16,6 @@
 
 // check-default-helpers (scripts/lint/rules/default_helpers.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

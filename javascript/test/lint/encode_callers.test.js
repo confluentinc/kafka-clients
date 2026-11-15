@@ -16,7 +16,6 @@
 
 // check-encode-callers (scripts/lint/rules/encode_callers.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

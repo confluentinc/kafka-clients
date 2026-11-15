@@ -16,7 +16,6 @@
 
 // J6 check-overload-shape (scripts/lint/rules/overload_shape.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

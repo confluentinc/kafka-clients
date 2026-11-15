@@ -17,7 +17,6 @@
 // Java's TimestampType. Java has no TimestampTypeTest: the enum's members are
 // checked against its source.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError, NoSuchElementError } = require('@confluentinc/kafka-javascript');

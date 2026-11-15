@@ -18,7 +18,6 @@
 // and none is a plain name that has an `_err` twin (javascript/CLAUDE.md;
 // Python's test_ffi_twins.py, .NET's NativeAbiConformanceTests).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

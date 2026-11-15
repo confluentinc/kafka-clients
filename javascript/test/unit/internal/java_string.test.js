@@ -18,7 +18,6 @@
 // the messages Java builds by concatenation. The expected texts are Java's,
 // from JDK 21's String.valueOf and Double.toString on the same values.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { javaString, javaDoubleString } = require('../../../dist/internal/java_string');

@@ -16,7 +16,6 @@
 
 // A2 check-native-registry (scripts/lint/rules/native_registry.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

@@ -20,7 +20,6 @@
 // Python client's encoding writes ("replace": `?` for a lone surrogate); Node's
 // own Buffer.from writes U+FFFD (ef bf bd) instead.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { encodeLikeJava } = require('../../../dist/internal/encode');

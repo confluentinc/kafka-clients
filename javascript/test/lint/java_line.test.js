@@ -18,7 +18,6 @@
 // forms of scripts/lint/java_line.js, on the vectors of the Rust lint's own
 // tests (rust/xtask/src/lint_custom/api_docs.rs), which it ports.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { javaLineRefs, javaLineRefsRun } = require('../../scripts/lint/java_line');

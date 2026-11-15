@@ -16,7 +16,6 @@
 
 // check-mock-native (scripts/lint/rules/mock_native.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

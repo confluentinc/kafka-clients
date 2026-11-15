@@ -20,7 +20,6 @@
 // constructed TopicPartition, and the JSON form (js-only) takes the place of
 // the round trip.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

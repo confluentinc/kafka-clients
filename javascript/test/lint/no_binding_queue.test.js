@@ -16,7 +16,6 @@
 
 // N8 check-no-binding-queue (scripts/lint/rules/no_binding_queue.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');

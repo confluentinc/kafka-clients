@@ -16,7 +16,6 @@
 
 // check-no-closed-flag (scripts/lint/rules/no_closed_flag.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

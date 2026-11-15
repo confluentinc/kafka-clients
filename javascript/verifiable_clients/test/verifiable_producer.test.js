@@ -20,7 +20,6 @@
 // over a MockProducer stand-in (./_mock_producer.js), plus the script run end
 // to end against an unreachable broker. Needs the compiled library (dist/).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

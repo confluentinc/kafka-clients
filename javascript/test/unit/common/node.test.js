@@ -17,7 +17,6 @@
 // Java has no NodeTest; these check the translation of Java's Node: its
 // three constructors, its value methods as fields, noNode() and toString().
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

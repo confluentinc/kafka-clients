@@ -18,7 +18,6 @@
 // in, driven with a stand-in `require` and process, so no platform package
 // and no other platform is needed.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 

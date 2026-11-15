@@ -19,7 +19,6 @@
 // whatever ESLint's working directory, a run of part of the client fails
 // while a rule cannot run, and an edit is always seen.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

@@ -17,7 +17,6 @@
 // Broker-backed producer test: runs only when KAFKA_BOOTSTRAP_SERVERS is set
 // (`make -C javascript test-integration` starts a scratch broker for it).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
@@ -43,7 +42,7 @@ function freshTopic(what) {
 
 const N = 300;
 
-test('produces one record with a key, a value and headers', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('produces one record with a key, a value and headers', async () => {
   const topic = freshTopic('one');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
   try {
@@ -127,9 +126,9 @@ test('produces one record with a key, a value and headers', { skip: SKIP, timeou
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test("a record's dependants complete inside the delivery, whatever their functions throw or cancel", { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)("a record's dependants complete inside the delivery, whatever their functions throw or cancel", async () => {
   const topic = freshTopic('dependants');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
   try {
@@ -161,9 +160,9 @@ test("a record's dependants complete inside the delivery, whatever their functio
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test("a record's future waits through the FFI's get_cb and get_with_timeout_cb, completing after its callback", { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)("a record's future waits through the FFI's get_cb and get_with_timeout_cb, completing after its callback", async () => {
   const topic = freshTopic('native-future');
   // A long linger keeps the record undelivered while its future is read.
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 3000 } });
@@ -209,7 +208,7 @@ test("a record's future waits through the FFI's get_cb and get_with_timeout_cb, 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
 // A record's native future across close, collection and destroy
 // (javascript/CLAUDE.md, rule 5): read each way (never; get() once and twice;
@@ -230,7 +229,7 @@ test("a record's future waits through the FFI's get_cb and get_with_timeout_cb, 
 // thread, and a unit only keeps a small struct), and the RSS they add, a few
 // hundred bytes per record, is within the noise of a bound that would not
 // flake.
-test("a record's native future is released across close, collection and destroy, whatever read it", { skip: SKIP || !['linux', 'darwin'].includes(process.platform), timeout: 180000 }, () => {
+(SKIP || !['linux', 'darwin'].includes(process.platform) ? test.skip : test)("a record's native future is released across close, collection and destroy, whatever read it", () => {
   const topic = freshTopic('destroy-futures');
   const script = `
     const { execSync } = require('node:child_process');
@@ -318,9 +317,9 @@ test("a record's native future is released across close, collection and destroy,
       'futures 36\n' +
       'slots at most 2\n',
   );
-});
+}, 180000);
 
-test("a record's future waited on natively across close(0) fails as Java's get() throws, and the process exits", { skip: SKIP, timeout: 180000 }, () => {
+(SKIP ? test.skip : test)("a record's future waited on natively across close(0) fails as Java's get() throws, and the process exits", () => {
   // Lingering records (linger.ms 60000), each future's get() waiting through
   // the FFI (get_cb, get_with_timeout_cb) when close(0) aborts them: Java's
   // get() throws ExecutionException, caused by the KafkaException
@@ -366,9 +365,9 @@ test("a record's future waited on natively across close(0) fails as Java's get()
     r.stdout,
     'done before the close: false false\nExecutionError caused by KafkaError: Producer is closed forcefully.\nexited after less than 1s\n',
   );
-});
+}, 180000);
 
-test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('NUL bytes in a key, a value and a header value cross byte-exact', async () => {
   // Only the strings the C ABI reads as NUL-terminated (topic, header key,
   // config) refuse a NUL; bytes cross with their length.
   const topic = freshTopic('nul');
@@ -396,9 +395,9 @@ test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('the serializers bytes, a header one adds and the sizes reach the broker', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('the serializers bytes, a header one adds and the sizes reach the broker', async () => {
   const topic = freshTopic('serde');
   const keySerializer = { serialize: ({ data }) => (data === null ? null : Buffer.from(`key-${data}`)) };
   const valueSerializer = {
@@ -420,9 +419,9 @@ test('the serializers bytes, a header one adds and the sizes reach the broker', 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('CreateTime: the timestamp given, or the send time, reaches the broker', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('CreateTime: the timestamp given, or the send time, reaches the broker', async () => {
   const topic = freshTopic('create-time');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
   try {
@@ -466,7 +465,7 @@ test('CreateTime: the timestamp given, or the send time, reaches the broker', { 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
 // Sends N records to partition 0 of `topic`, awaiting each send() (the
 // hand-over) before the next, and returns their futures in send order.
@@ -486,7 +485,7 @@ async function assertSendOrder(futures) {
   return offsets;
 }
 
-test('awaited sends to a fresh topic land in send order', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('awaited sends to a fresh topic land in send order', async () => {
   const topic = freshTopic('order');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
   try {
@@ -502,9 +501,9 @@ test('awaited sends to a fresh topic land in send order', { skip: SKIP, timeout:
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('awaited sends that wait for buffer memory land in send order', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('awaited sends that wait for buffer memory land in send order', async () => {
   const topic = freshTopic('memory');
   // Batches of one record each, with memory for only a few: a send waits for
   // memory (the would-block path) on cached metadata.
@@ -526,9 +525,9 @@ test('awaited sends that wait for buffer memory land in send order', { skip: SKI
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('flush after awaited sends completes every future', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('flush after awaited sends completes every future', async () => {
   const topic = freshTopic('flush');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 1000 } });
   try {
@@ -542,9 +541,9 @@ test('flush after awaited sends completes every future', { skip: SKIP, timeout: 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('close after awaited sends delivers every record', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('close after awaited sends delivers every record', async () => {
   const topic = freshTopic('close');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 1000 } });
   let callbacks = 0;
@@ -570,9 +569,9 @@ test('close after awaited sends delivers every record', { skip: SKIP, timeout: 1
   const { highWatermark, records } = await fetchRecords(BOOTSTRAP, topic, 0);
   assert.equal(highWatermark, 50);
   assert.equal(records.length, 50);
-});
+}, 120000);
 
-test('a Buffer reused after each awaited send keeps every record value', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('a Buffer reused after each awaited send keeps every record value', async () => {
   const topic = freshTopic('reuse');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 100 } });
   try {
@@ -594,9 +593,9 @@ test('a Buffer reused after each awaited send keeps every record value', { skip:
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('a Buffer changed once send() settled: the broker gets the bytes given', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('a Buffer changed once send() settled: the broker gets the bytes given', async () => {
   // A fresh topic: the first send waits for its metadata, so its record is
   // still in the core while send() is pending, reading the caller's own
   // memory. The key and value are left alone until send() settled; the
@@ -622,7 +621,7 @@ test('a Buffer changed once send() settled: the broker gets the bytes given', { 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
 // An accepted record's Buffers are released at its hand-over, when send()
 // resolves, and not held until delivery (javascript/CLAUDE.md, rule 8). A
@@ -630,7 +629,7 @@ test('a Buffer changed once send() settled: the broker gets the bytes given', { 
 // unit tests cover a record refused at its hand-over. linger.ms holds the
 // batch in the producer while the Buffers are collected; a child process
 // runs with --expose-gc.
-test("an accepted record's key and value Buffers are released when send() resolves, before delivery", { skip: SKIP, timeout: 120000 }, () => {
+(SKIP ? test.skip : test)("an accepted record's key and value Buffers are released when send() resolves, before delivery", () => {
   const topic = freshTopic('released');
   const script = `
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
@@ -667,9 +666,9 @@ test("an accepted record's key and value Buffers are released when send() resolv
   });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'done before delivery false\nalive 0\ndelivered 65536\n');
-});
+}, 120000);
 
-test("strings are encoded as Java's StringSerializer encodes them: a lone surrogate as ?", { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)("strings are encoded as Java's StringSerializer encodes them: a lone surrogate as ?", async () => {
   const topic = freshTopic('surrogates');
   // stringSerializer() as a constructor argument, and in a serde config key without ().
   const producer = new KafkaProducer({
@@ -696,9 +695,9 @@ test("strings are encoded as Java's StringSerializer encodes them: a lone surrog
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('a serde config function that reads the whole configuration leaves a working producer', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('a serde config function that reads the whole configuration leaves a working producer', async () => {
   // It spreads the configuration, reading bootstrap.servers too: the producer
   // keys reach the core, and only schema.registry.url, which the core doesn't
   // know, is kept from it.
@@ -721,9 +720,9 @@ test('a serde config function that reads the whole configuration leaves a workin
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('a record\'s headers are read-only once send() has taken it', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('a record\'s headers are read-only once send() has taken it', async () => {
   const topic = freshTopic('sealed');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
   try {
@@ -740,7 +739,7 @@ test('a record\'s headers are read-only once send() has taken it', { skip: SKIP,
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
 // Watches the event loop during a send loop: `turn()` counts the sends
 // between two of its turns (a setImmediate that reschedules itself), which is
@@ -774,7 +773,7 @@ async function warmedProducer(what) {
   return { topic, producer };
 }
 
-test('a loop awaiting sends taken at once lets the event loop and the callbacks run', { skip: SKIP, timeout: 300000 }, async () => {
+(SKIP ? test.skip : test)('a loop awaiting sends taken at once lets the event loop and the callbacks run', async () => {
   const { topic, producer } = await warmedProducer('yield');
   try {
     const SENDS = 200000;
@@ -817,9 +816,9 @@ test('a loop awaiting sends taken at once lets the event loop and the callbacks 
   } finally {
     await producer.close();
   }
-});
+}, 300000);
 
-test('a loop awaiting one send in seven lets the event loop run', { skip: SKIP, timeout: 300000 }, async () => {
+(SKIP ? test.skip : test)('a loop awaiting one send in seven lets the event loop run', async () => {
   // 7 divides 1001 (the yield period when only one send per period waits for
   // the turn), so a turn given to a fire-and-forget send would never reach
   // the awaited one.
@@ -860,9 +859,9 @@ test('a loop awaiting one send in seven lets the event loop run', { skip: SKIP, 
   } finally {
     await producer.close();
   }
-});
+}, 300000);
 
-test('queued hand-overs of a second caller do not keep the first from yielding', { skip: SKIP, timeout: 300000 }, async () => {
+(SKIP ? test.skip : test)('queued hand-overs of a second caller do not keep the first from yielding', async () => {
   // Caller B's hand-overs are queued and complete inside caller A's pumps,
   // with no event-loop turn between them: they must not restart the count A's
   // sends taken at once reach the deferral with.
@@ -917,9 +916,9 @@ test('queued hand-overs of a second caller do not keep the first from yielding',
   } finally {
     await producer.close();
   }
-});
+}, 300000);
 
-test('send() runs the delivery callbacks already due before handing its record over', { skip: SKIP, timeout: 300000 }, async () => {
+(SKIP ? test.skip : test)('send() runs the delivery callbacks already due before handing its record over', async () => {
   const { topic, producer } = await warmedProducer('pump');
   try {
     const SENDS = 50000;
@@ -949,9 +948,9 @@ test('send() runs the delivery callbacks already due before handing its record o
   } finally {
     await producer.close();
   }
-});
+}, 300000);
 
-test("partitionsFor resolves to the topic's partitions, PartitionInfo with Node values", { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)("partitionsFor resolves to the topic's partitions, PartitionInfo with Node values", async () => {
   const { Node, PartitionInfo } = require('@confluentinc/kafka-javascript/common');
   const topic = freshTopic('pf');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
@@ -975,9 +974,9 @@ test("partitionsFor resolves to the topic's partitions, PartitionInfo with Node 
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test('metrics() counts the records sent, read again on each call', { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)('metrics() counts the records sent, read again on each call', async () => {
   const { MetricName } = require('@confluentinc/kafka-javascript/common');
   const topic = freshTopic('metrics');
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-metrics' } });
@@ -989,9 +988,9 @@ test('metrics() counts the records sent, read again on each call', { skip: SKIP,
   } finally {
     await producer.close();
   }
-});
+}, 120000);
 
-test("an error the core reports carries its payload: an invalid topic's InvalidTopicError lists it", { skip: SKIP, timeout: 120000 }, async () => {
+(SKIP ? test.skip : test)("an error the core reports carries its payload: an invalid topic's InvalidTopicError lists it", async () => {
   const { InvalidTopicError } = require('@confluentinc/kafka-javascript/common/errors');
   // Java's Metadata.maybeThrowExceptionForTopic throws
   // InvalidTopicException(Collections.singleton(topic)) for the broker's
@@ -1025,4 +1024,4 @@ test("an error the core reports carries its payload: an invalid topic's InvalidT
   } finally {
     await producer.close();
   }
-});
+}, 120000);

@@ -16,7 +16,6 @@
 // MetricName and MetricNameMap. Java has no MetricNameTest; the hash codes are
 // Java's, computed by Java's MetricName (kafka-clients) on the same values.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

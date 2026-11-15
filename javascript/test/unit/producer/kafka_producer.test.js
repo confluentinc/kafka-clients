@@ -17,7 +17,6 @@
 // The producer against an unreachable broker: no broker is needed, every
 // record fails in the core with its own error.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
@@ -187,7 +186,7 @@ test('a callback that returns a Promise is awaited: the future and flush() wait 
 const COMPLETION_GAP_MS = 60;
 const gap = () => new Promise((res) => setTimeout(res, COMPLETION_GAP_MS));
 
-test("callbacks run one at a time in completion order: a later record's callback waits for an earlier one's Promise", { timeout: 30000 }, async () => {
+test("callbacks run one at a time in completion order: a later record's callback waits for an earlier one's Promise", async () => {
   // Java runs its callbacks one after another on the producer's I/O thread, so
   // a slow callback holds back the next: here a later record's callback starts
   // only once an earlier callback's Promise settled, and flush() and close()
@@ -237,9 +236,9 @@ test("callbacks run one at a time in completion order: a later record's callback
     release();
     await producer.close();
   }
-});
+}, 30000);
 
-test("a callback's timed get() on a later record's future times out: that record's callback waits for this one", { timeout: 30000 }, async () => {
+test("a callback's timed get() on a later record's future times out: that record's callback waits for this one", async () => {
   // As Java's get(timeout), called on the I/O thread from a callback, times out
   // on a record whose callback that thread runs next: the later record's future
   // completes only after its callback ran, which waits for this callback.
@@ -279,9 +278,9 @@ test("a callback's timed get() on a later record's future times out: that record
   } finally {
     await producer.close();
   }
-});
+}, 30000);
 
-test('a callback queued behind a pending Promise runs once its turn comes, before close() settles', { timeout: 30000 }, async () => {
+test('a callback queued behind a pending Promise runs once its turn comes, before close() settles', async () => {
   // close() waits for every callback of the records it covers, the ones still
   // waiting for their turn included, as Java's close() joins the I/O thread.
   const producer = new KafkaProducer({ configs: UNREACHABLE });
@@ -319,7 +318,7 @@ test('a callback queued behind a pending Promise runs once its turn comes, befor
     release();
     await (closing ?? producer.close());
   }
-});
+}, 30000);
 
 test("a callback's rejection is handled as a throw: the outcome is unchanged and nothing surfaces", () => {
   const r = runNode(`
@@ -1367,7 +1366,7 @@ test('a closed producer lets the process exit, and is destroyed when garbage col
 // the finalizer destroyed it. A send refused once the core reported the
 // close, or failed by the close, leaves no JS function of its own alive
 // that would hold the producer (javascript/CLAUDE.md, rule 10).
-test('a closed producer is destroyed when collected, a send refused after close() or failed by it included', { skip: !['linux', 'darwin'].includes(process.platform) }, () => {
+(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)('a closed producer is destroyed when collected, a send refused after close() or failed by it included', () => {
   const r = runNode(
     `
     const { execSync } = require('node:child_process');

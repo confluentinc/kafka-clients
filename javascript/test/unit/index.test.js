@@ -18,7 +18,6 @@
 // index.ts, compiled to CommonJS in dist/): an ES module `import`s each with
 // the same named exports `require` returns, through Node's CommonJS interop.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

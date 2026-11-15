@@ -85,7 +85,7 @@ in the preview: build from source there.
 make -C javascript build             # the addon (node-gyp) and the library (tsc, src/ -> dist/);
                                      # or, from the repository root: make build-javascript
 make -C javascript test-static       # header conformance and package layout, no build needed
-make -C javascript test-unit         # no broker needed
+make -C javascript test-unit         # no broker needed (Jest; JEST_ARGS='-t <name>' picks tests)
 make -C javascript test-typing       # dist/'s declarations type-check under --strict
 make -C javascript check-api         # the interface check: dist/'s declarations and the exports
                                      # map against the API report in api/ (update-api records it)
@@ -93,7 +93,8 @@ make -C javascript test-integration  # starts a scratch broker with docker, or u
                                      # KAFKA_BOOTSTRAP_SERVERS when it is set
 ```
 
-`make test` runs all four, then, on Linux, the container arm of the Rust
+The tests run on Jest (`jest.config.cjs`, a project per target), each file
+in a Node.js process of its own. `make test` runs them all, then, on Linux, the container arm of the Rust
 multilanguage suite (below; it is skipped with a message elsewhere). Every
 target that runs tests but `test-static` builds first: the tests, the example
 and the gRPC server are JavaScript run against the compiled `dist/`.

@@ -16,7 +16,6 @@
 
 // check-no-repeated-precondition (scripts/lint/rules/no_repeated_precondition.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

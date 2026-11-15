@@ -19,7 +19,6 @@
 // that cannot run or checks nothing, a stale eslint-baseline.txt line, an
 // unused allowlist entry) on every file the rule visits; and kafka/directives.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 

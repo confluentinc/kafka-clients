@@ -16,7 +16,6 @@
 
 // N2 check-cb-twin-only (scripts/lint/rules/cb_twin_only.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');

@@ -16,7 +16,6 @@
 
 // N5 check-completion-order (scripts/lint/rules/completion_order.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
