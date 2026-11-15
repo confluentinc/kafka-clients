@@ -145,12 +145,16 @@ test-javascript: build-javascript
 
 # The Node.js client's tests that need no broker, the part of `test` (and so
 # of `verify`): the static tests (header conformance, the package layout, the
-# release scripts), the unit tests, and the type check, `tsc --strict` over
-# the sources (the build) and over the type tests (test-typing, against the
-# compiled declarations), with the interface check of the declarations and the
-# exports map against the committed API report (check-api).
+# release scripts), the unit tests, and the type checks, `tsc --strict` over
+# the sources (the build), over the type tests (test-typing, against the
+# compiled declarations) and over every test file (typecheck-tests), with the
+# interface check of the declarations and the exports map against the
+# committed API report (check-api). The type check of the tests reads the
+# compiled declarations, so it runs here, in the one sub-make that builds
+# dist/, never beside it: under `make -j` a second build would delete dist/
+# while these tests read it.
 test-javascript-unit: build-javascript
-	$(MAKE) -C javascript test-static test-unit test-typing check-api
+	$(MAKE) -C javascript test-static test-unit test-typing check-api typecheck-tests
 
 # macOS variant of test-javascript: the unit tests only, as python/'s
 # `verify-macos` runs pytest test/unit only. On macOS the gRPC multilanguage arm
@@ -163,12 +167,11 @@ test-javascript-macos-docker: build-javascript
 # devDependency, so `npm ci` in javascript/ first, as for the build. It reads
 # the bindings header the Rust build writes and the committed Java index
 # (javascript/java-index.json, `cargo xtask java-api`), not the kafka submodule.
-# Then the type check of the tests, `tsc --strict` over javascript/test/
-# (typecheck-tests, against the compiled declarations, so it compiles the
-# library first).
+# It never builds or reads javascript/dist/, so it may run beside the tests;
+# the type check of the tests, which needs dist/, is in test-javascript-unit.
 lint-javascript:
 	$(MAKE) -C rust build-all-features
-	$(MAKE) -C javascript lint-rules test-lint format-check typecheck-tests
+	$(MAKE) -C javascript lint-rules test-lint format-check
 
 verify-javascript: test-javascript lint-javascript
 

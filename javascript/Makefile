@@ -120,7 +120,7 @@ build-ts:
 # test and the two never hold a broker at once. It self-skips off Linux (see
 # test-integration-grpc); the root `verify-javascript-macos-docker` runs the
 # native arm there instead.
-test: test-static test-unit test-typing check-api test-verifiable-clients test-integration
+test: test-static test-unit test-typing check-api typecheck-tests test-verifiable-clients test-integration
 	$(MAKE) test-integration-grpc
 
 # Header conformance and the package layout: no build needed.
@@ -180,10 +180,12 @@ test-typing: build-ts
 
 # The type check of the tests (root conventions, Tests, Q67, and Build,
 # packaging and release, Q74; scripts/typecheck_tests.js): `tsc --strict` over
-# every file under test/ (test/tsconfig.json), the JavaScript tests through
-# checkJs, against the compiled declarations in dist/ as a user's code types
-# against them. A deliberate misuse is marked `// @ts-expect-error <why>`; the
-# root `lint-javascript` runs it.
+# every test file, under test/ and verifiable_clients/test/
+# (test/tsconfig.json), the JavaScript tests through checkJs, against the
+# compiled declarations in dist/ as a user's code types against them. A
+# deliberate misuse is marked `// @ts-expect-error <why>`.
+# `test` and the root `test-javascript-unit` run it, beside the other targets
+# that read dist/ after the one build-ts.
 typecheck-tests: build-ts
 	$(NODE) scripts/typecheck_tests.js
 
