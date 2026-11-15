@@ -109,6 +109,7 @@ const PAYLOAD_INDEX = javaIndex(
           { ...method('FooException', ['String', 'Set']), param_names: ['message', 'topics'], param_types: ['String', 'Set<String>'] },
           { ...method('FooException', ['Set']), param_names: ['topics'], param_types: ['Set<String>'] },
           method('FooException', ['String']),
+          { ...method('FooException', ['String', 'String']), param_names: ['resource', 'message'] },
           method('topics', [], { return_type: 'Set<String>' }),
           method('fillInStackTrace', [], { return_type: 'Throwable' }),
         ],
@@ -120,6 +121,7 @@ const PAYLOAD_ERROR = `export class FooError extends Error {
   declare readonly cause: unknown;
   constructor(options: { message: string | null; topics: Iterable<string>; name?: never });
   constructor(options: { topics: Iterable<string>; name?: never });
+  constructor(options: { resource: string | null; message: string | null; name?: never });
   constructor(message: string);
   constructor(...args: unknown[]) { super(String(args[0])); }
   topics(): Set<string> { return new Set(); }
@@ -129,8 +131,13 @@ const PAYLOAD_ERROR = `export class FooError extends Error {
 test("an error class is asked for its payload getters and its payload constructors (Q39)", () => {
   const r = lint(fixture({ 'java-index.json': PAYLOAD_INDEX, 'src/common/errors/foo_error.ts': PAYLOAD_ERROR }), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // The 24 of the base fixture, topics(), and the two payload constructors.
-  assert.ok(r.out.includes('✅ check-java-completeness: 27 item(s) checked'), r.text);
+  // The 24 of the base fixture, topics(), and the three payload constructors.
+  assert.ok(r.out.includes('✅ check-java-completeness: 28 item(s) checked'), r.text);
+  // A form of two Strings is a payload form too: dropping it is a finding.
+  const noResource = PAYLOAD_ERROR.replace('  constructor(options: { resource: string | null; message: string | null; name?: never });\n', '');
+  assert.deepEqual(findings(lint(fixture({ 'java-index.json': PAYLOAD_INDEX, 'src/common/errors/foo_error.ts': noResource }), [RULE])), [
+    'common.errors.FooException#FooException(String, String): FooError has no constructor taking { resource, message }',
+  ]);
   const missing = PAYLOAD_ERROR.replace('  topics(): Set<string> { return new Set(); }\n', '')
     .replace('  constructor(options: { topics: Iterable<string>; name?: never });\n', '');
   assert.deepEqual(findings(lint(fixture({ 'java-index.json': PAYLOAD_INDEX, 'src/common/errors/foo_error.ts': missing }), [RULE])), [

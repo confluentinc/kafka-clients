@@ -36,7 +36,8 @@
 //     counterpart, and every public constructor that takes a payload, as a
 //     constructor signature whose one parameter is an options object of
 //     Java's parameter names (a `String` may be the `message`, a `Throwable`
-//     is the `cause`); its message and cause forms are checked by the error
+//     is the `cause`), a second `String` included; its message and cause
+//     forms (one `String`, one `Throwable` at most) are checked by the error
 //     tests;
 //   - a function type (`Callback`): nothing;
 //   - an enum: also the members `java.lang.Enum` gives it (`values`,
@@ -87,15 +88,23 @@ function constructorOptions(ts, node) {
   return out;
 }
 
-/** Whether options `keys` translate Java constructor `o`: one key per parameter, by Java's name, a String maybe `message`, a Throwable `cause`. */
+/**
+ * Whether options `keys` translate Java constructor `o`: each parameter is
+ * one key, by its Java name, but the cause (a Throwable, `cause`) and the
+ * message (a String passed on as the message, `message`, when its own name
+ * is no key), no two parameters on one key.
+ */
 function translatesConstructor(o, keys) {
   if (keys.length !== o.params.length) return false;
-  return o.params.every((t, i) => {
+  const used = new Set();
+  for (let i = 0; i < o.params.length; i++) {
+    const t = o.params[i];
     const name = o.param_names[i];
-    if (throwableType(t)) return keys.includes('cause');
-    if (t === 'String') return keys.includes(name) || keys.includes('message');
-    return keys.includes(name);
-  });
+    const key = throwableType(t) ? 'cause' : t === 'String' && !keys.includes(name) ? 'message' : name;
+    if (!keys.includes(key) || used.has(key)) return false;
+    used.add(key);
+  }
+  return true;
 }
 
 /** The findings of error class `item` (Java `cls`): its payload members and payload constructors. */
@@ -122,7 +131,12 @@ function errorFindings(ctx, ts, index, item, cls, findings) {
   const options = constructorOptions(ts, item.node);
   for (const o of cls.overloads) {
     if (o.name !== className || o.visibility !== 'public' || o.deprecated) continue;
-    if (o.params.every((t) => t === 'String' || throwableType(t))) continue;
+    // A message and cause form (at most one String and one Throwable) is
+    // checked by the error tests; a second String is a payload
+    // (`DuplicateResourceException(String resource, String message)`).
+    const strings = o.params.filter((t) => t === 'String').length;
+    const causes = o.params.filter(throwableType).length;
+    if (strings + causes === o.params.length && strings <= 1 && causes <= 1) continue;
     checked += 1;
     if (!options.some((keys) => translatesConstructor(o, keys))) {
       findings.push({
