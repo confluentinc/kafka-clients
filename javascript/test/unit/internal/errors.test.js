@@ -379,7 +379,7 @@ test('each form gives Java\'s message and cause, and a call no form takes is ref
       .map(shapeOf)
       .join(', ');
     for (const [params, message] of registered) {
-      // A payload form is checked by the payload tests (test/unit/common/errors/payload.test.js).
+      // A payload form is checked by the payload tests (test/unit/internal/payload.test.js).
       if (!plainForm(params)) continue;
       const args = {};
       if (params.includes('message')) args.message = 'm';

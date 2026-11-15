@@ -41,7 +41,7 @@ const { KafkaMetric, QuotaViolationError } = require('@confluentinc/kafka-javasc
 const { CorrelationIdMismatchError } = require('@confluentinc/kafka-javascript/common/requests');
 const { InvalidOffsetError, LogTruncationError, NoOffsetForPartitionError, OffsetOutOfRangeError } =
   require('@confluentinc/kafka-javascript/consumer');
-const { fromNative } = require('../../../../dist/internal/errors');
+const { fromNative } = require('../../../dist/internal/errors');
 
 const tp = (topic, partition) => new TopicPartition({ topic, partition });
 
