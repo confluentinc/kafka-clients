@@ -19,9 +19,11 @@
 // TopicPartition, so keys() and entries() return TopicPartition objects. The
 // partition is an integer, so the text after the last ':' is always the
 // partition and two topic partitions never share a key; a null topic's key is
-// the partition alone, which has no ':'. A null key, which Java's HashMap
-// holds, is the key 'null', which no TopicPartition gives (it is neither a
-// number nor has a ':'). A TopicPartition is frozen, so its key never changes
+// '-<partition>', which has no ':'. A null key, which Java's HashMap holds, is
+// the key 'null', which no TopicPartition gives. No key is an integer-like
+// property name, so toJSON() keeps the entries' order. A value is never
+// undefined (root CLAUDE.md, JavaScript Binding Conventions, Signatures, Q18):
+// null is Java's null. A TopicPartition is frozen, so its key never changes
 // once stored.
 
 import { JavaForms } from '../internal/args';
@@ -36,6 +38,12 @@ const GET_FORMS = new JavaForms('get', [['key']], { bareTypes: { key: isKey } })
 const HAS_FORMS = new JavaForms('has', [['key']], { bareTypes: { key: isKey } });
 const DELETE_FORMS = new JavaForms('delete', [['key']], { bareTypes: { key: isKey } });
 const SIZE_FORMS = new JavaForms('size', [[]], { reader: true });
+
+/** `value`, which is never `undefined`: null is Java's null. */
+function valueOf<V>(value: unknown, what: string): V {
+  if (value === undefined) throw new TypeError(`${what} must not be undefined: pass null for Java's null`);
+  return value as V;
+}
 
 /** The string key of a null key: no TopicPartition's key (TopicPartition.internalKey). */
 const NULL_KEY = 'null';
@@ -76,7 +84,8 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
    *   `TopicPartitionMap`
    * @throws `IllegalArgumentError` when it is given more than one argument
    * @throws `TypeError` when `entries` is `undefined` or not an iterable, or
-   *   an entry is not a `[TopicPartition, value]` pair
+   *   an entry is not a `[TopicPartition, value]` pair, or its value is
+   *   `undefined`
    */
   constructor(entries: Iterable<readonly [TopicPartition | null, V]>);
   constructor(entries?: unknown) {
@@ -91,7 +100,7 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
         throw new TypeError('an entry must be a [TopicPartition, value] pair');
       }
       const tp = entry[0] as TopicPartition | null;
-      this.#entries.set(keyOf(tp), [tp, entry[1] as V]);
+      this.#entries.set(keyOf(tp), [tp, valueOf(entry[1], 'an entry\'s value')]);
     }
   }
 
@@ -142,12 +151,14 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
    * @param key - the topic partition, or null
    * @param value - the value
    * @returns this map
-   * @throws `TypeError` when the key is neither a TopicPartition nor null
+   * @throws `TypeError` when the key is neither a TopicPartition nor null,
+   *   or the value is `undefined` or left out
    */
   set(key: TopicPartition | null, value: V): this {
     const k = keyOf(key);
+    const v = valueOf<V>(value, 'value');
     const kept = this.#entries.get(k);
-    this.#entries.set(k, [kept === undefined ? key : kept[0], value]);
+    this.#entries.set(k, [kept === undefined ? key : kept[0], v]);
     return this;
   }
 
@@ -220,7 +231,7 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
   /**
    * The map as `JSON.stringify` writes it: an object of its entries, each
    * keyed by the map's string key (`'orders:3'`, `'null'` for a null key), in the order of the
-   * entries, a `bigint` value written as a decimal string. It ignores the key
+   * entries (no key is integer-like), a `bigint` value written as a decimal string. It ignores the key
    * `JSON.stringify` passes.
    *
    * @returns the entries, by the map's string key
