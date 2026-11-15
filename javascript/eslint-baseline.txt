@@ -76,3 +76,19 @@ overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,S
 # Header's constructor takes Java's (String, byte[]) form: JavaScript has no
 # ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing Header.constructor/RecordHeader(ByteBuffer,ByteBuffer)
+# Error payloads of a type the client does not translate before the consumer
+# (the generated modules' header comments): RecordDeserializationException's
+# TimestampType and nested DeserializationExceptionOrigin, LogTruncationException's
+# OffsetAndMetadata.
+missing common.errors.RecordDeserializationException#RecordDeserializationException(DeserializationExceptionOrigin, TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers, String, Throwable)
+missing common.errors.RecordDeserializationException#headers
+missing common.errors.RecordDeserializationException#keyBuffer
+missing common.errors.RecordDeserializationException#offset
+missing common.errors.RecordDeserializationException#origin
+missing common.errors.RecordDeserializationException#timestamp
+missing common.errors.RecordDeserializationException#timestampType
+missing common.errors.RecordDeserializationException#topicPartition
+missing common.errors.RecordDeserializationException#valueBuffer
+missing clients.consumer.LogTruncationException#LogTruncationException(Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)
+missing clients.consumer.LogTruncationException#LogTruncationException(String, Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)
+missing clients.consumer.LogTruncationException#divergentOffsets
