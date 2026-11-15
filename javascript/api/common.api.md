@@ -53,7 +53,7 @@ export abstract class KafkaFuture<T> {
         mayInterruptIfRunning: boolean;
     }): boolean;
     abstract cancel(mayInterruptIfRunning: boolean): boolean;
-    static completedFuture<U extends NonNullable<unknown> | null>(options: {
+    static completedFuture<U>(options: {
         value: U;
     }): KafkaFuture<U>;
     static completedFuture<U>(value: U, ...check: BareCheck<U>): KafkaFuture<U>;

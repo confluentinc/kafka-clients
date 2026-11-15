@@ -779,7 +779,6 @@ test("undefined is refused, null is Java's null", async () => {
     name: 'TypeError',
     message: "value must not be undefined. Leave the argument out, or pass null for Java's null",
   });
-  // @ts-expect-error undefined for the named value: the undefined check throws TypeError
   assert.throws(() => KafkaFuture.completedFuture({ value: undefined }), {
     name: 'TypeError',
     message: "value must not be undefined. Leave the key out, or pass null for Java's null",
