@@ -90,6 +90,9 @@ enum Kind {
     Object,
     StringSet,
     TopicPartitions,
+    /// Java's `Collection<TopicPartition>` taken: read once into an array,
+    /// as given (duplicates included).
+    TopicPartitionList,
     TopicPartition,
     TopicPartitionLongMap,
     KafkaMetric,
@@ -115,7 +118,8 @@ impl Kind {
             "double" | "Double" => Kind::Double,
             "Object" => Kind::Object,
             "Set<String>" | "Collection<String>" => Kind::StringSet,
-            "Set<TopicPartition>" | "Collection<TopicPartition>" => Kind::TopicPartitions,
+            "Set<TopicPartition>" => Kind::TopicPartitions,
+            "Collection<TopicPartition>" => Kind::TopicPartitionList,
             "TopicPartition" => Kind::TopicPartition,
             "Map<TopicPartition,Long>" => Kind::TopicPartitionLongMap,
             "KafkaMetric" => Kind::KafkaMetric,
@@ -150,6 +154,7 @@ impl Kind {
             Kind::Object => "object",
             Kind::StringSet => "stringSet",
             Kind::TopicPartitions => "topicPartitions",
+            Kind::TopicPartitionList => "topicPartitionList",
             Kind::TopicPartition => "topicPartition",
             Kind::TopicPartitionLongMap => "topicPartitionLongMap",
             Kind::KafkaMetric => "kafkaMetric",
@@ -165,7 +170,7 @@ impl Kind {
             Kind::Long => "bigint | number",
             Kind::Object => "unknown",
             Kind::StringSet => "Iterable<string>",
-            Kind::TopicPartitions => "Iterable<TopicPartition>",
+            Kind::TopicPartitions | Kind::TopicPartitionList => "Iterable<TopicPartition>",
             Kind::TopicPartition => "TopicPartition",
             Kind::TopicPartitionLongMap => "TopicPartitionMap<bigint | number>",
             Kind::KafkaMetric => "KafkaMetric",
@@ -185,6 +190,7 @@ impl Kind {
             Kind::Object => "unknown",
             Kind::StringSet => "Set<string>",
             Kind::TopicPartitions => "TopicPartitionSet",
+            Kind::TopicPartitionList => "TopicPartition[]",
             Kind::TopicPartition => "TopicPartition",
             Kind::TopicPartitionLongMap => "TopicPartitionMap<bigint>",
             Kind::KafkaMetric => "KafkaMetric",
@@ -221,7 +227,7 @@ impl Kind {
     /// The TypeScript classes its taken type names.
     fn taken_names(self) -> &'static [&'static str] {
         match self {
-            Kind::TopicPartitions | Kind::TopicPartition => &["TopicPartition"],
+            Kind::TopicPartitions | Kind::TopicPartitionList | Kind::TopicPartition => &["TopicPartition"],
             Kind::TopicPartitionLongMap => &["TopicPartitionMap"],
             Kind::KafkaMetric => &["KafkaMetric"],
             Kind::Headers => &["Header", "Headers"],
@@ -607,6 +613,10 @@ struct JsForm {
     message: Message,
     typed: Vec<JsParam>,
     fields: Vec<(String, String)>,
+    /// What the form leaves the payload getters returning, for its doc
+    /// (root CLAUDE.md, JavaScript Binding Conventions, Documentation, Q64:
+    /// a comment states the values Java's shorter overloads pass).
+    gives: String,
 }
 
 /// A payload getter: Java's name, the field it reads, its kind and what it
@@ -645,6 +655,8 @@ struct JsPayload {
     to_string: Option<String>,
     left_out_members: Vec<String>,
     core_missing: Vec<String>,
+    /// The FFI has a view of the class (`CORE_READS`).
+    core_view: bool,
     java_string: bool,
     java_double: bool,
 }
@@ -710,7 +722,13 @@ fn js_form(fqn: &str, form: &PyForm) -> Res<Option<JsForm>> {
         anyhow::bail!("javascript errors: `{fqn}({})` has the message `{m}`", form.params.join(", "))
     };
     let typed = form.params.iter().map(|p| plain_param(p)).collect();
-    Ok(Some(JsForm { params: form.params.clone(), message, typed, fields: Vec::new() }))
+    Ok(Some(JsForm {
+        params: form.params.clone(),
+        message,
+        typed,
+        fields: Vec::new(),
+        gives: String::new(),
+    }))
 }
 
 /// A `message` or `cause` parameter.
@@ -829,6 +847,12 @@ fn js_translate(e: &Expr, env: &JsEnv) -> Res<JsVal> {
                 // Each copy dereferences its argument: Java's
                 // NullPointerException is `TypeError` naming it. The kind
                 // that took the argument already made the copy.
+                (["Set", "copyOf"], [x]) if x.ty.as_deref().is_some_and(|t| t.contains("TopicPartition")) => JsVal {
+                    expr: format!("P.topicPartitionSetCopyOf({}, {})", x.expr, js_str(&param_of(x))),
+                    ty: Some("Set".into()),
+                    text: None,
+                    konst: false,
+                },
                 (["Set", "copyOf"] | ["Collections", "unmodifiableSet"], [x]) => JsVal {
                     expr: format!("P.nonNull({}, {})", x.expr, js_str(&param_of(x))),
                     ty: Some("Set".into()),
@@ -1175,7 +1199,7 @@ fn payload_forms(g: &Graph, info: &ClassInfo) -> Res<(Vec<JsForm>, Vec<String>, 
         }
         let params: Vec<String> = typed.iter().map(|p| p.name.clone()).collect();
         if !forms.iter().any(|x| x.params == params) {
-            forms.push(JsForm { params, message, typed, fields });
+            forms.push(JsForm { params, message, typed, fields, gives: String::new() });
         }
     }
     // The names in Java's order (merge_order over the Python forms), as
@@ -1203,6 +1227,8 @@ fn payload_forms(g: &Graph, info: &ClassInfo) -> Res<(Vec<JsForm>, Vec<String>, 
         }
     }
     let core = CORE_READS.iter().find(|r| r.0 == fqn);
+    payload.core_view = core.is_some();
+    let mut unread: BTreeSet<String> = BTreeSet::new();
     for (field, kind) in &chain {
         let read = core.is_some_and(|r| r.4.iter().any(|(f, _, _)| f == field));
         let default = match CORE_DEFAULTS.iter().find(|(c, f, _, _)| *c == fqn && f == field) {
@@ -1216,6 +1242,7 @@ fn payload_forms(g: &Graph, info: &ClassInfo) -> Res<(Vec<JsForm>, Vec<String>, 
                 .map(|(_, _, _, w)| (*w).to_string())
                 .unwrap_or_else(|| format!("`{}`, Java's default", kind.java_default()));
             payload.core_missing.push(format!("`{field}` (it is {why})"));
+            unread.insert(field.clone());
         }
         payload.chain_fields.push((field.clone(), *kind, default));
     }
@@ -1230,7 +1257,9 @@ fn payload_forms(g: &Graph, info: &ClassInfo) -> Res<(Vec<JsForm>, Vec<String>, 
                     Some(kind) => {
                         let attr = attr_name(f);
                         let evidenced = model.params.iter().any(|q| q.evidenced && attr == format!("_{}", q.name));
-                        let nullable = kind.reference() && (evidenced || field_nullable(&model, &attr, &fty));
+                        // A field the core cannot give is null in an error the core reports.
+                        let nullable = kind.reference()
+                            && (evidenced || field_nullable(&model, &attr, &fty) || unread.contains(f));
                         payload.getters.push(JsGetter::Field {
                             name: gt.name.clone(),
                             field: f.clone(),
@@ -1260,6 +1289,28 @@ fn payload_forms(g: &Graph, info: &ClassInfo) -> Res<(Vec<JsForm>, Vec<String>, 
     }
     if let Some(expr) = &info.java.to_string {
         payload.to_string = Some(expr.clone());
+    }
+    // Each form's constant fields, as what their getters return.
+    for form in &mut forms {
+        let mut gives = Vec::new();
+        for (field, value) in &form.fields {
+            if value.contains("v.") {
+                continue;
+            }
+            let getter = payload.getters.iter().find_map(|gt| match gt {
+                JsGetter::Field { name, field: f, .. } if f == field => Some(name.clone()),
+                _ => None,
+            });
+            let Some(getter) = getter else { continue };
+            let text = match value.as_str() {
+                "new Set<string>()" => "an empty set".to_string(),
+                other => format!("`{other}`"),
+            };
+            gives.push(format!("`{getter}()` returns {text}"));
+        }
+        if !gives.is_empty() {
+            form.gives = format!(" With it, {}.", and_list(&gives));
+        }
     }
     Ok((forms, left_out, payload))
 }
@@ -1298,9 +1349,14 @@ fn form_sigs(form: &JsForm, bare_cause: &str) -> Vec<Sig> {
     };
     let java_sig: Vec<String> = form.typed.iter().map(java).collect();
     let summary = if java_sig.is_empty() {
-        format!("Java's no-argument constructor.{}", message_doc(&form.message))
+        format!("Java's no-argument constructor.{}{}", message_doc(&form.message), form.gives)
     } else {
-        format!("Java's `({})` constructor.{}", java_sig.join(", "), message_doc(&form.message))
+        format!(
+            "Java's `({})` constructor.{}{}",
+            java_sig.join(", "),
+            message_doc(&form.message),
+            form.gives
+        )
     };
     let field = |p: &JsParam| match p.name.as_str() {
         "message" => (
@@ -1781,11 +1837,19 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
         if !p.core_missing.is_empty() {
             push_note(
                 &mut text,
-                &format!(
-                    "An error the core reports has no payload for {}: the FFI's view of the class has no accessor \
-                     for it.",
-                    and_list(&p.core_missing)
-                ),
+                &if p.core_view {
+                    format!(
+                        "An error the core reports has no payload for {} *(deviation: Java's error carries it. Why: \
+                         the C API's view of the class has no accessor for it. Goes when: the view exposes it)*.",
+                        and_list(&p.core_missing)
+                    )
+                } else {
+                    format!(
+                        "An error the core reports has no payload for {} *(deviation: Java's error carries it. Why: \
+                         the C API has no view of the class at all. Goes when: the C FFI gives a view of it)*.",
+                        and_list(&p.core_missing)
+                    )
+                },
             );
         }
     }

@@ -839,9 +839,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (`native/error_payload.c`, generated from the table in
   `rust/xtask/src/error_hierarchy/js.rs`), and `create` runs the class's
   constructors with a private token so each class sets its fields; a field
-  the view has no accessor for keeps its default (`QuotaViolationError`'s
-  `metric()` is null; `CorrelationIdMismatchError`'s ids are `-1`, as
-  Python's), listed in its module's header comment. The public types a
+  the core cannot give keeps its default, listed in its module's header
+  comment: `QuotaViolationError`'s `metric()` is null, so typed
+  `KafkaMetric | null` *(deviation: Java's error carries the metric. Why: the
+  C API's view of the class gives the metric's name only. Goes when: the
+  view exposes the metric)*, and `CorrelationIdMismatchError`'s ids are
+  `-1`, as Python's *(deviation: Java's error carries them. Why: the class is
+  in `common.requests`, not a supported API, so the C API has no view of it.
+  Goes when: the C FFI gives a view of it)*. A form's doc says what Java's
+  shorter forms leave the getters returning (Q64: "`groupId()` returns
+  `null`"). The public types a
   payload reaches are translated, as Python's Scope translates them (root
   conventions, Scope, Q30: only `MockProducer` and `KafkaMetric` keep
   untranslated types): `TimestampType` (`common/record`, an enum whose Java

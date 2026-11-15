@@ -17,7 +17,8 @@
 // `cargo xtask check-generated` checks it is up to date.
 //
 // An error the core reports has no payload for `metric` (it is `null`, Java's
-// default): the FFI's view of the class has no accessor for it.
+// default) *(deviation: Java's error carries it. Why: the C API's view of the
+// class has no accessor for it. Goes when: the view exposes it)*.
 
 import { javaDoubleString, javaString } from '../../internal/java_string';
 import * as P from '../../internal/payload';
@@ -82,9 +83,9 @@ export class QuotaViolationError extends KafkaError {
    * @returns Java's `metric`
    * @throws `TypeError` when it is given an argument: it only reads
    */
-  metric(): KafkaMetric {
+  metric(): KafkaMetric | null {
     P.readOnly('metric', arguments.length);
-    return this.#metric as KafkaMetric;
+    return this.#metric;
   }
 
   /**

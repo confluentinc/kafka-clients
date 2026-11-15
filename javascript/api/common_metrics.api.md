@@ -42,7 +42,7 @@ export class QuotaViolationError extends KafkaError {
         name?: never;
     });
     bound(): number;
-    metric(): KafkaMetric;
+    metric(): KafkaMetric | null;
     toString(): string;
     value(): number;
 }

@@ -46,14 +46,15 @@ export class ThrottlingQuotaExceededError extends RetriableError {
   static override readonly _ffiId: number = 89;
 
   /**
-   * Java's `(String message)` constructor.
+   * Java's `(String message)` constructor. With it, `throttleTimeMs()` returns
+   * `0`.
    *
    * @param options - the message
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor. With it, `throttleTimeMs()` returns
+   * `0`. Given the message on its own, the same as `{ message }`.
    *
    * @param message - the message; `null` reads as `''`
    */
