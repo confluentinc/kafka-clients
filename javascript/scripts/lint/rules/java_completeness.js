@@ -29,9 +29,15 @@
 //     "Generated files");
 //   - any class: not a method that takes a `ConfigDef` (the key-name
 //     classes' `addClientSslSupport`, `addClientSaslSupport`);
-//   - an error class: nothing, its members being javascript/CLAUDE.md
-//     "Errors"'s fixed fields (Java's constructor forms and payload getters
-//     are not generated);
+//   - an error class: its payload (root CLAUDE.md, JavaScript Binding
+//     Conventions, Errors, Q39): every public method the class declares (the
+//     payload getters, a static factory, a `toString()` override) but Java's
+//     `fillInStackTrace()`, a JVM stack-trace override with no JavaScript
+//     counterpart, and every public constructor that takes a payload, as a
+//     constructor signature whose one parameter is an options object of
+//     Java's parameter names (a `String` may be the `message`, a `Throwable`
+//     is the `cause`); its message and cause forms are checked by the error
+//     tests;
 //   - a function type (`Callback`): nothing;
 //   - an enum: also the members `java.lang.Enum` gives it (`values`,
 //     `valueOf`, `name`, `ordinal`), which every translated enum has
@@ -53,6 +59,83 @@ const { ENUM_IMPLICIT, PLACEHOLDERS, javaIndexOf, mappedItems, itemMembers, java
 /** The instance method JavaScript adds to every enum (root CLAUDE.md, JavaScript Binding Conventions, Class family). */
 const ENUM_TO_JSON = 'toJSON';
 
+/** The Java methods of an error class no JavaScript error translates: JVM stack-trace overrides. */
+const ERROR_JVM_ONLY = new Set(['fillInStackTrace']);
+
+/** Whether Java parameter type `t` is a cause (a Throwable, whatever its class). */
+function throwableType(t) {
+  return t === 'Throwable' || /Exception$/.test(t);
+}
+
+/**
+ * The option names of each constructor signature of class `node`: the keys of
+ * its one parameter's object type, or null for a signature of another shape.
+ */
+function constructorOptions(ts, node) {
+  const out = [];
+  for (const member of node.members || []) {
+    if (!ts.isConstructorDeclaration(member) || member.body !== undefined) continue;
+    const [p, ...rest] = member.parameters;
+    if (p === undefined || rest.length > 0 || p.type === undefined || !ts.isTypeLiteralNode(p.type)) continue;
+    out.push(
+      p.type.members
+        .filter((e) => e.name && (ts.isIdentifier(e.name) || ts.isStringLiteral(e.name)))
+        .filter((e) => !(e.type && e.type.kind === ts.SyntaxKind.NeverKeyword))
+        .map((e) => e.name.text),
+    );
+  }
+  return out;
+}
+
+/** Whether options `keys` translate Java constructor `o`: one key per parameter, by Java's name, a String maybe `message`, a Throwable `cause`. */
+function translatesConstructor(o, keys) {
+  if (keys.length !== o.params.length) return false;
+  return o.params.every((t, i) => {
+    const name = o.param_names[i];
+    if (throwableType(t)) return keys.includes('cause');
+    if (t === 'String') return keys.includes(name) || keys.includes('message');
+    return keys.includes(name);
+  });
+}
+
+/** The findings of error class `item` (Java `cls`): its payload members and payload constructors. */
+function errorFindings(ctx, ts, index, item, cls, findings) {
+  const className = cls.path[cls.path.length - 1];
+  const covered = new Set();
+  for (const m of itemMembers(ts, item)) {
+    const jm = javaMember(index, cls, m);
+    if (jm && jm.owner === cls) covered.add(jm.name);
+  }
+  let checked = 0;
+  const wanted = [];
+  for (const o of cls.overloads) {
+    if (o.visibility !== 'public' || o.deprecated || o.name === className || ERROR_JVM_ONLY.has(o.name)) continue;
+    if (!wanted.includes(o.name)) wanted.push(o.name);
+  }
+  for (const name of wanted) {
+    checked += 1;
+    if (!covered.has(name)) {
+      findings.push({ kind: 'missing', subject: `${shortName(cls)}#${name}`, at: atNode(ctx, item.node), message: `${item.name} does not translate it` });
+    }
+  }
+  if (cls.abstract || item.kind !== 'class') return checked;
+  const options = constructorOptions(ts, item.node);
+  for (const o of cls.overloads) {
+    if (o.name !== className || o.visibility !== 'public' || o.deprecated) continue;
+    if (o.params.every((t) => t === 'String' || throwableType(t))) continue;
+    checked += 1;
+    if (!options.some((keys) => translatesConstructor(o, keys))) {
+      findings.push({
+        kind: 'missing',
+        subject: `${shortName(cls)}#${className}(${o.param_types.join(', ')})`,
+        at: atNode(ctx, item.node),
+        message: `${item.name} has no constructor taking { ${o.param_names.join(', ')} }`,
+      });
+    }
+  }
+  return checked;
+}
+
 module.exports = {
   name: 'check-java-completeness',
   kinds: ['missing'],
@@ -66,7 +149,11 @@ module.exports = {
     const findings = [];
     let checked = 0;
     for (const { item, java, isError } of mappedItems(ctx)) {
-      if (item.tags.jsOnly || isError || java === null || !java.cls) continue;
+      if (item.tags.jsOnly || java === null || !java.cls) continue;
+      if (isError) {
+        checked += errorFindings(ctx, ts, index, item, java.cls, findings);
+        continue;
+      }
       const cls = java.cls;
       if (functionType(cls)) continue;
       // A placeholder of a type the client does not translate has no members.

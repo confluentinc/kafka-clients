@@ -20,7 +20,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
-const { CLASSES, LIB, javaIndex } = require('./_java_fixture');
+const { CLASSES, LIB, javaIndex, method } = require('./_java_fixture');
 
 const RULE = 'check-java-completeness';
 
@@ -94,6 +94,53 @@ test('a member, the constructor and a constant left out are each a finding', () 
     'clients.producer.Rec#UNKNOWN: Rec does not translate it',
     'clients.producer.Rec#Rec: Rec has no public constructor',
     'clients.producer.Rec#getSize: Rec does not translate it',
+  ]);
+});
+
+// FooException with a payload: Java's (String message, Set<String> topics)
+// and (Set<String> topics) constructors, its getter topics(), and
+// fillInStackTrace(), a JVM override no error translates.
+const PAYLOAD_INDEX = javaIndex(
+  CLASSES.map((c) =>
+    c.fqn.endsWith('.FooException')
+      ? {
+        ...c,
+        overloads: [
+          { ...method('FooException', ['String', 'Set']), param_names: ['message', 'topics'], param_types: ['String', 'Set<String>'] },
+          { ...method('FooException', ['Set']), param_names: ['topics'], param_types: ['Set<String>'] },
+          method('FooException', ['String']),
+          method('topics', [], { return_type: 'Set<String>' }),
+          method('fillInStackTrace', [], { return_type: 'Throwable' }),
+        ],
+      }
+      : c,
+  ),
+);
+const PAYLOAD_ERROR = `export class FooError extends Error {
+  declare readonly cause: unknown;
+  constructor(options: { message: string | null; topics: Iterable<string>; name?: never });
+  constructor(options: { topics: Iterable<string>; name?: never });
+  constructor(message: string);
+  constructor(...args: unknown[]) { super(String(args[0])); }
+  topics(): Set<string> { return new Set(); }
+}
+`;
+
+test("an error class is asked for its payload getters and its payload constructors (Q39)", () => {
+  const r = lint(fixture({ 'java-index.json': PAYLOAD_INDEX, 'src/common/errors/foo_error.ts': PAYLOAD_ERROR }), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  // The 24 of the base fixture, topics(), and the two payload constructors.
+  assert.ok(r.out.includes('✅ check-java-completeness: 27 item(s) checked'), r.text);
+  const missing = PAYLOAD_ERROR.replace('  topics(): Set<string> { return new Set(); }\n', '')
+    .replace('  constructor(options: { topics: Iterable<string>; name?: never });\n', '');
+  assert.deepEqual(findings(lint(fixture({ 'java-index.json': PAYLOAD_INDEX, 'src/common/errors/foo_error.ts': missing }), [RULE])), [
+    'common.errors.FooException#topics: FooError does not translate it',
+    'common.errors.FooException#FooException(Set<String>): FooError has no constructor taking { topics }',
+  ]);
+  // A form of other keys, or a key closed with never, is no translation of it.
+  const wrong = PAYLOAD_ERROR.replace('constructor(options: { topics: Iterable<string>; name?: never });', 'constructor(options: { names: Iterable<string>; topics?: never });');
+  assert.deepEqual(findings(lint(fixture({ 'java-index.json': PAYLOAD_INDEX, 'src/common/errors/foo_error.ts': wrong }), [RULE])), [
+    'common.errors.FooException#FooException(Set<String>): FooError has no constructor taking { topics }',
   ]);
 });
 
