@@ -26,6 +26,7 @@ const assert = require('node:assert/strict');
 
 const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { internalHeaders } = require('../../../_internal');
 
 /** @param {string} s */
 const bytes = (s) => Buffer.from(s, 'utf8');
@@ -141,8 +142,7 @@ test('testReadOnly', () => {
   const headers = new Headers();
   headers.add(header('key', 'value'));
   const before = headers[Symbol.iterator]();
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  headers.internalSetReadOnly();
+  internalHeaders(headers).internalSetReadOnly();
   /** @param {unknown} e */
   const closed = (e) => {
     assert.ok(e instanceof IllegalStateError);
@@ -178,8 +178,7 @@ test('testHeaders', () => {
 test('testNew', () => {
   const headers = new Headers();
   headers.add(header('key', 'value'));
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  headers.internalSetReadOnly();
+  internalHeaders(headers).internalSetReadOnly();
   const newHeaders = new Headers(headers);
   newHeaders.add(header('key', 'value2'));
   // Ensure existing headers are not modified
@@ -236,8 +235,7 @@ test("the constructor takes Java's three forms, as {headers} or bare; null is no
   });
   // A copy of a read-only Headers is writable.
   const sealed = new Headers([h]);
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  sealed.internalSetReadOnly();
+  internalHeaders(sealed).internalSetReadOnly();
   new Headers({ headers: sealed }).add(h);
   for (const [args, message] of [
     [[undefined], 'a header must not be undefined. Pass a Header, or leave it out'],
@@ -309,8 +307,7 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
     message: 'add() takes one of (header), (key, value); got 2 arguments, not one object of named parameters',
   });
   // Java's add(key, value) builds the header before the read-only check.
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  headers.internalSetReadOnly();
+  internalHeaders(headers).internalSetReadOnly();
   // @ts-expect-error a null key: the header constructor throws TypeError before the read-only check
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
 });
@@ -347,8 +344,7 @@ test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () 
   });
   // (deviation) Java's remove checks canWrite() before checkKey(): on read-only
   // headers a null key is the FFI's error, which checks the NULL argument first.
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  headers.internalSetReadOnly();
+  internalHeaders(headers).internalSetReadOnly();
   assert.throws(
     // @ts-expect-error a null key: remove throws IllegalArgumentError with Java's message
     () => headers.remove(null),
@@ -390,8 +386,7 @@ test("toString is RecordHeaders' and RecordHeader's; JSON writes the array", () 
     String(headers),
     'RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), RecordHeader(key = n, value = null)], isReadOnly = false)',
   );
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  headers.internalSetReadOnly();
+  internalHeaders(headers).internalSetReadOnly();
   assert.equal(String(new Headers()), 'RecordHeaders(headers = [], isReadOnly = false)');
   assert.match(String(headers), /isReadOnly = true\)$/);
   assert.equal(JSON.stringify(new Headers([new Header({ key: 'n', value: null })])), '[{"key":"n","value":null}]');
@@ -412,8 +407,7 @@ test("equals and hashCode are RecordHeaders'", () => {
   assert.ok(headers.equals(same));
   assert.equal(headers.hashCode(), same.hashCode());
   // The read-only state is not compared.
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  same.internalSetReadOnly();
+  internalHeaders(same).internalSetReadOnly();
   assert.throws(() => same.add(h1), { name: 'IllegalStateError' });
   assert.ok(headers.equals({ o: same }));
   // The order counts.
@@ -484,8 +478,7 @@ test('a Header read from read-only headers is a view of the native header, with 
   const headers = new Headers();
   headers.add({ key: 'trace', value: bytes('t1') });
   headers.add({ key: 'span', value: null });
-  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
-  headers.internalSetReadOnly();
+  internalHeaders(headers).internalSetReadOnly();
   const { result: read, delta } = counted(() => ({
     last: headers.lastHeader('trace'),
     array: headers.toArray(),

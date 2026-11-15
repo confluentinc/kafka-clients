@@ -24,21 +24,19 @@ const assert = require('node:assert/strict');
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 const { TopicPartition } = require('@confluentinc/kafka-javascript/common');
 const { RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
+const { createRecordMetadata } = require('../../_internal');
 
 const FIELDS = ['topic', 'partition', 'offset', 'hasOffset', 'timestamp', 'hasTimestamp', 'serializedKeySize', 'serializedValueSize'];
 
+/** @typedef {import('../../_internal').RecordMetadataFields} MetadataFields */
+
 /**
- * The fields the library's own factory takes, as the native layer reads them.
+ * Metadata from the library's own factory (test/_internal.js).
  *
- * @typedef {{ topic: string, partition: number, hasOffset: boolean, offset: bigint, hasTimestamp: boolean, timestamp: bigint, serializedKeySize: number, serializedValueSize: number }} MetadataFields
+ * @param {Omit<MetadataFields, 'hasTimestamp'> & { hasTimestamp?: boolean }} fields
  */
-
-// The library's own factory, which the published types leave out.
-const Internal = /** @type {typeof RecordMetadata & { internalCreate(fields: MetadataFields): RecordMetadata }} */ (RecordMetadata);
-
-/** @param {Omit<MetadataFields, 'hasTimestamp'> & { hasTimestamp?: boolean }} fields */
 function metadataOf(fields) {
-  return Internal.internalCreate({ hasTimestamp: true, ...fields });
+  return createRecordMetadata({ hasTimestamp: true, ...fields });
 }
 
 test('testConstructionWithMissingBatchIndex', () => {

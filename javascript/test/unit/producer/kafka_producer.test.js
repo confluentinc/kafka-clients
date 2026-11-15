@@ -29,6 +29,7 @@ const errors = require('@confluentinc/kafka-javascript/common/errors');
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
+const { createFuture } = require('../../_internal');
 
 /** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
 /** @typedef {import('@confluentinc/kafka-javascript/common/header').Headers} Headers */
@@ -342,17 +343,17 @@ test('a hand-over failure rejects send() and never reaches the callback', async 
 });
 
 /**
- * A future with the library's own completion, which the published types leave out.
+ * A future with the library's own completion (test/_internal.js).
  *
  * @template T
- * @typedef {KafkaFuture<T> & { internalComplete(value: T, error: unknown): boolean }} InternalFuture
+ * @typedef {import('../../_internal').InternalFuture<T>} InternalFuture
  */
 
 // The constructor is TypeScript-private and the factory @internal (left out
 // of the declarations, test/typing); there is no run-time guard.
 test('KafkaFuture is made by the client, through its library-only factory', () => {
-  const factory = /** @type {typeof KafkaFuture & { internalCreate<T>(record: boolean): InternalFuture<T> }} */ (KafkaFuture);
-  const future = factory.internalCreate(true);
+  /** @type {InternalFuture<string>} */
+  const future = createFuture(true);
   assert.ok(future instanceof KafkaFuture);
   assert.equal(future.isDone(), false);
   future.internalComplete('v', null);
@@ -469,8 +470,12 @@ test("close checks its timeout, open or closed: the closed state is the core's",
     { timeout: Temporal.Duration.from({ seconds: 1 }) },
     Temporal.Duration.from({ seconds: 1 }),
   ]) {
-    // @ts-expect-error published type narrower than the run time: a value of the union of close's forms, which no single overload takes
-    await new KafkaProducer({ configs: UNREACHABLE }).close(timeout);
+    // A row of the union of close's forms, valid each, for which tsc picks no
+    // single overload: the call goes through the implementation's parameter.
+    const producer = /** @type {{ close(timeout: unknown): Promise<void> }} */ (
+      /** @type {unknown} */ (new KafkaProducer({ configs: UNREACHABLE }))
+    );
+    await producer.close(timeout);
   }
 });
 
@@ -573,8 +578,10 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
     });
     // The record on its own, named, and with Java's null callback.
     for (const args of [record, { record }, { record, callback: null }]) {
-      // @ts-expect-error published type narrower than the run time: a value of the union of send's forms, which no single overload takes
-      const future = await producer.send(args);
+      // A row of the union of send's forms, valid each, for which tsc picks no
+      // single overload: the call goes through the implementation's parameter.
+      const sender = /** @type {{ send(args: unknown): ReturnType<typeof producer.send> }} */ (/** @type {unknown} */ (producer));
+      const future = await sender.send(args);
       await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-forms') });
     }
     // The producer is still open after the rejected calls.
@@ -609,7 +616,7 @@ test("flush() takes no argument: Java's flush(), never 1.x's flush(timeout, call
       name: 'TypeError',
       message: 'flush() takes no argument: leave it out rather than pass undefined',
     });
-    // @ts-expect-error published type narrower than the run time: flush({}) is the options form with no keys, flush()
+    // @ts-expect-error an argument to flush(), whose one form takes none: the run time reads an empty options object as flush()
     await producer.flush({});
   } finally {
     await producer.close();
@@ -688,8 +695,10 @@ test("a closed producer checks a send's record and callback before the core repo
 test("the constructor takes Java's {configs} or the configs on their own, a plain object", async () => {
   // The configs on their own and named build the same producer.
   for (const args of [UNREACHABLE, { configs: UNREACHABLE }]) {
-    // @ts-expect-error published type narrower than the run time: a value of the union of the constructor's forms, which no single overload takes
-    const producer = new KafkaProducer(args);
+    // A row of the union of the constructor's forms, valid each, for which tsc
+    // picks no single overload: the call goes through the implementation's parameter.
+    const Producer = /** @type {new (args: unknown) => InstanceType<typeof KafkaProducer>} */ (/** @type {unknown} */ (KafkaProducer));
+    const producer = new Producer(args);
     const future = await producer.send(new ProducerRecord({ topic: 'unit-ctor', value: Buffer.from('v') }));
     await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-ctor') });
     await producer.close();
@@ -1900,7 +1909,7 @@ test("a serializer argument wins over its config key, which is then ignored; a n
     return { serialize: () => null };
   };
   const p1 = new KafkaProducer({
-    // @ts-expect-error published type narrower than the run time: a serializer argument makes its config key ignored, whatever its value
+    // @ts-expect-error a string for a serde config key, which its type refuses: the serializer argument wins and the run time ignores the key
     configs: { ...UNREACHABLE, 'key.serializer': make, 'value.serializer': 'not even a function' },
     keySerializer: { serialize: () => null },
     valueSerializer: { serialize: () => null },

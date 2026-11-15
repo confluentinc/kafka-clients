@@ -218,7 +218,7 @@ test("the core checks the values, with Java's messages naming the key", () => {
 });
 
 test('an unknown key, a kafkaJS block included, reaches the core, which builds the producer', async () => {
-  // @ts-expect-error published type narrower than the run time: a config value that is an object, a 1.x kafkaJS block, is written as text
+  // @ts-expect-error an object for a config value, which ConfigValue refuses: the run time writes it as text, [object Object] (Q52)
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': 'localhost:1', 'not.a.key': 'x', kafkaJS: { brokers: ['localhost:9092'] } },
   });

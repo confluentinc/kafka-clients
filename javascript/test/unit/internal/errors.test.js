@@ -53,7 +53,13 @@ const {
   errorFfiId,
   fromNative,
 } = require('../../../dist/internal/errors');
-const { create, ownFfiId, ownForms } = require('../../../dist/internal/throwable');
+const { create: untypedCreate, ownFfiId, ownForms } = require('../../../dist/internal/throwable');
+
+// src/internal/throwable.ts's signature, which the compiled JavaScript does not carry.
+const create =
+  /** @type {<T extends Error>(cls: abstract new (...args: never[]) => T, message: string, cause?: unknown, id?: number, payload?: Readonly<Record<string, unknown>>) => T} */ (
+    untypedCreate
+  );
 
 const { javaClass } = require('../../_java_source');
 
@@ -239,7 +245,6 @@ function javaPayloadGetters(fqn) {
  * @returns {Error}
  */
 function instance(cls) {
-  // @ts-expect-error published type narrower than the run time: dist/internal/throwable.js drops the optional marks of create's cause, id and payload
   return create(cls, 'm');
 }
 
@@ -428,7 +433,6 @@ test('an error has no public field but name, message and cause: classify with in
       if (!untranslated.has(m)) assert.ok(payload.includes(m), `${cls.name}.${m}`);
     }
   }
-  // @ts-expect-error published type narrower than the run time: dist/internal/throwable.js drops the optional marks of create's id and payload
   const withCause = create(KafkaError, 'm', null);
   assert.deepEqual(Object.getOwnPropertyNames(withCause).sort(), ['cause', 'message', 'name', 'stack']);
 });
