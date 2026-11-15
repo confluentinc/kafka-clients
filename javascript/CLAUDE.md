@@ -65,7 +65,8 @@ These decide every question, in this order:
      reads these keys. Goes when: never.
    - **A NUL byte in a string or bytes that cross as a C string** (the topic,
      the header keys, the config keys and values: `js_string_dup` and
-     `js_bytes_cstring` in `native/record.c`), a `TypeError` "... without null
+     `js_bytes_cstring` in `native/record.c`, which `native/headers.c` uses for
+   the header keys), a `TypeError` "... without null
      bytes". Why: every C reader stops at the first NUL, so the value would be
      truncated silently at the ABI. Goes when: these values cross the ABI with
      a length, as `kafka_Bytes_t` does.
@@ -208,8 +209,9 @@ These decide every question, in this order:
    the JS thread: the FFI borrows the bytes only until that completion
    (`rust/src/ffi/producer/mod.rs`, module docs), and the core copies them
    when it appends the record. A record that can't be built drops them at
-   once. Header values are handed over during the call, in which the core
-   copies them: the C API keeps no borrowed header value. The user-facing
+   once. Header values are copied by the core when they are added to a
+   `Headers` (the C API keeps no borrowed header value), and the record's
+   `RecordHeaders` is copied into the native record during the send. The user-facing
    contract, documented on `send`, in its compiled declaration and in the
    README, is the root conventions' text: "The client reads a `Buffer` or
    `Uint8Array` key or value after `send()` returns. Don't write to it,
@@ -359,35 +361,73 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (`src/internal/read_only_set.ts`) whose `add`, `delete` and `clear` throw
   `UnsupportedOperationError`.
 - Headers are Java's `Header` and `Headers` (`common/header`), as the Python
-  client's. The root conventions decide that `Headers` and `Header` wrap the
-  FFI's `RecordHeaders` and `RecordHeader` (Serialization, Q31); that is not
-  built yet, and both are plain classes today. Whether a record also takes
-  headers as plain `[key, value]` pairs is not decided yet in the root
-  conventions. `Header` keeps Java's methods, `key()` and
-  `value()`, over private fields (`new Header({ key, value })`, the
-  constructor of Java's internal `RecordHeader`), its value bytes, taken as a
-  `Uint8Array` and given back as a `Buffer` over the same memory (root
-  conventions, Types), so a string value throws `TypeError` asking to encode
-  it, and a `toJSON()`; `Headers` keeps Java's methods, in Java's order
-  (`add(header)` / `add({ key, value })`, `remove(key)`, `lastHeader(key)`,
-  `headers(key)`, an iterable read when iterated, `toArray()`,
-  `[Symbol.iterator]`, Java's `Iterable`), with Java's internal
-  `RecordHeaders`' three constructors as one `headers` parameter (`()`,
-  `(Header[])`, `(Iterable<Header>)`), its `toString()`, and a `toJSON()`
-  writing its array. Where Java takes `Headers` or `Iterable<Header>`, a
-  `Headers` or an iterable of `Header` is taken, as Java takes them;
-  `ProducerRecord` copies what it is given into its own `Headers`, as Java's
-  `new RecordHeaders(headers)` (the `Header` objects kept), so a record with
-  no headers has an empty one, and a place Java keeps the given `Headers`
-  would keep it as it is. The library reads a header through
+  client's, over the FFI's `RecordHeader` and `RecordHeaders` (root
+  conventions, Serialization, Q31), each a private native handle
+  (`native/headers.c`): a type-tagged object `napi_wrap`ed over a box whose
+  finalizer drops its reference, so the handle is destroyed once, on the JS
+  thread, when its last reference goes. `Headers`' methods call the addon, so
+  the core holds the headers and refuses a change once they are read-only,
+  with Java's text; the core's own errors are kept for a null header, key or
+  header key ("Header cannot be null.", "key cannot be null.", "Null header
+  keys are not permitted"). An app's `Headers` makes its own `RecordHeaders`
+  (`RecordHeaders_new`, or the `with_header_slice` / `with_header_iter` /
+  `with_record_headers` forms for Java's constructors) on its first `add`:
+  until then it reads one shared empty `RecordHeaders` that nothing changes,
+  and sealing it gives it one shared empty read-only one, so a record sent
+  with no headers makes no native object for them. An app's `Header` owns a
+  `RecordHeader` made with `RecordHeader_new_err`, which copies the key and
+  the value; `add(header)` and the constructors store copies, so the app's
+  `Header` stays its own. The key is read with `kafka_common_header_Header_key`
+  and the value with `kafka_common_header_Header_value`, once, on first use: a
+  `Buffer` over the native bytes (`napi_create_external_buffer`, its finalizer
+  holding a reference on the header box, so the `Buffer` keeps the header
+  alive), or a copy where the runtime refuses external buffers, or `null`.
+  **Option 1**, decided by the owner on 2026-11-15
+  (`design/current/javascript-producer/DECISIONS.md`, entry 21), while the
+  root row ("how a `Header` from a `Headers` that can still change stays
+  valid") is still parked: while a `Headers` can still change,
+  `lastHeader()`, `headers(key)`, `toArray()` and iteration hand out the
+  binding's own copy of each header, a new owned `RecordHeader` made from its
+  key and value, which stays valid when the `Headers` changes, as Java's does;
+  once it is read-only they hand out a `Header` over the FFI's borrowed view,
+  with no copy, which holds a reference on its `Headers`' box. The addon
+  decides which from `RecordHeaders_is_read_only`. A key crosses as
+  `encodeLikeJava`'s bytes, so a lone surrogate reads back as `?` and a NUL is
+  refused when the header is made *(deviation: Java's `RecordHeader` keeps the
+  `String`. Why: the C API takes the key as a NUL-terminated UTF-8 string.
+  Goes when: for the NUL, the key crosses with a length; the `?` stays, as the
+  core holds the key as UTF-8)*. Java's
+  `remove` checks the read-only state before the key, the FFI the key first:
+  for a key the core or the binding refuses, `remove` first asks read-only
+  headers to remove nothing, which the core refuses with its own error.
+  Whether a record also takes headers as plain `[key, value]` pairs is not
+  decided yet in the root conventions: `ProducerRecord` takes `Header`
+  objects only, as before. A consumed record's `Headers` (over
+  `kafka_consumer_ConsumerRecord_headers`) comes with the consumer.
+  `Header` keeps Java's methods, `key()` and `value()` (`new Header({ key,
+  value })`, the constructor of Java's internal `RecordHeader`), its value
+  bytes taken as a `Uint8Array` (root conventions, Types), so a string value
+  throws `TypeError` asking to encode it, and a `toJSON()`; `Headers` keeps
+  Java's methods, in Java's order (`add(header)` / `add({ key, value })`,
+  `remove(key)`, `lastHeader(key)`, `headers(key)`, an iterable read when
+  iterated, `toArray()`, `[Symbol.iterator]`, Java's `Iterable`), with Java's
+  internal `RecordHeaders`' three constructors as one `headers` parameter
+  (`()`, `(Header[])`, `(Iterable<Header>)`), its `toString()`, and a
+  `toJSON()` writing its array; `equals`, `hashCode` and `toString` are
+  computed from the accessors. Where Java takes `Headers` or
+  `Iterable<Header>`, a `Headers` or an iterable of `Header` is taken, as
+  Java takes them; `ProducerRecord` copies what it is given into its own
+  `Headers`, as Java's `new RecordHeaders(headers)`, so a record with no
+  headers has an empty one. The library reads a header through
   `Header.internalKeyOf` / `internalValueOf`, never through methods plain
   JavaScript may have reassigned on the instance. `send()` seals the
-  record's headers (`internalSetReadOnly`, Java's `setReadOnly`) after the
-  form and argument checks and before the hand-over; a later `add` or
-  `remove` throws `IllegalStateError` "RecordHeaders has been closed.". A null
-  header is Java's "Header cannot be null." (`TypeError`), a null key of
-  `remove` / `lastHeader` / `headers` Java's "key cannot be null."
-  (`IllegalArgumentError`).
+  record's headers (`internalSetReadOnly`, `RecordHeaders_set_read_only`,
+  Java's `setReadOnly`) once the serializers have run and the fields are
+  converted, and passes their handle to the native send, which hands it to
+  `ProducerRecordOptionsBuilder_set_headers`, which copies it into the native
+  record; a later `add` or `remove` throws the core's `IllegalStateError`
+  "RecordHeaders has been closed.". `headerStats()`, registered for the tests
+  only, counts the handles made and freed, the copies and the views.
 - Enums (root conventions, Class family): a class whose constants are frozen
   instances, with `java.lang.Enum`'s `name()` and `ordinal()`, static
   `values()` and `valueOf(name)` (exact; `IllegalArgumentError` "No enum
@@ -918,8 +958,8 @@ The layout is the root conventions' (Layout and modules).
   function; `callback_queue.c` is a client's notify hook, threadsafe
   function, drain, keep-alive and teardown (each client embeds a
   `CallbackQueue` and passes its own `__execute_callbacks`); `error.c`,
-  `record.c` (`ProducerRecord`, the borrowed key and value, and
-  headers), `producer.c` (the `KafkaProducer` and `MockProducer` handles,
+  `record.c` (`ProducerRecord`, the borrowed key and value), `headers.c`
+  (`Headers` and `Header` over `RecordHeaders` and `RecordHeader`), `producer.c` (the `KafkaProducer` and `MockProducer` handles,
   which share one native handle type).
 - `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
   per Java package (`clients` dropped), one public Java type per file,
