@@ -114,8 +114,7 @@ const N = 300;
       assert.equal(await future.get(1000), metadata);
       assert.equal(future.getNow(null), metadata);
       assert.equal(await future.toCompletionStage(), metadata);
-      // @ts-expect-error a number for a bigint future's valueIfAbsent, which Java's getNow(T) refuses: the run time returns what it is given
-      assert.equal(future.thenApply((m) => m.offset).getNow(-1), metadata.offset);
+      assert.equal(future.thenApply((m) => m.offset).getNow(-1n), metadata.offset);
       assert.equal(await KafkaFuture.allOf([future]).get(), null);
       // A record's future is never cancelled.
       assert.equal(future.cancel(true), false);

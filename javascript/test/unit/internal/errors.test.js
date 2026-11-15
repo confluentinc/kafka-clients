@@ -55,11 +55,8 @@ const {
 } = require('../../../dist/internal/errors');
 const { create: untypedCreate, ownFfiId, ownForms } = require('../../../dist/internal/throwable');
 
-// src/internal/throwable.ts's signature, which the compiled JavaScript does not carry.
-const create =
-  /** @type {<T extends Error>(cls: abstract new (...args: never[]) => T, message: string, cause?: unknown, id?: number, payload?: Readonly<Record<string, unknown>>) => T} */ (
-    untypedCreate
-  );
+// The compiled JavaScript carries no signature: create is typed by its source's.
+const create = /** @type {typeof import('../../../src/internal/throwable').create} */ (untypedCreate);
 
 const { javaClass } = require('../../_java_source');
 

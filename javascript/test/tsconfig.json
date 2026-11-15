@@ -14,19 +14,22 @@
 
 // The type check of the tests (`make typecheck-tests`, scripts/typecheck_tests.js;
 // root conventions, Tests, Q67, and Build, packaging and release, Q74): `tsc
-// --strict` over every file under test/, the JavaScript tests through
-// `checkJs`, as Jest runs them (jest.config.cjs). No file is excluded: the
-// rule linter's fixtures are strings inside the tests, not files of their own.
-// The package's own import paths (`@confluentinc/kafka-javascript/...`)
-// resolve, through package.json's exports, to the compiled declarations in
-// dist/, so it runs after `make build-ts`, as a user's code would type against
-// them. The compiler settings are the library's (tsconfig.json), with the
-// Jest globals beside Node's; `skipLibCheck` leaves the declarations of the
-// dependencies unchecked (tinypool's, which jest_runner.mjs imports, name the
-// DOM's Worker), and dist/'s are checked by the build that writes them.
-// `moduleDetection: force` reads each file as a module, as Node runs it: a
-// file that requires and exports nothing (test/jest_setup.js) has its own
-// scope, not the global one.
+// --strict` over every test file, under test/ and verifiable_clients/test/,
+// the JavaScript tests through `checkJs`, as Jest runs them (jest.config.cjs).
+// `include` names every extension of both directories, as the script checks;
+// a declaration file there is refused, since `skipLibCheck` skips it. No file
+// is excluded: the rule linter's fixtures are strings inside the tests, not
+// files of their own. The package's own import paths
+// (`@confluentinc/kafka-javascript/...`) resolve, through package.json's
+// exports, to the compiled declarations in dist/, so it runs after `make
+// build-ts`, as a user's code would type against them. The compiler settings
+// are the library's (tsconfig.json), with the Jest globals beside Node's;
+// `skipLibCheck` leaves the declarations unchecked: the dependencies'
+// (tinypool's, which jest_runner.mjs imports, name the DOM's Worker) and
+// dist/'s, which test/typing and the interface check (scripts/api_report.js)
+// compile as a consumer's, without it. `moduleDetection: force` reads each
+// file as a module, as Node runs it: a file that requires and exports nothing
+// (test/jest_setup.js) has its own scope, not the global one.
 {
   "compilerOptions": {
     "strict": true,
@@ -45,5 +48,18 @@
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["**/*.js", "**/*.mjs", "**/*.ts"]
+  "include": [
+    "**/*.js",
+    "**/*.mjs",
+    "**/*.cjs",
+    "**/*.ts",
+    "**/*.mts",
+    "**/*.cts",
+    "../verifiable_clients/test/**/*.js",
+    "../verifiable_clients/test/**/*.mjs",
+    "../verifiable_clients/test/**/*.cjs",
+    "../verifiable_clients/test/**/*.ts",
+    "../verifiable_clients/test/**/*.mts",
+    "../verifiable_clients/test/**/*.cts"
+  ]
 }

@@ -26,7 +26,7 @@
  *
  * @template T
  * @typedef {import('@confluentinc/kafka-javascript/common').KafkaFuture<T> & {
- *   internalComplete(value: T | null, error: unknown): boolean;
+ *   internalComplete(value: T, error: unknown): boolean;
  * }} InternalFuture
  */
 

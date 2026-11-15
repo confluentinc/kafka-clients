@@ -64,6 +64,7 @@ class Bucket {
     if (measurement > this.max) this.max = measurement;
   }
 
+  /** @returns {Record<string, string>} the window's values, as strings */
   rollover() {
     const record = {
       average: str(this.count === 0 ? 0 : this.total / this.count),
@@ -138,15 +139,18 @@ class SoakMetrics {
     return `${name}{${parts.join(',')}}`;
   }
 
+  /** @param {Record<string, string> | null} [tags] */
   incrCounter(name, incrval, tags = null) {
     const key = SoakMetrics.key(name, tags);
     this.counters.set(key, (this.counters.get(key) || 0) + incrval);
   }
 
+  /** @param {Record<string, string> | null} [tags] */
   counter(name, tags = null) {
     return this.counters.get(SoakMetrics.key(name, tags)) || 0;
   }
 
+  /** @param {Record<string, string> | null} [tags] */
   setGauge(name, value, tags = null) {
     const key = SoakMetrics.key(name, tags);
     let bucket = this.gauges.get(key);

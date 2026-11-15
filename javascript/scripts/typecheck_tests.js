@@ -16,26 +16,26 @@
 
 // The type check of the tests (`make typecheck-tests`; root conventions,
 // Tests, Q67, and Build, packaging and release, Q74): `tsc --strict` over
-// every file under test/, with test/tsconfig.json, the JavaScript tests
-// through `checkJs`. It fails on any finding in a file under test/, and on a
-// finding with no file (a configuration error).
+// every test file, those under test/ and the verifiable clients' under
+// verifiable_clients/test/ (TEST_DIRS), with test/tsconfig.json, the
+// JavaScript tests through `checkJs`. It fails on any finding in a test file,
+// and on a finding with no file (a configuration error). The file kinds it
+// checks are EXTENSIONS: the config's `include` must be the one these give
+// (`expectedInclude`), and a declaration file (`.d.ts`) in a test directory is
+// refused, since `skipLibCheck` would leave it unchecked.
 //
-// The compiler also reads the files the tests require from outside test/:
-// the rule linter (scripts/), the gRPC translation (grpc-server/) and the
-// compiled private modules (dist/internal/, which have no declarations). It
-// checks those too, since `checkJs` has no per-file exclusion, but they are
-// not tests: their own checks are the build (src/internal/*.ts compiles under
-// --strict) and the rule linter's tests, so their findings are counted here,
-// not failed on.
-//
-// `// @ts-expect-error <why>` marks only a misuse that tsc catches: a
-// deliberate wrong argument (a wrong type, a null the types forbid by the
-// nullability rule, an unknown key) by which a test reaches a run-time check,
-// so the directive proves tsc catches it for a TypeScript caller. A valid
-// call is never marked: one the published types should take is a type to fix,
-// and one reaching a library-only member goes through test/_internal.js.
-// `@ts-ignore` and `@ts-nocheck` are refused, and so is an `@ts-expect-error`
-// that gives no reason.
+// The compiler also reads the files the tests require from elsewhere: the
+// rule linter (scripts/), the gRPC translation (grpc-server/), the verifiable
+// clients themselves (verifiable_clients/), the compiled private modules
+// (dist/internal/, which have no declarations) and the sources of the three
+// internal functions whose signatures a test takes from src/internal/. Their
+// findings are counted, not failed on: they are not tests, and their own
+// checks are the build (src/ compiles under --strict) and the linter's and
+// the clients' tests. The path filter is what draws the line, not a comment
+// in each file: `// @ts-nocheck` in those files, or `checkJs: false` with a
+// `// @ts-check` opt-in in each test, would draw it too, but the first edits
+// files that are not tests (dist/ is generated) and the second lets a test
+// file that forgets the comment go unchecked.
 //
 // Usage: node scripts/typecheck_tests.js
 
@@ -44,7 +44,12 @@ const path = require('node:path');
 const { ROOT, runTsc } = require('./typescript');
 
 const CONFIG = path.join('test', 'tsconfig.json');
-const TEST_DIR = 'test';
+/** The directories of the test files, relative to the client's directory. */
+const TEST_DIRS = ['test', path.join('verifiable_clients', 'test')];
+/** The extensions of the files checked: every kind of JavaScript and TypeScript file Node or tsc reads. */
+const EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'];
+/** A declaration file, which `skipLibCheck` leaves unchecked. */
+const DECLARATION = /\.d\.[mc]?ts$/;
 
 /**
  * The files under `dir`, relative to the client's directory.
@@ -77,9 +82,54 @@ function refusedDirectives(file, source) {
   return found;
 }
 
+/**
+ * The `include` of the config that checks every file of `EXTENSIONS` under
+ * `TEST_DIRS`, its patterns relative to the config's directory.
+ *
+ * @returns {string[]} the patterns, in order
+ */
+function expectedInclude() {
+  const base = path.dirname(CONFIG);
+  return TEST_DIRS.flatMap((dir) => {
+    const rel = path.relative(base, dir).split(path.sep).join('/');
+    return EXTENSIONS.map((ext) => `${rel === '' ? '' : `${rel}/`}**/*${ext}`);
+  });
+}
+
+/**
+ * Whether `file` is a test file, one under `TEST_DIRS`.
+ *
+ * @param {string} file a path relative to the client's directory
+ * @returns {boolean} whether it is under a test directory
+ */
+function isTestFile(file) {
+  return TEST_DIRS.some((dir) => file.startsWith(`${dir}${path.sep}`));
+}
+
+/**
+ * What is wrong with the config's file list, if anything.
+ *
+ * @returns {string[]} one message per problem
+ */
+function configProblems() {
+  const ts = require('typescript');
+  const { config, error } = ts.readConfigFile(path.join(ROOT, CONFIG), ts.sys.readFile);
+  if (error !== undefined) return [`${CONFIG}: ${ts.flattenDiagnosticMessageText(error.messageText, '\n')}`];
+  const include = /** @type {{ include?: unknown }} */ (config).include;
+  const expected = expectedInclude();
+  return JSON.stringify(include) === JSON.stringify(expected)
+    ? []
+    : [`${CONFIG}: "include" must be ${JSON.stringify(expected)}, the test directories and extensions of scripts/typecheck_tests.js`];
+}
+
 function main() {
-  const failures = [];
-  for (const file of walk(TEST_DIR).filter((f) => /\.(js|mjs|cjs|ts)$/.test(f))) {
+  const failures = configProblems();
+  const files = TEST_DIRS.flatMap((dir) => walk(dir)).filter((f) => EXTENSIONS.includes(path.extname(f)));
+  for (const file of files) {
+    if (DECLARATION.test(file)) {
+      failures.push(`${file}: a declaration file is not type-checked (skipLibCheck); write the types in the test or in src/`);
+      continue;
+    }
     failures.push(...refusedDirectives(file, fs.readFileSync(path.join(ROOT, file), 'utf8')));
   }
 
@@ -97,7 +147,7 @@ function main() {
     const located = /^(.+?)\(\d+,\d+\): error TS\d+/.exec(line);
     if (located) {
       const file = path.normalize(located[1]);
-      if (file.startsWith(`${TEST_DIR}${path.sep}`)) {
+      if (isTestFile(file)) {
         current = [line];
         failures.push(current);
       } else {
@@ -119,14 +169,14 @@ function main() {
   for (const failure of failures) console.error(Array.isArray(failure) ? failure.join('\n') : failure);
   if (outside > 0) {
     console.log(
-      `typecheck-tests: ${outside} finding(s) in ${outsideFiles.size} file(s) the tests require from outside test/, not failed on`,
+      `typecheck-tests: ${outside} finding(s) in ${outsideFiles.size} file(s) the tests require from outside the test directories, not failed on`,
     );
   }
   if (failures.length > 0) {
-    console.error(`typecheck-tests: ${failures.length} finding(s) under test/`);
+    console.error(`typecheck-tests: ${failures.length} finding(s) in the test files`);
     return 1;
   }
-  console.log('typecheck-tests: no finding under test/');
+  console.log(`typecheck-tests: no finding in the test files (${TEST_DIRS.join(', ')})`);
   return 0;
 }
 

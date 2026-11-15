@@ -96,7 +96,8 @@ const complete = (future, value) => future.internalComplete(value, null);
  * @param {FutureImpl<T>} future
  * @param {unknown} error
  */
-const completeExceptionally = (future, error) => future.internalComplete(null, error);
+// The value is not read when the error is set: the library passes null there, as the tests do.
+const completeExceptionally = (future, error) => future.internalComplete(/** @type {T} */ (/** @type {unknown} */ (null)), error);
 
 /**
  * Asserts that the given future is done, didn't fail and wasn't cancelled.
@@ -252,7 +253,7 @@ function completer(future, value, error = null) {
     start() {
       started = new Promise((resolve) => {
         setImmediate(() => {
-          future.internalComplete(error === null ? value : null, error);
+          future.internalComplete(/** @type {T} */ (error === null ? value : null), error);
           resolve();
         });
       });
