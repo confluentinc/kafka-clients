@@ -83,7 +83,7 @@ export class NoOffsetForPartitionError extends InvalidOffsetError {
 }
 
 setForms(NoOffsetForPartitionError, [
-  [['partition'], (v) => 'Undefined offset with no reset policy for partition: ' + javaString(v.partition), (v) => ({ partitions: P.singleton(v.partition, 'partition') })],
+  [['partition'], (v) => 'Undefined offset with no reset policy for partition: ' + javaString(v.partition), (v) => ({ partitions: P.singleton(v.partition) })],
   [['partitions'], (v) => 'Undefined offset with no reset policy for partitions: ' + javaString(v.partitions), (v) => ({ partitions: P.nonNull(v.partitions, 'partitions') })],
 ], {
   order: ['partition', 'partitions'],

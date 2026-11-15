@@ -843,10 +843,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   constructors and `divergentOffsets()` (`OffsetAndMetadata`), and
   `RecordDeserializationError`'s payload (`TimestampType`, its nested
   `DeserializationExceptionOrigin`), so those two classes cannot be
-  constructed. A `TopicPartitionSet` holds `TopicPartition`s only, so
-  `new NoOffsetForPartitionError({ partition: null })` throws `TypeError`
-  *(deviation: Java's `Collections.singleton(null)` holds a null. Why: the set
-  keys its members by value. Goes when: never)*. Java's `public static final` instances are: `INSTANCE` on
+  constructed. Java's `public static final` instances are: `INSTANCE` on
   `DisconnectError` and `CoordinatorNotAvailableError`, a static property of
   the class that is not writable, built by Java's no-argument chain (an empty
   message, no cause) whatever that constructor's visibility

@@ -159,6 +159,11 @@ test('NoOffsetForPartitionError: one partition or a collection, kept as a TopicP
   assert.throws(() => new NoOffsetForPartitionError({ partitions: null }), { constructor: TypeError, message: 'partitions must not be null' });
   assert.throws(() => new NoOffsetForPartitionError({ partitions: [null] }), { constructor: TypeError, message: 'partitions must not contain null' });
   assert.throws(() => new NoOffsetForPartitionError({ partition: 't-0' }), { constructor: TypeError, message: 'partition must be a TopicPartition' });
+  // Java's Collections.singleton(null) holds the null.
+  const none = new NoOffsetForPartitionError({ partition: null });
+  assert.equal(none.message, 'Undefined offset with no reset policy for partition: null');
+  assert.equal(none.partitions().size(), 1);
+  assert.equal([...none.partitions()][0], null);
 });
 
 test("LogTruncationError: no constructor (its divergent offsets are the consumer's OffsetAndMetadata), the core's payload read", () => {
