@@ -10,9 +10,9 @@ export const __esModule: true;
 // @public
 export class TimestampType {
     static readonly CREATE_TIME: TimestampType;
-    static forName(name: string | null): TimestampType;
+    static forName(name: string): TimestampType;
     static forName(options: {
-        name: string | null;
+        name: string;
     }): TimestampType;
     readonly id: number;
     static readonly LOG_APPEND_TIME: TimestampType;

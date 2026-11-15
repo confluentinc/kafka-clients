@@ -128,11 +128,11 @@ export class TimestampType {
    * @param name - the type's name, as `toString()` writes it
    * @returns the constant
    * @throws `NoSuchElementError` when no constant has that name ("Invalid
-   *   timestamp type <name>")
+   *   timestamp type <name>"), null included, as Java's
    * @throws `IllegalArgumentError` when the given parameters are not `{name}`
-   * @throws `TypeError` when the name is not a string
+   * @throws `TypeError` when the name is neither a string nor null
    */
-  static forName(name: string | null): TimestampType;
+  static forName(name: string): TimestampType;
   /**
    * The constant whose Java `name` field is `name`, the same as
    * `forName(name)`.
@@ -143,7 +143,7 @@ export class TimestampType {
    */
   static forName(options: {
     /** The type's name, as `toString()` writes it. */
-    name: string | null;
+    name: string;
   }): TimestampType;
   static forName(options: unknown): TimestampType {
     FOR_NAME_FORMS.match(options, arguments.length);
