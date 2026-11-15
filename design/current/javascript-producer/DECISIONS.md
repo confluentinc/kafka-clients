@@ -179,3 +179,41 @@ rules and readings. Newest entries are at the end; dates are in IST.
       - Not built: a consumed record's `Headers`, over `kafka_consumer_ConsumerRecord_headers`, which comes with
         the consumer. The row on plain `[key, value]` pairs stays parked: `ProducerRecord` takes `Header`
         objects only, as before.
+
+## The tests' type check (A14, 2026-11-15)
+
+22. **`checkJs`, not ts-jest.** `tsc --strict` runs over the tests (Q67, Q74) as `make typecheck-tests`, with
+    `test/tsconfig.json` (`allowJs`, `checkJs`, `noEmit`, the library's own strict settings, the package typed by
+    `dist/`'s declarations). The tests stay JavaScript: jest-light-runner runs them in plain Node.js and transforms
+    nothing, so ts-jest cannot run under it (Q66, as Critic 128 confirmed). `checkJs` has no per-file exclusion, so the
+    files the tests require from outside `test/` (`scripts/`, `grpc-server/`, the undeclared `dist/internal/*.js`) are
+    read but not failed on; their own checks are the build and the rule linter's tests.
+23. **What `@ts-expect-error` marks.** Only a misuse `tsc` catches, with a reason naming the run-time check it reaches
+    and which kind it is:
+    - a wrong argument;
+    - a `null` the types forbid by the nullability rule: Java only stores it, so the type is `T`, while the run time
+      stores the `null` as Java does (`OffsetOutOfRangeError`'s partitions, `NoOffsetForPartitionError`'s partition,
+      `RecordDeserializationError`'s `timestampType` and `headers`);
+    - a class instance given bare to `KafkaFuture.completedFuture` or `getNow`: TypeScript cannot tell it from a plain
+      object, which the run time reads as the options object, so the types take it by name, `{ value }`.
+
+    A valid call is never marked. The ones the published types rejected were fixed in `src/`: the options forms of
+    `TopicPartitionMap`, `TopicPartitionSet` and `MetricNameMap` (Q15, as `partitionsFor` declares both). The
+    library-only members the tests reach go through `test/_internal.js`. `@ts-ignore` and `@ts-nocheck` are refused.
+24. **Types narrowed by the check.** `TimestampType.forName` takes a `string` (Java gives a null name no meaning), and
+    `KafkaFuture.completedFuture({ value })` refuses `undefined`, as its bare form already did.
+25. **Limits of `tsc`**, the misuses the tests make that it lets through, so they carry no directive:
+    - number ranges and integers: a fractional or out-of-range partition, leader epoch or batch index, a timestamp or
+      offset past 2^53 or 2^63, a negative offset, negative timeouts, `NaN` and `-Infinity`, a `Temporal.Duration` in
+      months;
+    - a key computed at run time (`{ [field]: null }` for `MetricName`, `{ [name]: undefined }` for `ProducerRecord`,
+      the serde config keys) and an options object from `Object.create`;
+    - a parameter typed `unknown`: the placeholders (`KafkaMetric`'s `valueProvider`, `config`, `time` as `null`) and
+      the value of a `TopicPartitionMap` built empty (`set(tp, undefined)`);
+    - an `any[]`, such as `new Array(1).fill(null)` for `Headers`;
+    - a `string` where an iterable of strings is taken (`unauthorizedTopics: 'abc'`), a string being one;
+    - `undefined` for an optional key (`send({ record, callback: undefined })`, `ProducerRecord`'s `value: undefined`),
+      which only `exactOptionalPropertyTypes` would refuse, one of the other `tsc` settings that stay parked (Q74);
+    - config contents, which the core checks (Q52, Q54): a value of the wrong type (`'linger.ms': true`,
+      `'batch.size': 42.5`, `acks: 5`), a missing `bootstrap.servers`, `{ configs: null }` read as a config map, and a
+      NUL in a config key or value, a topic or a header key.

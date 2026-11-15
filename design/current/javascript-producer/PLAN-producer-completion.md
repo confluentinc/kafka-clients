@@ -42,7 +42,7 @@ open and still changing.
 | A11 | **Native target.** `NAPI_VERSION=9`. The missing-platform error names a lockfile made on another OS. | Q73 | S |
 | A12 | **Docs.** README, MIGRATION and CHANGELOG get: the workers sentence; the decided default partitioner; `kafkaJS` and 1.x keys reaching the core as unknown keys; serde config keys accepted; an idle unclosed producer keeping Node running; the 1.x MIT → Apache-2.0 licence change; the `SuppressedError` note; `bigint`; `TopicPartitionSet`; leaving a Buffer alone until `send()` settles. Also `@remarks` marks for deviations ("a missing serde means bytes"), private-constructor doc comments, and module docs that list left-out members as `@packageDocumentation`. | Q64, Q65, Q16 | M |
 | A13 | **Tooling.** `module: nodenext` plus a nodenext typing project. `4.4.0-beta.1` and npm's `beta` tag, in `package.json`, the platform packages, `bump-version` and the release scripts, while the docs keep saying "preview". TypeDoc and an `eslint-plugin-jsdoc` docs lint. Prettier. publint. A tarball header check. The invented-names list gains `[Symbol.asyncDispose]` and `[Symbol.iterator]`. | Q13, Q64, Q74, Q75, Q76, Q6 | M |
-| A14 | **Tests on Jest** with ts-jest, `test/lint` included (§5, 5), and `tsc --strict` over the tests. | Q66, Q67 | L |
+| A14 | **Tests on Jest**, `test/lint` included (§5, 5), and `tsc --strict` over the tests (through `checkJs`, the tests staying JavaScript: ts-jest cannot run under jest-light-runner). **Done.** | Q66, Q67 | L |
 | A15 | **`javascript/CLAUDE.md` rewritten** to match the root rules. Boundary rules 1, 4, 5, 8 and 10 and the liveness section are reversed. Rows marked "not decided" are now decided. `preview` becomes `beta`, and `node:test` becomes Jest. The readings of §5 are recorded, each with the rule it follows. | all | M |
 | A16 | **Enum `toString()` and null binding.** `SslClientAuth.toString()` returns Java's lowercase text (§5, 6). Extra signatures for the null combinations, so a `null` key or value binds `never` (§5, 7). | Q12, Q26 | S |
 
@@ -56,8 +56,7 @@ open and still changing.
   headers can still change and a view once they are read-only. Not built: a consumed record's `Headers` (over
   `kafka_consumer_ConsumerRecord_headers`), which comes with the consumer. The parked row on plain `[key, value]`
   pairs stays parked: `ProducerRecord` takes `Header` objects only, as before.
-- **Waiting on npm registry access:** A14 (Jest), and A13's docs lint
-  (`eslint-plugin-jsdoc`), TypeDoc, Prettier and publint.
+- **A14: done** (on PR #333): the tests on Jest, and `tsc --strict` over them (`make typecheck-tests`).
 
 Notes from Phase A, for Phase B:
 
@@ -97,7 +96,9 @@ Phase A's send path (zero copy, no closed state, frozen records).
   `make pack-check`, every package now `"type": "commonjs"`), Prettier (`make format-check`, in the root
   `lint-javascript`, generated files left out) and
   the tests on Jest (`jest.config.cjs`, through jest-light-runner in a fresh Node.js process per file; ts-jest is not
-  used, the tests being JavaScript). Left: `tsc --strict` over the tests (Q67), about 2,400 `checkJs` errors.
+  used, the tests being JavaScript). `tsc --strict` over the tests (Q67, Q74) is done too: `make typecheck-tests`
+  (`test/tsconfig.json`, `checkJs`, in the root `lint-javascript`) checks every file under `test/` with no finding,
+  each deliberate misuse marked `@ts-expect-error` (`DECISIONS.md`, entries 22 to 25).
 - The decisions taken while aligning and completing the producer are logged in `DECISIONS.md`, in this folder.
 - **The parked rows (§5)**: the serde factories beyond `stringSerializer()`, Q50 ("the methods must be all async"),
   the `Headers` row on plain `[key, value]` pairs (the other, how a `Header` from a changeable `Headers` stays valid,
