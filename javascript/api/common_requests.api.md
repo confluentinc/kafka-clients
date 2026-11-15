@@ -19,6 +19,4 @@ export class CorrelationIdMismatchError extends IllegalStateError {
     responseCorrelationId(): number;
 }
 
-// (No @packageDocumentation comment for this package)
-
 ```

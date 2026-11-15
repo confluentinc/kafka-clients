@@ -18,6 +18,24 @@
 
 // `src/consumer`: the generated modules of src/consumer/.
 
+/**
+ * The classes of the Java package this client has, generated from the Java
+ * sources.
+ *
+ * What they leave out:
+ *
+ * - `LogTruncationError`: Not generated: Java's constructors that take a type
+ *   the client does not translate: `LogTruncationException(Map<TopicPartition,
+ *   Long>, Map<TopicPartition, OffsetAndMetadata>)` and
+ *   `LogTruncationException(String, Map<TopicPartition, Long>,
+ *   Map<TopicPartition, OffsetAndMetadata>)`.
+ * - `LogTruncationError`: Not generated, for a type the client does not
+ *   translate: the field `Map<TopicPartition, OffsetAndMetadata>
+ *   divergentOffsets` and `divergentOffsets()`.
+ *
+ * @packageDocumentation
+ */
+
 export { CommitFailedError } from './commit_failed_error';
 export { InvalidOffsetError } from './invalid_offset_error';
 export { LogTruncationError } from './log_truncation_error';

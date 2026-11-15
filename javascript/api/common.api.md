@@ -254,6 +254,4 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
     values(): IterableIterator<TopicPartition>;
 }
 
-// (No @packageDocumentation comment for this package)
-
 ```

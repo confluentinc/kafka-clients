@@ -12,14 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.common.metrics this client
-// has: KafkaMetric, and the placeholder types of the untranslated
-// MetricValueProvider, MetricConfig and Measurable it takes or returns.
-// QuotaViolationError is generated from the Java sources.
-//
-// Left out (Q30): the setter KafkaMetric.config(MetricConfig), whose only
-// extra parameter over the getter is `config`, and which Java says is for the
-// server only.
+/**
+ * The public classes of Java's `org.apache.kafka.common.metrics` this client
+ * has: `KafkaMetric`, and the placeholder types of the untranslated
+ * `MetricValueProvider`, `MetricConfig` and `Measurable` it takes or returns.
+ * `QuotaViolationError` is generated from the Java sources.
+ *
+ * Left out (Q30): the setter `KafkaMetric.config(MetricConfig)`, whose only
+ * extra parameter over the getter is `config`, and which Java says is for
+ * the server only.
+ *
+ * An error the core reports has no `QuotaViolationError.metric()`: the C
+ * API's view of the class gives the metric's name, not its `KafkaMetric`, so
+ * it is null there.
+ *
+ * @packageDocumentation
+ */
 
 export { KafkaMetric } from './kafka_metric';
 export type { Measurable } from './measurable';

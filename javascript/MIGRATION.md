@@ -115,6 +115,10 @@ producer for them.
 | the delivery report `(err, report)`, run by `poll()` / `setPollInterval()` | the callback `({ metadata, exception }) => ...`, one object with Java's parameter names | It runs on the JavaScript thread, before the record's future completes, without any polling: delete `producer.poll()` and `setPollInterval()`. On failure `metadata` has Java's `-1` fields. It may return a Promise, which the producer awaits |
 | `dr_cb: true`, `dr_msg_cb` | the `callback` of each `send()` | Per send, not per client |
 | `acks`, `timeout`, `compression` per `send()` (KafkaJS) | the producer's `acks`, `delivery.timeout.ms` and `compression.type` configuration | Java sets them per producer |
+| `stats_cb` with `statistics.interval.ms` (librdkafka's JSON statistics, pushed on a timer) | `producer.metrics()`, read when you call it | Java's metrics: a `MetricNameMap<Metric>` keyed by `MetricName` (group, name and tags), each `metric.metricValue()` a snapshot taken by the call; `metrics().get(new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', id]]) }))`. `statistics.interval.ms` reaches the core as an unknown key |
+| `producer.getMetadata({ topic }, cb)` (node-rdkafka style), the KafkaJS admin's `fetchTopicMetadata` for a producer's topic | `await producer.partitionsFor(topic)` | Java's `partitionsFor`: a Promise of `PartitionInfo[]`, each with `topic()`, `partition()`, `leader()`, `replicas()`, `inSyncReplicas()` and `offlineReplicas()` (`Node`s), waiting up to `max.block.ms` for the topic's metadata |
+| a string key or value given as it is | `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()`, or `{ 'key.serializer': stringSerializer }` | `stringSerializer()` (`common/serialization`) writes a string as Java's `StringSerializer` does (UTF-8, or Java's standard charsets through `serializer.encoding`); without a serializer a key or value is bytes, and a string throws `TypeError` pointing to it (Section 5). A serializer is `{ serialize({ topic, headers, data }) }`, and may return a Promise |
+| a hand-written mock of the producer, `jest.mock(...)` | `new MockProducer()`, Java's mock (`producer`) | It implements `Producer` and is the core's own mock: `history()` returns the records sent, `completeNext()` / `errorNext(e)` complete them, `setSendException(e)` (and the flush, close and `partitionsFor` setters) makes a call throw `e`. Close every mock: it keeps Node running until closed |
 | `await producer.flush({ timeout })` / `flush(timeout, cb)` | `await producer.flush()` | Java's `flush()` takes no timeout: it waits until every record sent before it is delivered or failed |
 | `producer.transaction()`, `sendOffsets()`, `commit()`, `abort()` (KafkaJS) | `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()` and `abortTransaction()`, Java's names | Not in the preview yet (Section 3). When they come, they return Promises, `beginTransaction()` included. A send is part of the transaction once its `send()` Promise has resolved. `commitTransaction()` waits for its delivery, so there's no need to await `future.get()` first. A send whose Promise hasn't resolved yet may be left out |
 
@@ -125,6 +129,8 @@ producer for them.
 | `RecordMetadata[]` from `send()`: `{ topicName, partition, baseOffset, errorCode }` | `RecordMetadata` from `future.get()`: `metadata.topic`, `.partition`, `.offset`, `.hasOffset`, `.timestamp`, `.serializedKeySize`, ... | A **data object**: Java's getters are `readonly` fields, so they read without `()`. **Silent:** `offset` and `timestamp`, Java's `long`, are bigints (`metadata.offset === 0n`), where 1.x's callback API gives numbers and its KafkaJS-style API strings; `JSON.stringify` writes them as decimal strings |
 | other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()` | Only the data objects (`ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`; on the consumer side the records) read through fields. Without the `()` a read returns the function itself and raises no error |
 | `err.code`, `err.type`, `err.retriable`, `KafkaJSError` subclasses | Java's classes, `Exception` read as `Error`: `instanceof RetriableError`, `instanceof TopicAuthorizationError`, `err.name` as the fallback | An error has no `code` or `retriable` field; they read `undefined`. The classes follow Java's `extends` chain and are in their packages (`common/errors`, `producer`, ...) |
+| an error's details as fields (KafkaJS's `KafkaJSProtocolError.type`, 1.x's `err.message` parsed for the topics) | Java's payload getters, methods with `()`: `err.unauthorizedTopics()` (a `Set`), `err.recordTooLargePartitions()` (a `TopicPartitionMap<bigint>`, or `null`), `err.invalidTopics()`, `err.groupId()`, `err.throttleTimeMs()` | Each returns a new collection the caller may change. An error is built with them by name: `new TopicAuthorizationError({ unauthorizedTopics: ['t'] })` |
+| a map or set keyed by `'topic:partition'` strings, or by `{ topic, partition }` objects | `TopicPartitionMap` and `TopicPartitionSet` (`common`) | A `Map` compares object keys by identity, so a new `TopicPartition` would miss; these compare by topic and partition and keep the original `TopicPartition`s. Where Java takes a `Map<TopicPartition, V>` only a `TopicPartitionMap` is taken, and a `Map` throws `TypeError` with a hint |
 | a failed `await send()` rejected with the delivery error | `send()` rejects with what Java's `send()` throws (a closed producer, a metadata timeout); `future.get()` rejects with an `ExecutionError` whose `cause` is the delivery error | Only `get()` wraps the failure, as Java's `Future.get()` does; the callback's `exception` and `toCompletionStage()` give the error itself |
 | deep imports: `@confluentinc/kafka-javascript/types/kafkajs`, `.../lib/...` | each package from its own path: `@confluentinc/kafka-javascript/producer`, `/common`, `/common/errors`, `/common/header`, `/common/config`, ... | A deep import fails with Node's `ERR_PACKAGE_PATH_NOT_EXPORTED`. The package root exports only Java's built-in errors and the `Duration` type |
 
@@ -208,7 +214,7 @@ await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), va
 | a KafkaJS-style API in the same package | 4.x has one API, Java's | the Java-shaped API of this guide |
 | `connect()`, `disconnect()`, `run()` helpers, events | a client is ready once constructed, as in Java; Java has no event emitter | construct it; `close()`; the callback and the futures |
 | a producer `poll()` / `setPollInterval()` | callbacks run on the JavaScript thread without polling | delete the call |
-| `error_cb`, `dr_cb`, `stats_cb`, `oauthbearer_token_refresh_cb`, `rebalance_cb`, `offset_commit_cb` config callbacks | no config value is a callback, as in Java | an operation's error rejects its call or fails its future; deliveries go to each `send()`'s callback; 1.x's `rebalance_cb` becomes a listener passed to `subscribe()`, and `offset_commit_cb` the commit call's callback (with the consumer). A custom OAuth token callback has no replacement until the core has a token hook |
+| `error_cb`, `dr_cb`, `stats_cb`, `oauthbearer_token_refresh_cb`, `rebalance_cb`, `offset_commit_cb` config callbacks | no config value is a callback, as in Java | an operation's error rejects its call or fails its future; deliveries go to each `send()`'s callback; `stats_cb`'s statistics are `metrics()`, read when called (Section 1); 1.x's `rebalance_cb` becomes a listener passed to `subscribe()`, and `offset_commit_cb` the commit call's callback (with the consumer). A custom OAuth token callback has no replacement until the core has a token hook |
 | a `logger` option | the core logs on its own | `RUST_LOG` for the core, `NODE_DEBUG=confluent_kafka` for the binding |
 | `producer.sendBatch()`, a producer queue length | the core batches and applies backpressure itself (`max.block.ms`) | `send()` in a loop, then `flush()` |
 | 1.x's `types/kafkajs` type definitions | the package ships the types of its own API | import the types from the package paths |
@@ -245,9 +251,10 @@ is decided for them already:
 - **A pattern is a `SubscriptionPattern`, not a `RegExp`**: the broker
   matches the whole topic name, so `/^orders-/` becomes
   `new SubscriptionPattern({ pattern: 'orders-.*' })`.
-- **A map keyed by partition is a `TopicPartitionMap`**, whose `keys()` are
-  `TopicPartition` objects (`tp.topic`, `tp.partition`), not a `Map` of
-  strings.
+- **A map keyed by partition is a `TopicPartitionMap`**, and a set of
+  partitions (`assignment()`) a `TopicPartitionSet`, both available today
+  (Section 1): their `keys()` are `TopicPartition` objects (`tp.topic`,
+  `tp.partition`), not strings.
 - **Every consumer sets `group.protocol: 'consumer'`** (KIP-848) until the
   core changes its default.
 - **The admin results and options are classes** (`new CreateTopicsOptions({
@@ -276,6 +283,11 @@ is decided for them already:
   the record's future completes.
 - Java's `MockProducer`, the client's own mock, for tests: `history()`,
   `completeNext()`, `errorNext()` and an error to throw from each call.
+- Java's metrics, `producer.metrics()`, by `MetricName`; Java's
+  `partitionsFor()`.
+- Java's error payloads as getters (`err.unauthorizedTopics()`), and
+  `TopicPartitionMap` / `TopicPartitionSet` for maps and sets keyed by
+  partition.
 
 ## 5. Same code, different result
 

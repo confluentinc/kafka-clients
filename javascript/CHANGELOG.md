@@ -86,9 +86,17 @@ newer.
   `clear()`, `completeNext()`, `errorNext(e)`, `closed()` and `flushed()`,
   and Java's public error fields as the setters `setSendException`,
   `setFlushException`, `setPartitionsForException` and `setCloseException`,
-  whose calls throw the very error given. The serializers run on every send.
-  Its `Cluster` constructor, transactions, `setMockMetrics` and the telemetry
-  calls are left out.
+  whose calls throw the very error given. The serializers run on every send,
+  each with its own fresh empty `Headers`; every record goes to partition 0,
+  as with Java's empty-cluster mock; what a delivery callback throws comes
+  out of the call that completed the record, as in Java, the record's future
+  completing all the same (Java's stays incomplete). A closed mock nothing
+  references is collected with its native mock, sends still waiting
+  included, and a refused record or an error given to the mock is released
+  as soon as the core is done with it. `partitionsFor(null)` rejects with the
+  C API's `TypeError`, where Java's mock answers `[]`. Its `Cluster`
+  constructor, transactions, `setMockMetrics` and the telemetry calls are
+  left out.
 - Java's `Producer` interface, a TypeScript interface that `KafkaProducer`
   implements. `KafkaFuture` is an abstract class, as Java's is: constructing
   it throws `TypeError`, and a subclass may be built. `DisconnectError` and
@@ -215,6 +223,13 @@ newer.
   topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,
   serializedValueSize })`, a `long` taking a bigint or a whole number; every
   `RecordMetadata` is frozen.
+- `TopicPartitionMap` and `TopicPartitionSet` (`common`, *js-only*), Java's
+  `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns:
+  each keys its entries by `'<topic>:<partition>'` and keeps the original
+  `TopicPartition`s, which `keys()`, `entries()` and iteration return. Neither
+  extends `Map` or `Set`; `get()` returns `null` for a missing key, `size()`
+  is a method, `toString()` is Java's text and `toJSON()` writes a map by
+  the string key (a bigint as a decimal string) and a set as its array.
 
 ### Errors and security
 
@@ -230,6 +245,22 @@ newer.
 - An error's constructors are Java's forms with a message and a cause, by name
   or, with one parameter, the value on its own: `new KafkaError('boom')`,
   `new KafkaError({ message, cause })`, `new KafkaError(cause)`.
+- Java's constructors that take a payload, by Java's parameter names beside
+  `message` and `cause` and always by name
+  (`new TopicAuthorizationError({ unauthorizedTopics })`, with Java's
+  message), and Java's payload getters as methods (`unauthorizedTopics()` a
+  `Set`, `recordTooLargePartitions()` a `TopicPartitionMap<bigint>`,
+  `partitions()` a `TopicPartitionSet`, `groupId()`, `throttleTimeMs()`,
+  ...), each returning a new collection; `GroupAuthorizationError.forGroupId`
+  and `QuotaViolationError`'s `toString()` are Java's. A
+  `Map<TopicPartition, Long>` is taken as a `TopicPartitionMap` only. An
+  error the core reports carries its payload, read through the C API's view
+  of its class (an invalid topic's `InvalidTopicError` lists it); a field
+  the C API has no accessor for keeps its default (`QuotaViolationError`'s
+  `metric()` `null`, `CorrelationIdMismatchError`'s ids `-1`). Left out, for
+  types not translated before the consumer: `LogTruncationError`'s
+  constructors and `divergentOffsets()`, and `RecordDeserializationError`'s
+  payload.
 - A `null` the client rejects as Java's `NullPointerException` throws
   `TypeError` "<param> must not be null" (`record`, `configs`, a
   `SecurityProtocol.forName` name); where Java throws its own message

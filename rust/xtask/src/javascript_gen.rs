@@ -98,6 +98,9 @@ pub(crate) struct JsModule {
     pub stem: String,
     pub name: String,
     pub content: String,
+    /// What the module leaves out, each a sentence its header comment holds
+    /// too, which a generated `index.ts` lists in its `@packageDocumentation`.
+    pub notes: Vec<String>,
 }
 
 /// `import` path from a module in `from_dir` to `src/<to>` (`to` a path under
@@ -355,6 +358,23 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
                 format!("src/{dir}")
             }
         ));
+        // What the classes leave out, in the package's documentation (root
+        // CLAUDE.md, JavaScript Binding Conventions, Documentation, Q64).
+        let noted: Vec<String> = members
+            .iter()
+            .flat_map(|m| m.notes.iter().map(move |n| format!("- `{}`: {n}", m.name)))
+            .collect();
+        if !noted.is_empty() {
+            text.push_str(&tsdoc(
+                &format!(
+                    "The classes of the Java package this client has, generated from the Java sources.\n\n\
+                     What they leave out:\n\n{}\n\n@packageDocumentation",
+                    noted.join("\n")
+                ),
+                "",
+            ));
+            text.push_str("\n\n");
+        }
         for l in &lines {
             text.push_str(l);
             text.push('\n');
@@ -554,6 +574,7 @@ mod tests {
             stem: "x_error".into(),
             name: "XError".into(),
             content: String::new(),
+            notes: Vec::new(),
         };
         let lines = export_lines(&[&m]);
         assert_eq!(lines, ["export { XError } from './x_error';"]);

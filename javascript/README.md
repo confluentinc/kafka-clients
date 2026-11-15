@@ -410,10 +410,13 @@ Kafka. It implements `Producer`, and it is the client core's own mock, so it
 answers as the real client does, with Promises and futures. Its records are
 the app's own: `history()` returns the very `ProducerRecord`s sent, key and
 value as given, which the mock holds until `clear()`. Its serializers run on
-every send, as Java's mock runs them. A callback runs inside the mock call that
-completes its record (`send()` with `autoComplete`, `completeNext()`,
-`errorNext()` or `flush()`). Java's public error fields are setters, and each
-call throws the very error it was given:
+every send, each with its own fresh empty `Headers`, as Java's mock runs them.
+Every record goes to partition 0, as with Java's empty-cluster mock. A
+callback runs inside the mock call that completes its record (`send()` with
+`autoComplete`, `completeNext()`, `errorNext()` or `flush()`), and what it
+throws comes out of that call, as in Java (its record's future still
+completes: Java's would stay incomplete). Java's public error fields are
+setters, and each call throws the very error it was given:
 
 ```js
 const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
@@ -427,7 +430,9 @@ mock.setSendException(new Error('broker down')); // send() now rejects with this
 await mock.close();
 ```
 
-A mock keeps Node running until it is closed, as a producer does. Left out:
+A mock keeps Node running until it is closed, as a producer does; once
+closed and unreferenced it is collected, sends still waiting included. Left
+out:
 Java's constructor taking a `Cluster` (the mock's cluster is always empty, so
 the partitioner is never called), the transaction calls, `setMockMetrics`, and
 the telemetry and metric-subscription calls (the producer package's
@@ -457,6 +462,17 @@ class keeps Java's getters as methods (`future.isDone()`, `header.key()`,
 iterable (`new PartitionInfo({ ..., replicas: new Set(nodes) })`), and one it
 returns is a new array each call. `TopicPartition`, `Node` and
 `PartitionInfo` have Java's `equals` and `hashCode`.
+
+A map keyed by `TopicPartition` is a `TopicPartitionMap`, and a set of them
+the client returns a `TopicPartitionSet` (both *js-only*): JavaScript's `Map`
+and `Set` compare object keys by identity, so these key each entry by
+`'<topic>:<partition>'` and keep the original `TopicPartition`s, which
+`keys()`, `entries()` and iteration return. `get()` returns `null` for a
+missing key, `size()` is a method, `toString()` is Java's text
+(`{orders-0=5}`), and `JSON.stringify` writes a map's entries by the string
+key (`{"orders:0":"5"}`, a bigint as a decimal string) and a set as its array.
+Where Java takes a `Map<TopicPartition, V>`, pass a `TopicPartitionMap`:
+`new TopicPartitionMap([[new TopicPartition({ topic: 'orders', partition: 0 }), 5n]])`.
 
 The enums, `SecurityProtocol` and `SslClientAuth`, have Java's `Enum`
 methods: `name()`, `ordinal()`, static `values()` and static
@@ -616,7 +632,7 @@ code relying on them keeps running with another meaning: check each.
 | a failed future's `get()` rejected with the delivery error | **silent** for `instanceof`: it rejects with `ExecutionError`, whose `cause` is the delivery error (the callback still gets the error itself) |
 | `err.code`, `err.errorName`, `err.retriable`, `err.apiError` | **silent**: gone, they read `undefined`; classify with `instanceof` (`RetriableError`, `ApiError`, ...), `err.name` as the fallback |
 | `new KafkaError(message, { cause })` | `new KafkaError({ message, cause })`, `new KafkaError(message)` or `new KafkaError(cause)`; Java's abstract bases throw `TypeError` when constructed |
-| `new QuotaViolationError(message)` and the other errors whose every Java constructor takes a payload | they throw `TypeError`: `QuotaViolationError`, `RecordDeserializationError`, `CorrelationIdMismatchError`, `LogTruncationError`, `NoOffsetForPartitionError` and the consumer's `OffsetOutOfRangeError` |
+| `new QuotaViolationError(message)` and the other errors whose every Java constructor takes a payload | they take Java's payload forms by name (`new QuotaViolationError({ metric, value, bound })`, `new NoOffsetForPartitionError({ partition })`), with Java's getters as methods (`err.partitions()`); `RecordDeserializationError` and `LogTruncationError` still throw `TypeError`, their payloads' types not being translated |
 | `IllegalArgumentError extends Error` | it, and `IndexOutOfBoundsError`, extend `RangeError` |
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
 | an argument to `flush()` | it is refused: Java's `flush()` takes none |
@@ -765,10 +781,28 @@ message is the cause's `String()`, as Java's is `cause.toString()`) and
 (`TopicAuthorizationError` has no `(message, cause)` one, so
 `new TopicAuthorizationError({ message, cause })` throws
 `IllegalArgumentError`); Java's abstract bases (`RetriableError`, ...) throw
-`TypeError` when constructed. The constructors that take a payload
-(`TopicAuthorizationError`'s topics, ...) are not translated yet, and a class
-whose every Java constructor takes one (`QuotaViolationError`, ...) cannot be
-constructed: the client builds it when the core reports it. The
+`TypeError` when constructed.
+
+Java's constructors that take a payload are there too, Java's other
+parameters by their Java names beside `message` and `cause`, always by name:
+`new TopicAuthorizationError({ unauthorizedTopics: ['orders'] })` (whose
+message is Java's "Not authorized to access topics: [orders]"),
+`new RecordTooLargeError({ message, recordTooLargePartitions })`. The payload
+is read through Java's getters, methods over private fields:
+`err.unauthorizedTopics()` (a `Set` of strings), `err.recordTooLargePartitions()`
+(a `TopicPartitionMap<bigint>`, or `null`), `err.groupId()`,
+`err.throttleTimeMs()`, the consumer's `err.partitions()` (a
+`TopicPartitionSet`), each returning a new collection the caller may change.
+An error the core reports carries its payload: an invalid topic's
+`InvalidTopicError` lists it in `invalidTopics()`. A `Map<TopicPartition, Long>`
+is taken as a `TopicPartitionMap` only (a `Map` keys by identity and is
+refused, with a hint), a `long` as a bigint or a whole number. Left out, for
+types the client does not translate before the consumer:
+`LogTruncationError`'s constructors and `divergentOffsets()`, and
+`RecordDeserializationError`'s payload, so those two cannot be constructed.
+A payload field the core's C API has no accessor for keeps its default in an
+error the core reports: `QuotaViolationError`'s `metric()` is `null`,
+`CorrelationIdMismatchError`'s ids are `-1`. The
 configuration is checked by the client's core, which throws a `ConfigError`
 with Java's message naming the key (`{ 'linger.ms': true }` fails with "Not a
 number of type LONG"); a `key.serializer` or `value.serializer` that is no

@@ -1088,7 +1088,10 @@ binding:
 
 `cargo xtask generate-error-codes` generates, from the Java sources and the
 FFI enum (the Python client's generators, `rust/xtask/src/javascript_gen.rs`):
-the error classes and `src/internal/error_registry.ts`, the config classes'
+the error classes (their payload constructors and getters included) and
+`src/internal/error_registry.ts`, `native/error_payload.c` (the payload of an
+error the core reports, read through the FFI's view of its class, from the
+emitter's table, which the C compiler checks against the header), the config classes'
 constants (`ProducerConfig`, the client config class, its constants only;
 `SslConfigs`, `SaslConfigs`, `SecurityConfig`, the key-name classes,
 translated in full, Java's public default constructor included, but the
@@ -1102,9 +1105,10 @@ and release) add the form tables, now hand-written in the modules that call
 DO NOT EDIT` naming its generator, and is never edited by hand;
 `cargo xtask check-generated` fails on a stale, missing or orphaned one (a
 `.ts`, or a generated `.js` left in `src/`). A folder holding only generated
-modules has a generated `index.ts`; in a hand-written one (`src/`, `common/`,
-`common/config/`, `producer/`) the generator owns the
-`BEGIN GENERATED EXPORTS` / `END GENERATED EXPORTS` block.
+modules has a generated `index.ts`, whose `@packageDocumentation` lists what
+its classes leave out (their header comments' notes); in a hand-written one
+(`src/`, `common/`, `common/config/`, `common/metrics/`, `producer/`) the
+generator owns the `BEGIN GENERATED EXPORTS` / `END GENERATED EXPORTS` block.
 
 ## The rule linter
 

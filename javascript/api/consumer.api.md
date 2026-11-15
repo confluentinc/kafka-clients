@@ -79,6 +79,4 @@ export class RetriableCommitFailedError extends RetriableError {
     });
 }
 
-// (No @packageDocumentation comment for this package)
-
 ```
