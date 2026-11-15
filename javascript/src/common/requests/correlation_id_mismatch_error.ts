@@ -62,7 +62,7 @@ export class CorrelationIdMismatchError extends IllegalStateError {
    * responseCorrelationId)` constructor.
    *
    * @param options - the message and the `requestCorrelationId` and the
-   * `responseCorrelationId`
+   *   `responseCorrelationId`
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** Java's `int requestCorrelationId`. */ requestCorrelationId: number; /** Java's `int responseCorrelationId`. */ responseCorrelationId: number; name?: never });
   constructor(...args: unknown[]) {
@@ -75,8 +75,8 @@ export class CorrelationIdMismatchError extends IllegalStateError {
   /**
    * Java's `requestCorrelationId()`.
    *
-   * @returns Java's `requestCorrelationId` @throws `TypeError` when it is given
-   * an argument: it only reads
+   * @returns Java's `requestCorrelationId`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   requestCorrelationId(): number {
     P.readOnly('requestCorrelationId', arguments.length);
@@ -86,8 +86,8 @@ export class CorrelationIdMismatchError extends IllegalStateError {
   /**
    * Java's `responseCorrelationId()`.
    *
-   * @returns Java's `responseCorrelationId` @throws `TypeError` when it is
-   * given an argument: it only reads
+   * @returns Java's `responseCorrelationId`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   responseCorrelationId(): number {
     P.readOnly('responseCorrelationId', arguments.length);

@@ -77,14 +77,17 @@ export class GroupAuthorizationError extends AuthorizationError {
   /**
    * Java's static `forGroupId(String groupId)`.
    *
-   * @param groupId - Java's `groupId` @returns the error @throws
-   * `IllegalArgumentError` when the given parameters are not `{groupId}`
+   * @param groupId - Java's `groupId`
+   * @returns the error
+   * @throws `IllegalArgumentError` when the given parameters are not
+   *   `{groupId}`
    */
   static forGroupId(groupId: string | null): GroupAuthorizationError;
   /**
    * The same as `forGroupId(groupId)`, with the groupId named.
    *
-   * @param options - the groupId @returns the error
+   * @param options - the groupId
+   * @returns the error
    */
   static forGroupId(options: {
     /** Java's `String groupId`. */
@@ -99,8 +102,8 @@ export class GroupAuthorizationError extends AuthorizationError {
   /**
    * Java's `groupId()`.
    *
-   * @returns Java's `groupId` @throws `TypeError` when it is given an argument:
-   * it only reads
+   * @returns Java's `groupId`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   groupId(): string | null {
     P.readOnly('groupId', arguments.length);

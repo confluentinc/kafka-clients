@@ -243,6 +243,164 @@ int payload_double(napi_env env, napi_value obj, const char* name, double value,
     return napi_create_double(env, value, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
 }
 
+int payload_int64(napi_env env, napi_value obj, const char* name, int64_t value, kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    napi_value v;
+    return napi_create_bigint_int64(env, value, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
+}
+
+int payload_topic_partition(napi_env env, napi_value obj, const char* name, const kafka_common_TopicPartition_t* value,
+                            kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    napi_value v;
+    if (value == NULL) return napi_get_null(env, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
+    v = topic_partition_pair(env, value);
+    return v == NULL ? -1 : set_named(env, obj, name, v);
+}
+
+// An enum constant as its ordinal (the C enum is in Java's declaration order),
+// null for none.
+static int put_ordinal(napi_env env, napi_value obj, const char* name, int have, int ordinal) {
+    napi_value v;
+    if (!have) return napi_get_null(env, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
+    return napi_create_int32(env, ordinal, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
+}
+
+int payload_timestamp_type(napi_env env, napi_value obj, const char* name, const kafka_common_record_TimestampType_t* value,
+                           kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    if (value == NULL) return put_ordinal(env, obj, name, 0, 0);
+    kafka_common_Error_t* ffi_err = NULL;
+    int ordinal = 0;
+    kafka_common_Error_t* err = FFI_SET(ordinal, (int)kafka_common_record_TimestampType__enum_err(value, &ffi_err));
+    if (err != NULL) {
+        error_discard(err);
+        return 0;
+    }
+    return put_ordinal(env, obj, name, 1, ordinal);
+}
+
+int payload_deserialization_origin(napi_env env, napi_value obj, const char* name,
+                                   const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t* value,
+                                   kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    if (value == NULL) return put_ordinal(env, obj, name, 0, 0);
+    kafka_common_Error_t* ffi_err = NULL;
+    int ordinal = 0;
+    kafka_common_Error_t* err =
+        FFI_SET(ordinal, (int)kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum_err(value, &ffi_err));
+    if (err != NULL) {
+        error_discard(err);
+        return 0;
+    }
+    return put_ordinal(env, obj, name, 1, ordinal);
+}
+
+// Borrowed bytes as a Buffer of their own (the error outlives the core's
+// handle, which is freed once converted), NULL data as null.
+static napi_value bytes_copy(napi_env env, kafka_Bytes_t b) {
+    napi_value v;
+    if (b.data == NULL) return napi_get_null(env, &v) == napi_ok ? v : NULL;
+    void* ignored = NULL;
+    return napi_create_buffer_copy(env, (size_t)(b.len > 0 ? b.len : 0), b.data, &ignored, &v) == napi_ok ? v : NULL;
+}
+
+int payload_bytes(napi_env env, napi_value obj, const char* name, kafka_Bytes_t value, kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    napi_value v = bytes_copy(env, value);
+    return v == NULL ? -1 : set_named(env, obj, name, v);
+}
+
+// A borrowed RecordHeaders as an array of [key, value], each value copied.
+int payload_headers(napi_env env, napi_value obj, const char* name, const kafka_common_header_internals_RecordHeaders_t* value,
+                    kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    napi_value arr;
+    if (value == NULL) return napi_get_null(env, &arr) == napi_ok ? set_named(env, obj, name, arr) : -1;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_header_Headers_t* view = NULL;
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = FFI_SET(view, kafka_common_header_internals_RecordHeaders__as_Headers_err(value, &ffi_err));
+    if (err != NULL || view == NULL) {
+        error_discard(err);
+        return 0;
+    }
+    err = FFI_SET(list, kafka_common_header_Headers_to_array_err(view, &ffi_err));
+    if (err != NULL || list == NULL) {
+        error_discard(err);
+        return 0;
+    }
+    int32_t size = 0;
+    error_discard(FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
+    int rc = napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok ? 0 : -1;
+    for (int32_t i = 0; i < size && rc == 0; i++) {
+        const kafka_common_header_internals_RecordHeader_t* rh = NULL;
+        const kafka_common_header_Header_t* h = NULL;
+        const char* key = NULL;
+        kafka_Bytes_t bytes = { NULL, 0 };
+        error_discard(FFI_SET(rh, (const kafka_common_header_internals_RecordHeader_t*)kafka_List_get_err(list, i, &ffi_err)));
+        if (rh != NULL) error_discard(FFI_SET(h, kafka_common_header_internals_RecordHeader__as_Header_err(rh, &ffi_err)));
+        if (h != NULL) {
+            error_discard(FFI_SET(key, kafka_common_header_Header_key_err(h, &ffi_err)));
+            error_discard(FFI_SET(bytes, kafka_common_header_Header_value_err(h, &ffi_err)));
+        }
+        napi_value pair, k, v;
+        if (napi_create_array_with_length(env, 2, &pair) != napi_ok || (k = string_or_null(env, key)) == NULL
+            || (v = bytes_copy(env, bytes)) == NULL || napi_set_element(env, pair, 0, k) != napi_ok
+            || napi_set_element(env, pair, 1, v) != napi_ok || napi_set_element(env, arr, (uint32_t)i, pair) != napi_ok) {
+            rc = -1;
+        }
+    }
+    error_discard(FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
+    if (rc == 0) rc = set_named(env, obj, name, arr);
+    return rc;
+}
+
+// A map of kafka_common_TopicPartition_t * to kafka_consumer_OffsetAndMetadata_t
+// * as an array of [topic, partition, offset (a bigint), leaderEpoch (-1 for
+// none), metadata]; a NULL map as null.
+int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char* name, kafka_Map_t* map,
+                                       kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) {
+        if (map != NULL) {
+            kafka_common_Error_t* ffi_err = NULL;
+            error_discard(FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+        }
+        return 0;
+    }
+    napi_value arr;
+    if (map == NULL) return napi_get_null(env, &arr) == napi_ok ? set_named(env, obj, name, arr) : -1;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t size = 0;
+    error_discard(FFI_SET(size, kafka_Map_size_err(map, &ffi_err)));
+    int rc = napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok ? 0 : -1;
+    for (int32_t i = 0; i < size && rc == 0; i++) {
+        const kafka_common_TopicPartition_t* tp = NULL;
+        const kafka_consumer_OffsetAndMetadata_t* om = NULL;
+        int64_t offset = 0;
+        int32_t epoch = -1;
+        const char* metadata = NULL;
+        error_discard(FFI_SET(tp, (const kafka_common_TopicPartition_t*)kafka_Map_key_err(map, i, &ffi_err)));
+        error_discard(FFI_SET(om, (const kafka_consumer_OffsetAndMetadata_t*)kafka_Map_value_err(map, i, &ffi_err)));
+        if (om != NULL) {
+            error_discard(FFI_SET(offset, kafka_consumer_OffsetAndMetadata_offset_err(om, &ffi_err)));
+            error_discard(FFI_SET(epoch, kafka_consumer_OffsetAndMetadata_leader_epoch_err(om, &ffi_err)));
+            error_discard(FFI_SET(metadata, kafka_consumer_OffsetAndMetadata_metadata_err(om, &ffi_err)));
+        }
+        napi_value entry = tp == NULL ? NULL : topic_partition_pair(env, tp);
+        napi_value o, e, m;
+        if (entry == NULL || om == NULL || napi_create_bigint_int64(env, offset, &o) != napi_ok
+            || napi_create_int32(env, epoch, &e) != napi_ok || (m = string_or_null(env, metadata != NULL ? metadata : "")) == NULL
+            || napi_set_element(env, entry, 2, o) != napi_ok || napi_set_element(env, entry, 3, e) != napi_ok
+            || napi_set_element(env, entry, 4, m) != napi_ok || napi_set_element(env, arr, (uint32_t)i, entry) != napi_ok) {
+            rc = -1;
+        }
+    }
+    error_discard(FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+    if (rc == 0) rc = set_named(env, obj, name, arr);
+    return rc;
+}
+
 // Wraps a plain error object through the registered factory, which also turns
 // its `cause` into an error too.
 static napi_value through_factory(napi_env env, napi_value obj) {

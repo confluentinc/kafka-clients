@@ -33,9 +33,16 @@
 // | TopicPartition           | a TopicPartition              | (no getter)               |
 // | Map<TopicPartition, Long>| a TopicPartitionMap           | a new TopicPartitionMap<bigint> |
 // | KafkaMetric              | a KafkaMetric                 | the same KafkaMetric      |
+// | ByteBuffer               | a Uint8Array, or null         | a Buffer over its memory  |
+// | Headers                  | a Headers (kept), or an iterable of Header | the same Headers |
+// | an enum                  | a constant, or null           | the constant              |
+// | Map<TopicPartition, OffsetAndMetadata> | a TopicPartitionMap | a new TopicPartitionMap |
 
 import { checkInt, checkLong } from './java_number';
+import { Header } from '../common/header/header';
+import { Headers } from '../common/header/headers';
 import { KafkaMetric } from '../common/metrics/kafka_metric';
+import { OffsetAndMetadata } from '../consumer/offset_and_metadata';
 import { TopicPartition } from '../common/topic_partition';
 import { TopicPartitionMap } from '../common/topic_partition_map';
 import { TopicPartitionSet } from '../common/topic_partition_set';
@@ -205,3 +212,84 @@ export function nonNull<T>(x: T | null, name: string): T {
 export function readOnly(method: string, count: number): void {
   if (count > 0) throw new TypeError(`${method}() only reads: it takes no argument`);
 }
+
+/** Java's `ByteBuffer`: a `Uint8Array` or null, kept as a `Buffer` over the same memory, never copied. */
+export const bytes: Kind = {
+  take(value, name) {
+    if (value === null) return null;
+    if (!(value instanceof Uint8Array)) throw new TypeError(`${name} must be a Uint8Array or null`);
+    return Buffer.isBuffer(value) ? value : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  },
+  core: same,
+  copy: same,
+};
+
+/**
+ * Java's `Headers`: a `Headers`, kept as it is, as Java keeps the object it
+ * is given; any other iterable of `Header` as a new `Headers`; null stays
+ * null.
+ */
+export const headers: Kind = {
+  take(value, name) {
+    if (value === null || value instanceof Headers) return value;
+    if (typeof value !== 'object' || typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
+      throw new TypeError(`${name} must be a Headers or an iterable of Header`);
+    }
+    return new Headers({ headers: value as Iterable<Header> });
+  },
+  core: (raw) =>
+    raw === null
+      ? null
+      : new Headers({ headers: (raw as Array<[string, Buffer | null]>).map(([key, value]) => new Header({ key, value })) }),
+  copy: same,
+};
+
+/** An enum class: its constants, in declaration order (`values()`). */
+interface EnumClass {
+  readonly name: string;
+  values(): unknown[];
+}
+
+/** An enum class's kind: a constant of it or null; the core gives its ordinal. */
+export function enumOf(cls: EnumClass): Kind {
+  return {
+    take(value, name) {
+      if (value !== null && !cls.values().includes(value)) throw new TypeError(`${name} must be a ${cls.name}`);
+      return value;
+    },
+    core: (raw) => (raw === null ? null : cls.values()[raw as number]),
+    copy: same,
+  };
+}
+
+/**
+ * Java's `Map<TopicPartition, OffsetAndMetadata>`: a `TopicPartitionMap`
+ * only, whose values are each an `OffsetAndMetadata` (or null), kept as a new
+ * map.
+ */
+export const topicPartitionOffsetMap: Kind = {
+  take(value, name) {
+    if (value === null) return null;
+    if (!(value instanceof TopicPartitionMap)) {
+      throw new TypeError(
+        `${name} must be a TopicPartitionMap, not ${value instanceof Map ? 'a Map' : typeof value}: a Map keyed by TopicPartition compares ` +
+          'its keys by identity, so build one with new TopicPartitionMap(entries)',
+      );
+    }
+    const copy = new TopicPartitionMap<OffsetAndMetadata | null>();
+    for (const [tp, v] of value as TopicPartitionMap<unknown>) {
+      if (v !== null && !(v instanceof OffsetAndMetadata)) throw new TypeError(`a value of ${name} must be an OffsetAndMetadata`);
+      copy.set(tp, v);
+    }
+    return copy;
+  },
+  core(raw) {
+    if (raw === null) return null;
+    const map = new TopicPartitionMap<OffsetAndMetadata>();
+    for (const [topic, partition, offset, leaderEpoch, metadata] of raw as Array<[string | null, number, bigint, number, string]>) {
+      map.set(new TopicPartition({ topic, partition }), new OffsetAndMetadata({ offset, leaderEpoch, metadata }));
+    }
+    return map;
+  },
+  copy: (stored) => (stored === null ? null : new TopicPartitionMap(stored as TopicPartitionMap<unknown>)),
+};

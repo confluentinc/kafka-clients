@@ -108,8 +108,8 @@ export class InvalidTopicError extends InvalidConfigurationError {
   /**
    * Java's `invalidTopics()`.
    *
-   * @returns Java's `invalidTopics`, as a new Set the caller may change @throws
-   * `TypeError` when it is given an argument: it only reads
+   * @returns Java's `invalidTopics`, as a new Set the caller may change
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   invalidTopics(): Set<string> {
     P.readOnly('invalidTopics', arguments.length);

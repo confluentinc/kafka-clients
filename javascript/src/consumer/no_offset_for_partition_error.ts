@@ -74,7 +74,8 @@ export class NoOffsetForPartitionError extends InvalidOffsetError {
    * Java's `partitions()`.
    *
    * @returns Java's `partitions`, as a new TopicPartitionSet the caller may
-   * change @throws `TypeError` when it is given an argument: it only reads
+   *   change
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   override partitions(): TopicPartitionSet {
     P.readOnly('partitions', arguments.length);

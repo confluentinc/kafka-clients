@@ -90,6 +90,7 @@ const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.producer.RecordMetadata',
   'org.apache.kafka.common.TopicPartition',
   'org.apache.kafka.common.Node',
+  'org.apache.kafka.clients.consumer.OffsetAndMetadata',
 ]);
 
 /**

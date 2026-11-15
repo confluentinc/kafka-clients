@@ -101,8 +101,8 @@ export class RecordTooLargeError extends ApiError {
    * Java's `recordTooLargePartitions()`.
    *
    * @returns Java's `recordTooLargePartitions`, as a new TopicPartitionMap the
-   * caller may change @throws `TypeError` when it is given an argument: it only
-   * reads
+   *   caller may change
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   recordTooLargePartitions(): TopicPartitionMap<bigint> | null {
     P.readOnly('recordTooLargePartitions', arguments.length);

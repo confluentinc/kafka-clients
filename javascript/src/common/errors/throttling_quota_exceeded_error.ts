@@ -73,8 +73,8 @@ export class ThrottlingQuotaExceededError extends RetriableError {
   /**
    * Java's `throttleTimeMs()`.
    *
-   * @returns Java's `throttleTimeMs` @throws `TypeError` when it is given an
-   * argument: it only reads
+   * @returns Java's `throttleTimeMs`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   throttleTimeMs(): number {
     P.readOnly('throttleTimeMs', arguments.length);

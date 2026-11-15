@@ -648,7 +648,7 @@ code relying on them keeps running with another meaning: check each.
 | a failed future's `get()` rejected with the delivery error | **silent** for `instanceof`: it rejects with `ExecutionError`, whose `cause` is the delivery error (the callback still gets the error itself) |
 | `err.code`, `err.errorName`, `err.retriable`, `err.apiError` | **silent**: gone, they read `undefined`; classify with `instanceof` (`RetriableError`, `ApiError`, ...), `err.name` as the fallback |
 | `new KafkaError(message, { cause })` | `new KafkaError({ message, cause })`, `new KafkaError(message)` or `new KafkaError(cause)`; Java's abstract bases throw `TypeError` when constructed |
-| `new QuotaViolationError(message)` and the other errors whose every Java constructor takes a payload | they take Java's payload forms by name (`new QuotaViolationError({ metric, value, bound })`, `new NoOffsetForPartitionError({ partition })`), with Java's getters as methods (`err.partitions()`); `RecordDeserializationError` and `LogTruncationError` still throw `TypeError`, their payloads' types not being translated |
+| `new QuotaViolationError(message)` and the other errors whose every Java constructor takes a payload | they take Java's payload forms by name (`new QuotaViolationError({ metric, value, bound })`, `new NoOffsetForPartitionError({ partition })`), with Java's getters as methods (`err.partitions()`) |
 | `IllegalArgumentError extends Error` | it, and `IndexOutOfBoundsError`, extend `RangeError` |
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
 | an argument to `flush()` | it is refused: Java's `flush()` takes none |
@@ -814,11 +814,13 @@ is read through Java's getters, methods over private fields:
 An error the core reports carries its payload: an invalid topic's
 `InvalidTopicError` lists it in `invalidTopics()`. A `Map<TopicPartition, Long>`
 is taken as a `TopicPartitionMap` only (a `Map` keys by identity and is
-refused, with a hint), a `long` as a bigint or a whole number. Left out, for
-types the client does not translate before the consumer:
-`LogTruncationError`'s constructors and `divergentOffsets()`, and
-`RecordDeserializationError`'s payload, so those two cannot be constructed.
-A payload field the core's C API has no accessor for keeps its default in an
+refused, with a hint), a `long` as a bigint or a whole number.
+`RecordDeserializationError` has Java's whole payload
+(`err.origin()`, a `RecordDeserializationError.DeserializationExceptionOrigin`,
+`err.timestampType()`, a `TimestampType` from `common/record`,
+`err.keyBuffer()` a `Buffer` or `null`, ...), and `LogTruncationError`'s
+`divergentOffsets()` is a `TopicPartitionMap` of `OffsetAndMetadata`
+(`consumer`). A payload field the core's C API has no accessor for keeps its default in an
 error the core reports: `QuotaViolationError`'s `metric()` is `null`,
 `CorrelationIdMismatchError`'s ids are `-1`. The
 configuration is checked by the client's core, which throws a `ConfigError`

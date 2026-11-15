@@ -72,11 +72,11 @@ pub(crate) fn header(from: &str) -> String {
 /// The src/ folders whose `index.ts` is hand-written (they also hold
 /// hand-written modules); the generator owns only the marked block there.
 /// `""` is `src/` itself.
-const MIXED_DIRS: &[&str] = &["", "common", "common/config", "common/metrics", "producer"];
+const MIXED_DIRS: &[&str] = &["", "common", "common/config", "common/metrics", "consumer", "producer"];
 
 /// The src/ folders whose `index.ts` is hand-written and which hold no
 /// generated module: their parents' blocks do not export them.
-const HAND_WRITTEN_DIRS: &[&str] = &["common/security", "common/security/auth"];
+const HAND_WRITTEN_DIRS: &[&str] = &["common/record", "common/security", "common/security/auth"];
 
 pub(crate) const EXPORTS_BEGIN: &str = "// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)";
 pub(crate) const EXPORTS_END: &str = "// END GENERATED EXPORTS";
@@ -215,7 +215,13 @@ pub(crate) fn tsdoc(text: &str, indent: &str) -> String {
             emit(&mut out, "");
             blank = false;
         }
-        if let Some(m) = marker {
+        if trimmed.starts_with('@') {
+            // A TSDoc block tag (`@param`, `@returns`, ...) starts a block of
+            // its own, its continuation lines indented by two.
+            flush(&mut out, &mut block);
+            let words = trimmed.split_whitespace().map(String::from).collect();
+            block = Some((lead.to_string(), format!("{lead}  "), words));
+        } else if let Some(m) = marker {
             flush(&mut out, &mut block);
             let first = format!("{lead}{m}");
             let cont = " ".repeat(first.len());

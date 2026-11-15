@@ -12,37 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
-// the Java sources (the generated modules of src/consumer/);
-// `cargo xtask check-generated` checks it is up to date.
-
-// `src/consumer`: the generated modules of src/consumer/.
-
 /**
- * The classes of the Java package this client has, generated from the Java
- * sources.
- *
- * What they leave out:
- *
- * - `LogTruncationError`: Not generated: Java's constructors that take a type
- *   the client does not translate: `LogTruncationException(Map<TopicPartition,
- *   Long>, Map<TopicPartition, OffsetAndMetadata>)` and
- *   `LogTruncationException(String, Map<TopicPartition, Long>,
- *   Map<TopicPartition, OffsetAndMetadata>)`.
- * - `LogTruncationError`: Not generated, for a type the client does not
- *   translate: the field `Map<TopicPartition, OffsetAndMetadata>
- *   divergentOffsets` and `divergentOffsets()`.
+ * The public classes of Java's `org.apache.kafka.clients.consumer` this
+ * client has before the consumer: `OffsetAndMetadata`, which
+ * `LogTruncationError`'s payload holds, and the consumer's error classes,
+ * generated from the Java sources.
  *
  * @packageDocumentation
  */
 
+export { OffsetAndMetadata } from './offset_and_metadata';
+// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { CommitFailedError } from './commit_failed_error';
 export { InvalidOffsetError } from './invalid_offset_error';
 export { LogTruncationError } from './log_truncation_error';
 export { NoOffsetForPartitionError } from './no_offset_for_partition_error';
 export { OffsetOutOfRangeError } from './offset_out_of_range_error';
 export { RetriableCommitFailedError } from './retriable_commit_failed_error';
+// END GENERATED EXPORTS
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
-// under `esModuleInterop` is a compile error rather than `undefined`.
+// under `esModuleInterop` is a compile error rather than `undefined` (import by
+// name or `import * as` instead; Node's own ESM default import still works).
 export declare const __esModule: true;
