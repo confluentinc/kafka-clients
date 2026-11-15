@@ -100,7 +100,8 @@ typedef struct {
     int32_t slot_count;
     int32_t free_head;                         // -1: none free
     MockRecord* kept;                          // a mock's records taken by its hand-over, held until clear() or destroy
-    InjectedError* injected;                   // the errors JS gave a mock, held until destroy
+    InjectedError* injected;                   // the errors JS gave a mock, held while the core holds a copy
+    SendCtx* mock_pending;                     // a mock's sends taken and not delivered yet: freed at destroy
 } Producer;
 
 // Whether the class handle is alive: not destroyed (only the handle object's
@@ -140,6 +141,14 @@ struct SendCtx {
     int32_t slot;                              // its slot in p->slots while js_holds, else -1
     int js_settled;                            // JS recorded the delivery: it reads the future no more
     MockRecord* mock_record;                   // a mock's send: the record it keeps, until the hand-over
+    // A mock's send taken and not delivered yet, on p->mock_pending: its
+    // completion may never come (Java's mock completes no send at close, and
+    // clear() drops the waiting ones), so destroy frees it. Its `on_complete`
+    // is weak: the MockProducer holds the function (src/producer/mock_producer.ts
+    // `#pending`), so an unreferenced closed mock is collected and destroyed.
+    int mock_pending;
+    SendCtx* pend_prev;
+    SendCtx* pend_next;
 };
 
 typedef struct {
@@ -238,9 +247,10 @@ static MockRecord* mock_record_of(const void* key) {
 // Binding Conventions, Errors, Q38). Two owners: the core's error, which
 // releases it from any thread once its last copy is dropped
 // (injected_error_release), and the producer struct, which deletes the
-// reference on the JS thread at the destroy (injected_errors_release); the
-// struct is freed by the last of them, and a value read after the destroy is
-// the core's plain error.
+// reference on the JS thread once the core's copies are gone (the sweep of
+// every mock call, injected_errors_sweep) or at the destroy
+// (injected_errors_release); the struct is freed by the last of them, and a
+// value read after the destroy is the core's plain error.
 struct InjectedError {
     uint32_t magic;
     atomic_int owners;
@@ -262,6 +272,24 @@ static void injected_errors_release(napi_env env, Producer* p) {
         p->injected = e->next;
         delete_ref(env, &e->value);
         injected_error_release(e);
+    }
+}
+
+// The errors the core holds no copy of any more (the producer struct is their
+// last owner): their references are deleted, on the JS thread, so a value JS
+// gave the mock is collectable once the core is done with it. Run by every
+// mock call (unwrap_mock).
+static void injected_errors_sweep(napi_env env, Producer* p) {
+    InjectedError** link = &p->injected;
+    while (*link != NULL) {
+        InjectedError* e = *link;
+        if (atomic_load(&e->owners) == 1) {
+            *link = e->next;
+            delete_ref(env, &e->value);
+            injected_error_release(e);
+        } else {
+            link = &e->next;
+        }
     }
 }
 
@@ -360,7 +388,19 @@ static void send_ctx_maybe_destroy_future(napi_env env, SendCtx* ctx) {
 
 static void mock_record_free(napi_env env, MockRecord* r);
 
+// Takes a mock's send off p->mock_pending, once.
+static void mock_pending_unlink(SendCtx* ctx) {
+    if (!ctx->mock_pending) return;
+    Producer* p = ctx->p;
+    if (ctx->pend_prev != NULL) ctx->pend_prev->pend_next = ctx->pend_next;
+    else p->mock_pending = ctx->pend_next;
+    if (ctx->pend_next != NULL) ctx->pend_next->pend_prev = ctx->pend_prev;
+    ctx->pend_prev = ctx->pend_next = NULL;
+    ctx->mock_pending = 0;
+}
+
 static void send_ctx_free(napi_env env, SendCtx* ctx) {
+    mock_pending_unlink(ctx);
     send_ctx_release_buffers(env, ctx);
     if (ctx->mock_record != NULL) {
         mock_record_free(env, ctx->mock_record);
@@ -558,27 +598,38 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
         p->kept = ctx->mock_record;
         ctx->mock_record = NULL;
     }
-    // A delivery that came first has already reported.
-    send_ctx_maybe_destroy_future(env, ctx);
-    error_discard(error);
-    delete_ref(env, &ctx->on_handover);
-    if (ctx->handover_failed && --ctx->refs > 0) {
-        // The delivery callback may still fire, once (the record had reached
-        // the accumulator): keep the context until destroy.
-        ctx->orphaned = 1;
-        ctx->next = p->orphans;
-        p->orphans = ctx;
-        // Refused once the core reported the close: no delivery callback can
-        // fire for it any more, so its JS function is dropped now, as
-        // close_on_complete drops the others'. Its closure holds the
-        // KafkaProducer, which would otherwise never be collected, nor the
-        // closed producer destroyed. One that fired and waits for its turn
-        // keeps it: it still runs.
-        if (cbq_is_closed(&p->queue) && !ctx->queued) delete_ref(env, &ctx->on_complete);
-    } else if (ctx->handover_failed) {
+    // A mock's refused send: the core's mock refuses before it keeps the
+    // record or makes a completion (MockProducer::send_with_callback's
+    // verify_can_send), and drops the delivery callback uncalled, so no
+    // delivery can follow: the context, and the app's record with it, are
+    // freed now.
+    if (p->mock != NULL && ctx->handover_failed) {
+        send_ctx_maybe_destroy_future(env, ctx);
+        error_discard(error);
         send_ctx_free(env, ctx);
     } else {
-        send_ctx_release(env, ctx);
+        // A delivery that came first has already reported.
+        send_ctx_maybe_destroy_future(env, ctx);
+        error_discard(error);
+        delete_ref(env, &ctx->on_handover);
+        if (ctx->handover_failed && --ctx->refs > 0) {
+            // The delivery callback may still fire, once (the record had
+            // reached the accumulator): keep the context until destroy.
+            ctx->orphaned = 1;
+            ctx->next = p->orphans;
+            p->orphans = ctx;
+            // Refused once the core reported the close: no delivery callback
+            // can fire for it any more, so its JS function is dropped now, as
+            // close_on_complete drops the others'. Its closure holds the
+            // KafkaProducer, which would otherwise never be collected, nor
+            // the closed producer destroyed. One that fired and waits for its
+            // turn keeps it: it still runs.
+            if (cbq_is_closed(&p->queue) && !ctx->queued) delete_ref(env, &ctx->on_complete);
+        } else if (ctx->handover_failed) {
+            send_ctx_free(env, ctx);
+        } else {
+            send_ctx_release(env, ctx);
+        }
     }
     cbq_call_end(env, &p->queue);
 }
@@ -840,7 +891,12 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     // In its turn (send_run_queued), it runs with the values it was queued with.
     int turn = ctx->turn;
     ctx->turn = 0;
-    if (!p->queue.finalizing && ctx->on_complete != NULL) {
+    mock_pending_unlink(ctx);
+    // A mock's function is held weakly (SendCtx.mock_pending): once its
+    // MockProducer is gone, nothing runs.
+    napi_value on_complete_fn = NULL;
+    if (ctx->on_complete != NULL && napi_get_reference_value(env, ctx->on_complete, &on_complete_fn) != napi_ok) on_complete_fn = NULL;
+    if (!p->queue.finalizing && on_complete_fn != NULL) {
         napi_value argv[2];
         int have;
         if (turn) {
@@ -1020,7 +1076,7 @@ static void send_hand_over(napi_env env, Producer* p, SendCtx* ctx, kafka_produc
     if ((!ctx->key.is_null && napi_create_reference(env, key, 1, &ctx->key_ref) != napi_ok)
         || (!ctx->value.is_null && napi_create_reference(env, value, 1, &ctx->value_ref) != napi_ok)
         || napi_create_reference(env, on_handover, 1, &ctx->on_handover) != napi_ok
-        || napi_create_reference(env, on_complete, 1, &ctx->on_complete) != napi_ok) {
+        || napi_create_reference(env, on_complete, p->mock != NULL ? 0 : 1, &ctx->on_complete) != napi_ok) {
         error_warn(env, 1, FFI_ERR(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err)));
         send_ctx_free(env, ctx);
         js_throw_last_napi_error(env, "napi_create_reference");
@@ -1475,7 +1531,15 @@ static void producer_destroy(napi_env env, Producer* p) {
     p->mock = NULL;
     p->view = NULL;
     // No callback can fire past this point, and a mock keeps no record and
-    // no error any more.
+    // no error any more. A mock's send whose completion never came (pending
+    // at its close, or dropped by clear()) is freed: no JS can reach its
+    // future, the handle object being collected.
+    while (p->mock_pending != NULL) {
+        SendCtx* ctx = p->mock_pending;
+        mock_pending_unlink(ctx);
+        ctx->js_holds = 0;
+        send_ctx_free(env, ctx);
+    }
     free_orphans(env, p);
     mock_records_free(env, &p->kept);
     injected_errors_release(env, p);
@@ -1792,6 +1856,7 @@ static Producer* unwrap_mock(napi_env env, napi_value handle) {
         napi_throw_type_error(env, NULL, "not a mock producer handle");
         return NULL;
     }
+    injected_errors_sweep(env, p);
     return p;
 }
 
@@ -1832,8 +1897,9 @@ napi_value js_mock_producer_create(napi_env env, napi_callback_info info) {
 // onComplete): a mock's send of the app's ProducerRecord `record`, whose
 // key and value cross as a MockRecord's `void *` tags, which the FFI's mock
 // keeps without reading; the record is held until clear() or the destroy
-// (refused at the hand-over: released then). No header crosses: the mock
-// keeps the app's own record, headers included.
+// (refused at the hand-over: released then, with the send's context). No
+// header crosses: the mock keeps the app's own record, headers included. The
+// mock's `onComplete` is held weakly: src/ keeps it until it runs.
 napi_value js_mock_producer_send(napi_env env, napi_callback_info info) {
     size_t argc = 7;
     napi_value argv[7];
@@ -1873,6 +1939,11 @@ napi_value js_mock_producer_send(napi_env env, napi_callback_info info) {
         return NULL;
     }
     ctx->mock_record = kept;
+    // Pending until its delivery, or the destroy (SendCtx.mock_pending).
+    ctx->mock_pending = 1;
+    ctx->pend_next = p->mock_pending;
+    if (p->mock_pending != NULL) p->mock_pending->pend_prev = ctx;
+    p->mock_pending = ctx;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_producer_ProducerRecord_t* record = NULL;
     // _with_partition_timestamp_key takes an out_err of its own.
