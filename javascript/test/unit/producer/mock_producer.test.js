@@ -37,21 +37,31 @@ const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { MockProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
+/** @typedef {import('@confluentinc/kafka-javascript/common').KafkaFuture<unknown>} AnyFuture */
+/** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
+
 const topic = 'topic';
 const record1 = new ProducerRecord({ topic, key: 'key1', value: 'value1' });
 const record2 = new ProducerRecord({ topic, key: 'key2', value: 'value2' });
 
 // Java's org.apache.kafka.test.MockSerializer: the data's bytes.
+/** @returns {Serializer<unknown>} */
 function mockSerializer() {
   return { serialize: ({ data }) => (data === null ? null : Buffer.from(String(data))) };
 }
 
+/** @param {boolean} autoComplete */
 function buildMockProducer(autoComplete) {
   return new MockProducer({ autoComplete, partitioner: null, keySerializer: mockSerializer(), valueSerializer: mockSerializer() });
 }
 
 // A call made once the mock is closed completes through a closed mock, which
 // no longer keeps the event loop alive: something must, until it settles.
+/**
+ * @template T
+ * @param {() => Promise<T>} body
+ * @returns {Promise<T>}
+ */
 async function holdingTheLoop(body) {
   const hold = setInterval(() => {}, 1000);
   try {
@@ -61,10 +71,12 @@ async function holdingTheLoop(body) {
   }
 }
 
+/** @param {MockProducer<unknown, unknown>} producer */
 async function cleanup(producer) {
   if (!producer.closed()) await producer.close();
 }
 
+/** @param {AnyFuture} future */
 async function isError(future) {
   try {
     await future.get();
@@ -142,6 +154,7 @@ test('shouldThrowClassCastException', async () => {
     keySerializer: { serialize: ({ data }) => (typeof data === 'number' ? Buffer.alloc(4) : assert.fail('not reached')) },
     valueSerializer: stringSerializer(),
   });
+  // @ts-expect-error a number for the string serializer: its type check throws TypeError
   await assert.rejects(customProducer.send(new ProducerRecord({ topic, key: 1, value: 2 })), {
     constructor: TypeError,
     message: 'stringSerializer: data must be a string or null, not a number',
@@ -179,7 +192,7 @@ test('shouldNotBeFlushedAfterFlush', async () => {
 
 test('testMetadataOnException', async () => {
   const producer = buildMockProducer(false);
-  let seen = null;
+  let seen = /** @type {{ md: RecordMetadata, exception: Error | null } | null} */ (null);
   const metadata = await producer.send({
     record: record2,
     callback: ({ metadata: md, exception }) => {
@@ -189,6 +202,7 @@ test('testMetadataOnException', async () => {
   const e = new IllegalArgumentError('dummy exception');
   assert.ok(producer.errorNext(e), 'Complete the second request with an error');
   assert.notEqual(seen, null);
+  assert.ok(seen);
   assert.ok(seen.md instanceof RecordMetadata);
   assert.equal(seen.md.offset, -1n, 'Invalid offset');
   assert.equal(seen.md.timestamp, -1n, 'Invalid timestamp');
@@ -203,14 +217,17 @@ test('testMetadataOnException', async () => {
 
 test("the constructor takes Java's () and (autoComplete, partitioner, keySerializer, valueSerializer)", async () => {
   const forms = 'MockProducer() takes one of (), (autoComplete, partitioner, keySerializer, valueSerializer)';
+  // @ts-expect-error a form missing keys: the form check throws IllegalArgumentError
   assert.throws(() => new MockProducer({ autoComplete: true }), {
     constructor: IllegalArgumentError,
     message: `${forms}; got (autoComplete)`,
   });
+  // @ts-expect-error a number for autoComplete: the type check throws TypeError
   assert.throws(() => new MockProducer({ autoComplete: 1, partitioner: null, keySerializer: null, valueSerializer: null }), {
     constructor: TypeError,
     message: 'autoComplete must be a boolean',
   });
+  // @ts-expect-error the factory for a serializer: the serde check throws IllegalArgumentError
   assert.throws(() => new MockProducer({ autoComplete: true, partitioner: null, keySerializer: stringSerializer, valueSerializer: null }), {
     constructor: IllegalArgumentError,
     message: "keySerializer: pass a serializer, not a function that makes one — did you forget '()'?",
@@ -257,7 +274,12 @@ test("history() returns the app's own records, which clear() drops, and the mock
 });
 
 test('the serializers run on every send, each with fresh empty headers, and the record keeps its own headers writable', async () => {
+  /** @type {unknown[][]} */
   const seen = [];
+  /**
+   * @param {string} side
+   * @returns {Serializer<string>}
+   */
   const serializer = (side) => ({
     serialize: async ({ topic: t, headers, data }) => {
       seen.push([side, t, data, headers.toArray().length]);
@@ -314,14 +336,17 @@ test('each error setter makes its call throw the very same value; null clears it
   await producer.close({ timeout: 0 });
   assert.ok(producer.closed());
 
+  // @ts-expect-error a string for an Error: the type check throws TypeError
   assert.throws(() => producer.setSendException({ sendException: 'boom' }), {
     constructor: TypeError,
     message: 'sendException must be an Error or null',
   });
+  // @ts-expect-error a string on its own: the form check throws IllegalArgumentError
   assert.throws(() => producer.setSendException('boom'), {
     constructor: IllegalArgumentError,
     message: 'setSendException() takes one of (sendException); got a string',
   });
+  // @ts-expect-error a missing key: the form check throws IllegalArgumentError
   assert.throws(() => producer.setSendException({}), {
     constructor: IllegalArgumentError,
     message: 'setSendException() takes one of (sendException); got ()',
@@ -336,11 +361,15 @@ test("errorNext takes Java's e, on its own or by name, and null completes the ca
   assert.equal((await first.get()).offset, 0n);
   const e = new Error('by name');
   assert.ok(producer.errorNext({ e }));
-  await assert.rejects(second.get(), (err) => err.cause === e);
+  await assert.rejects(second.get(), (err) => /** @type {Error} */ (err).cause === e);
   assert.equal(producer.errorNext(e), false);
+  // @ts-expect-error a string on its own: the form check throws IllegalArgumentError
   assert.throws(() => producer.errorNext('x'), { constructor: IllegalArgumentError });
+  // @ts-expect-error a string for an Error: the type check throws TypeError
   assert.throws(() => producer.errorNext({ e: 'x' }), { constructor: TypeError, message: 'e must be an Error or null' });
+  // @ts-expect-error an argument to a method that takes none: the form check throws IllegalArgumentError
   assert.throws(() => producer.completeNext(1), { constructor: IllegalArgumentError });
+  // @ts-expect-error an argument to a method that takes none: the reader throws TypeError
   assert.throws(() => producer.history(1), { constructor: TypeError });
   await producer.close();
 });
@@ -392,6 +421,7 @@ test("a callback that throws makes the completing call throw it, as Java's mock 
 
 test('flush() completes every waiting record before it rejects with the first throw (a recorded deviation)', async () => {
   const mock = new MockProducer();
+  /** @type {string[]} */
   const ran = [];
   const futures = [];
   for (const name of ['cb0', 'cb1', 'cb2']) {
@@ -449,6 +479,10 @@ test('a refused send is not in history() and keeps nothing: its callback never r
   await producer.close();
 });
 
+/**
+ * @param {string} script
+ * @param {number} [timeout]
+ */
 function runNode(script, timeout = 60000) {
   const { spawnSync } = require('node:child_process');
   const path = require('node:path');
@@ -536,7 +570,8 @@ function runNode(script, timeout = 60000) {
       r.stdout,
     );
     // About 18 threads per live mock: five leaked mocks would leave about 90.
-    for (const m of counts) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
+    // The deepEqual above has checked that both lines matched.
+    for (const m of /** @type {RegExpExecArray[]} */ (counts)) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
   },
 );
 

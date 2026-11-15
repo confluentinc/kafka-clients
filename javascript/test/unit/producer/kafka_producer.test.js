@@ -30,6 +30,11 @@ const { Header } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
+/** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
+/** @typedef {import('@confluentinc/kafka-javascript/common/header').Headers} Headers */
+/** @typedef {import('node:assert').AssertPredicate} AssertPredicate */
+/** @typedef {{ topic: string, headers: Headers, data: unknown }} SerializeCall */
+
 const MAX_BLOCK_MS = 300;
 const UNREACHABLE = {
   'bootstrap.servers': '127.0.0.1:1',
@@ -38,6 +43,7 @@ const UNREACHABLE = {
   'request.timeout.ms': 500,
   'linger.ms': 0,
 };
+/** @param {string} topic */
 const TIMEOUT_MESSAGE = (topic) => `Topic ${topic} not present in metadata after ${MAX_BLOCK_MS} ms.`;
 const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed';
 const BOOTSTRAP_MESSAGE =
@@ -46,9 +52,11 @@ const BOOTSTRAP_MESSAGE =
  * A failed record's delivery error: its future's get() rejects with Java's
  * ExecutionError, whose message is the cause's String(), and whose cause is
  * the error the delivery failed with, which this rejects with.
+ *
+ * @param {KafkaFuture<unknown>} future
  */
 function delivery(future) {
-  return future.get().catch((e) => {
+  return future.get().catch((/** @type {ExecutionError} */ e) => {
     assert.equal(e.constructor, ExecutionError);
     assert.equal(e.message, String(e.cause));
     throw e.cause;
@@ -60,6 +68,10 @@ function delivery(future) {
  * keeps Node running (javascript/CLAUDE.md, "Threads and liveness"), so a test
  * awaiting a call made after close() holds the loop itself, as an app's own
  * work would.
+ *
+ * @template T
+ * @param {() => Promise<T>} body
+ * @returns {Promise<T>}
  */
 async function holdingTheLoop(body) {
   const hold = setInterval(() => {}, 1000);
@@ -77,6 +89,7 @@ const FLUSH_IN_CALLBACK = 'KafkaProducer.flush() invocation inside a callback is
 test('send resolves at hand-over; the future fails after the callback ran once', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
+    /** @type {Array<{ metadata: RecordMetadata, error: Error | null }>} */
     const calls = [];
     const sent = producer.send({
       record: new ProducerRecord({ topic: 'unit-t', key: Buffer.from('k'), value: Buffer.from('v') }),
@@ -127,6 +140,7 @@ test('send resolves at hand-over; the future fails after the callback ran once',
     // as decimal strings in JSON.
     assert.deepEqual(JSON.parse(JSON.stringify(metadata)), { ...metadata, offset: '-1', timestamp: '-1' });
     assert.equal(Object.keys(metadata).length, 8);
+    assert.ok(error);
     assert.equal(error.message, TIMEOUT_MESSAGE('unit-t'));
     assert.equal(calls.length, 1);
   } finally {
@@ -168,9 +182,9 @@ test('a throwing callback does not change the outcome', async () => {
 test('a callback that returns a Promise is awaited: the future and flush() wait for it', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
-    let release;
+    let release = /** @type {((value?: unknown) => void) | undefined} */ (undefined);
     const released = new Promise((res) => (release = res));
-    let seen = null;
+    let seen = /** @type {{ metadata: RecordMetadata, exception: Error | null } | null} */ (null);
     const future = await producer.send({
       record: new ProducerRecord({ topic: 'unit-async', value: Buffer.from('v') }),
       callback: async ({ metadata, exception }) => {
@@ -181,6 +195,7 @@ test('a callback that returns a Promise is awaited: the future and flush() wait 
     // The callback ran (Java's send() returned after max.block.ms), and is
     // still pending: neither the future nor a flush covering it is done.
     assert.ok(seen !== null);
+    assert.ok(seen.exception);
     assert.equal(seen.exception.message, TIMEOUT_MESSAGE('unit-async'));
     assert.equal(future.isDone(), false);
     let flushed = false;
@@ -188,10 +203,12 @@ test('a callback that returns a Promise is awaited: the future and flush() wait 
     await new Promise((res) => setTimeout(res, 200));
     assert.equal(future.isDone(), false);
     assert.equal(flushed, false);
+    assert.ok(release);
     release();
     await flush;
     assert.equal(future.isDone(), true);
-    await assert.rejects(delivery(future), (e) => e === seen.exception);
+    // seen was checked not null above.
+    await assert.rejects(delivery(future), (e) => e === /** @type {{ exception: Error | null }} */ (seen).exception);
   } finally {
     await producer.close();
   }
@@ -276,7 +293,7 @@ test('a never-settling callback Promise nothing references is not reported at a 
 
 test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] closes as close() does', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
-  let release;
+  let release = /** @type {((value?: unknown) => void) | undefined} */ (undefined);
   const released = new Promise((res) => (release = res));
   await producer.send({ record: new ProducerRecord({ topic: 'unit-dispose', value: Buffer.from('v') }), callback: () => released });
   let closed = false;
@@ -284,6 +301,7 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
   assert.ok(closing instanceof Promise);
   await new Promise((res) => setTimeout(res, 200));
   assert.equal(closed, false);
+  assert.ok(release);
   release();
   await closing;
   await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
@@ -298,7 +316,7 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
 test('flush inside a callback rejects with the core error', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
-    let flushed;
+    let flushed = /** @type {Promise<void> | undefined} */ (undefined);
     const future = await producer.send({
       record: new ProducerRecord({ topic: 'unit-f', value: Buffer.from('v') }),
       callback: () => {
@@ -341,10 +359,18 @@ test('a hand-over failure rejects send() and never reaches the callback', async 
   }
 });
 
+/**
+ * A future with the library's own completion, which the published types leave out.
+ *
+ * @template T
+ * @typedef {KafkaFuture<T> & { internalComplete(value: T, error: unknown): boolean }} InternalFuture
+ */
+
 // The constructor is TypeScript-private and the factory @internal (left out
 // of the declarations, test/typing); there is no run-time guard.
 test('KafkaFuture is made by the client, through its library-only factory', () => {
-  const future = KafkaFuture.internalCreate(true);
+  const factory = /** @type {typeof KafkaFuture & { internalCreate<T>(record: boolean): InternalFuture<T> }} */ (KafkaFuture);
+  const future = factory.internalCreate(true);
   assert.ok(future instanceof KafkaFuture);
   assert.equal(future.isDone(), false);
   future.internalComplete('v', null);
@@ -357,6 +383,7 @@ test('KafkaFuture is made by the client, through its library-only factory', () =
 // constructor checked it: send() rejects with the constructor's error, and
 // nothing reaches the core.
 test('after close every call goes to the core: send rejects with its closed error, flush and close resolve', async () => {
+  /** @param {unknown} e */
   const closedError = (e) => {
     // Java's IllegalStateException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalStateError);
@@ -388,6 +415,7 @@ test('after close every call goes to the core: send rejects with its closed erro
 });
 
 test("close checks its timeout, open or closed: the closed state is the core's", async () => {
+  /** @param {unknown} e */
   const negative = (e) => {
     // Java's IllegalArgumentException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalArgumentError);
@@ -399,24 +427,31 @@ test("close checks its timeout, open or closed: the closed state is the core's",
   };
   const notADuration = { name: 'TypeError', message: 'timeout must be a number of milliseconds or a Temporal.Duration' };
   // Each refused timeout changes nothing.
+  /** @param {KafkaProducer} producer */
   const checks = async (producer) => {
     await assert.rejects(producer.close({ timeout: -1 }), negative);
     await assert.rejects(producer.close(-1), negative);
     await assert.rejects(producer.close(-0.5), negative);
     await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ milliseconds: -1 }) }), negative);
     await assert.rejects(producer.close(Temporal.Duration.from({ milliseconds: -1 })), negative);
+    // @ts-expect-error a string timeout: the duration check rejects with TypeError
     await assert.rejects(producer.close({ timeout: '5' }), notADuration);
     // A bare value that is neither a number nor a Temporal.Duration fits no form.
+    // @ts-expect-error a bare string: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.close('5'), {
       name: 'IllegalArgumentError',
       message: 'close() takes one of (), (timeout); got a string',
     });
+    // @ts-expect-error a null timeout: the null check rejects with TypeError
     await assert.rejects(producer.close({ timeout: null }), { name: 'TypeError', message: 'timeout must not be null' });
+    // @ts-expect-error a null timeout: the null check rejects with TypeError
     await assert.rejects(producer.close(null), { name: 'TypeError', message: 'timeout must not be null' });
+    // @ts-expect-error an undefined timeout: the undefined check rejects with TypeError
     await assert.rejects(producer.close({ timeout: undefined }), {
       name: 'TypeError',
       message: "timeout must not be undefined. Leave the key out, or pass null for Java's null",
     });
+    // @ts-expect-error an undefined timeout: the undefined check rejects with TypeError
     await assert.rejects(producer.close(undefined), {
       name: 'TypeError',
       message: "timeout must not be undefined. Leave the argument out, or pass null for Java's null",
@@ -431,7 +466,7 @@ test("close checks its timeout, open or closed: the closed state is the core's",
       name: 'RangeError',
       message: 'timeout of 9007199254740992 ms is above Number.MAX_SAFE_INTEGER ms; pass Infinity for no limit',
     });
-    await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ months: 1 }) }), (e) => {
+    await assert.rejects(producer.close({ timeout: Temporal.Duration.from({ months: 1 }) }), (/** @type {RangeError} */ e) => {
       assert.equal(e.constructor, RangeError);
       assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
       return true;
@@ -454,6 +489,7 @@ test("close checks its timeout, open or closed: the closed state is the core's",
     { timeout: Temporal.Duration.from({ seconds: 1 }) },
     Temporal.Duration.from({ seconds: 1 }),
   ]) {
+    // @ts-expect-error published type narrower than the run time: a value of the union of close's forms, which no single overload takes
     await new KafkaProducer({ configs: UNREACHABLE }).close(timeout);
   }
 });
@@ -498,6 +534,7 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
       [{ timeoutMs: 0 }, 'timeoutMs'],
       [{ timeout: 0, timeoutMs: 0 }, 'timeout, timeoutMs'],
     ]) {
+      // @ts-expect-error keys no form has: the form check rejects with IllegalArgumentError
       const closed = producer.close(args);
       assert.ok(closed instanceof Promise);
       await assert.rejects(closed, {
@@ -506,15 +543,18 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
       });
     }
     // send() with no argument at all; send(undefined) names the record.
+    // @ts-expect-error no argument: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.send(), {
       name: 'IllegalArgumentError',
       message: 'send() takes one of (record), (record, callback); got ()',
     });
+    // @ts-expect-error an undefined record: the undefined check rejects with TypeError
     await assert.rejects(producer.send(undefined), {
       name: 'TypeError',
       message: "record must not be undefined. Leave the argument out, or pass null for Java's null",
     });
     // A bare value that is no ProducerRecord fits no form.
+    // @ts-expect-error a bare number: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.send(5), {
       name: 'IllegalArgumentError',
       message: 'send() takes one of (record), (record, callback); got a number',
@@ -522,6 +562,7 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
     // Java's send(record, callback) is send({record, callback}): a second
     // argument is refused, never dropped with its callback.
     let ran = 0;
+    // @ts-expect-error a second argument: the form check rejects with IllegalArgumentError
     const twoArgs = producer.send(record, () => ran++);
     assert.ok(twoArgs instanceof Promise);
     await assert.rejects(twoArgs, {
@@ -530,6 +571,7 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
     });
     assert.equal(ran, 0);
     // Extra arguments are refused.
+    // @ts-expect-error a second argument: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.close(0, 1), {
       name: 'IllegalArgumentError',
       message: 'close() takes one of (), (timeout); got 2 arguments, not one object of named parameters',
@@ -539,6 +581,7 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
       [{ callback: () => {} }, 'callback'],
       [{ record, callback: null, extra: 1 }, 'record, callback, extra'],
     ]) {
+      // @ts-expect-error keys no form has: the form check rejects with IllegalArgumentError
       await assert.rejects(producer.send(args), {
         name: 'IllegalArgumentError',
         message: `send() takes one of (record), (record, callback); got (${given})`,
@@ -550,6 +593,7 @@ test("close and send take Java's forms, the one-parameter ones bare too, and rej
     });
     // The record on its own, named, and with Java's null callback.
     for (const args of [record, { record }, { record, callback: null }]) {
+      // @ts-expect-error published type narrower than the run time: a value of the union of send's forms, which no single overload takes
       const future = await producer.send(args);
       await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-forms') });
     }
@@ -564,28 +608,34 @@ test("flush() takes no argument: Java's flush(), never 1.x's flush(timeout, call
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
     let ran = 0;
+    // @ts-expect-error arguments to flush(): the form check rejects with IllegalArgumentError
     const withCallback = producer.flush(100, () => ran++);
     assert.ok(withCallback instanceof Promise);
     await assert.rejects(withCallback, {
       name: 'IllegalArgumentError',
       message: 'flush() takes one of (); got 2 arguments, not one object of named parameters',
     });
+    // @ts-expect-error an argument to flush(): the form check rejects with IllegalArgumentError
     await assert.rejects(producer.flush({ timeout: 100 }), {
       name: 'IllegalArgumentError',
       message: 'flush() takes one of (); got (timeout)',
     });
+    // @ts-expect-error an argument to flush(): the form check rejects with IllegalArgumentError
     await assert.rejects(producer.flush(100), { name: 'IllegalArgumentError', message: 'flush() takes one of (); got a number' });
     assert.equal(ran, 0);
     // undefined is never "not given": flush(undefined) is refused; flush({}) is flush().
+    // @ts-expect-error an undefined argument: the undefined check rejects with TypeError
     await assert.rejects(producer.flush(undefined), {
       name: 'TypeError',
       message: 'flush() takes no argument: leave it out rather than pass undefined',
     });
+    // @ts-expect-error published type narrower than the run time: flush({}) is the options form with no keys, flush()
     await producer.flush({});
   } finally {
     await producer.close();
   }
   // The form is checked before the closed producer.
+  // @ts-expect-error an argument to flush(): the form check rejects with IllegalArgumentError
   await assert.rejects(producer.flush(100), { name: 'IllegalArgumentError' });
 });
 
@@ -607,12 +657,12 @@ test('send reads only the parameters the form check saw: own enumerable keys', a
     const future = await producer.send(hidden);
     await assert.rejects(delivery(future), { name: 'TimeoutError' });
     // Nor is one on a polluted Object.prototype.
-    Object.prototype.callback = () => ran++;
+    /** @type {Record<string, unknown>} */ (Object.prototype).callback = () => ran++;
     let polluted;
     try {
       polluted = await producer.send({ record });
     } finally {
-      delete Object.prototype.callback;
+      delete (/** @type {Record<string, unknown>} */ (Object.prototype).callback);
     }
     await assert.rejects(delivery(polluted), { name: 'TimeoutError' });
     assert.equal(ran, 0);
@@ -627,9 +677,13 @@ test("a closed producer checks a send's record and callback before the core repo
   // closed producer first (a deviation, documented on send()).
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   await producer.close();
+  // @ts-expect-error a null record: the null check rejects with TypeError
   await assert.rejects(producer.send({ record: null }), { name: 'TypeError', message: 'record must not be null' });
+  // @ts-expect-error a null record: the null check rejects with TypeError
   await assert.rejects(producer.send(null), { name: 'TypeError', message: 'record must not be null' });
+  // @ts-expect-error a plain object for a ProducerRecord: the class check rejects with TypeError
   await assert.rejects(producer.send({ record: {} }), { name: 'TypeError', message: 'record must be a ProducerRecord' });
+  // @ts-expect-error a string callback: the type check rejects with TypeError
   await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }), callback: 'cb' }), {
     name: 'TypeError',
     message: 'callback must be a function ({ metadata, exception }) => void',
@@ -639,10 +693,12 @@ test("a closed producer checks a send's record and callback before the core repo
     message: CLOSED_MESSAGE,
   });
   // The form is checked first: a bare value that fits no form included.
+  // @ts-expect-error a missing record: the form check rejects with IllegalArgumentError
   await assert.rejects(producer.send({}), {
     name: 'IllegalArgumentError',
     message: 'send() takes one of (record), (record, callback); got ()',
   });
+  // @ts-expect-error a bare number: the form check rejects with IllegalArgumentError
   await assert.rejects(producer.send(42), {
     name: 'IllegalArgumentError',
     message: 'send() takes one of (record), (record, callback); got a number',
@@ -652,6 +708,7 @@ test("a closed producer checks a send's record and callback before the core repo
 test("the constructor takes Java's {configs} or the configs on their own, a plain object", async () => {
   // The configs on their own and named build the same producer.
   for (const args of [UNREACHABLE, { configs: UNREACHABLE }]) {
+    // @ts-expect-error published type narrower than the run time: a value of the union of the constructor's forms, which no single overload takes
     const producer = new KafkaProducer(args);
     const future = await producer.send(new ProducerRecord({ topic: 'unit-ctor', value: Buffer.from('v') }));
     await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-ctor') });
@@ -659,11 +716,14 @@ test("the constructor takes Java's {configs} or the configs on their own, a plai
   }
   // A plain object is the options object when it has the key configs: a
   // stray key is then a form error, not a config key.
+  // @ts-expect-error no argument: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer(), { name: 'IllegalArgumentError', message: `${CTOR_FORMS}; got ()` });
+  // @ts-expect-error undefined configs: the undefined check throws TypeError
   assert.throws(() => new KafkaProducer(undefined), {
     name: 'TypeError',
     message: "configs must not be undefined. Leave the argument out, or pass null for Java's null",
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer(UNREACHABLE, {}), {
     name: 'IllegalArgumentError',
     message: `${CTOR_FORMS}; got 2 arguments, not one object of named parameters`,
@@ -672,6 +732,7 @@ test("the constructor takes Java's {configs} or the configs on their own, a plai
     [{ configs: UNREACHABLE, keySerializer: null }, 'configs, keySerializer'],
     [{ 'bootstrap.servers': '127.0.0.1:1', configs: UNREACHABLE }, 'configs, bootstrap.servers'],
   ]) {
+    // @ts-expect-error keys no form has: the form check throws IllegalArgumentError
     assert.throws(() => new KafkaProducer(args), {
       name: 'IllegalArgumentError',
       message: `${CTOR_FORMS}; got (${given})`,
@@ -684,14 +745,17 @@ test("the constructor takes Java's {configs} or the configs on their own, a plai
   });
   // Java's Map and Properties forms are one plain object: a Map is refused, bare or named.
   for (const args of [new Map([['bootstrap.servers', '127.0.0.1:1']]), { configs: new Map() }]) {
+    // @ts-expect-error a Map for the configs: the plain-object check throws TypeError
     assert.throws(() => new KafkaProducer(args), { name: 'TypeError', message: 'configs must be a plain object, not a Map' });
   }
   assert.throws(() => new KafkaProducer({ configs: null }), { name: 'TypeError', message: 'configs must not be null' });
+  // @ts-expect-error null configs: the null check throws TypeError
   assert.throws(() => new KafkaProducer(null), { name: 'TypeError', message: 'configs must not be null' });
   assert.throws(() => new KafkaProducer({ configs: undefined }), {
     name: 'TypeError',
     message: "configs must not be undefined. Leave the key out, or pass null for Java's null",
   });
+  // @ts-expect-error a string for the configs: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer('bootstrap.servers=x'), {
     name: 'IllegalArgumentError',
     message: `${CTOR_FORMS}; got a string`,
@@ -702,6 +766,7 @@ test("the constructor takes Java's {configs} or the configs on their own, a plai
 });
 
 test('a negative close timeout on an open producer is rejected first and changes nothing', async () => {
+  /** @param {unknown} e */
   const negative = (e) => {
     // Java's IllegalArgumentException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalArgumentError);
@@ -745,6 +810,7 @@ test('a negative close timeout on an open producer is rejected first and changes
 
 test('close() while a send waits for metadata rejects that send with a bare KafkaError', async () => {
   const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'max.block.ms': 60000 } });
+  /** @type {string[]} */
   const calls = [];
   const sent = producer.send({
     record: new ProducerRecord({ topic: 'unit-close-waiting', value: Buffer.from('v') }),
@@ -762,7 +828,7 @@ test('close() while a send waits for metadata rejects that send with a bare Kafk
   assert.equal(settled, false);
   const started = Date.now();
   await producer.close();
-  await assert.rejects(sent, (e) => {
+  await assert.rejects(sent, (/** @type {Error} */ e) => {
     assert.equal(e.constructor, KafkaError);
     assert.equal(e.message, 'Producer closed while send in progress');
     return true;
@@ -776,6 +842,7 @@ test('flush() does not wait for a send still waiting for metadata', async () => 
   const blockMs = 1500;
   const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'max.block.ms': blockMs } });
   try {
+    /** @type {Array<Error | null>} */
     const calls = [];
     const sent = producer.send({
       record: new ProducerRecord({ topic: 'unit-flush-waiting', value: Buffer.from('v') }),
@@ -799,8 +866,11 @@ test('flush() does not wait for a send still waiting for metadata', async () => 
     assert.equal(future.isCompletedExceptionally(), true);
     await assert.rejects(delivery(future), { name: 'TimeoutError', message });
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].name, 'TimeoutError');
-    assert.equal(calls[0].message, message);
+    // The deepEqual above narrowed calls to an empty array: read it as it is now.
+    const [first] = /** @type {Array<Error | null>} */ (calls);
+    assert.ok(first);
+    assert.equal(first.name, 'TimeoutError');
+    assert.equal(first.message, message);
   } finally {
     await producer.close();
   }
@@ -809,16 +879,21 @@ test('flush() does not wait for a send still waiting for metadata', async () => 
 test('argument errors reject: send() and close() never throw', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
   try {
+    // @ts-expect-error a plain object for a ProducerRecord: the class check rejects with TypeError
     const sent = producer.send({ record: { topic: 't' } });
     assert.ok(sent instanceof Promise);
     await assert.rejects(sent, { name: 'TypeError', message: 'record must be a ProducerRecord' });
     // Java's doSend dereferences a null record.
+    // @ts-expect-error a null record: the null check rejects with TypeError
     await assert.rejects(producer.send({ record: null }), { name: 'TypeError', message: 'record must not be null' });
+    // @ts-expect-error a null record: the null check rejects with TypeError
     await assert.rejects(producer.send(null), { name: 'TypeError', message: 'record must not be null' });
+    // @ts-expect-error a string callback: the type check rejects with TypeError
     await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }), callback: 'cb' }), {
       name: 'TypeError',
       message: 'callback must be a function ({ metadata, exception }) => void',
     });
+    // @ts-expect-error a string timeout: the duration check rejects with TypeError
     const closed = producer.close({ timeout: 'soon' });
     assert.ok(closed instanceof Promise);
     await assert.rejects(closed, { name: 'TypeError', message: 'timeout must be a number of milliseconds or a Temporal.Duration' });
@@ -839,6 +914,7 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
     message: 'config values must be strings without null bytes',
   });
   const producer = new KafkaProducer({ configs: UNREACHABLE });
+  /** @type {string[]} */
   const calls = [];
   const callback = () => calls.push('callback');
   await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'good\0bad', value: Buffer.from('v') }), callback }), {
@@ -956,6 +1032,12 @@ test('the references of many sends are released: the process does not grow with 
 
 // Runs `script` in a fresh Node process (killed after `timeout` ms), returning
 // its exit status, output and wall time.
+/**
+ * @param {string} script
+ * @param {number} [timeout]
+ * @param {string[]} [flags]
+ * @param {Record<string, string>} [env]
+ */
 function runNode(script, timeout = 30000, flags = [], env = undefined) {
   const started = process.hrtime.bigint();
   const r = spawnSync(process.execPath, [...flags, '-e', script], {
@@ -1173,7 +1255,8 @@ test('a closed producer lets the process exit, and is destroyed when garbage col
       ],
       r.stdout,
     );
-    for (const m of lines) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
+    // The deepEqual above has checked that every line matched.
+    for (const m of /** @type {RegExpExecArray[]} */ (lines)) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
   },
 );
 
@@ -1232,7 +1315,14 @@ test('a failed future whose get() is never called raises no unhandled rejection'
 // { topic, headers, data }, run in JavaScript inside send(), awaited when it
 // returns a Promise, closed when the producer closes.
 
-/** A serializer recording its calls, returning `out(data)`. */
+/**
+ * A serializer recording its calls, returning `out(data)`.
+ *
+ * @template T
+ * @param {(data: T | null) => Uint8Array | null} out
+ * @param {SerializeCall[]} calls
+ * @returns {Serializer<T>}
+ */
 function recording(out, calls) {
   return {
     serialize({ topic, headers, data }) {
@@ -1242,9 +1332,15 @@ function recording(out, calls) {
   };
 }
 
-/** Collects the process warnings emitted while `body` runs and one turn after. */
+/**
+ * Collects the process warnings emitted while `body` runs and one turn after.
+ *
+ * @param {() => Promise<void>} body
+ */
 async function warningsOf(body) {
+  /** @type {Error[]} */
   const seen = [];
+  /** @param {Error} w */
   const listener = (w) => seen.push(w);
   process.on('warning', listener);
   try {
@@ -1258,6 +1354,7 @@ async function warningsOf(body) {
 }
 
 test('the serializers run in send(), key then value, with the topic, the headers and null data too', async () => {
+  /** @type {SerializeCall[]} */
   const calls = [];
   const keySerializer = recording((data) => (data === null ? null : Buffer.from(`k:${data}`)), calls);
   const valueSerializer = recording((data) => Buffer.from(JSON.stringify(data)), calls);
@@ -1293,6 +1390,7 @@ test('the serializers run in send(), key then value, with the topic, the headers
 });
 
 test('a serializer may add headers before the hand-over', async () => {
+  /** @type {Serializer<number[]>} */
   const valueSerializer = {
     serialize({ headers, data }) {
       headers.add({ key: 'type', value: Buffer.from('json') });
@@ -1303,13 +1401,18 @@ test('a serializer may add headers before the hand-over', async () => {
   try {
     const record = new ProducerRecord({ topic: 'unit-serde-h', value: [1] });
     await producer.send(record);
-    assert.equal(record.headers.lastHeader('type').value().toString(), 'json');
+    const type = record.headers.lastHeader('type');
+    assert.ok(type);
+    const value = type.value();
+    assert.ok(value);
+    assert.equal(value.toString(), 'json');
   } finally {
     await producer.close();
   }
 });
 
 test('a null serializer sends the record bytes as they are, as no serializer does', async () => {
+  /** @type {SerializeCall[]} */
   const calls = [];
   const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: recording(() => null, calls) });
   try {
@@ -1319,10 +1422,12 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
       ['anything'],
     );
     // Without a key serializer the key must be bytes; a string points to stringSerializer() (root Q24, Q27).
+    // @ts-expect-error a number key without a key serializer: the bytes check rejects with TypeError
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 3, value: 'v' })), {
       name: 'TypeError',
       message: 'key must be a Buffer, a Uint8Array or null when the producer has no key serializer',
     });
+    // @ts-expect-error a string key without a key serializer: the bytes check rejects with TypeError
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 'k', value: 'v' })), {
       name: 'TypeError',
       message:
@@ -1330,6 +1435,7 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
         'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
     });
     const bytesOnly = new KafkaProducer({ configs: UNREACHABLE });
+    // @ts-expect-error a string value without a value serializer: the bytes check rejects with TypeError
     await assert.rejects(bytesOnly.send(new ProducerRecord({ topic: 'unit-serde-n', value: 'v' })), {
       name: 'TypeError',
       message:
@@ -1343,10 +1449,13 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
 });
 
 test('a serializer returning a Promise is awaited; one returning a plain value adds no microtask', async () => {
+  /** @type {string[]} */
   const order = [];
+  /** @type {Serializer<string>} */
   const valueSerializer = {
     serialize({ data }) {
       order.push(`serialize ${data}`);
+      assert.ok(data !== null);
       return data === 'async' ? Promise.resolve(Buffer.from(data)).then((b) => (order.push('resolved'), b)) : Buffer.from(data);
     },
   };
@@ -1367,17 +1476,20 @@ test('a serializer returning a Promise is awaited; one returning a plain value a
 });
 
 test('the value serializer runs after the key serializer Promise settled', async () => {
+  /** @type {string[]} */
   const order = [];
-  let release;
+  let release = /** @type {((value?: unknown) => void) | undefined} */ (undefined);
   const gate = new Promise((resolve) => {
     release = resolve;
   });
+  /** @type {Serializer<number>} */
   const keySerializer = {
     serialize() {
       order.push('key');
       return gate.then(() => (order.push('key settled'), Buffer.from('k')));
     },
   };
+  /** @type {Serializer<number>} */
   const valueSerializer = {
     serialize() {
       order.push('value');
@@ -1389,6 +1501,7 @@ test('the value serializer runs after the key serializer Promise settled', async
     const sent = producer.send(new ProducerRecord({ topic: 'unit-serde-o', key: 1, value: 2 }));
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(order, ['key']);
+    assert.ok(release);
     release();
     await sent;
     assert.deepEqual(order, ['key', 'key settled', 'value']);
@@ -1399,7 +1512,8 @@ test('the value serializer runs after the key serializer Promise settled', async
 
 test('what a serializer throws, rejects with or returns that is no bytes rejects send()', async () => {
   const boom = new Error('boom');
-  for (const [serializer, expected] of [
+  /** @type {Array<[Serializer<string>, AssertPredicate]>} */
+  const cases = [
     [
       {
         serialize: () => {
@@ -1410,20 +1524,25 @@ test('what a serializer throws, rejects with or returns that is no bytes rejects
     ],
     [{ serialize: () => Promise.reject(boom) }, (e) => e === boom],
     [
+      // @ts-expect-error a serializer returning a string: the return check rejects send() with TypeError
       { serialize: () => 'text' },
       { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not a string' },
     ],
     [
+      // @ts-expect-error a serializer returning undefined: the return check rejects send() with TypeError
       { serialize: () => undefined },
       { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not an undefined' },
     ],
     [
+      // @ts-expect-error a serializer resolving to a number: the return check rejects send() with TypeError
       { serialize: async () => 5 },
       { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not a number' },
     ],
-  ]) {
+  ];
+  for (const [serializer, expected] of cases) {
     const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: serializer });
     try {
+      /** @type {unknown[]} */
       const calls = [];
       const record = new ProducerRecord({ topic: 'unit-serde-e', value: 'v' });
       await assert.rejects(producer.send({ record, callback: (r) => calls.push(r) }), expected);
@@ -1438,7 +1557,8 @@ test('what a serializer throws, rejects with or returns that is no bytes rejects
 });
 
 test('a producer closed while a serializer Promise is pending rejects that send as closed', async () => {
-  let release;
+  let release = /** @type {((value?: unknown) => void) | undefined} */ (undefined);
+  /** @type {Serializer<string>} */
   const valueSerializer = {
     serialize: () =>
       new Promise((resolve) => {
@@ -1448,10 +1568,12 @@ test('a producer closed while a serializer Promise is pending rejects that send 
   const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer });
   const sent = producer.send(new ProducerRecord({ topic: 'unit-serde-c', value: 'v' }));
   await producer.close();
+  assert.ok(release);
   release();
   await assert.rejects(sent, { name: 'IllegalStateError', message: CLOSED_MESSAGE });
   // The binding keeps no closed state: on a closed producer the serializers
   // still run, and the core reports the closed producer at the hand-over.
+  /** @type {SerializeCall[]} */
   const calls = [];
   const closed = new KafkaProducer({
     configs: UNREACHABLE,
@@ -1472,25 +1594,32 @@ test('a producer closed while a serializer Promise is pending rejects that send 
 });
 
 test("a serializer argument is a serializer object or null; a function gets Python's hint", () => {
+  /** @param {string} given */
   const forms = (given) => ({ name: 'IllegalArgumentError', message: `${CTOR_FORMS}; got (${given})` });
   const value = { serialize: () => null };
+  // @ts-expect-error a key serializer without a value serializer: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: value }), forms('configs, keySerializer'));
+  // @ts-expect-error a value serializer without a key serializer: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, valueSerializer: value }), forms('configs, valueSerializer'));
   // The built-in factory, given where its result goes.
+  // @ts-expect-error the factory for a serializer: the serde check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: stringSerializer, valueSerializer: null }), {
     name: 'IllegalArgumentError',
     message: "keySerializer: pass a serializer, not a function that makes one — did you forget '()'?",
   });
   for (const bad of [{}, 'string', 1, { serialize: 'x' }]) {
+    // @ts-expect-error values that are no serializer: the serde check throws TypeError
     assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: bad }), {
       name: 'TypeError',
       message: 'valueSerializer must be a Serializer: an object with a serialize({ topic, headers, data }) method, or null',
     });
   }
+  // @ts-expect-error a close that is no function: the serde check throws TypeError
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: { serialize() {}, close: 1 }, valueSerializer: null }), {
     name: 'TypeError',
     message: 'keySerializer.close must be a function when given',
   });
+  // @ts-expect-error an undefined key serializer: the undefined check throws TypeError
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: undefined, valueSerializer: null }), {
     name: 'TypeError',
     message: "keySerializer must not be undefined. Leave the key out, or pass null for Java's null",
@@ -1498,6 +1627,7 @@ test("a serializer argument is a serializer object or null; a function gets Pyth
 });
 
 test('close() closes both serializers, a failure being a process warning, never a rejection', async () => {
+  /** @type {string[]} */
   const closed = [];
   const keySerializer = { serialize: () => null, close: () => closed.push('key') };
   const valueSerializer = {
@@ -1536,7 +1666,9 @@ test('close() closes both serializers, a failure being a process warning, never 
 });
 
 test("a producer whose construction fails closes the serializers; a ConfigError of the configuration's check, which Java throws before that catch, does not", async () => {
+  /** @type {string[]} */
   const closed = [];
+  /** @param {string} name */
   const serializer = (name) => ({ serialize: () => null, close: () => closed.push(name) });
   // Inside Java's constructor catch: relabelled "Failed to construct kafka producer", serializers closed.
   assert.throws(
@@ -1546,7 +1678,10 @@ test("a producer whose construction fails closes the serializers; a ConfigError 
         keySerializer: serializer('key'),
         valueSerializer: serializer('value'),
       }),
-    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause.name === 'ConfigError',
+    (/** @type {KafkaError} */ e) =>
+      e.constructor === KafkaError &&
+      e.message === 'Failed to construct kafka producer' &&
+      /** @type {Error} */ (e.cause).name === 'ConfigError',
   );
   assert.deepEqual(closed, ['key', 'value']);
   // Java's new ProducerConfig(...) validates before that catch: the serializers stay open.
@@ -1568,9 +1703,12 @@ test("a producer whose construction fails closes the serializers; a ConfigError 
 // serializer, called once with the whole configuration, in place of Java's
 // class and its configure(configs, isKey).
 test('key.serializer and value.serializer take a function the producer calls once with the configuration', async () => {
+  /** @type {Array<{ isKey: boolean, configs: Readonly<Record<string, unknown>> }>} */
   const made = [];
+  /** @type {SerializeCall[]} */
   const calls = [];
-  const factory = (prefix) => (options) => {
+  /** @param {string} prefix */
+  const factory = (prefix) => (/** @type {{ configs: Readonly<Record<string, unknown>>, isKey: boolean }} */ options) => {
     made.push({ isKey: options.isKey, configs: options.configs });
     return recording((data) => (data === null ? null : Buffer.from(`${prefix}${data}`)), calls);
   };
@@ -1605,6 +1743,7 @@ test("a serializer argument wins over its config key, which is then ignored; a n
     return { serialize: () => null };
   };
   const p1 = new KafkaProducer({
+    // @ts-expect-error published type narrower than the run time: a serializer argument makes its config key ignored, whatever its value
     configs: { ...UNREACHABLE, 'key.serializer': make, 'value.serializer': 'not even a function' },
     keySerializer: { serialize: () => null },
     valueSerializer: { serialize: () => null },
@@ -1617,6 +1756,7 @@ test("a serializer argument wins over its config key, which is then ignored; a n
 });
 
 test('a serde config key that is no synchronous function throws ConfigError, saying what to pass', async () => {
+  /** @param {string} argument */
   const pass = (argument) =>
     `pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, or the serializer itself as the ${argument} argument of the constructor`;
   class StringSerializer {
@@ -1650,7 +1790,7 @@ test('a serde config key that is no synchronous function throws ConfigError, say
     ]) {
       assert.throws(
         () => new KafkaProducer({ ...UNREACHABLE, [key]: value }),
-        (e) => {
+        (/** @type {Error} */ e) => {
           assert.equal(e.constructor.name, 'ConfigError', key);
           assert.equal(e.message, message);
           return true;
@@ -1666,6 +1806,7 @@ test('a serde config key that is no synchronous function throws ConfigError, say
 });
 
 test('a serde config function that throws is a construction failure, and the serializers made so far are closed', async () => {
+  /** @type {string[]} */
   const closed = [];
   const cause = new Error('cannot build');
   assert.throws(
@@ -1677,7 +1818,8 @@ test('a serde config function that throws is a construction failure, and the ser
           throw cause;
         },
       }),
-    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
+    (/** @type {KafkaError} */ e) =>
+      e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
   );
   assert.deepEqual(closed, ['key']);
   // A key function that throws closes nothing: the value serializer given is
@@ -1695,7 +1837,8 @@ test('a serde config function that throws is a construction failure, and the ser
         keySerializer: null,
         valueSerializer: { serialize: () => null, close: () => closed.push('value argument') },
       }),
-    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
+    (/** @type {KafkaError} */ e) =>
+      e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
   );
   assert.deepEqual(closed, []);
   // A value function that throws closes the key serializer given, which was taken.
@@ -1709,10 +1852,11 @@ test('a serde config function that throws is a construction failure, and the ser
             throw cause;
           },
         },
-        keySerializer: { serialize: () => null, close: () => closed.push('key argument') },
+        keySerializer: { serialize: () => null, close: () => /** @type {string[]} */ (closed).push('key argument') },
         valueSerializer: null,
       }),
-    (e) => e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
+    (/** @type {KafkaError} */ e) =>
+      e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
   );
   assert.deepEqual(closed, ['key argument']);
   // One the core's configuration check refuses afterwards is closed too: only
@@ -1724,10 +1868,10 @@ test('a serde config function that throws is a construction failure, and the ser
         configs: {
           'bootstrap.servers': '127.0.0.1:1',
           acks: 'sometimes',
-          'key.serializer': () => ({ serialize: () => null, close: () => closed.push('key') }),
+          'key.serializer': () => ({ serialize: () => null, close: () => /** @type {string[]} */ (closed).push('key') }),
         },
         keySerializer: null,
-        valueSerializer: { serialize: () => null, close: () => closed.push('value argument') },
+        valueSerializer: { serialize: () => null, close: () => /** @type {string[]} */ (closed).push('value argument') },
       }),
     { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
   );
@@ -1736,7 +1880,7 @@ test('a serde config function that throws is a construction failure, and the ser
   closed.length = 0;
   const producer = new KafkaProducer({
     ...UNREACHABLE,
-    'value.serializer': () => ({ serialize: () => null, close: () => closed.push('value') }),
+    'value.serializer': () => ({ serialize: () => null, close: () => /** @type {string[]} */ (closed).push('value') }),
   });
   await producer.close();
   assert.deepEqual(closed, ['value']);
@@ -1745,7 +1889,7 @@ test('a serde config function that throws is a construction failure, and the ser
 test('stringSerializer goes in a serde config key without (), configured by its encoding keys', async () => {
   assert.throws(
     () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-32' }),
-    (e) => {
+    (/** @type {KafkaError & { cause: Error }} */ e) => {
       assert.equal(e.constructor, KafkaError);
       assert.equal(e.message, 'Failed to construct kafka producer');
       assert.equal(e.cause.name, 'SerializationError');
@@ -1763,7 +1907,7 @@ test('stringSerializer goes in a serde config key without (), configured by its 
         'key.serializer.encoding': 'UTF-8',
         'serializer.encoding': 'windows-1252',
       }),
-    (e) => e.cause.message === 'Unsupported encoding windows-1252',
+    (/** @type {Error & { cause: Error }} */ e) => e.cause.message === 'Unsupported encoding windows-1252',
   );
   const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
   await producer.close();
@@ -1840,16 +1984,21 @@ test("partitionsFor rejects with the core's errors: a metadata timeout, Java's n
     await assert.rejects(pending, { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-pf') });
     await assert.rejects(producer.partitionsFor({ topic: 'unit-pf' }), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-pf') });
     // Java's Objects.requireNonNull(topic, "topic cannot be null"), the core's.
+    // @ts-expect-error a null topic: the core's null check rejects with TypeError
     await assert.rejects(producer.partitionsFor(null), { constructor: TypeError, message: 'topic cannot be null' });
+    // @ts-expect-error a number topic: the type check rejects with TypeError
     await assert.rejects(producer.partitionsFor({ topic: 5 }), { constructor: TypeError, message: 'topic must be a string' });
+    // @ts-expect-error a bare number: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.partitionsFor(5), {
       name: 'IllegalArgumentError',
       message: 'partitionsFor() takes one of (topic); got a number',
     });
+    // @ts-expect-error no argument: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.partitionsFor(), {
       name: 'IllegalArgumentError',
       message: 'partitionsFor() takes one of (topic); got ()',
     });
+    // @ts-expect-error a second argument: the form check rejects with IllegalArgumentError
     await assert.rejects(producer.partitionsFor('a', 'b'), {
       name: 'IllegalArgumentError',
       message: 'partitionsFor() takes one of (topic); got 2 arguments, not one object of named parameters',
@@ -1884,11 +2033,13 @@ test("metrics() is a MetricNameMap of KafkaMetric, read when it runs, keyed by J
     });
     assert.equal(metrics.has(key), true);
     const total = metrics.get(key);
+    assert.ok(total instanceof KafkaMetric);
     assert.equal(total.isMeasurable(), true);
     assert.equal(total.metricValue(), 0);
     // A snapshot: a second call reads the values again.
     await producer.send(new ProducerRecord({ topic: 'unit-metrics', value: Buffer.from('v') }));
     assert.notEqual(producer.metrics(), metrics);
+    // @ts-expect-error an argument to a reader: the form check throws TypeError
     assert.throws(() => producer.metrics(1), { constructor: TypeError, message: 'metrics() only reads: it takes no argument' });
   } finally {
     await producer.close();

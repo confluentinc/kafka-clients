@@ -27,8 +27,18 @@ const { RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
 const FIELDS = ['topic', 'partition', 'offset', 'hasOffset', 'timestamp', 'hasTimestamp', 'serializedKeySize', 'serializedValueSize'];
 
+/**
+ * The fields the library's own factory takes, as the native layer reads them.
+ *
+ * @typedef {{ topic: string, partition: number, hasOffset: boolean, offset: bigint, hasTimestamp: boolean, timestamp: bigint, serializedKeySize: number, serializedValueSize: number }} MetadataFields
+ */
+
+// The library's own factory, which the published types leave out.
+const Internal = /** @type {typeof RecordMetadata & { internalCreate(fields: MetadataFields): RecordMetadata }} */ (RecordMetadata);
+
+/** @param {Omit<MetadataFields, 'hasTimestamp'> & { hasTimestamp?: boolean }} fields */
 function metadataOf(fields) {
-  return RecordMetadata.internalCreate({ hasTimestamp: true, ...fields });
+  return Internal.internalCreate({ hasTimestamp: true, ...fields });
 }
 
 test('testConstructionWithMissingBatchIndex', () => {
@@ -108,14 +118,17 @@ test("the public constructor: a long is a bigint or a whole number, and the fiel
     constructor: RangeError,
     message: 'batchIndex must be from -2147483648 to 2147483647',
   });
+  // @ts-expect-error a null topicPartition: the null check throws TypeError
   assert.throws(() => new RecordMetadata({ ...args, topicPartition: null }), {
     constructor: TypeError,
     message: 'topicPartition must not be null',
   });
+  // @ts-expect-error a plain object for a TopicPartition: the class check throws TypeError
   assert.throws(() => new RecordMetadata({ ...args, topicPartition: { topic: 'foo', partition: 0 } }), {
     constructor: TypeError,
     message: 'topicPartition must be a TopicPartition',
   });
+  // @ts-expect-error missing required keys: the form check throws IllegalArgumentError
   assert.throws(() => new RecordMetadata({ topicPartition: tp }), {
     constructor: IllegalArgumentError,
     message:
@@ -153,6 +166,7 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
   assert.deepEqual(Object.keys(metadata), FIELDS);
   for (const name of FIELDS) {
     const d = Object.getOwnPropertyDescriptor(metadata, name);
+    assert.ok(d);
     assert.ok('value' in d && d.enumerable, `${name} is an own enumerable data property`);
     assert.equal(Object.getOwnPropertyDescriptor(RecordMetadata.prototype, name), undefined);
   }
