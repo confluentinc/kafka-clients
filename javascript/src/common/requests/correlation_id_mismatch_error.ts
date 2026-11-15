@@ -19,8 +19,9 @@
 // An error the core reports has no payload for `requestCorrelationId` (it is
 // -1, a value Java's counter never assigns, as the Python client reads it) and
 // `responseCorrelationId` (it is -1, a value Java's counter never assigns, as
-// the Python client reads it): the FFI's view of the class has no accessor for
-// it.
+// the Python client reads it) *(deviation: Java's error carries it. Why: the C
+// API has no view of the class at all. Goes when: the C FFI gives a view of
+// it)*.
 
 import { IllegalStateError } from '../../illegal_state_error';
 import * as P from '../../internal/payload';

@@ -261,8 +261,9 @@ newer.
   `Map<TopicPartition, Long>` is taken as a `TopicPartitionMap` only. An
   error the core reports carries its payload, read through the C API's view
   of its class (an invalid topic's `InvalidTopicError` lists it); a field
-  the C API has no accessor for keeps its default (`QuotaViolationError`'s
-  `metric()` `null`, `CorrelationIdMismatchError`'s ids `-1`).
+  the C API cannot give keeps its default, a recorded deviation
+  (`QuotaViolationError`'s `metric()` `null`, typed `KafkaMetric | null`;
+  `CorrelationIdMismatchError`'s ids `-1`).
   `RecordDeserializationError` has Java's full payload (`origin()`,
   `topicPartition()`, `offset()`, `timestamp()`, `timestampType()`,
   `keyBuffer()`, `valueBuffer()`, `headers()`) and its nested
