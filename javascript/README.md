@@ -802,9 +802,11 @@ refused, with a hint), a `long` as a bigint or a whole number.
 `err.timestampType()`, a `TimestampType` from `common/record`,
 `err.keyBuffer()` a `Buffer` or `null`, ...), and `LogTruncationError`'s
 `divergentOffsets()` is a `TopicPartitionMap` of `OffsetAndMetadata`
-(`consumer`). A payload field the core's C API has no accessor for keeps its default in an
-error the core reports: `QuotaViolationError`'s `metric()` is `null`,
-`CorrelationIdMismatchError`'s ids are `-1`. The
+(`consumer`). A payload field the core's C API cannot give keeps its default in an
+error the core reports, a deviation from Java's: `QuotaViolationError`'s
+`metric()` is `null` (typed `KafkaMetric | null`), until the C API exposes
+the metric, and `CorrelationIdMismatchError`'s ids are `-1`, until it has a
+view of the class. The
 configuration is checked by the client's core, which throws a `ConfigError`
 with Java's message naming the key (`{ 'linger.ms': true }` fails with "Not a
 number of type LONG"); a `key.serializer` or `value.serializer` that is no

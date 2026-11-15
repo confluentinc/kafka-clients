@@ -46,20 +46,22 @@ export class ResourceNotFoundError extends ApiError {
   static override readonly _ffiId: number = 91;
 
   /**
-   * Java's `(String message)` constructor.
+   * Java's `(String message)` constructor. With it, `resource()` returns
+   * `null`.
    *
    * @param options - the message
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor. With it, `resource()` returns
+   * `null`. Given the message on its own, the same as `{ message }`.
    *
    * @param message - the message; `null` reads as `''`
    */
   constructor(message: string | null);
   /**
-   * Java's `(String message, Throwable cause)` constructor.
+   * Java's `(String message, Throwable cause)` constructor. With it,
+   * `resource()` returns `null`.
    *
    * @param options - the message and the cause
    */

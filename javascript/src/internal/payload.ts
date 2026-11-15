@@ -29,7 +29,8 @@
 // | long                     | bigint or a whole number      | bigint                    |
 // | Object                   | any value                     | (no getter)               |
 // | Set<String>              | an iterable of strings        | a new Set                 |
-// | Collection<TopicPartition>, Set<TopicPartition> | an iterable of TopicPartition | a new TopicPartitionSet |
+// | Collection<TopicPartition> | an iterable of TopicPartition, as given | (no getter) |
+// | Set<TopicPartition>      | an iterable of TopicPartition | a new TopicPartitionSet   |
 // | TopicPartition           | a TopicPartition              | (no getter)               |
 // | Map<TopicPartition, Long>| a TopicPartitionMap           | a new TopicPartitionMap<bigint> |
 // | KafkaMetric              | a KafkaMetric                 | the same KafkaMetric      |
@@ -38,6 +39,7 @@
 // | an enum                  | a constant, or null           | the constant              |
 // | Map<TopicPartition, OffsetAndMetadata> | a TopicPartitionMap | a new TopicPartitionMap |
 
+import { kind as kindOf } from './args';
 import { checkInt, checkLong } from './java_number';
 import { Header } from '../common/header/header';
 import { Headers } from '../common/header/headers';
@@ -102,23 +104,36 @@ function iterableOf(value: unknown, name: string, what: string): unknown[] | nul
   return [...(value as Iterable<unknown>)];
 }
 
+/**
+ * The elements of a collection argument, each one `test` accepts or null; an
+ * `undefined` element throws, as Java has no such value (root CLAUDE.md,
+ * JavaScript Binding Conventions, Signatures, Q18).
+ */
+function checkElements(items: readonly unknown[], name: string, what: string, test: (x: unknown) => boolean): void {
+  for (const x of items) {
+    if (x === undefined) throw new TypeError(`${name} must not hold undefined: pass null for Java's null`);
+    if (x !== null && !test(x)) throw new TypeError(`${name} must hold only ${what} or null, not ${kindOf(x)}`);
+  }
+}
+
 /** Java's `Set<String>` (or `Collection<String>`): an iterable of strings, kept as a new `Set`. */
 export const stringSet: Kind = {
   take(value, name) {
     const items = iterableOf(value, name, 'strings');
-    return items === null ? null : new Set(items);
+    if (items === null) return null;
+    checkElements(items, name, 'strings', (x) => typeof x === 'string');
+    return new Set(items);
   },
   core: (raw) => new Set(raw as Iterable<unknown>),
   copy: (stored) => (stored === null ? null : new Set(stored as Set<unknown>)),
 };
 
-/** A `TopicPartitionSet` of `items`, each a TopicPartition (a null one is `"<name> must not contain null"`). */
+const isTopicPartition = (x: unknown): boolean => x instanceof TopicPartition;
+
+/** A `TopicPartitionSet` of `items`, each a TopicPartition or null. */
 function topicPartitionSetOf(items: readonly unknown[], name: string): TopicPartitionSet {
-  for (const tp of items) {
-    if (tp === null || tp === undefined) throw new TypeError(`${name} must not contain null`);
-    if (!(tp instanceof TopicPartition)) throw new TypeError(`${name} must be an iterable of TopicPartition`);
-  }
-  return new TopicPartitionSet(items as TopicPartition[]);
+  checkElements(items, name, 'TopicPartition', isTopicPartition);
+  return new TopicPartitionSet(items as Array<TopicPartition | null>);
 }
 
 /** The `TopicPartition` the native layer reads as `[topic, partition]`. */
@@ -136,6 +151,34 @@ export const topicPartitions: Kind = {
   core: (raw) => new TopicPartitionSet((raw as unknown[]).map(coreTopicPartition)),
   copy: (stored) => (stored === null ? null : new TopicPartitionSet(stored as TopicPartitionSet)),
 };
+
+/**
+ * Java's `Collection<TopicPartition>` taken: an iterable of TopicPartition
+ * (or null elements), read once into an array, as given, so a message Java
+ * builds from it prints it whole, duplicates included.
+ */
+export const topicPartitionList: Kind = {
+  take(value, name) {
+    const items = iterableOf(value, name, 'TopicPartition');
+    if (items === null) return null;
+    checkElements(items, name, 'TopicPartition', isTopicPartition);
+    return items;
+  },
+  core: same,
+  copy: same,
+};
+
+/**
+ * Java's `Set.copyOf(x)` of a collection of TopicPartition: a
+ * `TopicPartitionSet`. Java dereferences `x` and refuses a null element:
+ * `TypeError` "<name> must not be null" / "<name> must not contain null".
+ */
+export function topicPartitionSetCopyOf(x: unknown, name: string): TopicPartitionSet {
+  if (x === null) throw new TypeError(`${name} must not be null`);
+  const items = x as unknown[];
+  if (items.includes(null)) throw new TypeError(`${name} must not contain null`);
+  return topicPartitionSetOf(items, name);
+}
 
 /** Java's `TopicPartition`: a TopicPartition or null. */
 export const topicPartition: Kind = {

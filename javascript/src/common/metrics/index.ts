@@ -22,9 +22,10 @@
  * extra parameter over the getter is `config`, and which Java says is for
  * the server only.
  *
- * An error the core reports has no `QuotaViolationError.metric()`: the C
- * API's view of the class gives the metric's name, not its `KafkaMetric`, so
- * it is null there.
+ * An error the core reports has no `QuotaViolationError.metric()`: it is
+ * null there *(deviation: Java's error carries the metric. Why: the C API's
+ * view of the class gives the metric's name, not its `KafkaMetric`. Goes
+ * when: the view exposes the metric)*.
  *
  * @packageDocumentation
  */

@@ -74,6 +74,19 @@ test("TopicAuthorizationError: Java's three constructors and unauthorizedTopics(
     constructor: TypeError,
     message: 'unauthorizedTopics must be an iterable of strings, not string',
   });
+  // undefined is no element (root Signatures, Q18), and an element is a string or null.
+  assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: ['a', undefined] }), {
+    constructor: TypeError,
+    message: "unauthorizedTopics must not hold undefined: pass null for Java's null",
+  });
+  assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: [1] }), {
+    constructor: TypeError,
+    message: 'unauthorizedTopics must hold only strings or null, not a number',
+  });
+  assert.throws(() => new NoOffsetForPartitionError({ partitions: [undefined] }), {
+    constructor: TypeError,
+    message: "partitions must not hold undefined: pass null for Java's null",
+  });
   assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: 5 }), {
     constructor: TypeError,
     message: 'unauthorizedTopics must be an iterable of strings',
@@ -156,7 +169,8 @@ test('NoOffsetForPartitionError: one partition or a collection, kept as a TopicP
   assert.equal(one.message, 'Undefined offset with no reset policy for partition: t-2');
   assert.equal(one.partitions().toString(), '[t-2]');
   const many = new NoOffsetForPartitionError({ partitions: [tp('t', 0), tp('t', 1), tp('t', 0)] });
-  assert.equal(many.message, 'Undefined offset with no reset policy for partitions: [t-0, t-1]');
+  // Java prints the collection as given, duplicates included, then keeps Set.copyOf of it.
+  assert.equal(many.message, 'Undefined offset with no reset policy for partitions: [t-0, t-1, t-0]');
   assert.equal(many.partitions().size(), 2);
   // Set.copyOf dereferences the collection and refuses a null element.
   assert.throws(() => new NoOffsetForPartitionError({ partitions: null }), { constructor: TypeError, message: 'partitions must not be null' });

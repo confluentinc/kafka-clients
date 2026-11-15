@@ -58,14 +58,16 @@ export class TopicAuthorizationError extends AuthorizationError {
    */
   constructor(options: { /** Java's `Set<String> unauthorizedTopics`. */ unauthorizedTopics: Iterable<string>; name?: never });
   /**
-   * Java's `(String message)` constructor.
+   * Java's `(String message)` constructor. With it, `unauthorizedTopics()`
+   * returns an empty set.
    *
    * @param options - the message
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor. With it, `unauthorizedTopics()`
+   * returns an empty set. Given the message on its own, the same as `{ message
+   * }`.
    *
    * @param message - the message; `null` reads as `''`
    */

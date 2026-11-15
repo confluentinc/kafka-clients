@@ -49,39 +49,44 @@ export class InvalidTopicError extends InvalidConfigurationError {
   static override readonly _ffiId: number = 17;
 
   /**
-   * Java's no-argument constructor. The message is empty, Java's null.
+   * Java's no-argument constructor. The message is empty, Java's null. With it,
+   * `invalidTopics()` returns an empty set.
    */
   constructor();
   /**
-   * Java's `(String message, Throwable cause)` constructor.
+   * Java's `(String message, Throwable cause)` constructor. With it,
+   * `invalidTopics()` returns an empty set.
    *
    * @param options - the message and the cause
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
-   * Java's `(String message)` constructor.
+   * Java's `(String message)` constructor. With it, `invalidTopics()` returns
+   * an empty set.
    *
    * @param options - the message
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor. With it, `invalidTopics()` returns
+   * an empty set. Given the message on its own, the same as `{ message }`.
    *
    * @param message - the message; `null` reads as `''`
    */
   constructor(message: string | null);
   /**
    * Java's `(Throwable cause)` constructor. The message is the cause's
-   * `String()`, as Java's is `cause.toString()` (`''` for a null cause).
+   * `String()`, as Java's is `cause.toString()` (`''` for a null cause). With
+   * it, `invalidTopics()` returns an empty set.
    *
    * @param options - the cause
    */
   constructor(options: { /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
    * Java's `(Throwable cause)` constructor. The message is the cause's
-   * `String()`, as Java's is `cause.toString()` (`''` for a null cause). Given
-   * the cause on its own, the same as `{ cause }`.
+   * `String()`, as Java's is `cause.toString()` (`''` for a null cause). With
+   * it, `invalidTopics()` returns an empty set. Given the cause on its own, the
+   * same as `{ cause }`.
    *
    * @param cause - the cause (`Error`'s `cause`)
    */
