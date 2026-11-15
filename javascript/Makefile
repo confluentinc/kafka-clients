@@ -53,11 +53,12 @@ export TSC TS_TYPE_ROOTS
 
 # The tests run on Jest (jest.config.cjs, one project per target below, run
 # by jest-light-runner in plain Node.js child processes). JEST_ARGS goes to
-# Jest (a test file, `-t <name>`). The integration tests run in band, one file
+# Jest before the project, so a test file (`JEST_ARGS=test/unit/x.test.js`)
+# runs only that file and `-t <name>` only the tests it names. The integration tests run in band, one file
 # at a time, so two files never share the broker at once.
 JEST ?= node_modules/.bin/jest
 JEST_ARGS ?=
-JEST_RUN = $(NODE) $(JEST) --ci --selectProjects
+JEST_RUN = $(NODE) $(JEST) --ci $(JEST_ARGS) --selectProjects
 
 # The integration test's scratch broker (test-integration starts one unless
 # KAFKA_BOOTSTRAP_SERVERS is already set).
@@ -124,7 +125,7 @@ test: test-static test-unit test-typing check-api test-verifiable-clients test-i
 
 # Header conformance and the package layout: no build needed.
 test-static:
-	$(JEST_RUN) static $(JEST_ARGS)
+	$(JEST_RUN) static
 
 # The rule linter (design/current/javascript-rule-linter/PLAN.md): the rules of
 # CLAUDE.md checked from the sources, as `cargo xtask lint-custom` checks the
@@ -164,18 +165,18 @@ format-check:
 
 # The rule linter's own tests: no build of the client.
 test-lint:
-	$(JEST_RUN) lint $(JEST_ARGS)
+	$(JEST_RUN) lint
 
 test-unit: build
-	$(JEST_RUN) unit $(JEST_ARGS)
+	$(JEST_RUN) unit
 
 test-verifiable-clients: build
-	$(JEST_RUN) verifiable-clients $(JEST_ARGS)
+	$(JEST_RUN) verifiable-clients
 
 # The compiled declarations (dist/) type-check under --strict in a consumer's
 # configurations; needs only the compiled library, not the addon.
 test-typing: build-ts
-	$(JEST_RUN) typing $(JEST_ARGS)
+	$(JEST_RUN) typing
 
 # The type check of the tests (root conventions, Tests, Q67, and Build,
 # packaging and release, Q74; scripts/typecheck_tests.js): `tsc --strict` over
@@ -208,7 +209,7 @@ docs:
 # this target starts with `docker run` and removes afterwards.
 test-integration: build
 	@if [ -n "$$KAFKA_BOOTSTRAP_SERVERS" ]; then \
-	  $(JEST_RUN) integration --runInBand $(JEST_ARGS); \
+	  $(JEST_RUN) integration --runInBand; \
 	else \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  docker run -d --rm --name $(KAFKA_CONTAINER) -p $(KAFKA_PORT):9092 \
@@ -222,7 +223,7 @@ test-integration: build
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) \
-	    $(JEST_RUN) integration --runInBand $(JEST_ARGS) || status=$$?; \
+	    $(JEST_RUN) integration --runInBand || status=$$?; \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  exit $$status; \
 	fi
