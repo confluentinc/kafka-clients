@@ -14,29 +14,37 @@
 
 'use strict';
 
-// Header: Java's Header with the constructor of RecordHeader (Java has no
-// RecordHeaderTest; RecordHeadersTest's assertions on a single header are
-// here too).
+// Header: Java's Header with the constructor of RecordHeader, over the C
+// RecordHeader (Java has no RecordHeaderTest; RecordHeadersTest's assertions
+// on a single header are here too).
 
 const assert = require('node:assert/strict');
 
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
 
-test("a header keeps Java's methods: key() and value(), the value a Buffer over the given bytes", () => {
+test("a header keeps Java's methods: key() and value(), the value a Buffer over the header's own bytes", () => {
   const value = Buffer.from('v');
   const h = new Header({ key: 'k', value });
   assert.equal(h.key(), 'k');
-  assert.equal(h.value(), value);
+  assert.deepEqual(h.value(), value);
+  // The native RecordHeader copied the value (js-only): the Buffer is over
+  // the header's own bytes, the same Buffer on every call, as Java's value()
+  // returns its array.
+  assert.notEqual(h.value(), value);
+  assert.equal(h.value(), h.value());
   // Private state: no own fields, and nothing to reassign.
   assert.deepEqual(Object.keys(h), []);
   assert.equal(new Header({ key: 'k', value: null }).value(), null);
-  // A Uint8Array is taken, and returned as a Buffer over the same memory.
+  // A Uint8Array is taken, and given back as a Buffer; a later write to the
+  // given bytes leaves the header as it was.
   const u8 = new Uint8Array([1, 2, 3]).subarray(1);
   const out = new Header({ key: '', value: u8 }).value();
   assert.ok(Buffer.isBuffer(out));
   assert.deepEqual([...out], [2, 3]);
   u8[0] = 9;
-  assert.equal(out[0], 9);
+  assert.equal(out[0], 2);
+  // An empty value is an empty Buffer, not null.
+  assert.deepEqual(new Header({ key: 'e', value: new Uint8Array(0) }).value(), Buffer.alloc(0));
   // Readers take no argument.
   for (const read of [() => h.key(5), () => h.value(undefined)]) {
     assert.throws(read, { name: 'TypeError' });
@@ -44,6 +52,15 @@ test("a header keeps Java's methods: key() and value(), the value a Buffer over 
   assert.throws(() => h.key(5), { name: 'TypeError', message: 'key() only reads: it takes no argument' });
   // toJSON writes the key and the value.
   assert.equal(JSON.stringify(new Header({ key: 'k', value: null })), '{"key":"k","value":null}');
+});
+
+test('the key crosses as its UTF-8 bytes: a lone surrogate reads back as ?, a NUL is refused', () => {
+  assert.equal(new Header({ key: 'a\uD800b', value: null }).key(), 'a?b');
+  assert.equal(new Header({ key: '\u{1F600}é', value: null }).key(), '\u{1F600}é');
+  assert.throws(() => new Header({ key: 'a\0b', value: null }), {
+    name: 'TypeError',
+    message: 'a header key must be a string without null bytes',
+  });
 });
 
 test("the constructor keeps Java's message for a null key; a header value is bytes", () => {

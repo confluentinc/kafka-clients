@@ -51,6 +51,14 @@ const TEST_ONLY = new Map([
       reason: 'a test-only registration: the load check test/unit/internal/native.test.js calls',
     },
   ],
+  [
+    'headerStats',
+    {
+      test: 'test/unit/common/header/headers.test.js',
+      reason:
+        "a test-only registration: the counts of native/headers.c, which prove option 1's copies and views and the handles' lifetimes",
+    },
+  ],
 ]);
 
 /** The module specifiers `sf` imports or requires, with their lines. */

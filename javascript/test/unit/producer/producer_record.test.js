@@ -21,10 +21,15 @@ const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
+const native = require('../../../dist/internal/native');
+
 const bytes = (s) => Buffer.from(s, 'utf8');
 const H = (key, value) => new Header({ key, value });
-/** The native send's header pairs with their keys as text (they cross as encodeLikeJava's bytes). */
-const keysAsText = (pairs) => (pairs === null ? null : pairs.map(([key, value]) => [Buffer.from(key).toString(), value]));
+/** What the native send's RecordHeaders holds, read back through the addon: [key, value] per header. */
+const keysAsText = (handle) =>
+  handle === null ? null : native.headersToArray(handle).map((h) => [native.headerKey(h), native.headerValue(h)]);
+/** Whether two header lists hold equal headers (Java's RecordHeader.equals), in order. */
+const sameHeaders = (a, b) => a.length === b.length && a.every((h, i) => h.equals(b[i]));
 
 test('the fields Java leaves out default to null and no headers', () => {
   const r = new ProducerRecord({ topic: 't', value: 'v' });
@@ -62,10 +67,12 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
     headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }],
   });
   assert.deepEqual(structuredClone(r), { ...fields, headers: {} });
-  // Frozen; the headers are the record's own Headers, holding the given
-  // Header objects, as Java's new RecordHeaders(headers), and stay writable.
+  // Frozen; the headers are the record's own Headers, holding copies of the
+  // given headers (the core copies them, where Java's new
+  // RecordHeaders(headers) keeps the objects), and stay writable.
   assert.equal(Object.isFrozen(r), true);
-  assert.equal(r.headers.toArray()[0], headers[0]);
+  assert.ok(sameHeaders(r.headers.toArray(), headers));
+  assert.notEqual(r.headers.toArray()[0], headers[0]);
   // A record with no headers has its own, empty and writable, Headers.
   const empty = new ProducerRecord({ topic: 't', value: 'v' });
   assert.notEqual(empty.headers, new ProducerRecord({ topic: 'u', value: null }).headers);
@@ -73,20 +80,20 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
   assert.equal(empty.headers.toArray().length, 1);
 });
 
-test('headers are taken as Java takes an Iterable<Header>: a Headers is copied, the Header objects kept', () => {
+test('headers are taken as Java takes an Iterable<Header>: a Headers is copied, each header copied by the core', () => {
   const given = new Headers([new Header({ key: 'a', value: bytes('1') })]);
   given.internalSetReadOnly();
   const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: given });
-  // A copy, writable, holding the same Header objects.
+  // A copy, writable, holding equal headers.
   assert.notEqual(r.headers, given);
-  assert.equal(r.headers.toArray()[0], given.toArray()[0]);
+  assert.ok(sameHeaders(r.headers.toArray(), given.toArray()));
   r.headers.add({ key: 'b', value: null });
   assert.equal(given.toArray().length, 1);
   // An iterable that is not an array, and null.
   const k = new Header({ key: 'k', value: null });
   const l = new Header({ key: 'l', value: bytes('x') });
   const set = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: new Set([k, l]) });
-  assert.deepEqual(set.headers.toArray(), [k, l]);
+  assert.ok(sameHeaders(set.headers.toArray(), [k, l]));
   // A [key, value] pair is no Header: Java takes only Header objects.
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [['k', null]] }), {
     name: 'TypeError',

@@ -23,6 +23,7 @@
 const assert = require('node:assert/strict');
 
 const { encodeLikeJava } = require('../../../dist/internal/encode');
+const native = require('../../../dist/internal/native');
 const { configEntries } = require('../../../dist/internal/config');
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
@@ -65,8 +66,10 @@ test('a key and a value through stringSerializer(), and a header key, are encode
     const [, , , , , headers] = record.internalToNative(key, value);
     assert.equal(Buffer.from(key).toString('hex'), hex, `${what}: key`);
     assert.equal(Buffer.from(value).toString('hex'), hex, `${what}: value`);
-    // The header key crosses as its bytes, encodeLikeJava's.
-    assert.equal(Buffer.from(headers[0][0]).toString('hex'), hex, `${what}: header key`);
+    // The header key crosses as its bytes, encodeLikeJava's: the native
+    // RecordHeaders that crosses holds them.
+    const [crossed] = native.headersToArray(headers);
+    assert.equal(Buffer.from(native.headerKey(crossed), 'utf8').toString('hex'), hex, `${what}: header key`);
   }
 });
 

@@ -829,19 +829,12 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
     name: 'TypeError',
     message: 'topic must be a string without null bytes',
   });
-  await assert.rejects(
-    producer.send({
-      record: new ProducerRecord({
-        topic: 'unit-nul',
-        partition: null,
-        key: null,
-        value: Buffer.from('v'),
-        headers: [new Header({ key: 'k\0x', value: Buffer.from('h') })],
-      }),
-      callback,
-    }),
-    { name: 'TypeError', message: 'a header key must be a string without null bytes' },
-  );
+  // A header key crosses to the core when the header is made (the native
+  // RecordHeader), so a NUL in it is refused there, before any send.
+  assert.throws(() => new Header({ key: 'k\0x', value: Buffer.from('h') }), {
+    name: 'TypeError',
+    message: 'a header key must be a string without null bytes',
+  });
   // Neither send left anything pending: the close has nothing to wait for and
   // no callback ran.
   const started = Date.now();
@@ -856,11 +849,13 @@ test('a refused NUL-holding send leaves nothing pending: the producer then close
     const { Header } = require('@confluentinc/kafka-javascript/common/header');
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
     (async () => {
-      for (const record of [
-        new ProducerRecord({ topic: 'a\\0b', value: Buffer.from('v') }),
-        new ProducerRecord({ topic: 'idle', partition: null, key: null, value: Buffer.from('v'), headers: [new Header({ key: 'a\\0b', value: Buffer.from('v') })] }),
-      ]) {
-        await p.send({ record, callback: () => console.log('callback ran') }).catch((e) => console.log(e.name, e.message));
+      await p
+        .send({ record: new ProducerRecord({ topic: 'a\\0b', value: Buffer.from('v') }), callback: () => console.log('callback ran') })
+        .catch((e) => console.log(e.name, e.message));
+      try {
+        new Header({ key: 'a\\0b', value: Buffer.from('v') });
+      } catch (e) {
+        console.log(e.name, e.message);
       }
       await p.close();
     })();
