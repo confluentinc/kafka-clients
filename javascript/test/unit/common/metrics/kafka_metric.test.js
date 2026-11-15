@@ -36,7 +36,13 @@ const mockTime = () => ({ milliseconds: () => 1000 });
 const metricConfig = () => ({});
 
 test('testIsMeasurable', () => {
-  const metricValueProvider = { measure: (config, now) => (void config, void now, 0) };
+  const metricValueProvider = {
+    /**
+     * @param {import('@confluentinc/kafka-javascript/common/metrics').MetricConfig} config
+     * @param {number} now
+     */
+    measure: (config, now) => (void config, void now, 0),
+  };
   const metric = new KafkaMetric({
     lock: {},
     metricName: METRIC_NAME_1,
@@ -81,6 +87,7 @@ test('testConstructorWithNullProvider', () => {
   );
 });
 
+/** @param {import('@confluentinc/kafka-javascript/common/metrics').MetricValueProvider} metricValueProvider */
 function testToStringOnLambdaOrAnonymousClass(metricValueProvider) {
   const metric = new KafkaMetric({
     lock: {},
@@ -137,12 +144,19 @@ test('testToStringWithStatProvider', () => {
 });
 
 test("metricValue passes the config and the time's milliseconds; a Measurable's value is its measure; config() only reads", () => {
+  /** @type {Array<[unknown, number]>} */
   const seen = [];
   const config = { samples: 2 };
   const measured = new KafkaMetric({
     lock: null,
     metricName: METRIC_NAME_1,
-    valueProvider: { measure: (c, now) => (seen.push([c, now]), 4.5) },
+    valueProvider: {
+      /**
+       * @param {import('@confluentinc/kafka-javascript/common/metrics').MetricConfig} c
+       * @param {number} now
+       */
+      measure: (c, now) => (seen.push([c, now]), 4.5),
+    },
     config,
     time: mockTime(),
   });
@@ -150,11 +164,14 @@ test("metricValue passes the config and the time's milliseconds; a Measurable's 
   assert.deepEqual(seen, [[config, 1000]]);
   assert.equal(measured.config(), config);
   // Java's setter config(MetricConfig) is left out (Q30): the getter only reads.
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError, as Java's setter is left out
   assert.throws(() => measured.config({ config: {} }), { constructor: TypeError, message: 'config() only reads: it takes no argument' });
   assert.equal(measured.metricName(), METRIC_NAME_1);
   const noTime = new KafkaMetric({ lock: null, metricName: METRIC_NAME_1, valueProvider: { value: () => 1 }, config: null, time: null });
   assert.throws(() => noTime.metricValue(), { constructor: TypeError, message: 'time must not be null' });
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => measured.metricValue(1), { constructor: TypeError, message: 'metricValue() only reads: it takes no argument' });
+  // @ts-expect-error only the metric name: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaMetric({ metricName: METRIC_NAME_1 }), {
     constructor: IllegalArgumentError,
     message: 'KafkaMetric() takes one of (lock, metricName, valueProvider, config, time); got (metricName)',

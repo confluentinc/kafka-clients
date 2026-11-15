@@ -103,11 +103,13 @@ test("the constructor checks Java's requireNonNull and the run-time types", () =
     assert.throws(() => new MetricName(options), { constructor: TypeError, message: `${field} must not be null` });
   }
   for (const tags of [[['a', 'b']], new Map([['a', 1]]), { a: 1 }, 'a=b']) {
+    // @ts-expect-error tags that are not a map of string to string: the type check throws TypeError
     assert.throws(() => new MetricName({ name: 'n', group: 'g', description: 'd', tags }), {
       constructor: TypeError,
       message: 'tags must be a Map or a plain object of string to string',
     });
   }
+  // @ts-expect-error no description or tags: the form check throws IllegalArgumentError
   assert.throws(() => new MetricName({ name: 'n', group: 'g' }), {
     constructor: IllegalArgumentError,
     message: 'MetricName() takes one of (name, group, description, tags); got (name, group)',
@@ -133,6 +135,7 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
       ['x', 2],
     ],
   );
+  /** @type {Array<[string, number, boolean]>} */
   const seen = [];
   map.forEach((value, key, m) => seen.push([key.name(), value, m === map]));
   assert.deepEqual(seen, [
@@ -147,11 +150,15 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   });
   assert.deepEqual(new MetricNameMap().toJSON(), {});
   assert.equal(new MetricNameMap().size(), 0);
+  // @ts-expect-error a bare string key: the form check throws IllegalArgumentError
   assert.throws(() => map.get('x'), { constructor: IllegalArgumentError, message: 'get() takes one of (key); got a string' });
+  // @ts-expect-error a string key in the named form: the key check throws TypeError
   assert.throws(() => map.has({ key: 'x' }), { constructor: TypeError, message: 'key must be a MetricName' });
+  // @ts-expect-error undefined entries: the undefined check throws TypeError
   assert.throws(() => new MetricNameMap(undefined), {
     constructor: TypeError,
     message: "entries must not be undefined. Leave the argument out, or pass null for Java's null",
   });
+  // @ts-expect-error an entry keyed by a number: the entry check throws TypeError
   assert.throws(() => new MetricNameMap([[1, 2]]), { constructor: TypeError, message: 'an entry must be a [MetricName, value] pair' });
 });
