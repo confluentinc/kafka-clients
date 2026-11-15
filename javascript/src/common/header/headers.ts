@@ -374,7 +374,8 @@ export class Headers implements Iterable<Header> {
    * @remarks *(deviation)* On read-only headers a null key is
    * `IllegalArgumentError`, where Java's `remove` checks the read-only state
    * first. Why: the FFI checks a null argument first, and the binding repeats
-   * no precondition of Java's.
+   * no precondition of Java's. Goes when: the FFI checks the read-only state
+   * first.
    */
   remove(options: {
     /** The key to remove all headers for; must not be null. */

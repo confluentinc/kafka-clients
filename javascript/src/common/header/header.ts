@@ -112,7 +112,8 @@ export class Header {
    * as its UTF-8 bytes, a lone surrogate as `?`, as Java's encoder writes
    * it, so `key()` reads `?` there, and a key holding a NUL is refused,
    * where Java's `RecordHeader` keeps the `String`. Why: the C API takes the
-   * key as a NUL-terminated UTF-8 string.
+   * key as a NUL-terminated UTF-8 string. Goes when, for the NUL: the key
+   * crosses the C API with a length.
    */
   constructor(options: {
     /** The header's key; must not be null. */
