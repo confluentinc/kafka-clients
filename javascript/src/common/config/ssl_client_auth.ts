@@ -48,8 +48,8 @@ export class SslClientAuth {
   /**
    * Made by this class only (the enum's constants).
    *
-   * @param ordinal the constant's position in Java's declaration, its `ordinal()`
-   * @param name the constant's name, its `name()`
+   * @param ordinal - the constant's position in Java's declaration, its `ordinal()`
+   * @param name - the constant's name, its `name()`
    */
   private constructor(ordinal: number, name: string) {
     this.#name = name;
@@ -123,6 +123,10 @@ export class SslClientAuth {
    * `null`. The key is given on its own, `forConfig('required')`, or named,
    * `forConfig({ key: 'required' })`.
    *
+   * @param key - the constant's name in any case, or `null` for `NONE`
+   * @returns the constant, `NONE` for `null`, or `null` when no constant has
+   *   that name
+   * @throws `TypeError` when the key is neither a string nor `null`
    * @throws `IllegalArgumentError` when the given parameters are not `{key}`
    */
   static forConfig(key: string | null): SslClientAuth | null;
