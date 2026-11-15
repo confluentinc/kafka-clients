@@ -413,7 +413,6 @@ export class ProducerRecord<out K = never, out V = never> {
         headers: Headers_2;
     };
     readonly topic: string;
-    // (undocumented)
     toString(): string;
     readonly value: V | null;
 }
@@ -446,7 +445,6 @@ export class RecordMetadata {
         serializedValueSize: number;
     };
     readonly topic: string;
-    // (undocumented)
     toString(): string;
     static readonly UNKNOWN_PARTITION: -1;
 }

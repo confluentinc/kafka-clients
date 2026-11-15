@@ -51,7 +51,7 @@ const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
  * null, which the core refuses with Java's `NullPointerException` "Null
  * header keys are not permitted", a `TypeError` here.
  *
- * @param key the key given
+ * @param key - the key given
  * @returns its bytes, or null
  */
 function keyBytes(key: unknown): Uint8Array | null {
@@ -70,7 +70,7 @@ const WRAP = Object.freeze({});
  * refused, since Java's and Python's header values are bytes: encode it
  * first.
  *
- * @param value the value given
+ * @param value - the value given
  * @returns the value, or null
  */
 function checkValue(value: unknown): Uint8Array | null {
@@ -136,7 +136,7 @@ export class Header {
    * A header over a native header handle the library got from the addon (an
    * owned copy, or a view that keeps its headers alive).
    *
-   * @param handle the native header
+   * @param handle - the native header
    * @returns the header
    *
    * @internal
@@ -153,7 +153,7 @@ export class Header {
   /**
    * The native header of `header`, for `Headers.add`.
    *
-   * @param header the header
+   * @param header - the header
    * @returns its native handle
    *
    * @internal
@@ -166,7 +166,7 @@ export class Header {
    * A header value as the core takes it, checked as this constructor checks
    * it, for `Headers.add(key, value)`.
    *
-   * @param value the value given
+   * @param value - the value given
    * @returns the value, or null
    *
    * @internal
@@ -205,7 +205,7 @@ export class Header {
    * The key of `header`, read from its native header once: a method
    * reassigned on the instance from plain JavaScript is never called.
    *
-   * @param header the header to read
+   * @param header - the header to read
    * @returns its key
    *
    * @internal
@@ -218,7 +218,7 @@ export class Header {
   /**
    * The value of `header`, read from its native header once.
    *
-   * @param header the header to read
+   * @param header - the header to read
    * @returns its value, or null
    *
    * @internal
