@@ -136,3 +136,33 @@ rules and readings. Newest entries are at the end; dates are in IST.
     - **Python and .NET** have no such problem, because neither wraps the FFI. Python's `Header`/`Headers` are Python
       objects; a consumed value is a memoryview into the fetched batch. .NET's are a managed `List<Header>` with owned
       `byte[]` values, and consumed headers are copies.
+    - **Implementation notes (A8):**
+      - `native/headers.c` wraps each `RecordHeaders` and `RecordHeader` in a type-tagged, `napi_wrap`ed object over a
+        refcounted box, so the handle is destroyed once, on the JS thread, when its last reference goes. A view's box
+        holds a reference on its `RecordHeaders`' box, and a value `Buffer` (`napi_create_external_buffer` over
+        `kafka_common_header_Header_value`'s bytes) holds one on its header's box, so no JS object references another
+        through a strong `napi_ref` that the GC could never collect. Where the runtime refuses external buffers, the
+        value is copied.
+      - The addon picks copy or view from `RecordHeaders_is_read_only`, inside `lastHeader`, `headers(key)`,
+        `toArray()` and iteration (`RecordHeaders`' `last_header`, `headers`, `to_array` and `iter` getters). A copy
+        is `RecordHeader_new_err` over the borrowed header's key and value.
+      - A `Headers` that never held a header has no `RecordHeaders` of its own: it reads one shared empty one, and
+        sealing it gives it one shared empty read-only one, so every `ProducerRecord` without headers (the common
+        case) still makes no native object for them. The first `add` makes its own.
+      - `send()` seals the record's headers with `RecordHeaders_set_read_only` once the serializers have run, and
+        hands their handle to `ProducerRecordOptionsBuilder_set_headers`, which copies it; the rebuild from
+        `[key, value]` pairs in `native/record.c` is gone.
+      - A key crosses as `encodeLikeJava`'s bytes in a C string, so a NUL is refused when the header is made (it
+        used to be at `send()`), and `key()` reads a lone surrogate back as `?`, where Java's `RecordHeader` keeps
+        the `String` (a recorded deviation).
+      - The core reports the null checks with Java's text (a null header, key or header key). Java's `remove`
+        checks the read-only state before the key, the FFI the other way: for a key the core or the binding
+        refuses, `remove` first asks read-only headers to remove nothing, which the core refuses with its own
+        error.
+      - `headerStats()`, a test-only registration, counts the handles made and freed, the copies and the views.
+        `test/unit/common/header/headers.test.js` proves the two cases of option 1 through it and, in a
+        `--expose-gc` child under `MallocScribble`, that a view keeps its `Headers` alive, a value `Buffer` its
+        `Header`, and that every handle is freed exactly once.
+      - Not built: a consumed record's `Headers`, over `kafka_consumer_ConsumerRecord_headers`, which comes with
+        the consumer. The row on plain `[key, value]` pairs stays parked: `ProducerRecord` takes `Header`
+        objects only, as before.

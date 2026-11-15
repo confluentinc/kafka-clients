@@ -51,7 +51,11 @@ open and still changing.
 - **Done:** A1, A2, A3, A4, A5, A7, A9, A10, A11, A12, A13 (but the parts below), A15.
 - **A16:** `SslClientAuth.toString()` done; the null binding (§5, 7) moved to B4.
 - **A6** moved to B4.
-- **A8** waits on the owner's decision about the parked `Headers` row (§5).
+- **A8: done** (on PR #333), with the owner's option 1 of 2026-11-15 (`DECISIONS.md`, entry 21): `Headers` and
+  `Header` over the FFI's `RecordHeaders` and `RecordHeader` (`native/headers.c`), a copy handed out while the
+  headers can still change and a view once they are read-only. Not built: a consumed record's `Headers` (over
+  `kafka_consumer_ConsumerRecord_headers`), which comes with the consumer. The parked row on plain `[key, value]`
+  pairs stays parked: `ProducerRecord` takes `Header` objects only, as before.
 - **Waiting on npm registry access:** A14 (Jest), and A13's docs lint
   (`eslint-plugin-jsdoc`), TypeDoc, Prettier and publint.
 
@@ -85,8 +89,9 @@ Phase A's send path (zero copy, no closed state, frozen records).
 
 ### Hand-off: what is left after Phase B
 
-- **A8**, `Headers` and `Header` over the FFI's `RecordHeaders` / `RecordHeader`: waits on the owner's decision about
-  the two parked `Headers` rows (§5).
+- **A8: done** (on PR #333): `Headers` and `Header` over the FFI's `RecordHeaders` / `RecordHeader`, with the
+  owner's option 1 (`DECISIONS.md`, entry 21). Left for the consumer: a consumed record's `Headers`, wrapping
+  `kafka_consumer_ConsumerRecord_headers`. The row on plain `[key, value]` pairs stays parked (§5).
 - **A13 and A14: done** (on PR #333). The docs lint (`eslint-plugin-jsdoc`'s `require-param` and `require-returns` on
   `src/`, in `make lint-rules`), TypeDoc (`make docs`, checked by `test/static/docs.test.js`), publint (in
   `make pack-check`, every package now `"type": "commonjs"`), Prettier (`make format-check`, in the root
@@ -97,7 +102,8 @@ Phase A's send path (zero copy, no closed state, frozen records).
   `test/static/lockfile.test.js` refuses.
 - The decisions taken while aligning and completing the producer are logged in `DECISIONS.md`, in this folder.
 - **The parked rows (§5)**: the serde factories beyond `stringSerializer()`, Q50 ("the methods must be all async"),
-  the two `Headers` rows, when and how the never-closed warning is logged, and the other `tsc` settings (Q74).
+  the `Headers` row on plain `[key, value]` pairs (the other, how a `Header` from a changeable `Headers` stays valid,
+  is answered for this binding by the owner's option 1, while the root row stays parked), when and how the never-closed warning is logged, and the other `tsc` settings (Q74).
 - **Transactions**: out of scope by request (the producer's and `MockProducer`'s transaction calls).
 - **Phase C** (§4): the generators of the class modules and the addon's C wrappers, its timing still to decide.
 

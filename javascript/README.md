@@ -393,9 +393,8 @@ throws `ConfigError`.
 `Header` and `Headers` are in `common/header`, with Java's members. A
 `Header` keeps Java's methods: `new Header({ key, value })`, then
 `header.key()` and `header.value()`. The value is bytes or `null`, as Java's
-`byte[]`: it is taken as a `Uint8Array` (a `Buffer` is one) and returned as a
-`Buffer` over the same bytes, so a string value throws `TypeError`: encode it
-first. `Headers` keeps Java's methods: `add(header)` or `add({ key, value })`,
+`byte[]`: it is taken as a `Uint8Array` (a `Buffer` is one), so a string value
+throws `TypeError`: encode it first. `Headers` keeps Java's methods: `add(header)` or `add({ key, value })`,
 `remove(key)`, `lastHeader(key)`, `headers(key)`, `toArray()`, iteration
 (`for (const header of headers)`) and Java's `toString()`; `new Headers()`,
 `new Headers(headers)` or `new Headers({ headers })`.
@@ -411,6 +410,21 @@ const record = new ProducerRecord({
 });
 record.headers.add({ key: 'more', value: Buffer.from([1]) });
 ```
+
+`Header` and `Headers` are the client core's own `RecordHeader` and
+`RecordHeaders`, so the core holds the headers and refuses a change once they
+are read-only. A `Header` copies its key and value when it is made, and
+`header.value()` is a `Buffer` over the header's own bytes, the same `Buffer`
+on every call: a later write to the bytes you gave leaves the header as it
+was, where Java's keeps your array. A key crosses as its UTF-8 bytes, so a key
+holding a NUL throws `TypeError`, and `key()` reads a lone surrogate back as
+`?`. `add(header)` and `new Headers([...])` store copies, so your `Header`
+stays your own. Reading a header back from a `Headers` that can still change,
+such as your own before `send()` (`lastHeader`, `headers(key)`, `toArray()`,
+iteration), gives a copy of it, which stays as it is when the `Headers`
+changes later, as Java's does. Once the `Headers` is read-only, after
+`send()`, a header read from it is a view of the core's header, with no copy,
+and keeps that `Headers` alive.
 
 A record's `headers` is its own `Headers` (an empty one when it has none),
 copied from what was given, as Java's `new RecordHeaders(headers)`. `send()`

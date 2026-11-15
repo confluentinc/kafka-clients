@@ -129,6 +129,17 @@ newer.
   `Headers` or an iterable of `Header`s. `send()` makes the record's headers read-only, as
   Java's does: a later `add` or `remove` throws `IllegalStateError`
   "RecordHeaders has been closed.".
+- `Header` and `Headers` wrap the client core's `RecordHeader` and
+  `RecordHeaders`: the core holds the headers and refuses a change once they
+  are read-only, and `send()` hands the record's own headers to the core
+  instead of rebuilding them. A `Header` copies its key and value when it is
+  made, and `value()` is a `Buffer` over its own bytes; `add(header)` and
+  `new Headers([...])` store copies. A header read back from a `Headers` that
+  can still change, such as your own before `send()`, is a copy, which stays
+  as it is when the `Headers` changes; one read from a read-only `Headers` is
+  a view, with no copy, which keeps it alive. A header key holding a NUL now
+  throws `TypeError` when the header is made, not at `send()`, and `key()`
+  reads a lone surrogate back as `?`.
 - A header value is bytes (`Uint8Array` or `null`), as in Java and Python: a
   string header value throws `TypeError` (encode it first,
   `Buffer.from(value, 'utf8')`), where development builds took a string.
