@@ -27,8 +27,9 @@
 // The compiler also reads the files the tests require from elsewhere: the
 // rule linter (scripts/), the gRPC translation (grpc-server/), the verifiable
 // clients themselves (verifiable_clients/), the compiled private modules
-// (dist/internal/, which have no declarations) and the sources of the three
-// internal functions whose signatures a test takes from src/internal/. Their
+// (dist/internal/, which have no declarations) and the sources of the two
+// internal functions, used in three places, whose signatures a test takes
+// from src/internal/. Their
 // findings are counted, not failed on: they are not tests, and their own
 // checks are the build (src/ compiles under --strict) and the linter's and
 // the clients' tests. The path filter is what draws the line, not a comment
