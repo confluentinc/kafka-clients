@@ -29,7 +29,8 @@ name: build-test-release
 #      suite, including the native-Rust arm of the multilanguage tests.
 #   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python, and
 #      verify-dotnet, each over PLAINTEXT, SSL and SASL_SSL, including the gRPC
-#      multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet). The .NET
+#      multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet), plus
+#      coverage-dotnet, the .NET unit tests' coverage report. The .NET
 #      gRPC images are built for linux/amd64: Grpc.Tools' linux_arm64 protoc
 #      SIGSEGVs during C# codegen inside an arm64 Linux container, so they need
 #      an amd64 Linux agent (which this block uses anyway).
@@ -290,7 +291,15 @@ blocks:
     # timing out, move the .NET jobs to a block of their own with a longer limit
     # (see the note at the top of this file).
     #
-    # Each job is a separate VM with its own broker, so the nine jobs do not
+    # coverage-dotnet runs the .NET unit tests with code coverage
+    # (`make coverage-dotnet`, see dotnet/Makefile). It is a job of its own so
+    # it adds no time to verify-dotnet's plaintext job. It prints the summary in
+    # the log and keeps the HTML report as the job artifact
+    # coverage-dotnet.tar.gz (about 3 MB; extract it and open
+    # report/index.html). One archive, because the report is several hundred
+    # pages that link to each other. It reports only: no coverage level fails it.
+    #
+    # Each job is a separate VM with its own broker, so the ten jobs do not
     # contend for Docker resources.
     dependencies: []
     execution_time_limit:
@@ -336,6 +345,16 @@ blocks:
         - name: "verify-dotnet (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-dotnet-sasl-ssl
+        - name: "coverage-dotnet (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - (cd dotnet && retry dotnet tool restore)
+            - make coverage-dotnet
+            - tar -czf coverage-dotnet.tar.gz -C dotnet/artifacts/coverage report
+            - retry artifact push job --force --expire-in 2w coverage-dotnet.tar.gz
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
