@@ -961,7 +961,10 @@ test("an error the core reports carries its payload: an invalid topic's InvalidT
     assert.ok(error instanceof InvalidTopicError, String(error));
     assert.equal(error.message, `Invalid topics: [${topic}]`);
     assert.deepEqual(error.invalidTopics(), new Set([topic]));
-    // The send path reports the same error with its payload, through the record's future.
+    // Once the cluster lists the topic as invalid, the send path throws
+    // Java's KafkaProducer#waitOnMetadata InvalidTopicException(topic): the
+    // (String message) form, whose message is the topic and whose
+    // invalidTopics() is empty.
     let sendError;
     try {
       await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
@@ -969,7 +972,8 @@ test("an error the core reports carries its payload: an invalid topic's InvalidT
       sendError = e instanceof ExecutionError ? e.cause : e;
     }
     assert.ok(sendError instanceof InvalidTopicError, String(sendError));
-    assert.ok(sendError.invalidTopics() instanceof Set);
+    assert.equal(sendError.message, topic);
+    assert.deepEqual(sendError.invalidTopics(), new Set());
   } finally {
     await producer.close();
   }
