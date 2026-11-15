@@ -53,13 +53,15 @@ import { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateEr
 import {
   AuthenticationError,
   GroupAuthorizationError,
+  RecordDeserializationError,
   RecordTooLargeError,
   RetriableError,
   SaslAuthenticationError,
   ThrottlingQuotaExceededError,
   TopicAuthorizationError,
 } from '@confluentinc/kafka-javascript/common/errors';
-import { LogTruncationError, NoOffsetForPartitionError, OffsetOutOfRangeError } from '@confluentinc/kafka-javascript/consumer';
+import { LogTruncationError, NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError } from '@confluentinc/kafka-javascript/consumer';
+import { TimestampType } from '@confluentinc/kafka-javascript/common/record';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
 import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
@@ -508,8 +510,37 @@ void new ConfigError({ name: 'linger.ms', value: 'x', message: 'bad' });
 new ConfigError({ name: 'linger.ms' });
 // @ts-expect-error a getter only reads
 unauthorized.unauthorizedTopics(1);
-// @ts-expect-error a LogTruncationError's constructors take the consumer's OffsetAndMetadata, not translated
+// @ts-expect-error LogTruncationException has no (String) constructor
 new LogTruncationError({ message: 'm' });
+const truncated = new LogTruncationError({
+  fetchOffsets: new TopicPartitionMap<bigint>(),
+  divergentOffsets: new TopicPartitionMap([[new TopicPartition({ topic: 't', partition: 0 }), new OffsetAndMetadata(5n)]]),
+});
+expectTypeOf(truncated.divergentOffsets()).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata>>();
+const offsetAndMetadata = new OffsetAndMetadata({ offset: 1, leaderEpoch: null, metadata: 'm' });
+expectTypeOf(offsetAndMetadata.offset).toEqualTypeOf<bigint>();
+expectTypeOf(offsetAndMetadata.leaderEpoch).toEqualTypeOf<number | null>();
+// @ts-expect-error OffsetAndMetadata has no (offset, leaderEpoch) constructor
+new OffsetAndMetadata({ offset: 1, leaderEpoch: 2 });
+const deserialization = new RecordDeserializationError({
+  origin: RecordDeserializationError.DeserializationExceptionOrigin.VALUE,
+  partition: new TopicPartition({ topic: 't', partition: 0 }),
+  offset: 1n,
+  timestamp: -1,
+  timestampType: TimestampType.CREATE_TIME,
+  keyBuffer: null,
+  valueBuffer: Buffer.from('v'),
+  headers: [],
+  message: 'failed',
+  cause: null,
+});
+expectTypeOf(deserialization.origin()).toEqualTypeOf<RecordDeserializationError.DeserializationExceptionOrigin>();
+expectTypeOf(deserialization.timestampType()).toEqualTypeOf<TimestampType>();
+expectTypeOf(deserialization.keyBuffer()).toEqualTypeOf<Buffer | null>();
+expectTypeOf(deserialization.offset()).toEqualTypeOf<bigint>();
+expectTypeOf(TimestampType.forName('CreateTime')).toEqualTypeOf<TimestampType>();
+const nullPartition = new TopicPartitionSet([null]);
+expectTypeOf(nullPartition.has(null)).toEqualTypeOf<boolean>();
 // An Error is not an options object: Java's ConfigException(Throwable) does not exist.
 const caught = new Error('caught');
 // @ts-expect-error a ConfigError takes no cause

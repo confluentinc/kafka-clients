@@ -342,7 +342,8 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (root conventions, Q35: no repeated precondition); its `Headers` stays
   writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord`, `RecordMetadata`, `TopicPartition` and `Node` today. **(root conflict)** The root
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node` and
+  `OffsetAndMetadata` today. **(root conflict)** The root
   conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
   `RecordMetadata`, `Node`, the admin description classes) does not name
   `Header`, which its one-line test would admit; the code follows the list, so
@@ -796,13 +797,21 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   constructors with a private token so each class sets its fields; a field
   the view has no accessor for keeps its default (`QuotaViolationError`'s
   `metric()` is null; `CorrelationIdMismatchError`'s ids are `-1`, as
-  Python's), listed in its module's header comment. Left out, and listed in
-  their modules' header comments, are the forms and getters of a type the
-  client does not translate before the consumer: `LogTruncationError`'s
-  constructors and `divergentOffsets()` (`OffsetAndMetadata`), and
-  `RecordDeserializationError`'s payload (`TimestampType`, its nested
-  `DeserializationExceptionOrigin`), so those two classes cannot be
-  constructed. Java's `public static final` instances are: `INSTANCE` on
+  Python's), listed in its module's header comment. The public types a
+  payload reaches are translated, as Python's Scope translates them (root
+  conventions, Scope, Q30: only `MockProducer` and `KafkaMetric` keep
+  untranslated types): `TimestampType` (`common/record`, an enum whose Java
+  field `name`, `'CreateTime'`, is reached through Java's `toString()`, as
+  Python's Enum rule reaches it, since a field cannot share the name of
+  `Enum.name()`), `OffsetAndMetadata` (`consumer`, a data class, its
+  `leaderEpoch` Java's `Optional<Integer>` getter as `number | null`), and
+  Java's nested `RecordDeserializationException.DeserializationExceptionOrigin`,
+  a class of the namespace merged with `RecordDeserializationError`, so a
+  static member of it (Names, Q11). A `ByteBuffer` payload is taken as a
+  `Uint8Array` and kept and returned as a `Buffer` over the same memory, a
+  `Headers` one as the `Headers` given, or a new one from an iterable of
+  `Header`; from the core, both are copies, as the error outlives the core's
+  handle. Java's `public static final` instances are: `INSTANCE` on
   `DisconnectError` and `CoordinatorNotAvailableError`, a static property of
   the class that is not writable, built by Java's no-argument chain (an empty
   message, no cause) whatever that constructor's visibility

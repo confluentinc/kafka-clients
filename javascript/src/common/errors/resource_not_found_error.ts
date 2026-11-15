@@ -85,8 +85,8 @@ export class ResourceNotFoundError extends ApiError {
   /**
    * Java's `resource()`.
    *
-   * @returns Java's `resource` @throws `TypeError` when it is given an
-   * argument: it only reads
+   * @returns Java's `resource`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   resource(): string | null {
     P.readOnly('resource', arguments.length);

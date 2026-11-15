@@ -75,8 +75,8 @@ export class OffsetOutOfRangeError extends InvalidOffsetError {
    * Java's `offsetOutOfRangePartitions()`.
    *
    * @returns Java's `offsetOutOfRangePartitions`, as a new TopicPartitionMap
-   * the caller may change @throws `TypeError` when it is given an argument: it
-   * only reads
+   *   the caller may change
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   offsetOutOfRangePartitions(): TopicPartitionMap<bigint> {
     P.readOnly('offsetOutOfRangePartitions', arguments.length);
@@ -87,8 +87,9 @@ export class OffsetOutOfRangeError extends InvalidOffsetError {
    * Java's `partitions()`: the partitions of `offsetOutOfRangePartitions`.
    *
    * @returns a new TopicPartitionSet of the keys of
-   * `offsetOutOfRangePartitions` @throws `TypeError` when it is given an
-   * argument (it only reads), or `offsetOutOfRangePartitions` is null
+   *   `offsetOutOfRangePartitions`
+   * @throws `TypeError` when it is given an argument (it only reads), or
+   *   `offsetOutOfRangePartitions` is null
    */
   override partitions(): TopicPartitionSet {
     P.readOnly('partitions', arguments.length);

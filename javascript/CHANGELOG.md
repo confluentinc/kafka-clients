@@ -257,10 +257,17 @@ newer.
   error the core reports carries its payload, read through the C API's view
   of its class (an invalid topic's `InvalidTopicError` lists it); a field
   the C API has no accessor for keeps its default (`QuotaViolationError`'s
-  `metric()` `null`, `CorrelationIdMismatchError`'s ids `-1`). Left out, for
-  types not translated before the consumer: `LogTruncationError`'s
-  constructors and `divergentOffsets()`, and `RecordDeserializationError`'s
-  payload.
+  `metric()` `null`, `CorrelationIdMismatchError`'s ids `-1`).
+  `RecordDeserializationError` has Java's full payload (`origin()`,
+  `topicPartition()`, `offset()`, `timestamp()`, `timestampType()`,
+  `keyBuffer()`, `valueBuffer()`, `headers()`) and its nested
+  `DeserializationExceptionOrigin`; `LogTruncationError` has Java's
+  constructors and `divergentOffsets()`, a `TopicPartitionMap<OffsetAndMetadata>`.
+- `TimestampType` (`common/record`), Java's enum, its `name` field read
+  through `toString()` (`'CreateTime'`), and `OffsetAndMetadata`
+  (`consumer`), a frozen data object with Java's constructors, `equals`,
+  `hashCode` and `toString`, `offset` a bigint and `leaderEpoch` a number
+  or null.
 - A `null` the client rejects as Java's `NullPointerException` throws
   `TypeError` "<param> must not be null" (`record`, `configs`, a
   `SecurityProtocol.forName` name); where Java throws its own message
@@ -308,13 +315,6 @@ newer.
   Use `require`, named imports or `import * as`.
 - Of the SASL mechanisms, only `PLAIN` is supported. Keys and certificates must
   be PEM (no JKS or PKCS12).
-- The error classes take only Java's constructors with a message and a cause;
-  those with a payload are not translated, nor are Java's payload getters
-  (`TopicAuthorizationError`'s `unauthorizedTopics()`, `RecordTooLargeError`'s
-  `recordTooLargePartitions()`, ...) or
-  `RecordDeserializationError.DeserializationExceptionOrigin`. A class whose
-  every Java constructor takes a payload (`QuotaViolationError`,
-  `RecordDeserializationError`, ...) cannot be constructed yet.
 
 ### Package
 

@@ -136,6 +136,57 @@ napi_value error_payload_to_js(napi_env env, int code, const kafka_common_Error_
             kafka_common_Error_t* failed = FFI_SET(value, kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions_err(view, &ffi_err));
             if (payload_topic_partition_long_map(env, obj, "offsetOutOfRangePartitions", value, failed)) return NULL;
         }
+        {
+            kafka_Map_t* value = NULL;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_ConsumerLogTruncationError_divergent_offsets_err(view, &ffi_err));
+            if (payload_topic_partition_offset_map(env, obj, "divergentOffsets", value, failed)) return NULL;
+        }
+        return obj;
+    }
+    case kafka_common_Error_RECORD_DESERIALIZATION: {
+        const kafka_common_RecordDeserializationError_t* view = NULL;
+        error_discard(FFI_SET(view, kafka_common_Error_record_deserialization_err(e, &ffi_err)));
+        if (view == NULL || napi_create_object(env, &obj) != napi_ok) return NULL;
+        {
+            const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t* value = NULL;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_origin_err(view, &ffi_err));
+            if (payload_deserialization_origin(env, obj, "origin", value, failed)) return NULL;
+        }
+        {
+            const kafka_common_TopicPartition_t* value = NULL;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_topic_partition_err(view, &ffi_err));
+            if (payload_topic_partition(env, obj, "partition", value, failed)) return NULL;
+        }
+        {
+            int64_t value = 0;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_offset_err(view, &ffi_err));
+            if (payload_int64(env, obj, "offset", value, failed)) return NULL;
+        }
+        {
+            int64_t value = 0;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_timestamp_err(view, &ffi_err));
+            if (payload_int64(env, obj, "timestamp", value, failed)) return NULL;
+        }
+        {
+            const kafka_common_record_TimestampType_t* value = NULL;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_timestamp_type_err(view, &ffi_err));
+            if (payload_timestamp_type(env, obj, "timestampType", value, failed)) return NULL;
+        }
+        {
+            kafka_Bytes_t value = { NULL, 0 };
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_key_buffer_err(view, &ffi_err));
+            if (payload_bytes(env, obj, "keyBuffer", value, failed)) return NULL;
+        }
+        {
+            kafka_Bytes_t value = { NULL, 0 };
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_value_buffer_err(view, &ffi_err));
+            if (payload_bytes(env, obj, "valueBuffer", value, failed)) return NULL;
+        }
+        {
+            const kafka_common_header_internals_RecordHeaders_t* value = NULL;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_RecordDeserializationError_headers_err(view, &ffi_err));
+            if (payload_headers(env, obj, "headers", value, failed)) return NULL;
+        }
         return obj;
     }
     case kafka_common_Error_QUOTA_VIOLATION: {

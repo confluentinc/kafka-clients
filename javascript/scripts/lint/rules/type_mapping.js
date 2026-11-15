@@ -37,6 +37,7 @@
 // | String                                       | string                                  |
 // | void, Void                                   | void                                    |
 // | Object                                       | unknown                                 |
+// | Optional<T>, OptionalInt                     | T (or number) | null                    |
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
@@ -253,6 +254,10 @@ module.exports = {
       // Conventions, Scope). A placeholder is an alias of unknown.
       if (PLACEHOLDERS.has(j.name) || NOT_PUBLIC_TYPES.has(j.name)) return (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0;
       if (j.name === '?') return true;
+      // Java's Optional<T> is `T | null` (root CLAUDE.md, JavaScript Binding
+      // Conventions, Types, Q26): null is stripped, T compared.
+      if (j.name === 'Optional') return j.args.length === 0 ? true : matches(j.args[0], t);
+      if (j.name === 'OptionalInt') return (t.flags & ts.TypeFlags.NumberLike) !== 0;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }

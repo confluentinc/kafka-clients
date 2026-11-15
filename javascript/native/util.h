@@ -128,6 +128,19 @@ int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* n
 int payload_string(napi_env env, napi_value obj, const char* name, const char* value, kafka_common_Error_t* failed);
 int payload_int32(napi_env env, napi_value obj, const char* name, int32_t value, kafka_common_Error_t* failed);
 int payload_double(napi_env env, napi_value obj, const char* name, double value, kafka_common_Error_t* failed);
+int payload_int64(napi_env env, napi_value obj, const char* name, int64_t value, kafka_common_Error_t* failed);
+int payload_topic_partition(napi_env env, napi_value obj, const char* name, const kafka_common_TopicPartition_t* value,
+                            kafka_common_Error_t* failed);
+int payload_timestamp_type(napi_env env, napi_value obj, const char* name, const kafka_common_record_TimestampType_t* value,
+                           kafka_common_Error_t* failed);
+int payload_deserialization_origin(napi_env env, napi_value obj, const char* name,
+                                   const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t* value,
+                                   kafka_common_Error_t* failed);
+int payload_bytes(napi_env env, napi_value obj, const char* name, kafka_Bytes_t value, kafka_common_Error_t* failed);
+int payload_headers(napi_env env, napi_value obj, const char* name, const kafka_common_header_internals_RecordHeaders_t* value,
+                    kafka_common_Error_t* failed);
+int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char* name, kafka_Map_t* map,
+                                       kafka_common_Error_t* failed);
 
 // An OWNED error with nowhere else to go: when `js` (JS may run here: not an
 // environment teardown), it is converted and handed to process.emitWarning
