@@ -221,7 +221,7 @@ test-examples-dotnet: build-dotnet
 # report), then prints a second total without Confluent.Kafka.Common.Errors: the
 # generated exception classes, whose unused constructor overloads are most of the
 # uncovered lines. CI runs it in the "coverage-dotnet (Linux amd64)" job and keeps
-# the HTML report as the job artifact coverage-dotnet.tar.gz. It reports only;
+# the HTML report as the workflow artifact coverage/dotnet.tar.gz. It reports only;
 # there is no threshold.
 # ---------------------------------------------------------------------------
 COVERAGE_DIR := $(REPO_ROOT)/dotnet/artifacts/coverage

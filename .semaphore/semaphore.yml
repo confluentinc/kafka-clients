@@ -592,7 +592,7 @@ blocks:
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
     # (`make coverage-dotnet`, see dotnet/Makefile). It prints the summary in the
-    # log and keeps the HTML report as the job artifact coverage-dotnet.tar.gz
+    # log and keeps the HTML report as the workflow artifact coverage/dotnet.tar.gz
     # (about 3 MB; extract it and open report/index.html). One archive, because
     # the report is several hundred pages that link to each other. It reports
     # only: no coverage level fails it.
@@ -614,7 +614,7 @@ blocks:
             - (cd dotnet && retry dotnet tool restore)
             - make coverage-dotnet
             - tar -czf coverage-dotnet.tar.gz -C dotnet/artifacts/coverage report
-            - retry artifact push job --force --expire-in 2w coverage-dotnet.tar.gz
+            - retry artifact push workflow --force --expire-in 2w coverage-dotnet.tar.gz --destination coverage/dotnet.tar.gz
 
   - name: "Release: CI passed"
     # Passes once every CI block has passed, as "Create release tag" requires

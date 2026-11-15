@@ -1661,7 +1661,7 @@ Colima and runs `make test-integration-dotnet-native`: the arms with the gRPC se
 process, with no perf stage. The arms skip no test. The gRPC server's own unit tests are a local
 gate, outside CI: `make -C dotnet test-grpc-server-dotnet`. A separate Linux job,
 `coverage-dotnet (Linux amd64)`, runs `make coverage-dotnet` and keeps the unit tests' coverage
-report as a job artifact; it reports only and fails on no coverage level.
+report as the workflow artifact `coverage/dotnet.tar.gz`; it reports only and fails on no coverage level.
 
 ### 7.6 The gRPC test server (`grpc-server/`)
 
