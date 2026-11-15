@@ -97,7 +97,8 @@ Phase A's send path (zero copy, no closed state, frozen records).
   `lint-javascript`, generated files left out) and
   the tests on Jest (`jest.config.cjs`, through jest-light-runner in a fresh Node.js process per file; ts-jest is not
   used, the tests being JavaScript). `tsc --strict` over the tests (Q67, Q74) is done too: `make typecheck-tests`
-  (`test/tsconfig.json`, `checkJs`, in the root `lint-javascript`) checks every file under `test/` with no finding,
+  (`test/tsconfig.json`, `checkJs`, in the root `test-javascript-unit`) checks every test file, under `test/` and
+  `verifiable_clients/test/`, with no finding,
   each deliberate misuse marked `@ts-expect-error` (`DECISIONS.md`, entries 22 to 25).
 - The decisions taken while aligning and completing the producer are logged in `DECISIONS.md`, in this folder.
 - **The parked rows (§5)**: the serde factories beyond `stringSerializer()`, Q50 ("the methods must be all async"),
