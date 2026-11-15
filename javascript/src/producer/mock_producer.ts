@@ -166,7 +166,12 @@ function thrownMessage(thrown: unknown): string {
  * the partitioner is never called and every record goes to partition 0, as
  * in Java. A callback's throw leaves the record's future completed
  * *(deviation: Java's leaves it incomplete. Why: the core's mock completes
- * it. Goes when: the core's mock leaves it incomplete)*.
+ * it. Goes when: the core's mock leaves it incomplete)*, and `flush()`
+ * completes every waiting record, running each callback, before it rejects
+ * with the first throw *(deviation: Java's `flush()` stops at the first
+ * callback that throws, the later records staying waiting. Why: the core's
+ * mock completes all of them in one call. Goes when: the core's mock stops at
+ * the first throw)*.
  */
 export class MockProducer<K, V> implements Producer<K, V> {
   #handle: ProducerHandle;
@@ -458,7 +463,11 @@ export class MockProducer<K, V> implements Producer<K, V> {
    *   argument
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
-   * @remarks The error set with `setFlushException` rejects it as it is.
+   * @remarks The error set with `setFlushException` rejects it as it is. A
+   * callback that throws rejects it, after every waiting record completed
+   * *(deviation: Java's stops at the first throw. Why: the core's mock
+   * completes them all in one call. Goes when: the core's mock stops at the
+   * first throw)*.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {

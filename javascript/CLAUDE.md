@@ -779,7 +779,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (with `autoComplete`) and `flush()` reject with it, and nothing logs it.
   The record's future completes all the same *(deviation: Java's mock leaves
   it incomplete. Why: the core's mock completes it. Goes when: the core's
-  mock leaves it incomplete)*; a callback's Promise that rejects is logged by
+  mock leaves it incomplete)*, and `flush()` completes every waiting record,
+  running each callback, before it rejects with the first throw
+  *(deviation: Java's `flush()` stops at the first callback that throws, the
+  later records staying waiting. Why: the core's mock completes all of them
+  in one call. Goes when: the core's mock stops at the first throw)*; a callback's Promise that rejects is logged by
   the core, as the producer's, since it settles after the call returned.
   `partitionsFor(null)` rejects with the FFI's `TypeError` "topic cannot be
   null" *(deviation: Java's mock answers `[]`, as its empty cluster has no

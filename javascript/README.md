@@ -433,7 +433,9 @@ Every record goes to partition 0, as with Java's empty-cluster mock. A
 callback runs inside the mock call that completes its record (`send()` with
 `autoComplete`, `completeNext()`, `errorNext()` or `flush()`), and what it
 throws comes out of that call, as in Java (its record's future still
-completes: Java's would stay incomplete). Java's public error fields are
+completes: Java's would stay incomplete, and `flush()` completes every waiting
+record before it rejects with the first throw, where Java's stops at it).
+Java's public error fields are
 setters, and each call throws the very error it was given:
 
 ```js
