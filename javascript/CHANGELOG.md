@@ -252,6 +252,9 @@ newer.
   extends `Map` or `Set`; `get()` returns `null` for a missing key, `size()`
   is a method, `toString()` is Java's text and `toJSON()` writes a map by
   the string key (a bigint as a decimal string) and a set as its array.
+  Their constructors, `get`, `has`, `add` and `delete` take the value on its
+  own or by name (`has({ key })`), as `MetricNameMap`'s do, and their types
+  declare both.
 
 ### Errors and security
 
@@ -287,7 +290,8 @@ newer.
   `DeserializationExceptionOrigin`; `LogTruncationError` has Java's
   constructors and `divergentOffsets()`, a `TopicPartitionMap<OffsetAndMetadata>`.
 - `TimestampType` (`common/record`), Java's enum, its `name` field read
-  through `toString()` (`'CreateTime'`), and `OffsetAndMetadata`
+  through `toString()` (`'CreateTime'`; `forName` takes a string, a `null`
+  matching no constant as in Java), and `OffsetAndMetadata`
   (`consumer`), a frozen data object with Java's constructors, `equals`,
   `hashCode` and `toString`, `offset` a bigint and `leaderEpoch` a number
   or null.
@@ -364,7 +368,10 @@ newer.
 - Installing runs no build (`"gypfile": false`, no install scripts).
 - Every package declares `"type": "commonjs"`, and publint checks each
   tarball.
-- The tests run on Jest, the sources are formatted with Prettier, and
+- The tests run on Jest, and `tsc --strict` type-checks them
+  (`make typecheck-tests`, through `checkJs`), against the compiled
+  declarations, each deliberate misuse marked `@ts-expect-error`.
+- The sources are formatted with Prettier, and
   `make docs` builds the HTML reference with TypeDoc. A docs lint
   (`eslint-plugin-jsdoc`) checks that each doc comment in `src/`, on a
   function, a method, an overload signature, an abstract method or an

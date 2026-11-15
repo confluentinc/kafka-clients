@@ -1481,7 +1481,45 @@ The rules, each named in its finding:
   file, and cleanup is `afterEach`. ts-jest is not used: the light runner
   transforms nothing, and the tests are JavaScript. The integration tests run
   in band (`--runInBand`), one file at a time, and are skipped, with a
-  visible message, unless `KAFKA_BOOTSTRAP_SERVERS` is set. `tsc --strict`
-  over the tests (root conventions, Tests, Q67) is not set up yet: under
-  `checkJs` the JavaScript tests have about 2,400 errors to fix.
+  visible message, unless `KAFKA_BOOTSTRAP_SERVERS` is set.
+- `tsc --strict` runs over the tests (root conventions, Tests, Q67, and
+  Build, packaging and release, Q74): `make typecheck-tests`
+  (`scripts/typecheck_tests.js`, in the root `lint-javascript`, so in
+  `verify`) checks every file under `test/` with `test/tsconfig.json`, the
+  JavaScript tests through `checkJs` under the library's own settings, the
+  package's import paths typed by `dist/`'s declarations (after `build-ts`),
+  as a user's code is. It fails on any finding under `test/`; the files the
+  tests require from elsewhere (`scripts/`, `grpc-server/`, the undeclared
+  `dist/internal/*.js`) are read but not failed on, since `checkJs` has no
+  per-file exclusion. ts-jest is not used (the light runner transforms
+  nothing, and the tests stay JavaScript), so the tests are typed with JSDoc:
+  precise types, never `any` (`unknown` and narrowing where a value's type is
+  not known), a nullable value narrowed by an assertion the test makes
+  (`assert.ok(x)`), not a cast. A deliberate misuse a test makes to reach a
+  run-time check (a wrong type, a `null` the types forbid, an unknown key, a
+  string without a serializer) carries `// @ts-expect-error <the run-time
+  check it covers>` on the line above it: the directive also proves `tsc`
+  catches the misuse for a TypeScript caller, the other half of the
+  TypeScript-first rule, while the test proves the run time catches it for a
+  plain JavaScript caller. A directive marks only a misuse `tsc` catches,
+  and its reason says which kind: a wrong argument, a `null` the types forbid
+  by the nullability rule (Java only stores it, so the type is `T` while the
+  run time stores the `null` as Java does), or a class instance given bare
+  (below). A valid call is never marked: one the published types reject is a
+  type to fix in `src/`; one that reaches a library-only member (`internal...`,
+  `_ffiId`) goes through `test/_internal.js`, the one typed view of them; a
+  table of valid forms whose union `tsc` picks no overload for calls the
+  implementation's parameter through a cast. A misuse `tsc` lets through gets
+  no directive: number ranges, `NaN` and integer checks, a key computed at run
+  time, a parameter typed `unknown` (the placeholders, `V` of a map built
+  empty) and an `any[]` such as `fill(null)`'s are limits of `tsc`, recorded
+  in `DECISIONS.md`. `@ts-ignore`, `@ts-nocheck` and an `@ts-expect-error`
+  without a reason are refused.
+- What `tsc` catches against the run time (TypeScript first): a bare value
+  that may be any non-plain object (`KafkaFuture.completedFuture(value)`,
+  `getNow(valueIfAbsent)`) is typed to take only built-in values bare, since
+  TypeScript cannot tell a class instance from a plain object and the run
+  time reads a plain object as the options object, so a TypeScript caller
+  passes an instance of its own class by name, `{ value }`, while plain
+  JavaScript may pass it bare.
 - Assert the core's exact error messages in tests.
