@@ -361,5 +361,6 @@ newer.
   (`eslint-plugin-jsdoc`) checks that each doc comment in `src/`, on a
   function, a method, an overload signature, an abstract method or an
   interface method, has a `@param` for each parameter (an options object as
-  one), written `@param name - text`, and a `@returns` unless the return type
-  is `void` or `Promise<void>`. A member with no doc comment is not checked.
+  one), written `@param name - text`, and a `@returns` unless the
+  declaration returns no value (`void`, `undefined` or `never`, alone or in a
+  `Promise`) or is an interface's setter. A member with no doc comment is not checked.

@@ -1234,8 +1234,10 @@ an interface method (`scripts/lint/eslint/config.js`, the plugin's default
 contexts plus `TSEmptyBodyFunctionExpression` and `TSMethodSignature`), and
 asks for a `@param` for each parameter, an options object as one parameter
 (`checkDestructured` off), in TSDoc's form `@param name - text`, and a
-`@returns` unless the return type is `void` or `Promise<void>` (a bodied
-function's only when its body returns a value). Not checked: a member with no
+`@returns` unless the declaration returns no value (`void`, `undefined` or
+`never`, alone or in a `Promise`; a union of them, such as
+`void | Promise<void>`, is not exempted yet) or is an interface's setter (a
+bodied function's only when its body returns a value). Not checked: a member with no
 doc comment (which members need one is not the lint's), and function types
 (a type alias or a property). A generated file gets its tags from its
 generator. `test/lint/docs_lint.test.js` pins the configuration; the runner
