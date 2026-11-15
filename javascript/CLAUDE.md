@@ -1012,9 +1012,9 @@ The layout is the root conventions' (Layout and modules).
   `@java` or `@jsOnly` tag. Each module's header comment lists the Java
   overloads it leaves out; the producer package's is its `index.ts`'s
   `@packageDocumentation` TSDoc, so the declarations show it (the API report
-  records only that the package has one). The docs lint, the `require-param` and
-  `require-returns` rules of `eslint-plugin-jsdoc` (Documentation, Q64, Q74),
-  runs in `make lint-rules` (The rule linter), and `make docs` builds the HTML
+  records only that the package has one). The docs lint, the `require-param`,
+  `require-returns` and `require-hyphen-before-param-description` rules of
+  `eslint-plugin-jsdoc` (Documentation, Q64, Q74), runs in `make lint-rules` (The rule linter), and `make docs` builds the HTML
   reference with TypeDoc (`typedoc.config.cjs`, root conventions,
   Documentation, Q64) into `build/docs/`: one module per import path, each
   package's `@packageDocumentation` its page, the `@internal` members left out
@@ -1216,11 +1216,19 @@ from the sources, as `cargo xtask lint-custom` checks the Rust crate's
 (`eslint.config.cjs`, the `kafka/` rules, with `eslint-baseline.txt`) runs the
 rules that read TypeScript, beside typescript-eslint's recommended
 type-checked rules on `src/` (`no-floating-promises` among them) and the docs
-lint, `eslint-plugin-jsdoc`'s `require-param` and `require-returns` on `src/`
-(root conventions, Documentation, Q64, Q74): a doc comment names each
-parameter and what the function returns, an options object as one parameter
-(`checkDestructured` off), and a generated file gets its tags from its
-generator; which members need a doc comment is not the lint's; the runner
+lint, `eslint-plugin-jsdoc`'s `require-param`, `require-returns` and
+`require-hyphen-before-param-description` on `src/` (root conventions,
+Documentation, Q64, Q74). It reads each doc comment on a function, a method,
+an overload signature of either or of a constructor, an abstract method and
+an interface method (`scripts/lint/eslint/config.js`, the plugin's default
+contexts plus `TSEmptyBodyFunctionExpression` and `TSMethodSignature`), and
+asks for a `@param` for each parameter, an options object as one parameter
+(`checkDestructured` off), in TSDoc's form `@param name - text`, and a
+`@returns` unless the return type is `void` or `Promise<void>` (a bodied
+function's only when its body returns a value). Not checked: a member with no
+doc comment (which members need one is not the lint's), and function types
+(a type alias or a property). A generated file gets its tags from its
+generator. `test/lint/docs_lint.test.js` pins the configuration; the runner
 (`scripts/lint_rules.js`, with `lint-baseline.txt`) runs the addon's C rules
 and the other files. `make test-lint` runs the linter's own tests
 (`test/lint/`): each rule's tests over a fixture, and a mutation test that

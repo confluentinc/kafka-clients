@@ -350,5 +350,9 @@ newer.
 - Every package declares `"type": "commonjs"`, and publint checks each
   tarball.
 - The tests run on Jest, the sources are formatted with Prettier, and
-  `make docs` builds the HTML reference with TypeDoc. Doc comments name every parameter and return value
-  (`eslint-plugin-jsdoc`).
+  `make docs` builds the HTML reference with TypeDoc. A docs lint
+  (`eslint-plugin-jsdoc`) checks that each doc comment in `src/`, on a
+  function, a method, an overload signature, an abstract method or an
+  interface method, has a `@param` for each parameter (an options object as
+  one), written `@param name - text`, and a `@returns` unless the return type
+  is `void` or `Promise<void>`. A member with no doc comment is not checked.
