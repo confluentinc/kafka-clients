@@ -253,15 +253,20 @@ char* js_string_dup(napi_env env, napi_value value, const char* what);
 // `what` followed by " without null bytes" for bytes holding a NUL.
 char* js_bytes_cstring(napi_env env, napi_value value, const char* what);
 
-// Builds the C record. `headers` is `null` or an array of `[key, value]`
-// pairs, key the bytes of its string (encodeLikeJava's) and value a
-// Uint8Array or null. Key and value point at
-// `key` / `value` (or are Java's null), which must stay valid until the
-// hand-over; the header bytes are copied by the core during this call. Returns NULL with a JS exception
-// pending on failure.
+// Builds the C record. `headers` is `null` or a headers handle object
+// (native/headers.c), whose RecordHeaders the core copies during this call.
+// Key and value point at `key` / `value` (or are Java's null), which must
+// stay valid until the hand-over. Returns NULL with a JS exception pending on
+// failure.
 kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, int32_t partition,
                                               int64_t timestamp, const JsBytes* key,
                                               const JsBytes* value, napi_value headers);
+
+// ---- headers.c -------------------------------------------------------------
+
+// The RecordHeaders behind a headers handle object, borrowed for the call, or
+// NULL with a TypeError pending when `value` is not one.
+kafka_common_header_internals_RecordHeaders_t* headers_handle(napi_env env, napi_value value);
 
 // producer.c: the JS value an error JS gave a mock carries, for the
 // LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
@@ -290,5 +295,22 @@ napi_value js_producer_metrics(napi_env env, napi_callback_info info);
 napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);
+
+// headers.c: Headers and Header over RecordHeaders and RecordHeader.
+napi_value js_headers_new(napi_env env, napi_callback_info info);
+napi_value js_headers_copy(napi_env env, napi_callback_info info);
+napi_value js_headers_add(napi_env env, napi_callback_info info);
+napi_value js_headers_add_key_value(napi_env env, napi_callback_info info);
+napi_value js_headers_remove(napi_env env, napi_callback_info info);
+napi_value js_headers_last_header(napi_env env, napi_callback_info info);
+napi_value js_headers_headers(napi_env env, napi_callback_info info);
+napi_value js_headers_to_array(napi_env env, napi_callback_info info);
+napi_value js_headers_iterator(napi_env env, napi_callback_info info);
+napi_value js_headers_set_read_only(napi_env env, napi_callback_info info);
+napi_value js_headers_is_read_only(napi_env env, napi_callback_info info);
+napi_value js_header_new(napi_env env, napi_callback_info info);
+napi_value js_header_key(napi_env env, napi_callback_info info);
+napi_value js_header_value(napi_env env, napi_callback_info info);
+napi_value js_header_stats(napi_env env, napi_callback_info info);
 
 #endif  // CONFLUENT_KAFKA_JS_UTIL_H

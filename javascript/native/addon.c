@@ -180,6 +180,22 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"mockProducerCompleteNext", NULL, js_mock_producer_complete_next, NULL, NULL, NULL, napi_default, NULL},
         {"mockProducerState", NULL, js_mock_producer_state, NULL, NULL, NULL, napi_default, NULL},
         {"recordFutureGet", NULL, js_record_future_get, NULL, NULL, NULL, napi_default, NULL},
+        // headers.c
+        {"headersNew", NULL, js_headers_new, NULL, NULL, NULL, napi_default, NULL},
+        {"headersCopy", NULL, js_headers_copy, NULL, NULL, NULL, napi_default, NULL},
+        {"headersAdd", NULL, js_headers_add, NULL, NULL, NULL, napi_default, NULL},
+        {"headersAddKeyValue", NULL, js_headers_add_key_value, NULL, NULL, NULL, napi_default, NULL},
+        {"headersRemove", NULL, js_headers_remove, NULL, NULL, NULL, napi_default, NULL},
+        {"headersLastHeader", NULL, js_headers_last_header, NULL, NULL, NULL, napi_default, NULL},
+        {"headersHeaders", NULL, js_headers_headers, NULL, NULL, NULL, napi_default, NULL},
+        {"headersToArray", NULL, js_headers_to_array, NULL, NULL, NULL, napi_default, NULL},
+        {"headersIterator", NULL, js_headers_iterator, NULL, NULL, NULL, napi_default, NULL},
+        {"headersSetReadOnly", NULL, js_headers_set_read_only, NULL, NULL, NULL, napi_default, NULL},
+        {"headersIsReadOnly", NULL, js_headers_is_read_only, NULL, NULL, NULL, napi_default, NULL},
+        {"headerNew", NULL, js_header_new, NULL, NULL, NULL, napi_default, NULL},
+        {"headerKey", NULL, js_header_key, NULL, NULL, NULL, napi_default, NULL},
+        {"headerValue", NULL, js_header_value, NULL, NULL, NULL, napi_default, NULL},
+        {"headerStats", NULL, js_header_stats, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
     return exports;

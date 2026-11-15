@@ -41,14 +41,12 @@ const FORMS = new JavaForms(
 const EQUALS_FORMS = new JavaForms('equals', [['o']]);
 const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
-/** A header as the native send takes it: key and value bytes. */
-type NativeHeader = [Uint8Array, Uint8Array | null];
-
 /**
  * The record arguments of the native send (`internal/native.ts`
- * `producerSend`): topic, partition, timestamp, key, value, headers.
+ * `producerSend`): topic, partition, timestamp, key, value, and the
+ * headers' native `RecordHeaders` or null.
  */
-type NativeRecord = [string, number, bigint, Uint8Array | null, Uint8Array | null, NativeHeader[] | null];
+type NativeRecord = [string, number, bigint, Uint8Array | null, Uint8Array | null, object | null];
 
 const INT32_MIN = -(2 ** 31);
 const INT32_MAX = 2 ** 31 - 1;
@@ -188,7 +186,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -217,7 +215,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -246,7 +244,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -297,7 +295,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -415,7 +413,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -438,7 +436,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -461,7 +459,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -484,7 +482,7 @@ export class ProducerRecord<out K = never, out V = never> {
     /**
      * The headers that will be included in the record: a `Headers` or an
      * iterable of `Header`, copied into the record's own `Headers` (the
-     * `Header` objects are kept), or null.
+     * core copies each header), or null.
      */
     headers: Iterable<Header> | null;
   });
@@ -782,12 +780,13 @@ export class ProducerRecord<out K = never, out V = never> {
 
   /**
    * The arguments of the native send: topic, partition (-1 for null) and
-   * timestamp (-1n for null), key and value bytes, header pairs or null; then
-   * the record's headers are made read-only, as Java's `doSend` seals them
-   * (`setReadOnly`) before handing the record over. Called by
-   * `KafkaProducer`. The record is frozen, so its fields are what the
-   * constructor checked: nothing is checked again. A record with no headers
-   * allocates nothing more for them.
+   * timestamp (-1n for null), key and value bytes, and the record's native
+   * `RecordHeaders`, which the core copies into the record, or null for none.
+   * The record's headers are made read-only first, as Java's `doSend` seals
+   * them (`setReadOnly`) once the serializers have run, before handing the
+   * record over. Called by `KafkaProducer`. The record is frozen, so its
+   * fields are what the constructor checked: nothing is checked again. A
+   * record with no headers allocates nothing for them.
    *
    * `key` and `value` are what a serializer returned; one left out is the
    * record's own field, sent without a serializer: bytes as they are,
@@ -802,16 +801,17 @@ export class ProducerRecord<out K = never, out V = never> {
    */
   internalToNative(key?: Uint8Array | null, value?: Uint8Array | null): NativeRecord {
     const { topic, partition, timestamp, headers } = this;
-    const out: NativeRecord = [
+    const keyBytes = key === undefined ? rawBytes(this.key, 'key') : key;
+    const valueBytes = value === undefined ? rawBytes(this.value, 'value') : value;
+    headers.internalSetReadOnly();
+    return [
       topic,
       partition === null ? -1 : partition,
       timestamp === null ? -1n : timestamp,
-      key === undefined ? rawBytes(this.key, 'key') : key,
-      value === undefined ? rawBytes(this.value, 'value') : value,
-      headers.internalToNative(),
+      keyBytes,
+      valueBytes,
+      headers.internalNative(),
     ];
-    headers.internalSetReadOnly();
-    return out;
   }
 }
 
