@@ -30,7 +30,7 @@ const native: Native = loaded;
 export = native;
 `;
 
-const fixture = (files) =>
+const fixture = (/** @type {Record<string, string | undefined>} */ files) =>
   project({
     'tsconfig.json': TSCONFIG,
     'src/internal/native.ts': NATIVE_TS,

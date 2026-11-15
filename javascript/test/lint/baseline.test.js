@@ -25,7 +25,13 @@ const { Baseline, key } = require('../../scripts/lint/baseline');
 const { TODO_MARK, CLAUDE_MD, project, lint, lintRunner, findings } = require('./_project');
 const { part } = require('../../scripts/lint/checks');
 
+/**
+ * @param {string} kind
+ * @param {string} subject
+ * @returns {import('./_project').Finding}
+ */
 const f = (kind, subject) => ({ kind, subject, message: 'm' });
+/** @param {import('./_project').Finding[]} list */
 const subjects = (list) => list.map((x) => `${x.kind} ${x.subject}: ${x.message}`);
 
 test('a key line waives its finding; comments and blank lines are ignored', () => {

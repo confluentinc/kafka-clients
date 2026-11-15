@@ -23,6 +23,10 @@ const { project, lint, findings } = require('./_project');
 const RULE = 'check-commonjs-pin';
 
 const TSCONFIG = '// A comment, as the real one has.\n{ "compilerOptions": { "module": "nodenext", "moduleResolution": "NodeNext" } }\n';
+/**
+ * @param {Record<string, unknown>} [extra]
+ * @param {Record<string, unknown>} [exports]
+ */
 const PACKAGE = (extra = {}, exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } }) =>
   JSON.stringify({ name: 'p', ...extra, exports }, null, 2);
 

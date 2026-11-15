@@ -124,8 +124,8 @@ test("a client's destroy is reached only from the handle object's finalizer, for
   const header = `${HEADER}\nvoid kafka_x_K_destroy_err(kafka_x_K_t *self_, kafka_common_Error_t **out_err);\n\nconst kafka_x_P_t *kafka_x_K__as_P_err(kafka_x_K_t *self_, kafka_common_Error_t **out_err);\n`;
   const destroy =
     'static void producer_destroy(void* k) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_K_destroy_err(k, &ffi_err));\n}\n\n';
-  const finalizer = (body) => `static void producer_finalize(void* env, void* data, void* hint) {\n${body}}\n\n`;
-  const wrapped = (finalize) =>
+  const finalizer = (/** @type {string} */ body) => `static void producer_finalize(void* env, void* data, void* hint) {\n${body}}\n\n`;
+  const wrapped = (/** @type {string} */ finalize) =>
     PRODUCER_C.replace('void js_create(', `${destroy}${finalize}void js_create(`).replace(
       '    cbq_init(q, p, producer_execute);\n',
       '    cbq_init(q, p, producer_execute);\n    napi_wrap(0, 0, p, producer_finalize, NULL, NULL);\n',

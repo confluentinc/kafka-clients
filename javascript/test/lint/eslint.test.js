@@ -31,6 +31,10 @@ const { FILES, ADDON } = require('./_native_fixture');
 const INDEX = javaIndex(CLASSES);
 
 /** The messages of rule `id`: `<file>:<line> <messageId> <message>`. */
+/**
+ * @param {import('./_project').FileMessage[]} messages
+ * @param {string} id
+ */
 const of = (messages, id) => messages.filter((m) => m.ruleId === id).map((m) => `${m.rel}:${m.line} ${m.messageId} ${m.message}`);
 
 test('a missing Java member is reported on the declaration of the class that should hold it', () => {
@@ -65,6 +69,7 @@ test('a registration src/ never uses is reported on src/internal/native.ts, nami
 });
 
 /** Every file ESLint lints in `files`' project, sorted: where a project finding is reported. */
+/** @param {Record<string, string>} files */
 const linted = (files) =>
   Object.keys(files)
     .filter((f) => /\.(ts|js|cjs|mjs)$/.test(f))
@@ -152,6 +157,7 @@ test('an unused allowlist entry is located on the entry, in the rule module that
 
 test('kafka/directives: a disable names one rule, not a kafka/ one, with a reason; no inline configuration', () => {
   const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB };
+  /** @type {[string, string[]][]} */
   const cases = [
     ['// eslint-disable-next-line no-console -- the reason', []],
     ['/* eslint-disable no-console -- a block, one rule, a reason */', []],
@@ -208,6 +214,7 @@ test('kafka/directives reads every inline form ESLint accepts, as ESLint itself 
   const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, ...LIB };
   const R = 'kafka/java-name';
   // [comment, the check's kind, whether ESLint itself reads a configuration or a kafka/ rule in it]
+  /** @type {[string, string | null, boolean][]} */
   const forms = [
     [`/* eslint ${R}: "off" */`, 'config-inline', true],
     [`/* eslint "${R}": "off" */`, 'config-inline', true],
@@ -242,7 +249,11 @@ test('kafka/directives reads every inline form ESLint accepts, as ESLint itself 
     // ESLint's own reading agrees.
     const linter = new Linter({ cwd: root });
     const file = path.join(root, 'src', 'x.ts');
-    linter.verify(require('node:fs').readFileSync(file, 'utf8'), config(root, { typed: false }), file);
+    linter.verify(
+      require('node:fs').readFileSync(file, 'utf8'),
+      /** @type {import('eslint').Linter.Config[]} */ (config(root, { typed: false })),
+      file,
+    );
     assert.equal(eslintReading(linter.getSourceCode()).length > 0, read, comment);
   }
 });
@@ -303,6 +314,11 @@ test('kafka/config: an ESLint configuration besides eslint.config.cjs is reporte
 
 test('the formatter groups a message the same rule reports on several files, and counts it once', () => {
   const format = require('../../scripts/lint/eslint/formatter');
+  /**
+   * @param {string} ruleId
+   * @param {string} message
+   * @param {number} [line]
+   */
   const m = (ruleId, message, line = 1) => ({ ruleId, message, line, column: 0, severity: 2 });
   const out = format(
     [
@@ -330,6 +346,10 @@ test('the formatter groups a message the same rule reports on several files, and
 
 test("the formatter groups only kafka/ messages: another rule's identical messages stay under their files", () => {
   const format = require('../../scripts/lint/eslint/formatter');
+  /**
+   * @param {number} line
+   * @param {number} column
+   */
   const any = (line, column) => ({
     ruleId: '@typescript-eslint/no-explicit-any',
     message: 'Unexpected any. Specify a different type.',

@@ -210,7 +210,7 @@ test('each other finding kind, with its exact text', () => {
 
 test('an error class keeps its fields, and no code or retriable flag', () => {
   const classes = [...CLASSES, javaClass('common.errors.BarException', { fields: [field('x')], overloads: [method('m')] })];
-  const run = (body) =>
+  const run = (/** @type {string} */ body) =>
     lint(
       project({
         'tsconfig.json': TSCONFIG,
