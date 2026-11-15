@@ -26,18 +26,56 @@
 // the light runner gives a timeout no meaning (`test.concurrent`,
 // `test.failing`) refuse one.
 
-const register = globalThis.test;
-const hooks = Object.fromEntries(['beforeAll', 'beforeEach', 'afterAll', 'afterEach'].map((name) => [name, globalThis[name]]));
+/**
+ * A test or hook function, or a `test.each` row's: it takes the row's values,
+ * then Jest's `done` when it declares one more parameter.
+ *
+ * @typedef {(...args: unknown[]) => unknown} TestFn
+ */
+/**
+ * A Jest member registering a test, as this file calls it.
+ *
+ * @typedef {(name: string, fn?: TestFn, timeout?: number) => void} Register
+ */
+/**
+ * A Jest member registering a test, with its `each`.
+ *
+ * @typedef {Register & { each: (...table: unknown[]) => Register }} Form
+ */
+/**
+ * Jest's `test`, with the members this file replaces or keeps.
+ *
+ * @typedef {Form & { only: Form, skip: Register, todo: (name: string) => void, concurrent?: Register, failing?: Register }} Test
+ */
+/**
+ * A Jest hook (`beforeAll`, ...).
+ *
+ * @typedef {(fn?: TestFn, timeout?: number) => void} Hook
+ */
 
-/** Runs `fn` with `args`, Jest's `done` form included: a Promise of its end. */
+// The globals this file replaces, read as the shapes above: Jest's own types
+// (`jest.It`, `jest.Lifecycle`) take only Jest's own function forms, while
+// this file passes any of them through as it is given.
+const globals = /** @type {{ test: Test, it: Test } & Record<string, Hook | undefined>} */ (/** @type {unknown} */ (globalThis));
+const register = globals.test;
+const hooks = Object.fromEntries(['beforeAll', 'beforeEach', 'afterAll', 'afterEach'].map((name) => [name, globals[name]]));
+
+/**
+ * Runs `fn` with `args`, Jest's `done` form included: a Promise of its end.
+ *
+ * @param {TestFn} fn the test function
+ * @param {unknown[]} args the values it is called with, before `done`
+ * @returns {Promise<unknown>} its end
+ */
 function call(fn, args) {
   if (fn.length <= args.length) return Promise.resolve().then(() => fn(...args));
-  return new Promise((resolve, reject) => {
-    const settle = (error) => (error === undefined || error === null ? resolve() : reject(error));
+  return new Promise((/** @type {(value?: unknown) => void} */ resolve, reject) => {
+    const settle = (/** @type {unknown} */ error) => (error === undefined || error === null ? resolve() : reject(error));
     // A `done` called before `fn` returned settles once its return is checked.
     let returned = false;
+    /** @type {{ error: unknown } | null} */
     let early = null;
-    const done = (error) => {
+    const done = (/** @type {unknown} */ error) => {
       if (returned) settle(error);
       else early = { error };
     };
@@ -57,7 +95,9 @@ function call(fn, args) {
       return;
     }
     returned = true;
-    if (early !== null) settle(early.error);
+    // `done` may have set `early` while `fn` ran, which tsc cannot see.
+    const pending = /** @type {{ error: unknown } | null} */ (early);
+    if (pending !== null) settle(pending.error);
   });
 }
 
@@ -65,12 +105,18 @@ function call(fn, args) {
  * `fn`, failing once it has run `timeout` ms; arity 0, so the runner passes
  * it no `done`. `rows`: it is `test.each`'s, which calls it with the row's
  * values; otherwise the runner calls it with a value to ignore.
+ *
+ * @param {TestFn} fn the test function
+ * @param {unknown} timeout its timeout, in ms
+ * @param {boolean} rows whether it is `test.each`'s
+ * @returns {TestFn} the function the runner calls
  */
 function withTimeout(fn, timeout, rows) {
   if (typeof timeout !== 'number' || !(timeout > 0))
     throw new TypeError(`a timeout must be a positive number of ms, not ${String(timeout)}`);
   return async (...given) => {
     const args = rows ? given : [];
+    /** @type {NodeJS.Timeout | undefined} */
     let timer;
     const expired = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`Exceeded timeout of ${timeout} ms for a test.`)), timeout);
@@ -83,19 +129,33 @@ function withTimeout(fn, timeout, rows) {
   };
 }
 
+/** @type {(fn: TestFn | undefined, timeout: number | undefined, rows?: boolean) => TestFn | undefined} */
 const timed = (fn, timeout, rows = false) => (timeout === undefined || typeof fn !== 'function' ? fn : withTimeout(fn, timeout, rows));
 
-/** `registerFn`'s form with the timeout applied, and its `each`. */
+/**
+ * `registerFn`'s form with the timeout applied, and its `each`.
+ *
+ * @param {Form} registerFn Jest's member
+ * @returns {Form} the member with the timeout applied
+ */
 function timedForm(registerFn) {
+  /** @type {Register} */
   const form = (name, fn, timeout) => registerFn(name, timed(fn, timeout));
-  form.each =
+  /** @type {Form['each']} */
+  const each =
     (...table) =>
     (name, fn, timeout) =>
       registerFn.each(...table)(name, timed(fn, timeout, true));
-  return form;
+  return Object.assign(form, { each });
 }
 
-/** A member whose timeout the light runner does not apply: it refuses one. */
+/**
+ * A member whose timeout the light runner does not apply: it refuses one.
+ *
+ * @param {Register} member Jest's member
+ * @param {string} label its name, for the message
+ * @returns {Register} the member refusing a timeout
+ */
 function refusingTimeout(member, label) {
   return (name, fn, timeout) => {
     if (timeout !== undefined) throw new Error(`${label}: test/jest_setup.js does not apply a timeout to it`);
@@ -103,15 +163,13 @@ function refusingTimeout(member, label) {
   };
 }
 
-const test = timedForm(register);
-test.only = timedForm(register.only);
-test.skip = register.skip;
-test.todo = register.todo;
+/** @type {Test} */
+const test = Object.assign(timedForm(register), { only: timedForm(register.only), skip: register.skip, todo: register.todo });
 if (register.concurrent !== undefined) test.concurrent = refusingTimeout(register.concurrent, 'test.concurrent');
 if (register.failing !== undefined) test.failing = refusingTimeout(register.failing, 'test.failing');
 
-globalThis.test = test;
-globalThis.it = test;
+globals.test = test;
+globals.it = test;
 for (const [name, hook] of Object.entries(hooks)) {
-  if (typeof hook === 'function') globalThis[name] = (fn, timeout) => hook(timed(fn, timeout));
+  if (typeof hook === 'function') globals[name] = (fn, timeout) => hook(timed(fn, timeout));
 }

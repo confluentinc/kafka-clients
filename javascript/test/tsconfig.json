@@ -24,6 +24,9 @@
 // Jest globals beside Node's; `skipLibCheck` leaves the declarations of the
 // dependencies unchecked (tinypool's, which jest_runner.mjs imports, name the
 // DOM's Worker), and dist/'s are checked by the build that writes them.
+// `moduleDetection: force` reads each file as a module, as Node runs it: a
+// file that requires and exports nothing (test/jest_setup.js) has its own
+// scope, not the global one.
 {
   "compilerOptions": {
     "strict": true,
@@ -34,6 +37,7 @@
     "lib": ["es2022", "es2024.string"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    "moduleDetection": "force",
     "types": ["node", "jest"],
     "skipLibCheck": true,
     "noImplicitOverride": true,
