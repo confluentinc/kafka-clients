@@ -16,7 +16,6 @@
 
 // N6 check-ownership (scripts/lint/rules/ownership.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');

@@ -23,7 +23,6 @@
 // conversion builds the class of the core's id with the fallback rules of
 // python/confluent_kafka/_errors.py.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 

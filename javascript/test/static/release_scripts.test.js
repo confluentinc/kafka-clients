@@ -21,7 +21,6 @@
 // over a fake recorded release against a stub `npm`: a first publish, a rerun,
 // and its read-back of the dist-tags.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');

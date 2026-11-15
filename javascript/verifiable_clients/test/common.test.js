@@ -20,7 +20,6 @@
 // java.util.Properties forms Kafka's system tests write), printJson on a
 // stdout that fails, and the shutdown hook.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

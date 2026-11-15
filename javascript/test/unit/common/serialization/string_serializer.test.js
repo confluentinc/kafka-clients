@@ -22,7 +22,6 @@
 // serializer: the deserializer waits for the consumer, so a round trip is
 // checked against Java's bytes.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

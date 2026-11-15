@@ -18,7 +18,6 @@
 // warning about producers never closed. Each case runs in a child process,
 // whose warnings are its own.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');

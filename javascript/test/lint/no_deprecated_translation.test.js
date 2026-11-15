@@ -16,7 +16,6 @@
 
 // J5 check-no-deprecated-translation (scripts/lint/rules/no_deprecated_translation.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

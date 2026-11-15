@@ -21,7 +21,6 @@
 // Python tests run throttle() on a thread and join it, these await its
 // Promise, racing it against a timer.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { ThroughputThrottler, LONG_MAX, NS_PER_SEC } = require('../throughput_throttler');

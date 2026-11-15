@@ -36,7 +36,6 @@
 // path segment, so need no entry. This file is not read: its fixtures are
 // the dodges it tests.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

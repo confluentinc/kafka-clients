@@ -18,7 +18,6 @@
 // .js and .d.ts starts with its source's licence header, the source maps
 // shifted to match, and a source without the header fails the build.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

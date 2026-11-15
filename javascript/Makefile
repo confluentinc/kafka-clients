@@ -51,16 +51,13 @@ TSC ?= node_modules/.bin/tsc
 TS_TYPE_ROOTS ?= node_modules/@types
 export TSC TS_TYPE_ROOTS
 
-# node --test takes files: the unit test directories up to four levels deep
-# (test/unit/common/security/auth/), as src/'s folders are.
-UNIT_TESTS = $(wildcard test/unit/*.test.js test/unit/*/*.test.js test/unit/*/*/*.test.js test/unit/*/*/*/*.test.js)
-STATIC_TESTS = test/static/*.test.js
-LINT_TESTS = test/lint/*.test.js
-TYPING_TESTS = test/typing/*.test.js
-INTEGRATION_TESTS = test/integration/*.test.js
-# The verifiable producer's, the chaos workload's and the producer soak's tests
-# (verifiable_clients/README.md): no broker.
-VERIFIABLE_CLIENTS_TESTS = verifiable_clients/test/*.test.js
+# The tests run on Jest (jest.config.cjs, one project per target below, run
+# by jest-light-runner in plain Node.js child processes). JEST_ARGS goes to
+# Jest (a test file, `-t <name>`). The integration tests run in band, one file
+# at a time, so two files never share the broker at once.
+JEST ?= node_modules/.bin/jest
+JEST_ARGS ?=
+JEST_RUN = $(NODE) $(JEST) --ci --selectProjects
 
 # The integration test's scratch broker (test-integration starts one unless
 # KAFKA_BOOTSTRAP_SERVERS is already set).
@@ -127,7 +124,7 @@ test: test-static test-unit test-typing check-api test-verifiable-clients test-i
 
 # Header conformance and the package layout: no build needed.
 test-static:
-	$(NODE) --test $(STATIC_TESTS)
+	$(JEST_RUN) static $(JEST_ARGS)
 
 # The rule linter (design/current/javascript-rule-linter/PLAN.md): the rules of
 # CLAUDE.md checked from the sources, as `cargo xtask lint-custom` checks the
@@ -157,18 +154,18 @@ lint-rules:
 
 # The rule linter's own tests: no build of the client.
 test-lint:
-	$(NODE) --test $(LINT_TESTS)
+	$(JEST_RUN) lint $(JEST_ARGS)
 
 test-unit: build
-	$(NODE) --test $(UNIT_TESTS)
+	$(JEST_RUN) unit $(JEST_ARGS)
 
 test-verifiable-clients: build
-	$(NODE) --test $(VERIFIABLE_CLIENTS_TESTS)
+	$(JEST_RUN) verifiable-clients $(JEST_ARGS)
 
 # The compiled declarations (dist/) type-check under --strict in a consumer's
 # configurations; needs only the compiled library, not the addon.
 test-typing: build-ts
-	$(NODE) --test $(TYPING_TESTS)
+	$(JEST_RUN) typing $(JEST_ARGS)
 
 # The interface check (root conventions, Stability; scripts/api_report.js):
 # api-extractor's report of each import path's compiled declarations and the
@@ -192,7 +189,7 @@ docs:
 # this target starts with `docker run` and removes afterwards.
 test-integration: build
 	@if [ -n "$$KAFKA_BOOTSTRAP_SERVERS" ]; then \
-	  $(NODE) --test $(INTEGRATION_TESTS); \
+	  $(JEST_RUN) integration --runInBand $(JEST_ARGS); \
 	else \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  docker run -d --rm --name $(KAFKA_CONTAINER) -p $(KAFKA_PORT):9092 \
@@ -206,7 +203,7 @@ test-integration: build
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) \
-	    $(NODE) --test $(INTEGRATION_TESTS) || status=$$?; \
+	    $(JEST_RUN) integration --runInBand $(JEST_ARGS) || status=$$?; \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  exit $$status; \
 	fi

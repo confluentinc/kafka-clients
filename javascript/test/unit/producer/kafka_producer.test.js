@@ -17,7 +17,6 @@
 // The producer against an unreachable broker: no broker is needed, every
 // record fails in the core with its own error.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
@@ -1062,7 +1061,7 @@ test('a closed producer lets the process exit, and is destroyed when garbage col
 // the finalizer destroyed it. A send refused once the core reported the
 // close, or failed by the close, leaves no JS function of its own alive
 // that would hold the producer (javascript/CLAUDE.md, rule 10).
-test('a closed producer is destroyed when collected, a send refused after close() or failed by it included', { skip: !['linux', 'darwin'].includes(process.platform) }, () => {
+(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)('a closed producer is destroyed when collected, a send refused after close() or failed by it included', () => {
   const r = runNode(
     `
     const { execSync } = require('node:child_process');

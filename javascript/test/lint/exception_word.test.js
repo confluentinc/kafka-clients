@@ -16,7 +16,6 @@
 
 // H2 check-exception-word (scripts/lint/rules/exception_word.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { project, lint, findings } = require('./_project');

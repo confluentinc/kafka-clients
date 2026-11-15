@@ -30,7 +30,6 @@
 //   shouldNotThrowOnFlushProducerIfProducerIsFenced): the binding leaves the
 //   mock's transactions out, by request.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
@@ -432,7 +431,7 @@ function runNode(script, timeout = 60000) {
 // destroyed (its threads gone), whatever sends were still waiting at its
 // close or dropped by clear(): the addon holds a waiting send's delivery
 // function weakly, the mock strongly (native/producer.c, SendCtx.mock_pending).
-test('a closed mock is destroyed when collected, a send pending at close() or dropped by clear() included', { skip: !['linux', 'darwin'].includes(process.platform) }, () => {
+(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)('a closed mock is destroyed when collected, a send pending at close() or dropped by clear() included', () => {
   const r = runNode(`
     const { execSync } = require('node:child_process');
     const fs = require('node:fs');

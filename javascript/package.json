@@ -160,9 +160,10 @@
     "eslint-plugin-jsdoc": "65.4.7",
     "expect-type": "1.4.0",
     "jest": "30.5.2",
+    "jest-light-runner": "0.8.2",
     "prettier": "3.10.1",
     "publint": "0.3.25",
-    "ts-jest": "29.4.15",
+    "tinypool": "2.2.0",
     "typedoc": "0.28.20",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1"

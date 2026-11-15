@@ -46,7 +46,6 @@
 // SaslConfigsTest, 11 tests: skipped (test/unit/common/config/ssl_configs.test.js
 // says why).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { javaStringConstants } = require('../../_java_source');

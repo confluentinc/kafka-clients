@@ -20,7 +20,6 @@
 // copy, makes exactly that rule fail. It catches a rule whose path through
 // the real sources is broken, which a fixture of the rule alone would miss.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

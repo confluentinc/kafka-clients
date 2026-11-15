@@ -19,7 +19,6 @@
 // names, `null` as given and `undefined` refused, the bare value of a
 // one-parameter form, and the message naming every form.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { JavaForms } = require('../../../dist/internal/args');

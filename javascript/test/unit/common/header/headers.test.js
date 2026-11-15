@@ -22,7 +22,6 @@
 // (they read a RecordHeader built from ByteBuffers on several threads: there is
 // neither the ByteBuffer constructor nor a second thread here).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');

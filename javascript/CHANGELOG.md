@@ -329,3 +329,8 @@ newer.
   `require` loads and an ES module `import`s, with its `.d.ts` declarations
   and source maps).
 - Installing runs no build (`"gypfile": false`, no install scripts).
+- Every package declares `"type": "commonjs"`, and publint checks each
+  tarball.
+- The tests run on Jest, and `make docs` builds the HTML reference with
+  TypeDoc. Doc comments name every parameter and return value
+  (`eslint-plugin-jsdoc`).

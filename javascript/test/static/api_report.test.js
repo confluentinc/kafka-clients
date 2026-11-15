@@ -19,7 +19,6 @@
 // change warns in a pre-release or a major release and fails in any other
 // release (root conventions, Stability). `make check-api` compares the build.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

@@ -22,7 +22,6 @@
 // with the @js-temporal/polyfill, and with the built-in Temporal where Node has
 // one (Node 26).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Temporal: Polyfill } = require('@js-temporal/polyfill');
 

@@ -16,7 +16,6 @@
 
 // N3 check-notify-hook (scripts/lint/rules/notify_hook.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');

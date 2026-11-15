@@ -17,7 +17,6 @@
 // The integration tests' Fetch reader (_fetch_records.js) against a fake
 // server: no broker is needed, so these run whether or not one is set.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('node:net');
 
@@ -43,7 +42,7 @@ function listenerCounts(socket) {
   return Object.fromEntries(EVENTS.map((event) => [event, socket.listenerCount(event)]));
 }
 
-test('a round trip rejects promptly when the connection closes mid-response', { timeout: 10000 }, async () => {
+test('a round trip rejects promptly when the connection closes mid-response', async () => {
   // The size announces 100 bytes; 10 arrive, then the server closes.
   const { server, port } = await fakeServer((socket) => {
     socket.end(frame(Buffer.alloc(100)).subarray(0, 14));
@@ -59,7 +58,7 @@ test('a round trip rejects promptly when the connection closes mid-response', { 
     socket.destroy();
     server.close();
   }
-});
+}, 10000);
 
 test('a completed round trip removes every listener it added', async () => {
   const { server, port } = await fakeServer((socket) => {

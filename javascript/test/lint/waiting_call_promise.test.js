@@ -16,7 +16,6 @@
 
 // A1 check-waiting-call-promise (scripts/lint/rules/waiting_call_promise.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint: lintAll, findings } = require('./_project');

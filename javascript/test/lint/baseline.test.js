@@ -18,7 +18,6 @@
 // rust/xtask/src/lint_custom/baseline.rs, alone, through the runner
 // (lint-baseline.txt) and through ESLint (eslint-baseline.txt).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 

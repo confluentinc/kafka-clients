@@ -30,7 +30,7 @@ once the package is built (`make -C javascript build`).
 | `_common.js` | argument parser, properties reader, `printJson`, shutdown hook | `python/verifiable_clients/_common.py` |
 | `chaos_workload.js` | the chaos harness's `ChaosWorkloadService`, producer only | `python/grpc_chaos.py` |
 | `soak/soakclient.js`, `soak/soak_metrics.js` | the producer half of the soak | `python/soak/soakclient.py`, `soak_metrics.py` |
-| `test/` | their tests (`node --test`) | `python/verifiable_clients/test/`, `python/soak/test/` |
+| `test/` | their tests (Jest, `make test-verifiable-clients`) | `python/verifiable_clients/test/`, `python/soak/test/` |
 
 ## Verifiable producer
 
