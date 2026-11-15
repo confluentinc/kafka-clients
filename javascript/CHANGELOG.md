@@ -90,7 +90,9 @@ newer.
   each with its own fresh empty `Headers`; every record goes to partition 0,
   as with Java's empty-cluster mock; what a delivery callback throws comes
   out of the call that completed the record, as in Java, the record's future
-  completing all the same (Java's stays incomplete). A closed mock nothing
+  completing all the same (Java's stays incomplete), and `flush()`
+  completing every waiting record before it rejects with the first throw
+  (Java's stops at it). A closed mock nothing
   references is collected with its native mock, sends still waiting
   included, and a refused record or an error given to the mock is released
   as soon as the core is done with it. `partitionsFor(null)` rejects with the

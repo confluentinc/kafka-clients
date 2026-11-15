@@ -367,6 +367,24 @@ test("a callback that throws makes the completing call throw it, as Java's mock 
   await manual.close();
 });
 
+test('flush() completes every waiting record before it rejects with the first throw (a recorded deviation)', async () => {
+  const mock = new MockProducer();
+  const ran = [];
+  const futures = [];
+  for (const name of ['cb0', 'cb1', 'cb2']) {
+    futures.push(await mock.send({ record: record1, callback: () => {
+      ran.push(name);
+      throw new Error(name);
+    } }));
+  }
+  await assert.rejects(mock.flush(), { message: 'cb0' });
+  // Java's flush() stops at cb0, leaving two records waiting; the core's mock completes them all.
+  assert.deepEqual(ran, ['cb0', 'cb1', 'cb2']);
+  assert.deepEqual(futures.map((f) => f.isDone()), [true, true, true]);
+  assert.equal(mock.completeNext(), false);
+  await mock.close();
+});
+
 test("Java's empty-cluster mock sends to partition 0 whatever the record says, with its offsets", async () => {
   const producer = new MockProducer({ autoComplete: false, partitioner: null, keySerializer: null, valueSerializer: null });
   const explicit = new ProducerRecord({ topic, partition: 3, key: null, value: Buffer.from('a') });
