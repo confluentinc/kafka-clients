@@ -12,9 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.common this client has. Each
-// subpackage has its own import path (`@confluentinc/kafka-javascript/common/errors`),
-// which this index does not re-export.
+/**
+ * The public classes of Java's `org.apache.kafka.common` this client has.
+ * Each subpackage has its own import path
+ * (`@confluentinc/kafka-javascript/common/errors`), which this index does not
+ * re-export.
+ *
+ * Invented *(js-only)*: `TopicPartitionMap` and `TopicPartitionSet`, Java's
+ * `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns,
+ * and `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that
+ * `metrics()` returns: JavaScript has no value equality for map keys.
+ *
+ * @packageDocumentation
+ */
 
 export { KafkaFuture } from './kafka_future';
 export type { Metric } from './metric';

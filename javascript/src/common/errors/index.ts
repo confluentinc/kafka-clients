@@ -18,6 +18,26 @@
 
 // `src/common/errors`: the generated modules of src/common/errors/.
 
+/**
+ * The classes of the Java package this client has, generated from the Java
+ * sources.
+ *
+ * What they leave out:
+ *
+ * - `RecordDeserializationError`: Not generated: Java's payload, as its payload
+ *   holds the consumer's `TimestampType` and Java's nested
+ *   `DeserializationExceptionOrigin`, which the client does not translate
+ *   before the consumer: the constructors
+ *   `RecordDeserializationException(DeserializationExceptionOrigin,
+ *   TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers,
+ *   String, Throwable)`, the getters `origin()`, `topicPartition()`,
+ *   `offset()`, `timestampType()`, `timestamp()`, `keyBuffer()`,
+ *   `valueBuffer()` and `headers()`, and the payload of an error the core
+ *   reports.
+ *
+ * @packageDocumentation
+ */
+
 export { ApiError } from './api_error';
 export { ApplicationRecoverableError } from './application_recoverable_error';
 export { AuthenticationError } from './authentication_error';

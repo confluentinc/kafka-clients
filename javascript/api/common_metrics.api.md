@@ -47,6 +47,4 @@ export class QuotaViolationError extends KafkaError {
     value(): number;
 }
 
-// (No @packageDocumentation comment for this package)
-
 ```
