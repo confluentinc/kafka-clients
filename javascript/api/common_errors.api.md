@@ -2014,6 +2014,4 @@ export class WakeupError extends KafkaError {
     constructor();
 }
 
-// (No @packageDocumentation comment for this package)
-
 ```

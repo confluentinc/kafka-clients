@@ -1559,6 +1559,11 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
     let (forms, left_out, payload) = &own[&info.java_fqn];
     let name = &info.py_name;
     let mut text = header(&format!("the Java source of `{}`", info.java_fqn));
+    let mut notes: Vec<String> = Vec::new();
+    let mut push_note = |text: &mut String, note: &str| {
+        notes.push(note.to_string());
+        push_note(text, note);
+    };
     if let Some((_, why)) = LEFT_OUT_PAYLOADS.iter().find(|(c, _)| *c == info.java_fqn) {
         let getters: Vec<String> = info.java.getters.iter().map(|gt| format!("`{}()`", gt.name)).collect();
         push_note(
@@ -1901,7 +1906,7 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
             single.name
         ));
     }
-    Ok(JsModule { dir, stem: info.file_stem(), name: info.py_name.clone(), content: text })
+    Ok(JsModule { dir, stem: info.file_stem(), name: info.py_name.clone(), content: text, notes })
 }
 
 /// native/error_payload.c: the payload of an error the core reports, read
