@@ -83,9 +83,18 @@ test('the constructor takes Java form only, with run-time types', () => {
     constructor: TypeError,
     message: "partition must not be undefined. Leave the key out, or pass null for Java's null",
   });
-  assert.throws(() => new TopicPartition({ topic: 1, partition: 0 }), { constructor: TypeError, message: 'topic must be a string or null' });
-  assert.throws(() => new TopicPartition({ topic: 't', partition: 0.5 }), { constructor: TypeError, message: 'partition must be an integer' });
-  assert.throws(() => new TopicPartition({ topic: 't', partition: null }), { constructor: TypeError, message: 'partition must be an integer' });
+  assert.throws(() => new TopicPartition({ topic: 1, partition: 0 }), {
+    constructor: TypeError,
+    message: 'topic must be a string or null',
+  });
+  assert.throws(() => new TopicPartition({ topic: 't', partition: 0.5 }), {
+    constructor: TypeError,
+    message: 'partition must be an integer',
+  });
+  assert.throws(() => new TopicPartition({ topic: 't', partition: null }), {
+    constructor: TypeError,
+    message: 'partition must be an integer',
+  });
 });
 
 test("equals and hashCode are Java's; the partition is Java's int", () => {

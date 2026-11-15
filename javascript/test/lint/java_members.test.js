@@ -25,7 +25,7 @@ const RULE = 'check-java-members';
 
 const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), ...LIB, ...files });
 
-test('members named as Java\'s pass: getters as properties, supertype methods, constants, the constructor, invented ones', () => {
+test("members named as Java's pass: getters as properties, supertype methods, constants, the constructor, invented ones", () => {
   const r = lint(fixture(), [RULE]);
   assert.equal(r.status, 0, r.text);
   // Rec: 14 members, equals, hashCode and the setter setMode included (the invented one, the private and # ones not counted); Mode: 6, its toString
@@ -47,7 +47,8 @@ test('each finding kind, with its exact text', () => {
         ),
       'src/producer/mode.ts': LIB['src/producer/mode.ts'].replace('static forName(', 'forName('),
       'src/common/header/header.ts': 'export interface Header {\n  readonly key: string;\n  value(): unknown;\n  extra: number;\n}\n',
-      'src/common/errors/foo_error.ts': 'export class FooError extends Error {\n  readonly payload!: string;\n  readonly code!: number;\n}\n',
+      'src/common/errors/foo_error.ts':
+        'export class FooError extends Error {\n  readonly payload!: string;\n  readonly code!: number;\n}\n',
     }),
     [RULE],
   );
@@ -70,7 +71,8 @@ test("an error's methods translating a Java method of its class pass: its payloa
   const index = javaIndex(
     CLASSES.map((c) => (c.fqn.endsWith('.FooException') ? { ...c, overloads: [method('topics', [], { return_type: 'Set<String>' })] } : c)),
   );
-  const error = 'export class FooError extends Error {\n  topics(): Set<string> { return new Set(); }\n  extraPayload(): number { return 0; }\n}\n';
+  const error =
+    'export class FooError extends Error {\n  topics(): Set<string> { return new Set(); }\n  extraPayload(): number { return 0; }\n}\n';
   assert.deepEqual(findings(lint(fixture({ 'java-index.json': index, 'src/common/errors/foo_error.ts': error }), [RULE])), [
     'FooError.extraPayload: is not one of the error fields (constructor, name, message, cause): an error class keeps the fields javascript/CLAUDE.md "Errors" lists (classify with instanceof), not Java\'s members',
   ]);
@@ -90,7 +92,9 @@ test('a member named by a well-known symbol is read, and passes only on the list
 });
 
 test('toString maps to java.lang.Enum only on an enum', () => {
-  const r = lint(fixture({ 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  toString(): string { return \'\'; }\n', '') + '' }), [RULE]);
+  const r = lint(fixture({ 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace("  toString(): string { return ''; }\n", '') + '' }), [
+    RULE,
+  ]);
   assert.equal(r.status, 0, r.text);
   const classes = CLASSES.map((c) => (c.fqn.endsWith('.Rec') ? { ...c, overloads: c.overloads.filter((o) => o.name !== 'toString') } : c));
   const root = project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...LIB });
@@ -102,10 +106,18 @@ test('a member listed in javaTargets maps to the member it names', () => {
     'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('extra(): void {}', 'extra(): void {}\n  conceal(): void {}'),
   };
   const lists = { invented: { ...INVENTED } };
-  const r = lint(fixture({ ...files, 'lint-mapping.json': mapping({ ...lists, javaTargets: { 'Rec.conceal': 'org.apache.kafka.clients.producer.Rec#hidden' } }) }), [RULE]);
+  const r = lint(
+    fixture({
+      ...files,
+      'lint-mapping.json': mapping({ ...lists, javaTargets: { 'Rec.conceal': 'org.apache.kafka.clients.producer.Rec#hidden' } }),
+    }),
+    [RULE],
+  );
   assert.equal(r.status, 0, r.text);
   // Unlisted, it maps to nothing.
-  assert.deepEqual(findings(lint(fixture({ ...files, 'lint-mapping.json': mapping(lists) }), [RULE])), ['Rec.conceal: no Java member of clients.producer.Rec']);
+  assert.deepEqual(findings(lint(fixture({ ...files, 'lint-mapping.json': mapping(lists) }), [RULE])), [
+    'Rec.conceal: no Java member of clients.producer.Rec',
+  ]);
 });
 
 test('cannot run without the Java index', () => {
@@ -115,7 +127,14 @@ test('cannot run without the Java index', () => {
 });
 
 test('no exported class with a Java class fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/producer/callback.ts': LIB['src/producer/callback.ts'] }), [RULE]);
+  const r = lint(
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(CLASSES),
+      'src/producer/callback.ts': LIB['src/producer/callback.ts'],
+    }),
+    [RULE],
+  );
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-members: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

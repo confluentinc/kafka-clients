@@ -192,7 +192,8 @@ module.exports = {
     const elementOf = (t, iterable = !outward) => {
       if (checker.isArrayType(t) || checker.isTupleType(t)) return checker.getTypeArguments(t)[0];
       const n = symbolName(t);
-      if (n === 'ReadonlyArray' || n === 'Array' || (iterable && n === 'Iterable')) return (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
+      if (n === 'ReadonlyArray' || n === 'Array' || (iterable && n === 'Iterable'))
+        return (t.aliasTypeArguments || checker.getTypeArguments(t))[0];
       return undefined;
     };
     const typeArgs = (t) => t.aliasTypeArguments || checker.getTypeArguments(t);
@@ -365,7 +366,12 @@ module.exports = {
       const java = js.map(javaText).join(' | ');
       findings.push(
         ok === 'unmapped'
-          ? { at, kind: 'unmapped', subject, message: `${where}: Java ${java} has no row in the table (TypeScript ${checker.typeToString(tsType)})` }
+          ? {
+              at,
+              kind: 'unmapped',
+              subject,
+              message: `${where}: Java ${java} has no row in the table (TypeScript ${checker.typeToString(tsType)})`,
+            }
           : { at, kind: 'type-mismatch', subject, message: `${where}: Java ${java} is not TypeScript ${checker.typeToString(tsType)}` },
       );
     };
@@ -390,9 +396,11 @@ module.exports = {
       const subject = `${item.name}.${m.name}`;
       at = atNode(ctx, m.node);
       if (m.kind === 'property' || m.kind === 'get') {
-        const javaType =
-          jm.kind === 'field' ? jm.field.type : (liveForms(jm.overloads)[0] || jm.overloads[0]).return_type;
-        const tsType = m.kind === 'get' ? checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(m.node)) : checker.getTypeAtLocation(m.node);
+        const javaType = jm.kind === 'field' ? jm.field.type : (liveForms(jm.overloads)[0] || jm.overloads[0]).return_type;
+        const tsType =
+          m.kind === 'get'
+            ? checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(m.node))
+            : checker.getTypeAtLocation(m.node);
         check(subject, 'type', javaType, tsType);
         continue;
       }
@@ -416,7 +424,8 @@ module.exports = {
           // one (toCompletionStage, which waits on the future through its
           // _cb twin) is never unwrapped.
           const blocking =
-            (waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`)) && parseJava(javaReturn || 'void').name !== 'CompletionStage';
+            (waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`)) &&
+            parseJava(javaReturn || 'void').name !== 'CompletionStage';
           const awaited = AWAITED_RETURNS.has(`${jm.owner.fqn}#${jm.name}`);
           if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }

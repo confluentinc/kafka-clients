@@ -86,9 +86,9 @@ module.exports = {
   kinds: ['no-java-member', 'static-mismatch', 'not-static-final', 'error-member'],
   needs: ['program', 'java'],
   hint:
-    'Give the member its Java member\'s name (a Java getter is a readonly field on a data class and a method ' +
-    'of Java\'s name elsewhere, a `public static final` a `static readonly`), or list it with its reason in ' +
-    'lint-mapping.json\'s `invented`, the list of invented names ' +
+    "Give the member its Java member's name (a Java getter is a readonly field on a data class and a method " +
+    "of Java's name elsewhere, a `public static final` a `static readonly`), or list it with its reason in " +
+    "lint-mapping.json's `invented`, the list of invented names " +
     '(javascript/CLAUDE.md "Java shape, JS idiom").',
   mappedMembers,
   check(ctx) {
@@ -102,7 +102,8 @@ module.exports = {
       if (other !== null) {
         findings.push({
           kind: 'static-mismatch',
-          subject: memberName(item, m), at: atNode(ctx, m.node),
+          subject: memberName(item, m),
+          at: atNode(ctx, m.node),
           message: m.isStatic
             ? `is static, but ${shortName(other.owner)}#${other.name} is an instance member`
             : `is an instance member, but ${shortName(other.owner)}#${other.name} is static`,
@@ -125,7 +126,8 @@ module.exports = {
       } else if (m.isStatic && m.kind === 'property' && jm.kind === 'field' && !(jm.field.static && jm.field.final)) {
         findings.push({
           kind: 'not-static-final',
-          subject: memberName(item, m), at: atNode(ctx, m.node),
+          subject: memberName(item, m),
+          at: atNode(ctx, m.node),
           message: `is static, but ${shortName(jm.owner)}#${jm.name} is not a static final field`,
         });
       }
@@ -148,7 +150,8 @@ module.exports = {
         if (!singleton && !payload && !ERROR_ALLOWANCE.members.has(m.name)) {
           findings.push({
             kind: 'error-member',
-            subject: memberName(item, m), at: atNode(ctx, m.node),
+            subject: memberName(item, m),
+            at: atNode(ctx, m.node),
             message: `is not one of the error fields (${[...ERROR_ALLOWANCE.members].join(', ')}): ${ERROR_ALLOWANCE.reason}`,
           });
         }

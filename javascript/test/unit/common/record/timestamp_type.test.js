@@ -38,7 +38,10 @@ test("the constants keep Java's id, name and order; toString is Java's name fiel
 test("forName finds Java's name field, valueOf the constant's name", () => {
   assert.equal(TimestampType.forName('CreateTime'), TimestampType.CREATE_TIME);
   assert.equal(TimestampType.forName({ name: 'LogAppendTime' }), TimestampType.LOG_APPEND_TIME);
-  assert.throws(() => TimestampType.forName('CREATE_TIME'), { constructor: NoSuchElementError, message: 'Invalid timestamp type CREATE_TIME' });
+  assert.throws(() => TimestampType.forName('CREATE_TIME'), {
+    constructor: NoSuchElementError,
+    message: 'Invalid timestamp type CREATE_TIME',
+  });
   assert.throws(() => TimestampType.forName(null), { constructor: NoSuchElementError, message: 'Invalid timestamp type null' });
   assert.equal(TimestampType.valueOf('NO_TIMESTAMP_TYPE'), TimestampType.NO_TIMESTAMP_TYPE);
   assert.throws(() => TimestampType.valueOf('CreateTime'), {

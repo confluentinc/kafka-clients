@@ -160,7 +160,8 @@ export class KafkaMetric implements Metric {
     const provider = this.#metricValueProvider;
     const value = method(provider, 'value');
     // A Measurable's value() is Java's default: measure(config, now).
-    if (value === undefined && this.isMeasurable()) return (method(provider, 'measure') as (...args: unknown[]) => unknown).call(provider, this.#config, now);
+    if (value === undefined && this.isMeasurable())
+      return (method(provider, 'measure') as (...args: unknown[]) => unknown).call(provider, this.#config, now);
     if (value === undefined) throw new TypeError('valueProvider must have a value(config, now) method');
     return value.call(provider, this.#config, now);
   }

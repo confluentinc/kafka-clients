@@ -206,7 +206,9 @@ export class JavaForms {
       throw new Error(`JavaForms(${method}): bareTypes has no test for every one-parameter form`);
     }
     const bareNames = tests !== undefined || single.length === 1 ? single : [];
-    this.#bare = bareNames.map((name) => [name, forms.findIndex((form) => form.length === 1 && form[0] === name), tests?.[name] ?? null] as const);
+    this.#bare = bareNames.map(
+      (name) => [name, forms.findIndex((form) => form.length === 1 && form[0] === name), tests?.[name] ?? null] as const,
+    );
     this.#bareIsPlainObject = options.bareIsPlainObject === true;
     this.#reader = options.reader === true;
     if (this.#reader && (forms.length !== 1 || forms[0].length !== 0)) throw new Error(`JavaForms(${method}): a reader takes no parameter`);
@@ -242,12 +244,16 @@ export class JavaForms {
       // `undefined` is "not given" only as a key left out, never as a value.
       if (this.#bare.length > 0) {
         const name = this.#bare[0][0];
-        throw new TypeError(this.#undefinedMessages[name] ?? `${name} must not be undefined. Leave the argument out, or pass null for Java's null`);
+        throw new TypeError(
+          this.#undefinedMessages[name] ?? `${name} must not be undefined. Leave the argument out, or pass null for Java's null`,
+        );
       }
       if (this.#forms.size === 1 && this.#forms.has(0)) {
         throw new TypeError(`${this.#method}() takes no argument: leave it out rather than pass undefined`);
       }
-      throw new TypeError(`${this.#method}() takes one object of named parameters, not undefined: leave the argument out, or pass null for Java's null`);
+      throw new TypeError(
+        `${this.#method}() takes one object of named parameters, not undefined: leave the argument out, or pass null for Java's null`,
+      );
     }
     if (!this.#isOptions(args)) {
       const bare = this.#bareOf(args);
@@ -269,8 +275,7 @@ export class JavaForms {
     }
     if (!unknown && undefinedName !== null) {
       throw new TypeError(
-        this.#undefinedMessages[undefinedName] ??
-          `${undefinedName} must not be undefined. Leave the key out, or pass null for Java's null`,
+        this.#undefinedMessages[undefinedName] ?? `${undefinedName} must not be undefined. Leave the key out, or pass null for Java's null`,
       );
     }
     return this.#matched(mask, unknown ? args : null);

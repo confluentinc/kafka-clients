@@ -62,10 +62,7 @@ const RULES = Object.keys(require('../../scripts/lint/eslint/plugin').rules);
  * `kafka/x`), JSON-escaped or not, or the prefix `kafka/` in prose, followed
  * by a space or a backtick (`a kafka/ rule`).
  */
-const RULE_MENTION = new RegExp(
-  `kafka\\\\?/(?:(?:${[...RULES, '<rule>', '<name>', 'x', 'y'].join('|')})(?![\\w-])|(?=[\\s\`]))`,
-  'g',
-);
+const RULE_MENTION = new RegExp(`kafka\\\\?/(?:(?:${[...RULES, '<rule>', '<name>', 'x', 'y'].join('|')})(?![\\w-])|(?=[\\s\`]))`, 'g');
 
 /**
  * A path segment `kafka`: next to a `/` or `\\` (`../kafka`, `kafka/clients`,
@@ -179,9 +176,8 @@ function findings(rel, text) {
       if (runsXtask(s.text)) out.push(`${rel}:${s.line}: runs an xtask: ${JSON.stringify(s.text)}`);
     }
   } else if (OTHER.test(base) || base === 'package.json') {
-    const lines = base === 'package.json'
-      ? Object.values(JSON.parse(text).scripts || {}).map((s) => ({ text: s, line: 0 }))
-      : codeLines(text);
+    const lines =
+      base === 'package.json' ? Object.values(JSON.parse(text).scripts || {}).map((s) => ({ text: s, line: 0 })) : codeLines(text);
     for (const l of lines) {
       if (namesKafka(l.text, KAFKA_LINE)) out.push(`${rel}:${l.line}: names kafka as a path: ${l.text.trim()}`);
       if (XTASK.test(l.text)) out.push(`${rel}:${l.line}: runs an xtask: ${l.text.trim()}`);
@@ -211,11 +207,11 @@ test('the dodges are found: a kafka path built from parts, a relative one, an xt
   const script = [
     "const path = require('node:path');",
     "const fs = require('node:fs');",
-    "// A comment may say kafka/clients/src and cargo xtask java-api.",
+    '// A comment may say kafka/clients/src and cargo xtask java-api.',
     "const KAFKA = path.join(REPO, 'kafka');",
     "fs.readFileSync(path.join(KAFKA, 'gradle.properties'), 'utf8');",
     "const up = path.resolve(REPO, '../kafka');",
-    "const src = `${REPO}/kafka/clients/src`;",
+    'const src = `${REPO}/kafka/clients/src`;',
     "spawnSync('cargo', ['xtask', 'java-api']);",
     "const ok = ['kafka/java-name', 'kafka/baseline: stale', '@confluentinc/kafka-javascript', 'confluent-kafka-javascript.node'];",
   ].join('\n');

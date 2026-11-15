@@ -243,7 +243,10 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
   assert.equal(headers.add(h), headers);
   assert.equal(headers.add({ header: h }), headers);
   assert.equal(headers.add({ key: 'b', value: null }), headers);
-  assert.deepEqual(headers.toArray().map((x) => x.key()), ['a', 'a', 'b']);
+  assert.deepEqual(
+    headers.toArray().map((x) => x.key()),
+    ['a', 'a', 'b'],
+  );
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
   assert.throws(() => headers.add({ key: 'k', value: 'v' }), { name: 'TypeError' });
   assert.throws(() => headers.add({ header: { key: 'k', value: null } }), { name: 'TypeError', message: 'header must be a Header' });
@@ -265,9 +268,14 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
 });
 
-test("a null key is Java's IllegalArgumentException \"key cannot be null.\"", () => {
+test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () => {
   const headers = new Headers([header('a', '1')]);
-  for (const call of [() => headers.remove(null), () => headers.lastHeader(null), () => headers.headers(null), () => headers.remove({ key: null })]) {
+  for (const call of [
+    () => headers.remove(null),
+    () => headers.lastHeader(null),
+    () => headers.headers(null),
+    () => headers.remove({ key: null }),
+  ]) {
     assert.throws(call, (e) => {
       assert.ok(e instanceof IllegalArgumentError);
       assert.equal(e.message, 'key cannot be null.');
@@ -292,7 +300,10 @@ test('headers(key) reads the headers when iterated; toArray is a copy', () => {
   const headers = new Headers([header('a', '1')]);
   const byKey = headers.headers('a');
   headers.add(header('a', '2'));
-  assert.deepEqual([...byKey].map((h) => h.value().toString()), ['1', '2']);
+  assert.deepEqual(
+    [...byKey].map((h) => h.value().toString()),
+    ['1', '2'],
+  );
   assert.deepEqual([...headers.headers('none')], []);
   const array = headers.toArray();
   array.pop();
@@ -302,7 +313,10 @@ test('headers(key) reads the headers when iterated; toArray is a copy', () => {
 
 test("toString is RecordHeaders' and RecordHeader's; JSON writes the array", () => {
   const headers = new Headers([new Header({ key: 'k', value: new Uint8Array([1, 255]) }), new Header({ key: 'n', value: null })]);
-  assert.equal(String(headers), 'RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), RecordHeader(key = n, value = null)], isReadOnly = false)');
+  assert.equal(
+    String(headers),
+    'RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), RecordHeader(key = n, value = null)], isReadOnly = false)',
+  );
   headers.internalSetReadOnly();
   assert.equal(String(new Headers()), 'RecordHeaders(headers = [], isReadOnly = false)');
   assert.match(String(headers), /isReadOnly = true\)$/);
@@ -317,12 +331,15 @@ test("equals and hashCode are RecordHeaders'", () => {
   const headers = new Headers([h1, h2]);
   assert.equal(headers.hashCode(), 1733507910);
   assert.equal(new Headers().hashCode(), 1);
-  const same = new Headers([new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) }), new Header({ key: '\u{1F600}é', value: null })]);
+  const same = new Headers([
+    new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) }),
+    new Header({ key: '\u{1F600}é', value: null }),
+  ]);
   assert.ok(headers.equals(same));
   assert.equal(headers.hashCode(), same.hashCode());
   // The read-only state is not compared.
   same.internalSetReadOnly();
-  assert.throws(() => same.add(h1), { name: "IllegalStateError" });
+  assert.throws(() => same.add(h1), { name: 'IllegalStateError' });
   assert.ok(headers.equals({ o: same }));
   // The order counts.
   assert.ok(!headers.equals(new Headers([h2, h1])));

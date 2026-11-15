@@ -65,7 +65,10 @@ test("Java's getters stay methods, which only read; the arrays are new arrays ea
   assert.deepEqual(info.inSyncReplicas(), [leader]);
   // Java's five-parameter constructor passes new Node[0].
   assert.deepEqual(info.offlineReplicas(), []);
-  assert.equal(new PartitionInfo({ topic: 't', partition: 0, leader: null, replicas: null, inSyncReplicas: null, offlineReplicas: null }).replicas(), null);
+  assert.equal(
+    new PartitionInfo({ topic: 't', partition: 0, leader: null, replicas: null, inSyncReplicas: null, offlineReplicas: null }).replicas(),
+    null,
+  );
   assert.deepEqual(Object.keys(info), []);
   for (const name of ['topic', 'partition', 'leader', 'replicas', 'inSyncReplicas', 'offlineReplicas', 'hashCode']) {
     assert.throws(() => info[name](1), { constructor: TypeError, message: `${name}() only reads: it takes no argument` });
@@ -76,8 +79,22 @@ test("equals and hashCode are Java's: the arrays element by element", () => {
   const n0 = new Node({ id: 0, host: 'localhost', port: 9092 });
   const n1 = new Node({ id: 1, host: 'localhost', port: 9093, rack: 'rack1' });
   const r2 = new Node({ id: 2, host: 'localhost', port: 9094 });
-  const p1 = new PartitionInfo({ topic: 'sample', partition: 0, leader: n0, replicas: [n0, n1, r2], inSyncReplicas: [n0, n1], offlineReplicas: [r2] });
-  const p2 = new PartitionInfo({ topic: 'sample', partition: 0, leader: null, replicas: null, inSyncReplicas: null, offlineReplicas: null });
+  const p1 = new PartitionInfo({
+    topic: 'sample',
+    partition: 0,
+    leader: n0,
+    replicas: [n0, n1, r2],
+    inSyncReplicas: [n0, n1],
+    offlineReplicas: [r2],
+  });
+  const p2 = new PartitionInfo({
+    topic: 'sample',
+    partition: 0,
+    leader: null,
+    replicas: null,
+    inSyncReplicas: null,
+    offlineReplicas: null,
+  });
   const p3 = new PartitionInfo({ topic: 't', partition: 3, leader: n0, replicas: [n0], inSyncReplicas: [n0] });
   // Java: new PartitionInfo(...).hashCode() on the same values.
   assert.equal(p1.hashCode(), -670058797);
@@ -95,7 +112,12 @@ test("equals and hashCode are Java's: the arrays element by element", () => {
   assert.equal(p3.equals({ obj: same }), true);
   assert.equal(same.hashCode(), p3.hashCode());
   // A null array is not an empty one.
-  assert.equal(p2.equals(new PartitionInfo({ topic: 'sample', partition: 0, leader: null, replicas: null, inSyncReplicas: null, offlineReplicas: [] })), false);
+  assert.equal(
+    p2.equals(
+      new PartitionInfo({ topic: 'sample', partition: 0, leader: null, replicas: null, inSyncReplicas: null, offlineReplicas: [] }),
+    ),
+    false,
+  );
   assert.equal(p1.equals(p1), true);
   assert.equal(p1.equals(null), false);
   assert.equal(p1.equals('sample'), false);
@@ -124,8 +146,20 @@ test('the constructor takes Java forms only, with run-time types', () => {
   const base = { topic: 't', partition: 0, leader: node, replicas: [node], inSyncReplicas: [node] };
   assert.throws(() => new PartitionInfo({ ...base, topic: 1 }), { constructor: TypeError, message: 'topic must be a string or null' });
   assert.throws(() => new PartitionInfo({ ...base, partition: 0.5 }), { constructor: TypeError, message: 'partition must be an integer' });
-  assert.throws(() => new PartitionInfo({ ...base, partition: 2 ** 31 }), { constructor: RangeError, message: 'partition must be from -2147483648 to 2147483647' });
-  assert.throws(() => new PartitionInfo({ ...base, leader: { id: 1 } }), { constructor: TypeError, message: 'leader must be a Node or null' });
-  assert.throws(() => new PartitionInfo({ ...base, replicas: 5 }), { constructor: TypeError, message: 'replicas must be an iterable of Node, or null' });
-  assert.throws(() => new PartitionInfo({ ...base, inSyncReplicas: [node, 'n'] }), { constructor: TypeError, message: 'inSyncReplicas must hold only Node, not a string' });
+  assert.throws(() => new PartitionInfo({ ...base, partition: 2 ** 31 }), {
+    constructor: RangeError,
+    message: 'partition must be from -2147483648 to 2147483647',
+  });
+  assert.throws(() => new PartitionInfo({ ...base, leader: { id: 1 } }), {
+    constructor: TypeError,
+    message: 'leader must be a Node or null',
+  });
+  assert.throws(() => new PartitionInfo({ ...base, replicas: 5 }), {
+    constructor: TypeError,
+    message: 'replicas must be an iterable of Node, or null',
+  });
+  assert.throws(() => new PartitionInfo({ ...base, inSyncReplicas: [node, 'n'] }), {
+    constructor: TypeError,
+    message: 'inSyncReplicas must hold only Node, not a string',
+  });
 });

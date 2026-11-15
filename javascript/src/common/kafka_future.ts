@@ -275,7 +275,7 @@ export abstract class KafkaFuture<T> {
    * Makes `KafkaFuture` nominal: TypeScript checks it by name, not by shape.
    * Declared only, it holds no state.
    */
-  private declare readonly kafkaFutureBrand: never;
+  declare private readonly kafkaFutureBrand: never;
 
   /**
    * A future is made by the client, `completedFuture` and `allOf`; a subclass
@@ -741,10 +741,11 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   override whenComplete(options: unknown): KafkaFuture<T> {
     WHEN_COMPLETE_FORMS.match(options, arguments.length);
-    const action = checkFunction(WHEN_COMPLETE_FORMS.value(options, 'action'), 'action', '(value, error) => void') as KafkaFuture.BiConsumer<
-      T | null,
-      unknown
-    >;
+    const action = checkFunction(
+      WHEN_COMPLETE_FORMS.value(options, 'action'),
+      'action',
+      '(value, error) => void',
+    ) as KafkaFuture.BiConsumer<T | null, unknown>;
     const dependant = new KafkaFutureImpl<T>(false);
     this.#listen((state, outcome) => {
       try {
@@ -1115,7 +1116,6 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     this.#native = null;
     this.internalComplete(value, error);
   }
-
 }
 
 // The public class's name, which a message naming an argument's class

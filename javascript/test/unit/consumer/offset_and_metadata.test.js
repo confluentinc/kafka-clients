@@ -82,5 +82,8 @@ test("the constructor takes Java's three forms only", () => {
   });
   assert.throws(() => new OffsetAndMetadata(1.5), { constructor: TypeError });
   assert.throws(() => new OffsetAndMetadata({ offset: 1, leaderEpoch: 2 ** 31, metadata: '' }), { constructor: RangeError });
-  assert.throws(() => new OffsetAndMetadata({ offset: 1, metadata: 5 }), { constructor: TypeError, message: 'metadata must be a string or null' });
+  assert.throws(() => new OffsetAndMetadata({ offset: 1, metadata: 5 }), {
+    constructor: TypeError,
+    message: 'metadata must be a string or null',
+  });
 });

@@ -36,10 +36,9 @@ test('a key line waives its finding; comments and blank lines are ignored', () =
 
 test('a prefix line waives every finding whose subject starts with it', () => {
   const b = Baseline.parse('b.txt', 'prefix:src/producer/\n');
-  assert.deepEqual(
-    b.apply([f('todo', 'src/producer/a.ts:1'), f('java-line', 'src/producer/b.ts'), f('todo', 'src/c.ts:1')]),
-    [f('todo', 'src/c.ts:1')],
-  );
+  assert.deepEqual(b.apply([f('todo', 'src/producer/a.ts:1'), f('java-line', 'src/producer/b.ts'), f('todo', 'src/c.ts:1')]), [
+    f('todo', 'src/c.ts:1'),
+  ]);
 });
 
 test('a stale line, a stale prefix and a duplicate are findings', () => {
@@ -78,9 +77,7 @@ test('through the runner: a stale line fails its rule; an unknown kind and a sta
   });
   let r = lintRunner(root, ['check-no-todo'], { rules: [noTodo] });
   assert.equal(r.status, 1);
-  assert.deepEqual(findings(r), [
-    'lint-baseline.txt: todo a.md:9: stale entry: no finding matches it any more; delete the line',
-  ]);
+  assert.deepEqual(findings(r), ['lint-baseline.txt: todo a.md:9: stale entry: no finding matches it any more; delete the line']);
   r = lintRunner(root, [], { rules: [noTodo] });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
@@ -110,9 +107,7 @@ test('through ESLint: a stale line fails its rule; an unknown kind and a stale p
   });
   let r = lint(root, ['check-no-todo'], { set: [noTodo] });
   assert.equal(r.status, 1);
-  assert.deepEqual(findings(r), [
-    'eslint-baseline.txt: todo src/a.ts:9: stale entry: no finding matches it any more; delete the line',
-  ]);
+  assert.deepEqual(findings(r), ['eslint-baseline.txt: todo src/a.ts:9: stale entry: no finding matches it any more; delete the line']);
   r = lint(root, [], { set: [noTodo] });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [

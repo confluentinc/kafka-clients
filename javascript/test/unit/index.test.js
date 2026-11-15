@@ -92,14 +92,26 @@ function secondCopy() {
   return createRequire(path.join(dir, '..', '..', 'index.js'));
 }
 
-test('two copies of the package: their classes are distinct, so calls taking the client\'s classes refuse the other copy\'s', async () => {
+test("two copies of the package: their classes are distinct, so calls taking the client's classes refuse the other copy's", async () => {
   // README.md, Limitations: "The client supports one copy of the package in
   // an app. If node_modules holds two versions, calls that take the client's
   // classes can fail." The classes are told apart with plain instanceof, with
   // no Symbol.for brand (root conventions, Signatures).
   const other = secondCopy();
-  const ours = { root: require(pkg.name), errors: require(`${pkg.name}/common/errors`), common: require(`${pkg.name}/common`), header: require(`${pkg.name}/common/header`), producer: require(`${pkg.name}/producer`) };
-  const theirs = { root: other(pkg.name), errors: other(`${pkg.name}/common/errors`), common: other(`${pkg.name}/common`), header: other(`${pkg.name}/common/header`), producer: other(`${pkg.name}/producer`) };
+  const ours = {
+    root: require(pkg.name),
+    errors: require(`${pkg.name}/common/errors`),
+    common: require(`${pkg.name}/common`),
+    header: require(`${pkg.name}/common/header`),
+    producer: require(`${pkg.name}/producer`),
+  };
+  const theirs = {
+    root: other(pkg.name),
+    errors: other(`${pkg.name}/common/errors`),
+    common: other(`${pkg.name}/common`),
+    header: other(`${pkg.name}/common/header`),
+    producer: other(`${pkg.name}/producer`),
+  };
   assert.notEqual(theirs.producer.KafkaProducer, ours.producer.KafkaProducer, 'the second copy is the same module');
 
   // The error hierarchy holds within each copy, and not across them; the

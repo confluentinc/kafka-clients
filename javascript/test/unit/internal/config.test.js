@@ -107,11 +107,14 @@ test("configs is a plain object: a Map is refused, and a symbol key rejected wit
     name: 'ConfigError',
     message: 'Invalid value x for configuration Symbol(k): Key must be a string.',
   });
-  assert.throws(() => configEntries({ 'linger.ms': true, [Symbol('k')]: 'x' }), (e) => {
-    assert.ok(e instanceof ConfigError);
-    assert.equal(e.message, 'Invalid value x for configuration Symbol(k): Key must be a string.');
-    return true;
-  });
+  assert.throws(
+    () => configEntries({ 'linger.ms': true, [Symbol('k')]: 'x' }),
+    (e) => {
+      assert.ok(e instanceof ConfigError);
+      assert.equal(e.message, 'Invalid value x for configuration Symbol(k): Key must be a string.');
+      return true;
+    },
+  );
   assert.throws(() => configEntries(null), { name: 'TypeError', message: 'configs must not be null' });
   assert.throws(() => configEntries([]), { name: 'TypeError', message: 'configs must be a plain object, not array' });
 });
@@ -159,7 +162,10 @@ test("the producer's own serde keys and the keys a serde function read never rea
   );
   // So does a producer key only the core defines.
   assert.deepEqual(
-    entriesAsBytes({ 'partitioner.type': 'RoundRobinPartitioner' }, new Set(['partitioner.type'])).map(([k, v]) => [k.toString(), v.toString()]),
+    entriesAsBytes({ 'partitioner.type': 'RoundRobinPartitioner' }, new Set(['partitioner.type'])).map(([k, v]) => [
+      k.toString(),
+      v.toString(),
+    ]),
     [['partitioner.type', 'RoundRobinPartitioner']],
   );
 });
@@ -270,8 +276,5 @@ test('an undefined SSL password is reported as unused', () => {
   });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'closed\n');
-  assert.ok(
-    r.stderr.includes("These configurations '[ssl.keystore.password]' were supplied but are not used yet."),
-    r.stderr,
-  );
+  assert.ok(r.stderr.includes("These configurations '[ssl.keystore.password]' were supplied but are not used yet."), r.stderr);
 });

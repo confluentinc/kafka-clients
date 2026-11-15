@@ -33,7 +33,7 @@ if (globalThis.Temporal !== undefined) TEMPORALS.push(['the built-in Temporal', 
 
 const NOT_A_DURATION = 'timeout must be a number of milliseconds or a Temporal.Duration';
 
-test('a number is milliseconds, rounded down as Java\'s toMillis()', () => {
+test("a number is milliseconds, rounded down as Java's toMillis()", () => {
   assert.equal(durationToMillis(0, 'timeout'), 0);
   assert.ok(Object.is(durationToMillis(-0, 'timeout'), 0));
   assert.equal(durationToMillis(1500, 'timeout'), 1500);
@@ -91,7 +91,10 @@ test('null, undefined and any other type are TypeErrors', () => {
     message: "timeout must not be undefined. Leave the key out, or pass null for Java's null",
   });
   // Another Temporal type is not a Duration.
-  assert.throws(() => durationToMillis(Polyfill.Instant.fromEpochMilliseconds(0), 'timeout'), { name: 'TypeError', message: NOT_A_DURATION });
+  assert.throws(() => durationToMillis(Polyfill.Instant.fromEpochMilliseconds(0), 'timeout'), {
+    name: 'TypeError',
+    message: NOT_A_DURATION,
+  });
   // The parameter's name is the one given.
   assert.throws(() => durationToMillis('x', 'maxWait'), {
     name: 'TypeError',
@@ -116,12 +119,15 @@ for (const [label, Temporal] of TEMPORALS) {
 
   test(`a Temporal.Duration (${label}) with years, months or weeks is a RangeError`, () => {
     for (const fields of [{ years: 1 }, { months: 1 }, { weeks: 1 }, { weeks: -1 }]) {
-      assert.throws(() => durationToMillis(Temporal.Duration.from(fields), 'timeout'), (e) => {
-        assert.equal(e.constructor, RangeError);
-        assert.ok(!(e instanceof IllegalArgumentError));
-        assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
-        return true;
-      });
+      assert.throws(
+        () => durationToMillis(Temporal.Duration.from(fields), 'timeout'),
+        (e) => {
+          assert.equal(e.constructor, RangeError);
+          assert.ok(!(e instanceof IllegalArgumentError));
+          assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
+          return true;
+        },
+      );
     }
   });
 

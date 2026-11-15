@@ -40,8 +40,10 @@ test('a method reaching a _cb twin, through a private method and a C helper, ret
 test('each finding kind, with its exact text', () => {
   const r = lint(
     fixture({
-      'src/producer/producer.ts': PRODUCER_TS.replace('flush(): Promise<void> {\n    return new Promise((resolve) => this.#start(resolve));', 'flush(): void {\n    this.#start(() => {});')
-        .replace('pump(): void {\n    native.pump();', 'pump(): Promise<void> {\n    native.pump();\n    return Promise.resolve();'),
+      'src/producer/producer.ts': PRODUCER_TS.replace(
+        'flush(): Promise<void> {\n    return new Promise((resolve) => this.#start(resolve));',
+        'flush(): void {\n    this.#start(() => {});',
+      ).replace('pump(): void {\n    native.pump();', 'pump(): Promise<void> {\n    native.pump();\n    return Promise.resolve();'),
     }),
     [RULE],
   );
@@ -88,7 +90,8 @@ export class Producer {
 test('a native function with no registration, or no C definition, is unresolved', () => {
   const r = lint(
     fixture({
-      'src/internal/native.ts': "interface Native {\n  flush(done: () => void): void;\n  pump(): void;\n  gone(): void;\n  setFactories(): void;\n}\ndeclare const loaded: Native;\nconst native: Native = loaded;\nexport = native;\n",
+      'src/internal/native.ts':
+        'interface Native {\n  flush(done: () => void): void;\n  pump(): void;\n  gone(): void;\n  setFactories(): void;\n}\ndeclare const loaded: Native;\nconst native: Native = loaded;\nexport = native;\n',
       'src/producer/producer.ts': PRODUCER_TS.replace('native.pump();', 'native.gone();'),
       'native/producer.c': FILES['native/producer.c'].replace('napi_value js_flush(', 'napi_value js_flush_renamed('),
     }),

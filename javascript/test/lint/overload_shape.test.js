@@ -33,7 +33,8 @@ const REC_PER_FORM = REC.replace(
 ).replace('close(options?: { p0?: number }): void;', 'close(): void;\n  close(options: { p0: number }): void;');
 
 /** The findings but `signature-per-form`'s, which its own test covers: the tests of one options object's names. */
-const shapeFindings = (r) => findings(r).filter((f) => !f.includes('with one options signature: give each form its own overload signature'));
+const shapeFindings = (r) =>
+  findings(r).filter((f) => !f.includes('with one options signature: give each form its own overload signature'));
 
 test('overload sets taken as one options object, one signature per form, and the bare value of a one-parameter form, pass: the constructor, close(), close({p0}), close(p0)', () => {
   const r = lint(fixture({ 'src/producer/rec.ts': REC_PER_FORM }), [RULE]);
@@ -54,7 +55,10 @@ test('one options signature for several Java forms is signature-per-form: each f
   const { javaClass } = require('./_java_fixture');
   const index = javaIndex([
     javaClass('clients.producer.KafkaProducer', {
-      overloads: [method('KafkaProducer', ['Map<String, Object>'], { param_names: ['configs'] }), method('KafkaProducer', ['Properties'], { param_names: ['properties'] })],
+      overloads: [
+        method('KafkaProducer', ['Map<String, Object>'], { param_names: ['configs'] }),
+        method('KafkaProducer', ['Properties'], { param_names: ['properties'] }),
+      ],
     }),
   ]);
   const one = lint(
@@ -72,7 +76,10 @@ test('one options signature for several Java forms is signature-per-form: each f
 test('each finding kind, with its exact text', () => {
   const r = lint(
     fixture({
-      'src/producer/rec.ts': REC.replace('constructor(options: { p0: string; p1?: number })', 'constructor(options?: { p0?: string; p1: number; q?: boolean })')
+      'src/producer/rec.ts': REC.replace(
+        'constructor(options: { p0: string; p1?: number })',
+        'constructor(options?: { p0?: string; p1: number; q?: boolean })',
+      )
         .replace('close(options?: { p0?: number })', 'close(options: { p0?: number; timeout?: number })')
         .replace('get size(): number { return 0; }', 'get size(): number { return 0; }\n  getSize(): number { return 0; }')
         .replace('flush(): void {}', 'flush(): void {}\n  static forName(): void {}'),
@@ -154,10 +161,17 @@ test("one signature per Java form: each names exactly its form's parameters", ()
   );
   assert.deepEqual(shapeFindings(r), [], r.text);
   // A form without a signature; a signature of no form; an optional parameter.
-  r = lint(root([FOUR, '{ topic: string; partition: number | null; key?: never; value: unknown }', '{ topic: string; partition?: never; key?: unknown; value: unknown }']), [RULE]);
+  r = lint(
+    root([
+      FOUR,
+      '{ topic: string; partition: number | null; key?: never; value: unknown }',
+      '{ topic: string; partition?: never; key?: unknown; value: unknown }',
+    ]),
+    [RULE],
+  );
   assert.deepEqual(shapeFindings(r), [
     'ProducerRecord.constructor/(topic,partition,value): takes (topic, partition, value), which is no Java form of clients.producer.ProducerRecord#ProducerRecord',
-    '{ topic: string; partition?: undefined; key?: unknown; value: unknown; }.key: is optional, but a signature of one Java form of clients.producer.ProducerRecord#ProducerRecord takes its form\'s parameters',
+    "{ topic: string; partition?: undefined; key?: unknown; value: unknown; }.key: is optional, but a signature of one Java form of clients.producer.ProducerRecord#ProducerRecord takes its form's parameters",
     "ProducerRecord.constructor/ProducerRecord(String,K,V): clients.producer.ProducerRecord#ProducerRecord's form ProducerRecord(String topic, K key, V value) has no translation: ProducerRecord.constructor takes (options: { topic: string; partition: number | null; key: unknown; value: unknown })",
   ]);
   // A name no form has.
@@ -179,7 +193,9 @@ test('a Java form the options object does not name is its own finding, keyed by 
     javaClass('clients.producer.KafkaProducer', {
       overloads: [
         method('KafkaProducer', ['Map<String, Object>'], { param_names: ['configs'] }),
-        method('KafkaProducer', ['Map<String, Object>', 'Serializer<K>', 'Serializer<V>'], { param_names: ['configs', 'keySerializer', 'valueSerializer'] }),
+        method('KafkaProducer', ['Map<String, Object>', 'Serializer<K>', 'Serializer<V>'], {
+          param_names: ['configs', 'keySerializer', 'valueSerializer'],
+        }),
         method('KafkaProducer', ['Properties'], { param_names: ['properties'] }),
       ],
     }),
@@ -230,21 +246,31 @@ test('a Java form a function taking no parameter leaves out is its own finding, 
       'java-index.json': index,
       'src/common/kafka_future.ts': `export class KafkaFuture {\n  ${signature} { return Promise.resolve(); }\n}\n`,
     });
-  const missing = "KafkaFuture.get/get(long,TimeUnit): common.KafkaFuture#get's form get(long timeout, TimeUnit unit) has no translation: KafkaFuture.get takes ()";
+  const missing =
+    "KafkaFuture.get/get(long,TimeUnit): common.KafkaFuture#get's form get(long timeout, TimeUnit unit) has no translation: KafkaFuture.get takes ()";
   let r = lint(root('get(): Promise<void>'), [RULE]);
   assert.deepEqual(shapeFindings(r), [missing]);
   // Baselined, the missing form waives nothing else: a positional timeout is a
   // wrong shape, of the whole set (so the baselined form is no longer the
   // finding, and its line goes stale).
   const baseline = { 'eslint-baseline.txt': 'overload-missing KafkaFuture.get/get(long,TimeUnit)\n' };
-  r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': index, ...baseline, 'src/common/kafka_future.ts': 'export class KafkaFuture {\n  get(): Promise<void> { return Promise.resolve(); }\n}\n' }), [RULE]);
+  r = lint(
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': index,
+      ...baseline,
+      'src/common/kafka_future.ts': 'export class KafkaFuture {\n  get(): Promise<void> { return Promise.resolve(); }\n}\n',
+    }),
+    [RULE],
+  );
   assert.deepEqual(shapeFindings(r), [], r.text);
   r = lint(
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': index,
       ...baseline,
-      'src/common/kafka_future.ts': 'export class KafkaFuture {\n  get(timeoutMs?: number): Promise<void> { void timeoutMs; return Promise.resolve(); }\n}\n',
+      'src/common/kafka_future.ts':
+        'export class KafkaFuture {\n  get(timeoutMs?: number): Promise<void> { void timeoutMs; return Promise.resolve(); }\n}\n',
     }),
     [RULE],
   );
@@ -255,13 +281,17 @@ test('a Java form a function taking no parameter leaves out is its own finding, 
   // Translated: the TimeUnit is merged with the long it qualifies into one
   // `timeout`, an option of get() and get's bare value.
   r = lint(
-    root('get(options?: { timeout?: number }): Promise<void>;\n  get(timeout: number): Promise<void>;\n  get(options?: unknown): Promise<void>'),
+    root(
+      'get(options?: { timeout?: number }): Promise<void>;\n  get(timeout: number): Promise<void>;\n  get(options?: unknown): Promise<void>',
+    ),
     [RULE],
   );
   assert.deepEqual(shapeFindings(r), [], r.text);
   // Not merged into a `unit` of its own.
   r = lint(
-    root('get(options?: { timeout?: number; unit?: string }): Promise<void>;\n  get(timeout: number): Promise<void>;\n  get(options?: unknown): Promise<void>'),
+    root(
+      'get(options?: { timeout?: number; unit?: string }): Promise<void>;\n  get(timeout: number): Promise<void>;\n  get(options?: unknown): Promise<void>',
+    ),
     [RULE],
   );
   assert.deepEqual(shapeFindings(r), [
@@ -313,12 +343,30 @@ test('an option every form takes is required, even one Java may take as null; sa
 test("ProducerRecord's six forms: K and V keep their own kinds, so key and value stay apart", () => {
   const { javaClass } = require('./_java_fixture');
   const forms = [
-    [['String', 'Integer', 'Long', 'K', 'V', 'Iterable'], ['topic', 'partition', 'timestamp', 'key', 'value', 'headers']],
-    [['String', 'Integer', 'Long', 'K', 'V'], ['topic', 'partition', 'timestamp', 'key', 'value']],
-    [['String', 'Integer', 'K', 'V', 'Iterable'], ['topic', 'partition', 'key', 'value', 'headers']],
-    [['String', 'Integer', 'K', 'V'], ['topic', 'partition', 'key', 'value']],
-    [['String', 'K', 'V'], ['topic', 'key', 'value']],
-    [['String', 'V'], ['topic', 'value']],
+    [
+      ['String', 'Integer', 'Long', 'K', 'V', 'Iterable'],
+      ['topic', 'partition', 'timestamp', 'key', 'value', 'headers'],
+    ],
+    [
+      ['String', 'Integer', 'Long', 'K', 'V'],
+      ['topic', 'partition', 'timestamp', 'key', 'value'],
+    ],
+    [
+      ['String', 'Integer', 'K', 'V', 'Iterable'],
+      ['topic', 'partition', 'key', 'value', 'headers'],
+    ],
+    [
+      ['String', 'Integer', 'K', 'V'],
+      ['topic', 'partition', 'key', 'value'],
+    ],
+    [
+      ['String', 'K', 'V'],
+      ['topic', 'key', 'value'],
+    ],
+    [
+      ['String', 'V'],
+      ['topic', 'value'],
+    ],
   ];
   const index = javaIndex([
     javaClass('clients.producer.ProducerRecord', {
@@ -368,11 +416,13 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing mapped fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(CLASSES), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [
+    RULE,
+  ]);
   assert.ok(r.err.includes('❌ check-overload-shape: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
 
-test("each LEFT_OUT form names a public form of the shipped Java index (no stale entry)", () => {
+test('each LEFT_OUT form names a public form of the shipped Java index (no stale entry)', () => {
   const { LEFT_OUT } = require('../../scripts/lint/rules/overload_shape');
   const index = require('../../java-index.json');
   for (const key of LEFT_OUT.keys()) {

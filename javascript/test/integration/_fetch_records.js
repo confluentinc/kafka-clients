@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // A minimal Fetch (v4) client for the integration tests: reads back what the

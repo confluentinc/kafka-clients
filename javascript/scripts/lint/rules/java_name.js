@@ -38,7 +38,7 @@ module.exports = {
   needs: ['program', 'java'],
   hint:
     'Name the export as its Java class, in the file of that name snake_cased under the folder of its Java ' +
-    'package, one per file; list an export with no Java class in lint-mapping.json\'s `invented` with its reason, and one ' +
+    "package, one per file; list an export with no Java class in lint-mapping.json's `invented` with its reason, and one " +
     'the convention does not find in its `javaTargets` (javascript/CLAUDE.md "Files and layout").',
   check(ctx) {
     const index = javaIndexOf(ctx);
@@ -55,7 +55,8 @@ module.exports = {
       if (java === null) {
         findings.push({
           kind: 'no-java-class',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `exports ${item.name}, which names no Java class of ${pkg === null ? 'java.*' : pkg}: list it in lint-mapping.json's invented, or javaTargets`,
         });
         continue;
@@ -69,7 +70,8 @@ module.exports = {
       if (javaName.endsWith('Exception') && item.name !== `${javaName.slice(0, -'Exception'.length)}Error`) {
         findings.push({
           kind: 'error-name',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `translates ${javaShort}: an exception's class is named ${javaName.slice(0, -'Exception'.length)}Error`,
         });
       }
@@ -77,17 +79,25 @@ module.exports = {
       if (stem !== snakeCase(item.name)) {
         findings.push({
           kind: 'file-name',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `exports ${item.name} (${javaShort}); the file must be ${snakeCase(item.name)}.ts`,
         });
       }
       if (isError) {
         const javaPkg = java.fqn.startsWith(PREFIX) ? java.fqn.slice(PREFIX.length).replace(/\.[^.]*$/, '') : null;
-        const expected = javaPkg === null ? '' : javaPkg.replace(/^clients\./, '').split('.').join('/');
+        const expected =
+          javaPkg === null
+            ? ''
+            : javaPkg
+                .replace(/^clients\./, '')
+                .split('.')
+                .join('/');
         if (item.dir !== expected) {
           findings.push({
             kind: 'java-package',
-            subject, at: atNode(ctx, item.node),
+            subject,
+            at: atNode(ctx, item.node),
             message: `translates ${javaShort}, of ${javaPkg === null ? 'java.*' : javaPkg}: its file belongs in src/${expected === '' ? '' : `${expected}/`}`,
           });
         }
@@ -104,13 +114,15 @@ module.exports = {
       if (item.kind === 'enum' || item.kind === 'namespace') {
         findings.push({
           kind: 'export-form',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `exports ${item.name} as a TypeScript ${item.kind}, a form no Java type translates to: make it a class`,
         });
       } else if (!item.tags.jsOnly) {
         findings.push({
           kind: 'jsonly-required',
-          subject, at: atNode(ctx, item.node),
+          subject,
+          at: atNode(ctx, item.node),
           message: `exports the ${item.kind} ${item.name}, which no Java class translates to: list it in lint-mapping.json's invented`,
         });
       }

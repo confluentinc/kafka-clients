@@ -207,7 +207,8 @@ const LIB = {
   constructor(message: string) { super(message); }
 }
 `,
-  'src/internal/error_registry.ts': "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
+  'src/internal/error_registry.ts':
+    "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
   // The mapping lists (scripts/lint/java_ts.js mappingLists): Rec.extraJs and Mode.toJSON are invented.
   'lint-mapping.json': mapping({ invented: INVENTED }),
 };
