@@ -47,7 +47,8 @@ const keysAsText = (handle) =>
 const sameHeaders = (a, b) => a.length === b.length && a.every((h, i) => h.equals(b[i]));
 // ProducerRecord's constructor as its implementation takes its parameter: for
 // a table of Java's forms, valid each, whose union tsc cannot pick one
-// overload for (each form is typed where it is written on its own).
+// overload for (each form is typed where it is written on its own), and for
+// the key sets it rejects, built at run time, which no overload names.
 const AnyForm = /** @type {new (options: unknown) => ProducerRecord<unknown, unknown>} */ (/** @type {unknown} */ (ProducerRecord));
 // The record as the producer sends it, through the library's own method
 // (test/_internal.js).
