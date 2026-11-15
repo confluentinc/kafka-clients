@@ -95,7 +95,7 @@ const FAST_PATH_YIELD_EVERY = 1000;
 /**
  * The native layer's node fields as a Node, Java's five-parameter constructor.
  *
- * @param fields the node's fields, or null
+ * @param fields - the node's fields, or null
  * @returns the node, or null
  */
 function nodeOf(fields: { id: number; host: string | null; port: number; rack: string | null; isFenced: boolean } | null): Node | null {
@@ -105,7 +105,7 @@ function nodeOf(fields: { id: number; host: string | null; port: number; rack: s
 /**
  * The callback `send` was given, or null; throws a TypeError for a non-function.
  *
- * @param callback the callback given
+ * @param callback - the callback given
  * @returns the callback, or null
  */
 function checkCallback(callback: unknown): Callback | null {
@@ -117,8 +117,8 @@ function checkCallback(callback: unknown): Callback | null {
 /**
  * An error to give the mock: an `Error`, or null; throws a TypeError for any other value.
  *
- * @param error the error given
- * @param name the argument's name, for the error
+ * @param error - the error given
+ * @param name - the argument's name, for the error
  * @returns the error, or null
  */
 function checkError(error: unknown, name: string): Error | null {
@@ -129,10 +129,10 @@ function checkError(error: unknown, name: string): Error | null {
 /**
  * Records a record's delivery on its future after its callback ran, and gives back what the callback threw.
  *
- * @param future the record's future
- * @param metadata the record's metadata
- * @param error the delivery's error, or null
- * @param failure the text of what the callback threw, or undefined
+ * @param future - the record's future
+ * @param metadata - the record's metadata
+ * @param error - the delivery's error, or null
+ * @param failure - the text of what the callback threw, or undefined
  * @returns `failure`
  */
 function completeRecord(
@@ -148,10 +148,10 @@ function completeRecord(
 /**
  * `Promise.resolve(returned)`, the callback's result, with the record's delivery recorded once it settled.
  *
- * @param returned what the callback returned
- * @param future the record's future
- * @param metadata the record's metadata
- * @param error the delivery's error, or null
+ * @param returned - what the callback returned
+ * @param future - the record's future
+ * @param metadata - the record's metadata
+ * @param error - the delivery's error, or null
  * @returns a Promise of the text of the rejection, or of undefined
  */
 function completeWhenSettled(
@@ -169,7 +169,7 @@ function completeWhenSettled(
 /**
  * The text of what a callback threw, which the core logs; it never throws.
  *
- * @param thrown the thrown value
+ * @param thrown - the thrown value
  * @returns its text
  */
 function thrownMessage(thrown: unknown): string {

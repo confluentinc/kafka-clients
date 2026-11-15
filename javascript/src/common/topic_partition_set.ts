@@ -38,7 +38,7 @@ const NULL_KEY = 'null';
 /**
  * The key of `tp`, which must be a TopicPartition or null.
  *
- * @param tp the partition given
+ * @param tp - the partition given
  * @returns its key
  */
 function keyOf(tp: unknown): string {

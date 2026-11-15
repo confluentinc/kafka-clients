@@ -39,7 +39,7 @@ class ReadOnlySet<T> extends Set<T> {
   /**
    * Throws `UnsupportedOperationError`: the set is read-only.
    *
-   * @param value the value not added
+   * @param value - the value not added
    */
   override add(value: T): this {
     void value;
@@ -49,7 +49,7 @@ class ReadOnlySet<T> extends Set<T> {
   /**
    * Throws `UnsupportedOperationError`: the set is read-only.
    *
-   * @param value the value not deleted
+   * @param value - the value not deleted
    */
   override delete(value: T): boolean {
     void value;

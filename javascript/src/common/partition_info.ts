@@ -42,8 +42,8 @@ const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 /**
  * A Java `Node[]` argument: null, or an iterable of `Node` (or null, as a Java array holds), copied.
  *
- * @param value the argument given
- * @param what the argument's name, for the error
+ * @param value - the argument given
+ * @param what - the argument's name, for the error
  * @returns a copy of the nodes, or null
  */
 function checkNodes(value: unknown, what: string): readonly (Node | null)[] | null {

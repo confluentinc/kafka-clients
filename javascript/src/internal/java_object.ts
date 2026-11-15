@@ -28,7 +28,7 @@
 /**
  * Java's `String.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the UTF-16 code units.
  *
- * @param s the string
+ * @param s - the string
  * @returns its hash code
  */
 export function stringHashCode(s: string): number {
@@ -40,7 +40,7 @@ export function stringHashCode(s: string): number {
 /**
  * Java's `Long.hashCode(long)`: `(int) (value ^ (value >>> 32))`.
  *
- * @param value the long
+ * @param value - the long
  * @returns its hash code
  */
 export function longHashCode(value: bigint): number {
@@ -51,7 +51,7 @@ export function longHashCode(value: bigint): number {
 /**
  * Java's `Arrays.hashCode(byte[])`: 0 for null, else `31 * h + b` over the signed bytes, from 1.
  *
- * @param value the bytes, or null
+ * @param value - the bytes, or null
  * @returns their hash code
  */
 export function bytesHashCode(value: Uint8Array | null): number {
@@ -64,8 +64,8 @@ export function bytesHashCode(value: Uint8Array | null): number {
 /**
  * Java's `Arrays.equals(byte[], byte[])`: the same array, both null, or the same bytes.
  *
- * @param a the first bytes, or null
- * @param b the second bytes, or null
+ * @param a - the first bytes, or null
+ * @param b - the second bytes, or null
  * @returns whether they are equal
  */
 export function bytesEquals(a: Uint8Array | null, b: Uint8Array | null): boolean {
@@ -107,8 +107,8 @@ function identityHashCode(value: object): number {
 /**
  * Java's `Objects.equals(a, b)`: `a == b`, or `a != null && a.equals(b)`.
  *
- * @param a the first value
- * @param b the second value
+ * @param a - the first value
+ * @param b - the second value
  * @returns whether they are equal
  */
 export function objectsEquals(a: unknown, b: unknown): boolean {
@@ -120,7 +120,7 @@ export function objectsEquals(a: unknown, b: unknown): boolean {
 /**
  * Java's `o != null ? o.hashCode() : 0` for a value standing for a Java object.
  *
- * @param value the value, or null
+ * @param value - the value, or null
  * @returns its hash code
  */
 export function objectHashCode(value: unknown): number {
@@ -147,8 +147,8 @@ export function objectHashCode(value: unknown): number {
 /**
  * Java's `getClass() == o.getClass()`: `o` is an object of exactly `self`'s class.
  *
- * @param self the object whose class is compared
- * @param o the other value
+ * @param self - the object whose class is compared
+ * @param o - the other value
  * @returns whether `o` has exactly `self`'s class
  */
 export function sameClass(self: object, o: unknown): boolean {
