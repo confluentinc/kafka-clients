@@ -24,10 +24,19 @@ const assert = require('node:assert/strict');
 
 const { encodeLikeJava } = require('../../../dist/internal/encode');
 const native = require('../../../dist/internal/native');
-const { configEntries } = require('../../../dist/internal/config');
+const { configEntries: untypedEntries } = require('../../../dist/internal/config');
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+
+// src/internal/config.ts's signature, which the compiled JavaScript does not carry.
+const configEntries = /** @type {(configs: unknown) => Array<[Buffer, Buffer]>} */ (untypedEntries);
+
+/**
+ * A record with its internal conversion for the addon, which the published types leave out.
+ *
+ * @typedef {{internalToNative(key?: Uint8Array | null, value?: Uint8Array | null): [string, number, bigint, Uint8Array | null, Uint8Array | null, object | null]}} NativeConversion
+ */
 
 // [what, string, Java's StringSerializer bytes, as hex]
 const JAVA = [
@@ -63,7 +72,8 @@ test('a key and a value through stringSerializer(), and a header key, are encode
     });
     const key = serializer.serialize({ topic: 't', headers: record.headers, data: record.key });
     const value = serializer.serialize({ topic: 't', headers: record.headers, data: record.value });
-    const [, , , , , headers] = record.internalToNative(key, value);
+    assert.ok(key instanceof Uint8Array && value instanceof Uint8Array, what);
+    const [, , , , , headers] = /** @type {ProducerRecord<string, string> & NativeConversion} */ (record).internalToNative(key, value);
     assert.equal(Buffer.from(key).toString('hex'), hex, `${what}: key`);
     assert.equal(Buffer.from(value).toString('hex'), hex, `${what}: value`);
     // The header key crosses as its bytes, encodeLikeJava's: the native

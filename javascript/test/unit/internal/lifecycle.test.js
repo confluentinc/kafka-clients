@@ -24,10 +24,19 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..', '..', '..');
 
+/**
+ * @param {string} script
+ * @param {Array<string>} [flags]
+ */
 function runNode(script, flags = []) {
   return spawnSync(process.execPath, [...flags, '-e', script], { cwd: ROOT, encoding: 'utf8', timeout: 30000 });
 }
 
+/**
+ * @param {string} text
+ * @param {string} needle
+ * @returns {Array<string>}
+ */
 const lines = (text, needle) => text.split('\n').filter((l) => l.includes(needle));
 
 test('the preview notice is emitted once per process, the workers included', () => {
