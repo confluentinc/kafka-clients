@@ -22,7 +22,6 @@
 // constructors build (their source in kafka/), and an error the core reports
 // carries the payload the FFI's view of its class gives.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

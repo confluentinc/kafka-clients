@@ -26,7 +26,6 @@
 // conventions, Scope: the ConfigDef machinery); core: none. SslConfigs and
 // SecurityConfig have no Java test class.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { javaStringConstants } = require('../../../_java_source');

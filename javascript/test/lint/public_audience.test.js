@@ -16,7 +16,6 @@
 
 // J4 check-public-audience (scripts/lint/rules/public_audience.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

@@ -19,7 +19,6 @@
 // arguments, the report, the inputs a rule needs, the split between the two
 // tools, and the real tree.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

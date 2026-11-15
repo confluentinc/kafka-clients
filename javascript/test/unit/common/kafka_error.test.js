@@ -14,7 +14,6 @@
 
 'use strict';
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');

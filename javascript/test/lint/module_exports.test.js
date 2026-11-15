@@ -16,7 +16,6 @@
 
 // check-module-exports (scripts/lint/rules/module_exports.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

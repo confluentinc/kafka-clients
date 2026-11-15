@@ -18,7 +18,6 @@
 // default compiler with no shell, a `TSC` override through the shell with
 // every argument quoted, so arguments reach the compiler literally.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const fs = require('node:fs');

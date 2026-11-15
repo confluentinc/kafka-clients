@@ -87,8 +87,14 @@ Phase A's send path (zero copy, no closed state, frozen records).
 
 - **A8**, `Headers` and `Header` over the FFI's `RecordHeaders` / `RecordHeader`: waits on the owner's decision about
   the two parked `Headers` rows (§5).
-- **A14**, the tests on Jest, and the four tools blocked on npm registry access (A13): `eslint-plugin-jsdoc`, TypeDoc,
-  Prettier and publint.
+- **A13 and A14: done** (on PR #333). The docs lint (`eslint-plugin-jsdoc`'s `require-param` and `require-returns` on
+  `src/`, in `make lint-rules`), TypeDoc (`make docs`, checked by `test/static/docs.test.js`), publint (in
+  `make pack-check`, every package now `"type": "commonjs"`) and
+  the tests on Jest (`jest.config.cjs`, through jest-light-runner in a fresh Node.js process per file; ts-jest is not
+  used, the tests being JavaScript). Left: `tsc --strict` over the tests (Q67), about 2,400 `checkJs` errors, and the
+  lockfile, whose new entries resolve from the configured CodeArtifact mirror, which
+  `test/static/lockfile.test.js` refuses.
+- The decisions taken while aligning and completing the producer are logged in `DECISIONS.md`, in this folder.
 - **The parked rows (§5)**: the serde factories beyond `stringSerializer()`, Q50 ("the methods must be all async"),
   the two `Headers` rows, when and how the never-closed warning is logged, and the other `tsc` settings (Q74).
 - **Transactions**: out of scope by request (the producer's and `MockProducer`'s transaction calls).

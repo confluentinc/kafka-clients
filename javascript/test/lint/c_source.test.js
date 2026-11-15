@@ -17,7 +17,6 @@
 // scripts/lint/c_source.js: the C scanning the rule linter and the
 // header-conformance test share.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const c = require('../../scripts/lint/c_source');

@@ -19,7 +19,6 @@
 // writes every value as the string the FFI takes, drops null and undefined,
 // and passes every key to the core, which checks them with Java's messages.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');

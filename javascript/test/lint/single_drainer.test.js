@@ -16,7 +16,6 @@
 
 // N4 check-single-drainer (scripts/lint/rules/single_drainer.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');

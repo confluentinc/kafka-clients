@@ -19,7 +19,6 @@
 // the build, into a scratch directory. A module per import path, each
 // package's `@packageDocumentation` on its page, and no `@internal` member.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -29,9 +28,11 @@ const path = require('node:path');
 const ROOT = path.join(__dirname, '..', '..');
 const TYPEDOC = path.join(ROOT, 'node_modules', '.bin', 'typedoc');
 
-test('the reference builds, a page per import path, without the @internal members', { timeout: 120_000 }, (t) => {
-  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'kafka-js-docs-'));
-  t.after(() => fs.rmSync(out, { recursive: true, force: true }));
+let out;
+afterEach(() => fs.rmSync(out, { recursive: true, force: true }));
+
+test('the reference builds, a page per import path, without the @internal members', () => {
+  out = fs.mkdtempSync(path.join(os.tmpdir(), 'kafka-js-docs-'));
   const run = spawnSync(process.execPath, [TYPEDOC, '--options', 'typedoc.config.cjs', '--out', out], {
     cwd: ROOT,
     encoding: 'utf8',
@@ -51,4 +52,4 @@ test('the reference builds, a page per import path, without the @internal member
     const html = fs.readFileSync(path.join(out, f), 'utf8');
     assert.doesNotMatch(html, /\binternal(Create|ToNative|Complete|SetDelivery|SetNative)\b/, `${f} shows an @internal member`);
   }
-});
+}, 120_000);

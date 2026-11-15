@@ -34,7 +34,6 @@
 // error. Java's CompleterThread and WaiterThread are a completion from a
 // later macrotask and a get() started before it: JavaScript has one thread.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
@@ -1028,8 +1027,8 @@ test('a timed-out get leaves the future pending, and a later get still answers',
 
 // --- Unhandled rejections --------------------------------------------------------
 
-// node:test fails a test on any unhandled rejection, so the check runs in a
-// child process of its own.
+// The test runner reports an unhandled rejection as a failure of its own, so
+// the check runs in a child process of its own.
 test('a failed future nobody waits on, and its dependants, raise no unhandled rejection', () => {
   const script = `
     const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
@@ -1087,11 +1086,11 @@ setTimeout(() => {
 }, 50);
 `;
 
-test("completing a million record futures, each with a get() waiting, runs no minor GC", (t) => {
+test("completing a million record futures, each with a get() waiting, runs no minor GC", () => {
   const r = spawnSync(process.execPath, ['--expose-gc', '-e', GC_SCRIPT], { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 120_000 });
   assert.equal(r.status, 0, r.stderr);
   const { ns, minor } = JSON.parse(r.stdout);
-  t.diagnostic(`${ns.toFixed(1)} ns per completion`);
+  console.log(`${ns.toFixed(1)} ns per completion`);
   assert.equal(minor, 0, `${minor} minor GC(s) while completing; ${ns.toFixed(1)} ns per completion`);
 });
 

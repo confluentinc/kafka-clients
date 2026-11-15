@@ -39,7 +39,7 @@ name: build-test-release
 #      for the broker the integration/perf tests need.
 #   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest),
 #      verify-python (pytest test/unit), verify-dotnet (dotnet test, net8.0 +
-#      net10.0) and verify-javascript (node --test test/unit), each followed
+#      net10.0) and verify-javascript (Jest's unit project), each followed
 #      by the gRPC multilanguage arm with the gRPC server running as a native
 #      host process (MULTILANG_BACKEND_MODE=native), which tests the macOS
 #      build of each binding. The broker runs in Docker via Colima. The native
@@ -298,7 +298,7 @@ blocks:
     # broker over the CONTAINER listener for the active protocol:
     #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
     #     / `make verify-javascript` — the full binding gate (ctest / pytest /
-    #     dotnet test / node --test unit tests, the PLAINTEXT gRPC arm,
+    #     dotnet test / Jest unit tests, the PLAINTEXT gRPC arm,
     #     check-bindings, the Python and .NET perf suites, and the Node.js
     #     client's static, typing and broker-backed tests).
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
@@ -451,8 +451,8 @@ blocks:
 
   - name: "Verify language bindings (macOS arm64)"
     # verify-c runs the C ctest suite; verify-python runs pytest test/unit;
-    # verify-dotnet runs the .NET unit tests; verify-javascript runs node --test
-    # test/unit. Each job then runs its binding's gRPC multilanguage arm
+    # verify-dotnet runs the .NET unit tests; verify-javascript runs Jest's
+    # unit project. Each job then runs its binding's gRPC multilanguage arm
     # (__grpc_c / __grpc_python / __grpc_dotnet / __grpc_js) with the gRPC server
     # as a native host process rather than a container. Containers on macOS run
     # Linux, so a container would only test the Linux build of the binding. The

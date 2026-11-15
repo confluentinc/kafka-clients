@@ -20,7 +20,6 @@
 // HashMap<TopicPartition, V> and HashSet<TopicPartition>, whose keys compare
 // with TopicPartition.equals.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

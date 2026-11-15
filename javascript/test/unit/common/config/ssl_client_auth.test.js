@@ -16,7 +16,6 @@
 
 // SslClientAuth, as python/test/unit/test_config_classes.py checks the Python one.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');

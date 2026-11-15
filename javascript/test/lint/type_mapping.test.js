@@ -16,7 +16,6 @@
 
 // J7 check-type-mapping (scripts/lint/rules/type_mapping.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

@@ -17,7 +17,6 @@
 
 // J8 check-data-objects (scripts/lint/rules/data_objects.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

@@ -19,7 +19,6 @@
 // import path per Java package, and no install-time build. It reads the TypeScript
 // sources (src/**/*.ts) and package.json only: no build needed.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -146,12 +145,11 @@ test('a module folder index.ts re-exports public files of its own folder, and no
   }
 });
 
-test('the build outputs are not committed: dist/, build/ and native/build/ are git-ignored and untracked', (t) => {
-  const git = (args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
-  if (git(['rev-parse', '--is-inside-work-tree']).status !== 0) {
-    t.skip('not a git checkout');
-    return;
-  }
+const git = (args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+const NOT_GIT = git(['rev-parse', '--is-inside-work-tree']).status !== 0;
+if (NOT_GIT) console.log('skipping the build-output check: not a git checkout');
+
+(NOT_GIT ? test.skip : test)('the build outputs are not committed: dist/, build/ and native/build/ are git-ignored and untracked', () => {
   const tracked = git(['ls-files', '--', 'dist', 'build', 'native/build']);
   assert.equal(tracked.status, 0, tracked.stderr);
   assert.equal(tracked.stdout, '', 'dist/, build/ or native/build/ has tracked files');

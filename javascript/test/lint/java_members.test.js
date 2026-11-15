@@ -16,7 +16,6 @@
 
 // J2 check-java-members (scripts/lint/rules/java_members.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');

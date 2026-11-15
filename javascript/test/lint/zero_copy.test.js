@@ -16,7 +16,6 @@
 
 // N7 check-zero-copy (scripts/lint/rules/zero_copy.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
