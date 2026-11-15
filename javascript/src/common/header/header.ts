@@ -108,9 +108,11 @@ export class Header {
    * `RecordHeader`, is internal; this is its `(String, byte[])` constructor.
    * *(js-only)* The header is a native `RecordHeader`, which copies the key
    * and the value: a later write to the given bytes does not change the
-   * header, where Java's keeps the given array. A key crosses as its UTF-8
-   * bytes, a lone surrogate as `?`, as Java's encoder writes it, so
-   * `key()` reads `?` there.
+   * header, where Java's keeps the given array. *(deviation)* A key crosses
+   * as its UTF-8 bytes, a lone surrogate as `?`, as Java's encoder writes
+   * it, so `key()` reads `?` there, and a key holding a NUL is refused,
+   * where Java's `RecordHeader` keeps the `String`. Why: the C API takes the
+   * key as a NUL-terminated UTF-8 string.
    */
   constructor(options: {
     /** The header's key; must not be null. */

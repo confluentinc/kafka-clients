@@ -81,9 +81,6 @@ const TO_ARRAY_FORMS = new JavaForms('toArray', [[]], { reader: true });
 const EQUALS_FORMS = new JavaForms('equals', [['o']]);
 const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
-/** The key of a remove that removes nothing: an empty key's bytes. */
-const NO_KEY = new Uint8Array(0);
-
 /** The shared empty RecordHeaders that headers with none of their own read: nothing changes it. */
 let emptyWritable: object | null = null;
 /** The shared empty read-only RecordHeaders of headers sealed before their first add. */
@@ -128,15 +125,16 @@ function keyBytes(key: unknown): Uint8Array | null {
 }
 
 /**
- * One taken element: a `Header`. A null element is Java's
- * `Objects.requireNonNull(header, "Header cannot be null.")`.
+ * One taken element's native header, or null for a null element, which the
+ * core refuses as Java's `Objects.requireNonNull(header, "Header cannot be
+ * null.")` does.
  *
  * @param item an element of the iterable given
- * @returns the element as a `Header`
+ * @returns the element's native header, or null
  */
-function headerOf(item: unknown): Header {
-  if (item instanceof Header) return item;
-  if (item === null) throw new TypeError('Header cannot be null.');
+function nativeHeaderOf(item: unknown): object | null {
+  if (item instanceof Header) return Header.internalNativeOf(item);
+  if (item === null) return null;
   if (item === undefined) throw new TypeError('a header must not be undefined. Pass a Header, or leave it out');
   throw new TypeError('a header must be a Header');
 }
@@ -243,11 +241,21 @@ export class Headers implements Iterable<Header> {
     if (typeof headers !== 'object' || typeof (headers as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
       throw new TypeError('headers must be a Headers, or an iterable of Header');
     }
-    const handles: object[] = [];
+    // Java checks the headers one by one, so the first null is the last read:
+    // the core reports it, and nothing after it is read.
+    const handles: (object | null)[] = [];
     if (Array.isArray(headers)) {
-      for (let i = 0; i < headers.length; i++) handles.push(Header.internalNativeOf(headerOf(headers[i])));
+      for (let i = 0; i < headers.length; i++) {
+        const handle = nativeHeaderOf(headers[i]);
+        handles.push(handle);
+        if (handle === null) break;
+      }
     } else {
-      for (const item of headers as Iterable<unknown>) handles.push(Header.internalNativeOf(headerOf(item)));
+      for (const item of headers as Iterable<unknown>) {
+        const handle = nativeHeaderOf(item);
+        handles.push(handle);
+        if (handle === null) break;
+      }
     }
     if (handles.length === 0) return null;
     return native.headersNew(handles, Array.isArray(headers) ? 1 : 2);
@@ -274,10 +282,16 @@ export class Headers implements Iterable<Header> {
     return this.#native ?? writableEmpty();
   }
 
-  // The RecordHeaders to change: their own, made on the first add.
+  // The RecordHeaders a change goes to: their own, made on the first add,
+  // while they can still change; once they are read-only, the shared empty
+  // read-only RecordHeaders, which refuses the change with the core's error.
+  // The FFI drops the header views a handle handed out on every mutating
+  // call, refused or not, so a change is never sent to read-only headers
+  // whose views a Header may hold (javascript/CLAUDE.md, boundary rule 1).
   #write(): object {
-    if (this.#native === null) this.#native = native.headersNew(null, 0);
-    return this.#native;
+    const own = this.#native;
+    if (own === null) return (this.#native = native.headersNew(null, 0));
+    return native.headersIsReadOnly(own) ? sealedEmpty() : own;
   }
 
   /**
@@ -308,7 +322,8 @@ export class Headers implements Iterable<Header> {
    * @param options - the header's key and value
    * @returns this instance of the Headers, once the header is added.
    * @throws `IllegalStateError` is thrown if headers are in a read-only state.
-   * @throws `TypeError` when the key is null or not a string, or the value is
+   * @throws `TypeError` when the key is null, not a string or holds a NUL
+   *   ("a header key must be a string without null bytes"), or the value is
    *   neither bytes nor null (a string included: encode it first)
    */
   add(options: {
@@ -351,8 +366,15 @@ export class Headers implements Iterable<Header> {
    * @returns this instance of the Headers, once the header is removed.
    * @throws `IllegalStateError` is thrown if headers are in a read-only state.
    * @throws `IllegalArgumentError` when the key is null ("key cannot be
-   *   null."), or the given parameters are not `{key}`
-   * @throws `TypeError` when the key is not a string or is `undefined`
+   *   null."), read-only headers included, or the given parameters are not
+   *   `{key}`
+   * @throws `TypeError` when the key is not a string, holds a NUL ("a header
+   *   key must be a string without null bytes") or is `undefined`
+   *
+   * @remarks *(deviation)* On read-only headers a null key is
+   * `IllegalArgumentError`, where Java's `remove` checks the read-only state
+   * first. Why: the FFI checks a null argument first, and the binding repeats
+   * no precondition of Java's.
    */
   remove(options: {
     /** The key to remove all headers for; must not be null. */
@@ -368,16 +390,10 @@ export class Headers implements Iterable<Header> {
   remove(key: string): Headers;
   remove(options: unknown): Headers {
     REMOVE_FORMS.match(options, arguments.length);
-    const key = REMOVE_FORMS.value(options, 'key');
-    const own = this.#native;
-    // Java's canWrite() comes before its checkKey(), the FFI's key check
-    // before its read-only one: for a key the core or the binding refuses,
-    // read-only headers are first asked to remove nothing, which the core
-    // refuses with its own error, changing nothing.
-    if (typeof key !== 'string' && own !== null && native.headersIsReadOnly(own)) native.headersRemove(own, NO_KEY);
+    const key = keyBytes(REMOVE_FORMS.value(options, 'key'));
     // Headers with none of their own remove nothing from the shared empty
     // ones; only a null key is an error there.
-    native.headersRemove(own ?? writableEmpty(), keyBytes(key));
+    native.headersRemove(this.#native === null ? writableEmpty() : this.#write(), key);
     return this;
   }
 
@@ -389,7 +405,8 @@ export class Headers implements Iterable<Header> {
    *   present.
    * @throws `IllegalArgumentError` when the key is null ("key cannot be
    *   null."), or the given parameters are not `{key}`
-   * @throws `TypeError` when the key is not a string or is `undefined`
+   * @throws `TypeError` when the key is not a string, holds a NUL ("a header
+   *   key must be a string without null bytes") or is `undefined`
    *
    * @remarks *(js-only)* While the headers can still change (before their
    * record is sent), the header is the binding's own copy of the key and
@@ -422,14 +439,20 @@ export class Headers implements Iterable<Header> {
    *
    * @param options - the key
    * @returns all headers for the given key, in the order they were added in,
-   *   if NO headers are present an empty iterable is returned. Each iteration
-   *   reads the headers as they are then.
+   *   if NO headers are present an empty iterable is returned.
    * @throws `IllegalArgumentError` when the key is null ("key cannot be
    *   null."), or the given parameters are not `{key}`
-   * @throws `TypeError` when the key is not a string or is `undefined`
+   * @throws `TypeError` when the key is not a string or is `undefined`, or,
+   *   when iterated, holds a NUL ("a header key must be a string without null
+   *   bytes")
    *
    * @remarks *(js-only)* Each header is a copy while the headers can still
    * change, and a view once they are read-only, as `lastHeader` says.
+   * *(deviation)* Each iterator reads the headers when it is made, so a change
+   * during an iteration is not seen and throws nothing, where Java's throws
+   * `ConcurrentModificationException`. Why: the FFI hands the headers out as a
+   * list, and Java's `ArrayList` iterators fail fast only on a best-effort
+   * basis.
    */
   headers(options: {
     /** The key to return the headers for; must not be null. */
@@ -474,13 +497,17 @@ export class Headers implements Iterable<Header> {
   }
 
   /**
-   * The headers, in the order they were added in, as they are when the
-   * iterator is made.
+   * The headers, in the order they were added in.
    *
    * @returns an iterator over the headers
    *
    * @remarks *(js-only)* Each header is a copy while the headers can still
    * change, and a view once they are read-only, as `lastHeader` says.
+   * *(deviation)* The iterator reads the headers when it is made, so a change
+   * during an iteration is not seen and throws nothing, where Java's throws
+   * `ConcurrentModificationException`. Why: the FFI hands the headers out as a
+   * list, and Java's `ArrayList` iterators fail fast only on a best-effort
+   * basis.
    */
   [Symbol.iterator](): Iterator<Header> {
     const headers = this.#native === null ? [] : wrapAll(native.headersIterator(this.#native));
