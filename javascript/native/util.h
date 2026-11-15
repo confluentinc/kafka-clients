@@ -113,6 +113,35 @@ void error_throw_owned(napi_env env, kafka_common_Error_t* e);
 // error: everywhere else an error with nowhere to go is error_warn'ed.
 void error_discard(kafka_common_Error_t* e);
 
+// The payload of an error the core reports, as a plain object keyed by Java
+// field name, or NULL when its class has none (native/error_payload.c,
+// generated). Each field is set by one of the payload_* helpers below
+// (native/error.c), given the value an FFI accessor returned and the owned
+// error it failed with, or NULL: a failure leaves the field out. They return
+// -1 when a Node-API call failed, 0 otherwise, and free an owned value.
+napi_value error_payload_to_js(napi_env env, int code, const kafka_common_Error_t* e);
+int payload_string_list(napi_env env, napi_value obj, const char* name, kafka_List_t* list, kafka_common_Error_t* failed);
+int payload_topic_partition_list(napi_env env, napi_value obj, const char* name, kafka_List_t* list,
+                                 kafka_common_Error_t* failed);
+int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* name, kafka_Map_t* map,
+                                     kafka_common_Error_t* failed);
+int payload_string(napi_env env, napi_value obj, const char* name, const char* value, kafka_common_Error_t* failed);
+int payload_int32(napi_env env, napi_value obj, const char* name, int32_t value, kafka_common_Error_t* failed);
+int payload_double(napi_env env, napi_value obj, const char* name, double value, kafka_common_Error_t* failed);
+int payload_int64(napi_env env, napi_value obj, const char* name, int64_t value, kafka_common_Error_t* failed);
+int payload_topic_partition(napi_env env, napi_value obj, const char* name, const kafka_common_TopicPartition_t* value,
+                            kafka_common_Error_t* failed);
+int payload_timestamp_type(napi_env env, napi_value obj, const char* name, const kafka_common_record_TimestampType_t* value,
+                           kafka_common_Error_t* failed);
+int payload_deserialization_origin(napi_env env, napi_value obj, const char* name,
+                                   const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t* value,
+                                   kafka_common_Error_t* failed);
+int payload_bytes(napi_env env, napi_value obj, const char* name, kafka_Bytes_t value, kafka_common_Error_t* failed);
+int payload_headers(napi_env env, napi_value obj, const char* name, const kafka_common_header_internals_RecordHeaders_t* value,
+                    kafka_common_Error_t* failed);
+int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char* name, kafka_Map_t* map,
+                                       kafka_common_Error_t* failed);
+
 // An OWNED error with nowhere else to go: when `js` (JS may run here: not an
 // environment teardown), it is converted and handed to process.emitWarning
 // (a pending JS exception is kept and thrown again after), then destroyed;
@@ -234,6 +263,12 @@ kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, i
                                               int64_t timestamp, const JsBytes* key,
                                               const JsBytes* value, napi_value headers);
 
+// producer.c: the JS value an error JS gave a mock carries, for the
+// LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
+// is not one (another callback's error) or its value is gone (the mock
+// destroyed).
+napi_value injected_error_value(napi_env env, void* opaque);
+
 // ---- the native functions addon.c registers -----------------------------------
 
 // error.c: setFactories(errorFactory, metadataFactory).
@@ -241,8 +276,17 @@ napi_value js_set_factories(napi_env env, napi_callback_info info);
 
 // producer.c: the KafkaProducer handle.
 napi_value js_producer_create(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_create(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_send(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_history(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_clear(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_set_error(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_complete_next(napi_env env, napi_callback_info info);
+napi_value js_mock_producer_state(napi_env env, napi_callback_info info);
 napi_value js_producer_send(napi_env env, napi_callback_info info);
 napi_value js_producer_flush(napi_env env, napi_callback_info info);
+napi_value js_producer_partitions_for(napi_env env, napi_callback_info info);
+napi_value js_producer_metrics(napi_env env, napi_callback_info info);
 napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);

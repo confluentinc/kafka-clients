@@ -27,6 +27,37 @@ import { fromNative } from './errors';
 import { loadAddon, platformKey } from './native_loader';
 import { RecordMetadata } from '../producer/record_metadata';
 
+/** A metric's fields and its value read when metrics() ran (native/producer.c, metric_to_js). */
+interface NativeMetric {
+  name: string;
+  group: string;
+  description: string;
+  // The tags sorted by key.
+  tags: Array<[string, string]>;
+  // A double or an int a number, a long a bigint, a string gauge a string.
+  value: number | bigint | string;
+  measurable: boolean;
+}
+
+/** A node's fields, as the addon reads them (native/producer.c, node_to_js). */
+interface NativeNode {
+  id: number;
+  host: string | null;
+  port: number;
+  rack: string | null;
+  isFenced: boolean;
+}
+
+/** A partition's fields, as the addon reads them (native/producer.c, partition_info_to_js). */
+interface NativePartitionInfo {
+  topic: string;
+  partition: number;
+  leader: NativeNode | null;
+  replicas: NativeNode[] | null;
+  inSyncReplicas: NativeNode[] | null;
+  offlineReplicas: NativeNode[] | null;
+}
+
 /** The fields the native layer reads a delivered record's metadata into (native/producer.c). */
 interface RecordMetadataFields {
   topic: string;
@@ -79,6 +110,17 @@ interface Native {
     onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
   ): void;
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
+  // Java's metrics() through kafka_producer_Producer_metrics (no _cb twin):
+  // every metric, read now.
+  producerMetrics(handle: ProducerHandle): NativeMetric[];
+  // Java's partitionsFor through partitions_for_cb; the partitions' fields
+  // as src/common/partition_info.ts's constructor takes them, each node as
+  // src/common/node.ts's does. A null topic goes to the core as NULL.
+  producerPartitionsFor(
+    handle: ProducerHandle,
+    topic: string | null,
+    onComplete: (error: unknown, partitions: NativePartitionInfo[] | null) => void,
+  ): void;
   producerClose(
     handle: ProducerHandle,
     // null when the timeout was left out (Java's close()), else the
@@ -89,6 +131,32 @@ interface Native {
     onComplete: (error: unknown, closedNow: boolean) => void,
   ): void;
   producerPump(handle: ProducerHandle): void;
+  // A native producer handle over the FFI's MockProducer, Java's
+  // MockProducer(autoComplete, null, null, null): every producer* function
+  // takes it, through its __as_Producer view.
+  mockProducerCreate(autoComplete: boolean): ProducerHandle;
+  // A mock's send of the app's own record, which the mock keeps: its key and
+  // value cross as the FFI's `void *`, never read (native/producer.c,
+  // MockRecord). The completions are producerSend's.
+  mockProducerSend(
+    handle: ProducerHandle,
+    topic: string,
+    partition: number,
+    // -1n for Java's null.
+    timestamp: bigint,
+    record: object,
+    onHandover: (error: unknown, future: number | null) => void,
+    onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
+  ): void;
+  // The records the mock holds, the app's own, in send order.
+  mockProducerHistory(handle: ProducerHandle): object[];
+  mockProducerClear(handle: ProducerHandle): void;
+  // Java's public error field of the mock, set to `error` or cleared by null.
+  mockProducerSetError(handle: ProducerHandle, field: 'send' | 'flush' | 'partitionsFor' | 'close', error: Error | null): void;
+  // Java's errorNext(error), completeNext() for null: whether a send waited.
+  mockProducerCompleteNext(handle: ProducerHandle, error: Error | null): boolean;
+  // Java's closed() or flushed().
+  mockProducerState(handle: ProducerHandle, which: 'closed' | 'flushed'): boolean;
   // A wait on a record's future through get_cb (timeoutMs null) or
   // get_with_timeout_cb; `done` runs once it completed, from the producer's
   // drain, or inside the call once the producer is destroyed. timedOut: the
@@ -119,8 +187,7 @@ function warn(error: unknown): void {
   }
 }
 
-// RecordMetadata's constructor is private: users never build one. The native
-// layer does, through its library-only factory.
+// The native layer builds RecordMetadata through its library-only factory.
 native.setFactories(
   (fields) => fromNative(fields),
   (fields) => RecordMetadata.internalCreate(fields),

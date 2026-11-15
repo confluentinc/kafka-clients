@@ -24,7 +24,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { configEntries: entriesAsBytes, decimal } = require('../../../dist/internal/config');
+const { checkConfigs, configEntries: entriesAsBytes, decimal } = require('../../../dist/internal/config');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
@@ -135,24 +135,47 @@ test('numbers are written in decimal, never in exponent form', () => {
   }
 });
 
-test('key.serializer and value.serializer are refused, whatever their value, pointing to the constructor arguments', () => {
-  for (const [key, argument] of [
-    ['key.serializer', 'keySerializer'],
-    ['value.serializer', 'valueSerializer'],
-  ]) {
-    for (const value of ['org.apache.kafka.common.serialization.StringSerializer', null, 5]) {
-      assert.throws(() => configEntries({ [key]: value }), (e) => {
-        assert.ok(e instanceof ConfigError, key);
-        assert.equal(
-          e.message,
-          `${key} is not a configuration of this client: a serializer is the ${argument} argument of the constructor, never a configuration value`,
-        );
-        return true;
-      });
-    }
-    // undefined leaves the key out, as for every key.
-    assert.deepEqual(configEntries({ [key]: undefined }), []);
-  }
+test("the producer's own serde keys and the keys a serde function read never reach the core; the consumer's do", () => {
+  const make = () => ({ serialize: () => null });
+  assert.deepEqual(
+    configEntries({ 'key.serializer': make, 'value.serializer': 'org.example.Serializer', 'key.deserializer': 'org.example.D', a: 1 }),
+    [
+      ['key.deserializer', 'org.example.D'],
+      ['a', '1'],
+    ],
+  );
+  // A read key the core doesn't know is left out; a producer key of Java's
+  // reaches the core all the same, as Java only marks it used.
+  const read = new Set(['schema.registry.url', 'bootstrap.servers', 'client.id']);
+  assert.deepEqual(
+    entriesAsBytes({ 'schema.registry.url': 'http://sr', 'bootstrap.servers': 'b:1', 'client.id': 'c', b: 2 }, read).map(([k, v]) => [
+      k.toString(),
+      v.toString(),
+    ]),
+    [
+      ['bootstrap.servers', 'b:1'],
+      ['client.id', 'c'],
+      ['b', '2'],
+    ],
+  );
+  // So does a producer key only the core defines.
+  assert.deepEqual(
+    entriesAsBytes({ 'partitioner.type': 'RoundRobinPartitioner' }, new Set(['partitioner.type'])).map(([k, v]) => [k.toString(), v.toString()]),
+    [['partitioner.type', 'RoundRobinPartitioner']],
+  );
+});
+
+test('the checked configuration is a frozen copy, a __proto__ key a key', () => {
+  const given = JSON.parse('{"__proto__": "x", "a": 1}');
+  const checked = checkConfigs(given);
+  assert.ok(Object.isFrozen(checked));
+  assert.notEqual(checked, given);
+  assert.equal(Object.getPrototypeOf(checked), Object.prototype);
+  assert.deepEqual(Object.keys(checked), ['__proto__', 'a']);
+  assert.deepEqual(configEntries(given), [
+    ['__proto__', 'x'],
+    ['a', '1'],
+  ]);
 });
 
 test("the core checks the values, with Java's messages naming the key", () => {

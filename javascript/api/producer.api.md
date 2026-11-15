@@ -30,46 +30,120 @@ export type CloseArgs = {
 };
 
 // @public
-export type Data = Buffer | Uint8Array | string;
-
-// @public
-export class KafkaProducer implements Producer {
+export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {
     [Symbol.asyncDispose](): Promise<void>;
     constructor(options: {
-        configs: ProducerConfigs;
+        configs: ProducerConfigs & SerdeConfigs<K, V>;
+        keySerializer?: never;
+        valueSerializer?: never;
     });
-    constructor(configs: ProducerConfigs);
+    constructor(options: {
+        configs: ProducerConfigs & SerdeConfigs<K, V>;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
+    });
+    constructor(configs: ProducerConfigs & SerdeConfigs<K, V>);
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
     flush(): Promise<void>;
+    metrics(): MetricNameMap<Metric>;
+    static readonly NETWORK_THREAD_PREFIX: string;
+    partitionsFor(options: {
+        topic: string;
+    }): Promise<PartitionInfo[]>;
+    partitionsFor(topic: string): Promise<PartitionInfo[]>;
+    static readonly PRODUCER_METRIC_GROUP_NAME: string;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K, V>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K, V>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
-export interface Producer {
+export class MockProducer<K, V> implements Producer<K, V> {
+    [Symbol.asyncDispose](): Promise<void>;
+    constructor();
+    constructor(options: {
+        autoComplete: boolean;
+        partitioner: Partitioner | null;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
+    });
+    clear(): void;
+    close(): Promise<void>;
+    close(options: CloseArgs): Promise<void>;
+    close(timeout: Duration): Promise<void>;
+    closed(): boolean;
+    completeNext(): boolean;
+    errorNext(options: {
+        e: Error | null;
+    }): boolean;
+    errorNext(e: Error | null): boolean;
+    flush(): Promise<void>;
+    flushed(): boolean;
+    history(): Array<ProducerRecord<K, V>>;
+    metrics(): MetricNameMap<Metric>;
+    partitionsFor(options: {
+        topic: string;
+    }): Promise<PartitionInfo[]>;
+    partitionsFor(topic: string): Promise<PartitionInfo[]>;
+    send(options: {
+        record: ProducerRecord<K, V>;
+        callback: Callback | null;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(options: {
+        record: ProducerRecord<K, V>;
+        callback?: never;
+    }): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
+    setCloseException(options: {
+        closeException: Error | null;
+    }): void;
+    setCloseException(closeException: Error | null): void;
+    setFlushException(options: {
+        flushException: Error | null;
+    }): void;
+    setFlushException(flushException: Error | null): void;
+    setPartitionsForException(options: {
+        partitionsForException: Error | null;
+    }): void;
+    setPartitionsForException(partitionsForException: Error | null): void;
+    setSendException(options: {
+        sendException: Error | null;
+    }): void;
+    setSendException(sendException: Error | null): void;
+}
+
+// @public
+export type Partitioner = unknown;
+
+// @public
+export interface Producer<K = Uint8Array, V = Uint8Array> {
     [Symbol.asyncDispose](): Promise<void>;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
     flush(): Promise<void>;
+    metrics(): MetricNameMap<Metric>;
+    partitionsFor(options: {
+        topic: string;
+    }): Promise<PartitionInfo[]>;
+    partitionsFor(topic: string): Promise<PartitionInfo[]>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K, V>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
     send(options: {
-        record: ProducerRecord;
+        record: ProducerRecord<K, V>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
-    send(record: ProducerRecord): Promise<KafkaFuture<RecordMetadata>>;
+    send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
@@ -140,49 +214,169 @@ export class ProducerConfig {
 
 // @public
 export type ProducerConfigs = {
-    [key in 'acks' | 'batch.size' | 'bootstrap.resolve.timeout.ms' | 'bootstrap.servers' | 'buffer.memory' | 'buffer.memory.allocation.strategy' | 'client.dns.lookup' | 'client.id' | 'client.rack' | 'compression.gzip.level' | 'compression.lz4.level' | 'compression.type' | 'compression.zstd.level' | 'config.providers' | 'connections.max.idle.ms' | 'delivery.timeout.ms' | 'enable.idempotence' | 'enable.metrics.push' | 'interceptor.classes' | 'key.serializer' | 'linger.ms' | 'max.block.ms' | 'max.in.flight.requests.per.connection' | 'max.request.size' | 'metadata.cluster.check.enable' | 'metadata.max.age.ms' | 'metadata.max.idle.ms' | 'metadata.recovery.rebootstrap.trigger.ms' | 'metadata.recovery.strategy' | 'metric.reporters' | 'metrics.num.samples' | 'metrics.recording.level' | 'metrics.sample.window.ms' | 'partitioner.adaptive.partitioning.enable' | 'partitioner.availability.timeout.ms' | 'partitioner.class' | 'partitioner.ignore.keys' | 'partitioner.rack.aware' | 'receive.buffer.bytes' | 'reconnect.backoff.max.ms' | 'reconnect.backoff.ms' | 'request.timeout.ms' | 'retries' | 'retry.backoff.max.ms' | 'retry.backoff.ms' | 'sasl.client.callback.handler.class' | 'sasl.jaas.config' | 'sasl.kerberos.kinit.cmd' | 'sasl.kerberos.min.time.before.relogin' | 'sasl.kerberos.service.name' | 'sasl.kerberos.ticket.renew.jitter' | 'sasl.kerberos.ticket.renew.window.factor' | 'sasl.login.callback.handler.class' | 'sasl.login.class' | 'sasl.login.connect.timeout.ms' | 'sasl.login.read.timeout.ms' | 'sasl.login.refresh.buffer.seconds' | 'sasl.login.refresh.min.period.seconds' | 'sasl.login.refresh.window.factor' | 'sasl.login.refresh.window.jitter' | 'sasl.login.retry.backoff.max.ms' | 'sasl.login.retry.backoff.ms' | 'sasl.mechanism' | 'sasl.oauthbearer.allow.unverified.audience' | 'sasl.oauthbearer.allow.unverified.issuer' | 'sasl.oauthbearer.assertion.algorithm' | 'sasl.oauthbearer.assertion.claim.aud' | 'sasl.oauthbearer.assertion.claim.exp.seconds' | 'sasl.oauthbearer.assertion.claim.iss' | 'sasl.oauthbearer.assertion.claim.jti.include' | 'sasl.oauthbearer.assertion.claim.nbf.seconds' | 'sasl.oauthbearer.assertion.claim.sub' | 'sasl.oauthbearer.assertion.file' | 'sasl.oauthbearer.assertion.private.key.file' | 'sasl.oauthbearer.assertion.private.key.passphrase' | 'sasl.oauthbearer.assertion.template.file' | 'sasl.oauthbearer.client.credentials.client.id' | 'sasl.oauthbearer.client.credentials.client.secret' | 'sasl.oauthbearer.clock.skew.seconds' | 'sasl.oauthbearer.expected.audience' | 'sasl.oauthbearer.expected.issuer' | 'sasl.oauthbearer.header.urlencode' | 'sasl.oauthbearer.jwks.endpoint.refresh.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.ms' | 'sasl.oauthbearer.jwks.endpoint.url' | 'sasl.oauthbearer.jwt.retriever.class' | 'sasl.oauthbearer.jwt.validator.class' | 'sasl.oauthbearer.scope' | 'sasl.oauthbearer.scope.claim.name' | 'sasl.oauthbearer.sub.claim.name' | 'sasl.oauthbearer.token.endpoint.url' | 'security.protocol' | 'security.providers' | 'send.buffer.bytes' | 'socket.connection.setup.timeout.max.ms' | 'socket.connection.setup.timeout.ms' | 'ssl.cipher.suites' | 'ssl.enabled.protocols' | 'ssl.endpoint.identification.algorithm' | 'ssl.engine.factory.class' | 'ssl.key.password' | 'ssl.keymanager.algorithm' | 'ssl.keystore.certificate.chain' | 'ssl.keystore.key' | 'ssl.keystore.location' | 'ssl.keystore.password' | 'ssl.keystore.type' | 'ssl.protocol' | 'ssl.provider' | 'ssl.secure.random.implementation' | 'ssl.trustmanager.algorithm' | 'ssl.truststore.certificates' | 'ssl.truststore.location' | 'ssl.truststore.password' | 'ssl.truststore.type' | 'transaction.timeout.ms' | 'transaction.two.phase.commit.enable' | 'transactional.id' | 'value.serializer' | (string & {})]?: string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;
+    [key in 'acks' | 'batch.size' | 'bootstrap.resolve.timeout.ms' | 'bootstrap.servers' | 'buffer.memory' | 'buffer.memory.allocation.strategy' | 'client.dns.lookup' | 'client.id' | 'client.rack' | 'compression.gzip.level' | 'compression.lz4.level' | 'compression.type' | 'compression.zstd.level' | 'config.providers' | 'connections.max.idle.ms' | 'delivery.timeout.ms' | 'enable.idempotence' | 'enable.metrics.push' | 'interceptor.classes' | 'key.serializer' | 'linger.ms' | 'max.block.ms' | 'max.in.flight.requests.per.connection' | 'max.request.size' | 'metadata.cluster.check.enable' | 'metadata.max.age.ms' | 'metadata.max.idle.ms' | 'metadata.recovery.rebootstrap.trigger.ms' | 'metadata.recovery.strategy' | 'metric.reporters' | 'metrics.num.samples' | 'metrics.recording.level' | 'metrics.sample.window.ms' | 'partitioner.adaptive.partitioning.enable' | 'partitioner.availability.timeout.ms' | 'partitioner.class' | 'partitioner.ignore.keys' | 'partitioner.rack.aware' | 'receive.buffer.bytes' | 'reconnect.backoff.max.ms' | 'reconnect.backoff.ms' | 'request.timeout.ms' | 'retries' | 'retry.backoff.max.ms' | 'retry.backoff.ms' | 'sasl.client.callback.handler.class' | 'sasl.jaas.config' | 'sasl.kerberos.kinit.cmd' | 'sasl.kerberos.min.time.before.relogin' | 'sasl.kerberos.service.name' | 'sasl.kerberos.ticket.renew.jitter' | 'sasl.kerberos.ticket.renew.window.factor' | 'sasl.login.callback.handler.class' | 'sasl.login.class' | 'sasl.login.connect.timeout.ms' | 'sasl.login.read.timeout.ms' | 'sasl.login.refresh.buffer.seconds' | 'sasl.login.refresh.min.period.seconds' | 'sasl.login.refresh.window.factor' | 'sasl.login.refresh.window.jitter' | 'sasl.login.retry.backoff.max.ms' | 'sasl.login.retry.backoff.ms' | 'sasl.mechanism' | 'sasl.oauthbearer.allow.unverified.audience' | 'sasl.oauthbearer.allow.unverified.issuer' | 'sasl.oauthbearer.assertion.algorithm' | 'sasl.oauthbearer.assertion.claim.aud' | 'sasl.oauthbearer.assertion.claim.exp.seconds' | 'sasl.oauthbearer.assertion.claim.iss' | 'sasl.oauthbearer.assertion.claim.jti.include' | 'sasl.oauthbearer.assertion.claim.nbf.seconds' | 'sasl.oauthbearer.assertion.claim.sub' | 'sasl.oauthbearer.assertion.file' | 'sasl.oauthbearer.assertion.private.key.file' | 'sasl.oauthbearer.assertion.private.key.passphrase' | 'sasl.oauthbearer.assertion.template.file' | 'sasl.oauthbearer.client.credentials.client.id' | 'sasl.oauthbearer.client.credentials.client.secret' | 'sasl.oauthbearer.clock.skew.seconds' | 'sasl.oauthbearer.expected.audience' | 'sasl.oauthbearer.expected.issuer' | 'sasl.oauthbearer.header.urlencode' | 'sasl.oauthbearer.jwks.endpoint.refresh.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.ms' | 'sasl.oauthbearer.jwks.endpoint.url' | 'sasl.oauthbearer.jwt.retriever.class' | 'sasl.oauthbearer.jwt.validator.class' | 'sasl.oauthbearer.scope' | 'sasl.oauthbearer.scope.claim.name' | 'sasl.oauthbearer.sub.claim.name' | 'sasl.oauthbearer.token.endpoint.url' | 'security.protocol' | 'security.providers' | 'send.buffer.bytes' | 'socket.connection.setup.timeout.max.ms' | 'socket.connection.setup.timeout.ms' | 'ssl.cipher.suites' | 'ssl.enabled.protocols' | 'ssl.endpoint.identification.algorithm' | 'ssl.engine.factory.class' | 'ssl.key.password' | 'ssl.keymanager.algorithm' | 'ssl.keystore.certificate.chain' | 'ssl.keystore.key' | 'ssl.keystore.location' | 'ssl.keystore.password' | 'ssl.keystore.type' | 'ssl.protocol' | 'ssl.provider' | 'ssl.secure.random.implementation' | 'ssl.trustmanager.algorithm' | 'ssl.truststore.certificates' | 'ssl.truststore.location' | 'ssl.truststore.password' | 'ssl.truststore.type' | 'transaction.timeout.ms' | 'transaction.two.phase.commit.enable' | 'transactional.id' | 'value.serializer' | (string & {})]?: key extends 'key.serializer' | 'value.serializer' ? SerializerConfig : string extends key ? ConfigValue | SerializerConfig : ConfigValue;
 };
 
 // @public
-export class ProducerRecord {
+export class ProducerRecord<out K = never, out V = never> {
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp: bigint | number | null;
-        key: Data | null;
-        value: Data | null;
+        key: null;
+        value: null;
         headers: Iterable<Header> | null;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp: bigint | number | null;
-        key: Data | null;
-        value: Data | null;
+        key: null;
+        value: V | null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: K | null;
+        value: null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: K | null;
+        value: V | null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: null;
+        value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: K | null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp: bigint | number | null;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: null;
+        value: null;
         headers: Iterable<Header> | null;
     });
     constructor(options: {
         topic: string;
         partition: number | null;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: null;
+        value: V | null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: K | null;
+        value: null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: K | null;
+        value: V | null;
+        headers: Iterable<Header> | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: null;
+        value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: K | null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number | null;
+        timestamp?: never;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
         topic: string;
         partition?: never;
         timestamp?: never;
-        key: Data | null;
-        value: Data | null;
+        key: null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key: null;
+        value: V | null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key: K | null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key: K | null;
+        value: V | null;
         headers?: never;
     });
     constructor(options: {
@@ -190,7 +384,15 @@ export class ProducerRecord {
         partition?: never;
         timestamp?: never;
         key?: never;
-        value: Data | null;
+        value: null;
+        headers?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition?: never;
+        timestamp?: never;
+        key?: never;
+        value: V | null;
         headers?: never;
     });
     equals(options: {
@@ -199,25 +401,33 @@ export class ProducerRecord {
     equals(o: unknown): boolean;
     hashCode(): number;
     readonly headers: Headers_2;
-    readonly key: Data | null;
+    readonly key: K | null;
     readonly partition: number | null;
     readonly timestamp: bigint | null;
     toJSON(): {
         topic: string;
         partition: number | null;
         timestamp: string | null;
-        key: Data | null;
-        value: Data | null;
+        key: K | null;
+        value: V | null;
         headers: Headers_2;
     };
     readonly topic: string;
     // (undocumented)
     toString(): string;
-    readonly value: Data | null;
+    readonly value: V | null;
 }
 
 // @public
 export class RecordMetadata {
+    constructor(options: {
+        topicPartition: TopicPartition;
+        baseOffset: bigint | number;
+        batchIndex: number;
+        timestamp: bigint | number;
+        serializedKeySize: number;
+        serializedValueSize: number;
+    });
     readonly hasOffset: boolean;
     readonly hasTimestamp: boolean;
     readonly offset: bigint;

@@ -25,8 +25,18 @@
 // on. An error the core reports is built by `create`, with the core's message
 // and cause, whatever forms its class has, and keeps the core's id when it
 // differs from its class's, in the error's own non-enumerable `_ffiId`.
+//
+// A class with a payload (Java's constructor parameters other than the
+// message and the cause, and the fields its getters read, src/internal/payload.ts)
+// registers with its forms each payload parameter's `Kind` and, for each form,
+// the fields that form sets, over the whole chain; the root's constructor
+// computes them once, and each class's constructor reads its own fields with
+// `payloadOf`. `create` runs the class's constructors too (with a private
+// token instead of a form), so an error the core reports has its fields, read
+// from the payload the native layer gives it, or each field's default.
 
 import type { JavaForms } from './args';
+import type { Kind } from './payload';
 
 /**
  * An error class: what `ffiIdOf` and `setForms` take (a class whose
@@ -47,18 +57,74 @@ interface WithFfiId {
  * cause's `toString()` (Java's `Throwable(Throwable)`), Java's `null`, or a
  * fixed text.
  */
-export type FormMessage = 'message' | 'cause.toString()' | null | { readonly text: string };
+export type FormMessage =
+  | 'message'
+  | 'cause.toString()'
+  | null
+  | { readonly text: string }
+  | ((values: Readonly<Record<string, unknown>>) => string | null);
 
-/** One Java constructor form: its parameter names, in Java order, and its message. */
-export type ErrorForm = readonly [params: readonly string[], message: FormMessage];
+/** The fields a form sets, by Java field name, from the form's values. */
+export type FormFields = (values: Readonly<Record<string, unknown>>) => Record<string, unknown>;
+
+/**
+ * One Java constructor form: its parameter names, in Java order, its message
+ * (a function of the values for a message Java builds), and the payload
+ * fields it sets.
+ */
+export type ErrorForm = readonly [params: readonly string[], message: FormMessage, fields?: FormFields];
+
+/** A class's payload: the names in Java's order, each parameter's kind, each field's kind and default. */
+export interface ErrorPayload {
+  /** Every parameter name of the forms, in the order a form error lists them. */
+  readonly order?: readonly string[];
+  /** The kind of each payload parameter (not `message` or `cause`). */
+  readonly params?: Readonly<Record<string, Kind>>;
+  /**
+   * Each payload field of the class's chain: its kind and its value in an
+   * error the core reports without it.
+   */
+  readonly fields?: Readonly<Record<string, readonly [kind: Kind, coreDefault: unknown]>>;
+}
 
 interface Registered {
   readonly name: string;
   readonly forms: readonly ErrorForm[];
+  readonly payload: ErrorPayload;
   matcher: JavaForms | null;
 }
 
 const registered = new WeakMap<ErrorClassLike, Registered>();
+
+/** The arguments `create` passes a class's constructor: no form's. */
+const CORE = Symbol('core');
+
+/** What `create` hands the constructors of the error it builds. */
+interface CoreArgs {
+  readonly token: typeof CORE;
+  readonly message: string;
+  readonly cause: unknown;
+  readonly payload: Readonly<Record<string, unknown>> | undefined;
+}
+
+/** The fields `errorArgs` computed, until `init` gives them to the new error. */
+let pendingFields: Record<string, unknown> | null = null;
+
+/** The payload fields of each error, read by its classes' constructors. */
+const fieldsOf = new WeakMap<object, Readonly<Record<string, unknown>>>();
+
+function isCoreArgs(args: readonly unknown[]): args is readonly [CoreArgs] {
+  return args.length === 1 && typeof args[0] === 'object' && args[0] !== null && (args[0] as Partial<CoreArgs>).token === CORE;
+}
+
+/**
+ * Whether a constructor's arguments are `create`'s (an error the core or the
+ * binding builds, whatever its class): an abstract base's guard lets them
+ * through.
+ */
+export function isCreate(args: readonly unknown[]): boolean {
+  return isCoreArgs(args);
+}
 
 /** The FFI id `cls` itself declares (its own static `_ffiId`), or `undefined`. */
 export function ownFfiId(cls: ErrorClassLike): number | undefined {
@@ -83,8 +149,8 @@ export function instanceFfiId(error: object): number | undefined {
 }
 
 /** Registers the Java constructor forms of a generated class, in Java declaration order. */
-export function setForms(cls: ErrorClassLike, forms: readonly ErrorForm[]): void {
-  registered.set(cls, { name: cls.name, forms, matcher: null });
+export function setForms(cls: ErrorClassLike, forms: readonly ErrorForm[], payload: ErrorPayload = {}): void {
+  registered.set(cls, { name: cls.name, forms, payload, matcher: null });
 }
 
 /** The nearest class at or above `cls` with registered forms. */
@@ -126,7 +192,9 @@ function matcherOf(r: Registered): JavaForms {
   const { JavaForms: Matcher } = require('./args') as typeof import('./args');
   const singles = new Set(r.forms.filter(([params]) => params.length === 1).map(([params]) => params[0]));
   // A bare value is a message when it is a string or null, a cause when it
-  // is an Error (or null, when the class has no message on its own).
+  // is an Error (or null, when the class has no message on its own); a
+  // payload parameter is given by name only, `{ unauthorizedTopics }` (root
+  // CLAUDE.md, JavaScript Binding Conventions, Errors, Q39).
   const bareTypes: Record<string, (value: unknown) => boolean> = {};
   if (singles.has('message')) bareTypes.message = isMessage;
   if (singles.has('cause')) bareTypes.cause = singles.has('message') ? isError : isErrorOrNull;
@@ -134,8 +202,9 @@ function matcherOf(r: Registered): JavaForms {
     r.name,
     r.forms.map(([params]) => params),
     {
-      order: ['message', 'cause'].filter((p) => r.forms.some(([params]) => params.includes(p))),
+      order: r.payload.order ?? ['message', 'cause'].filter((p) => r.forms.some(([params]) => params.includes(p))),
       bareTypes,
+      optionsOnly: [...singles].filter((p) => p !== 'message' && p !== 'cause'),
       // The forms as JavaScript calls them, so the ES2022
       // `new Error(message, { cause })` throws `KafkaError() takes one of (),
       // (message), (cause), ({ message, cause }); got 2 arguments` (root
@@ -158,25 +227,58 @@ function matcherOf(r: Registered): JavaForms {
 export function errorArgs(cls: ErrorClassLike, args: readonly unknown[]): [string, { cause: unknown } | undefined] {
   const r = formsOf(cls);
   const name = cls.name;
+  if (isCoreArgs(args)) {
+    const { message, cause, payload } = args[0];
+    const fields: Record<string, unknown> = {};
+    for (const [field, [kind, coreDefault]] of Object.entries(r?.payload.fields ?? {})) {
+      const raw = payload?.[field];
+      fields[field] = raw === undefined ? coreDefault : kind.core(raw);
+    }
+    pendingFields = fields;
+    return [message, cause === undefined ? undefined : { cause }];
+  }
   if (r === undefined || r.forms.length === 0) {
-    throw new TypeError(`${name} cannot be constructed: its Java constructors take a payload the client does not translate yet`);
+    throw new TypeError(`${name} cannot be constructed: its Java constructors take a type the client does not translate yet`);
   }
   const matcher = matcherOf(r);
   const first = args[0];
-  const [params, message] = r.forms[matcher.match(first, args.length)];
+  const [params, message, formFields] = r.forms[matcher.match(first, args.length)];
   const cause = params.includes('cause') ? matcher.value(first, 'cause') : undefined;
+  // The form's values: the message checked, each payload parameter taken by
+  // its kind, in Java's order, before the message Java builds from them.
+  const values: Record<string, unknown> = {};
+  for (const p of params) {
+    const v = matcher.value(first, p);
+    if (p === 'message') {
+      if (v !== null && typeof v !== 'string') throw new TypeError(`message must be a string, not ${kind(v)}`);
+      values[p] = v;
+    } else if (p === 'cause') values[p] = v;
+    else {
+      const k = r.payload.params?.[p];
+      values[p] = k === undefined ? v : k.take(v, p);
+    }
+  }
   let text: string;
   if (message === null) text = '';
+  else if (typeof message === 'function') text = message(values) ?? '';
   else if (message === 'message') {
-    const m = matcher.value(first, 'message');
-    if (m !== null && typeof m !== 'string') throw new TypeError(`message must be a string, not ${kind(m)}`);
-    text = m ?? '';
+    text = (values.message as string | null) ?? '';
   } else if (message === 'cause.toString()') {
     // Java's (Throwable cause): the message is cause.toString(), null for a null cause.
     // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's (Throwable cause) constructor takes cause.toString(), whatever the cause is
     text = cause === null || cause === undefined ? '' : String(cause);
   } else text = message.text;
+  pendingFields = formFields === undefined ? {} : formFields(values);
   return [text, params.includes('cause') ? { cause } : undefined];
+}
+
+/**
+ * The payload fields of `self`, a newly constructed error: what its form
+ * set, or, for an error `create` built, what the core reported. Its classes'
+ * constructors read their own fields from it.
+ */
+export function payloadOf(self: object): Readonly<Record<string, unknown>> {
+  return fieldsOf.get(self) ?? {};
 }
 
 /**
@@ -185,18 +287,33 @@ export function errorArgs(cls: ErrorClassLike, args: readonly unknown[]): [strin
  */
 export function init(self: Error, cls: ErrorClassLike): void {
   Object.defineProperty(self, 'name', { value: cls.name, enumerable: false, configurable: true, writable: true });
+  if (pendingFields !== null) {
+    fieldsOf.set(self, pendingFields);
+    pendingFields = null;
+  }
 }
 
 /**
  * An error of class `cls` with `message` and, when it is not `undefined`,
  * `cause`, whatever constructor forms the class has: the error the core
  * reported, or one the binding throws itself. `id` is the FFI id the core
- * reported, kept for this error when it differs from its class's.
+ * reported, kept for this error when it differs from its class's. `payload`
+ * is the core's payload of the error, by Java field name, as native/error.c
+ * reads it; a field it lacks keeps its class's default.
  */
-export function create<T extends Error>(cls: abstract new (...args: never[]) => T, message: string, cause?: unknown, id?: number): T {
-  const error = Reflect.construct(Error, cause === undefined ? [message] : [message, { cause }], cls) as T;
-  // Reflect.construct never runs `cls`'s constructor, so V8 skips every frame
-  // looking for it: capture the stack again, from the caller of `create`.
+export function create<T extends Error>(
+  cls: abstract new (...args: never[]) => T,
+  message: string,
+  cause?: unknown,
+  id?: number,
+  payload?: Readonly<Record<string, unknown>>,
+): T {
+  const coreArgs: CoreArgs = { token: CORE, message, cause, payload };
+  // The class's constructors run (each sets its payload fields), given the
+  // private token instead of a form: the root's `errorArgs` reads it.
+  const error = Reflect.construct(cls, [coreArgs]) as T;
+  // The stack would start in the classes' constructors: capture it again,
+  // from the caller of `create`.
   Error.captureStackTrace(error, create);
   init(error, cls);
   if (id !== undefined && id !== ffiIdOf(cls)) {

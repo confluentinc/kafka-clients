@@ -16,7 +16,7 @@
 // the Java source of `org.apache.kafka.common.errors.RetriableException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../../internal/throwable';
+import { isCreate, setForms } from '../../internal/throwable';
 import { ApiError } from './api_error';
 
 /**
@@ -72,7 +72,7 @@ export abstract class RetriableError extends ApiError {
    */
   constructor();
   constructor(...args: unknown[]) {
-    if (new.target === RetriableError) {
+    if (new.target === RetriableError && !isCreate(args)) {
       throw new TypeError('RetriableError is an abstract catch-only base; it is never thrown directly');
     }
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));

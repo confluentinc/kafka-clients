@@ -26,11 +26,9 @@
 // Only ProducerService is registered: the binding has no consumer or admin
 // client yet. Within it, the RPCs for what the JS producer does not have yet
 // are deliberately left out, so grpc-js answers them with UNIMPLEMENTED rather
-// than this server inventing a result:
-//   - InitTransactions, BeginTransaction, CommitTransaction, AbortTransaction,
-//     SendOffsetsToTransaction: no transaction surface;
-//   - PartitionsFor: no partitionsFor();
-//   - Metrics: no metrics().
+// than this server inventing a result: InitTransactions, BeginTransaction,
+// CommitTransaction, AbortTransaction and SendOffsetsToTransaction, as there
+// is no transaction surface.
 // The tests needing them are skipped for this backend only, by JS_GRPC_SKIPS in
 // rust/Makefile, each with the condition for removing its skip.
 //
@@ -53,15 +51,16 @@ const path = require('node:path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 
-const { KafkaProducer } = require('../dist/producer');
+const { KafkaProducer, MockProducer } = require('../dist/producer');
 const {
   CallbackLog,
-  LOCAL_UNSUPPORTED_OPERATION,
   REQUEST_TIMED_OUT,
   futureError,
   int64,
   kafkaErrorToProto,
   makeLoggingDeliveryCallback,
+  metricToProto,
+  partitionInfoToProto,
   protoToProducerRecord,
   recordMetadataToProto,
   serverError,
@@ -135,6 +134,8 @@ class ProducerService {
       CreateProducer: unary(this.createProducer),
       Send: unary(this.send),
       Flush: unary(this.flush),
+      PartitionsFor: unary(this.partitionsFor),
+      Metrics: unary(this.metrics),
       Close: unary(this.close),
       CloseTimeout: unary(this.closeTimeout),
       GetCallbackLog: unary(this.getCallbackLog),
@@ -143,16 +144,15 @@ class ProducerService {
 
   async createProducer(request) {
     const config = request.config || {};
-    if (selectsMock(config)) {
-      // Python creates a MockProducer here; the JS binding has none.
-      return {
-        producer_id: 0,
-        error: serverError('MockProducer is not implemented', LOCAL_UNSUPPORTED_OPERATION),
-      };
-    }
     let producer;
     try {
-      producer = new KafkaProducer({ configs: config });
+      // An empty config selects a MockProducer, as Python's server does:
+      // Java's MockProducer(autoComplete, partitioner, keySerializer,
+      // valueSerializer), completing every send at once, with no
+      // serializers (the records' bytes are kept as they are).
+      producer = selectsMock(config)
+        ? new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null })
+        : new KafkaProducer({ configs: config });
     } catch (e) {
       return { producer_id: 0, error: kafkaErrorToProto(e) };
     }
@@ -208,6 +208,32 @@ class ProducerService {
       return { error: kafkaErrorToProto(e) };
     }
     return {};
+  }
+
+  async partitionsFor(request) {
+    const id = idOf(request.producer_id);
+    const producer = this.#producers.get(id);
+    if (producer === undefined) return { error: unknownProducer(id) };
+    let partitions;
+    try {
+      partitions = await producer.partitionsFor(request.topic === undefined ? '' : request.topic);
+    } catch (e) {
+      return { error: kafkaErrorToProto(e) };
+    }
+    return { partitions: partitions.map(partitionInfoToProto) };
+  }
+
+  async metrics(request) {
+    const id = idOf(request.producer_id);
+    const producer = this.#producers.get(id);
+    if (producer === undefined) return { error: unknownProducer(id) };
+    let metrics;
+    try {
+      metrics = producer.metrics();
+    } catch (e) {
+      return { error: kafkaErrorToProto(e) };
+    }
+    return { metrics: { metrics: [...metrics.values()].map(metricToProto) } };
   }
 
   async close(request) {

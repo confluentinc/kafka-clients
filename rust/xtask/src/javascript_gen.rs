@@ -72,11 +72,11 @@ pub(crate) fn header(from: &str) -> String {
 /// The src/ folders whose `index.ts` is hand-written (they also hold
 /// hand-written modules); the generator owns only the marked block there.
 /// `""` is `src/` itself.
-const MIXED_DIRS: &[&str] = &["", "common", "common/config", "producer"];
+const MIXED_DIRS: &[&str] = &["", "common", "common/config", "common/metrics", "consumer", "producer"];
 
 /// The src/ folders whose `index.ts` is hand-written and which hold no
 /// generated module: their parents' blocks do not export them.
-const HAND_WRITTEN_DIRS: &[&str] = &["common/security", "common/security/auth"];
+const HAND_WRITTEN_DIRS: &[&str] = &["common/record", "common/security", "common/security/auth"];
 
 pub(crate) const EXPORTS_BEGIN: &str = "// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)";
 pub(crate) const EXPORTS_END: &str = "// END GENERATED EXPORTS";
@@ -98,6 +98,9 @@ pub(crate) struct JsModule {
     pub stem: String,
     pub name: String,
     pub content: String,
+    /// What the module leaves out, each a sentence its header comment holds
+    /// too, which a generated `index.ts` lists in its `@packageDocumentation`.
+    pub notes: Vec<String>,
 }
 
 /// `import` path from a module in `from_dir` to `src/<to>` (`to` a path under
@@ -212,7 +215,13 @@ pub(crate) fn tsdoc(text: &str, indent: &str) -> String {
             emit(&mut out, "");
             blank = false;
         }
-        if let Some(m) = marker {
+        if trimmed.starts_with('@') {
+            // A TSDoc block tag (`@param`, `@returns`, ...) starts a block of
+            // its own, its continuation lines indented by two.
+            flush(&mut out, &mut block);
+            let words = trimmed.split_whitespace().map(String::from).collect();
+            block = Some((lead.to_string(), format!("{lead}  "), words));
+        } else if let Some(m) = marker {
             flush(&mut out, &mut block);
             let first = format!("{lead}{m}");
             let cont = " ".repeat(first.len());
@@ -355,6 +364,23 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
                 format!("src/{dir}")
             }
         ));
+        // What the classes leave out, in the package's documentation (root
+        // CLAUDE.md, JavaScript Binding Conventions, Documentation, Q64).
+        let noted: Vec<String> = members
+            .iter()
+            .flat_map(|m| m.notes.iter().map(move |n| format!("- `{}`: {n}", m.name)))
+            .collect();
+        if !noted.is_empty() {
+            text.push_str(&tsdoc(
+                &format!(
+                    "The classes of the Java package this client has, generated from the Java sources.\n\n\
+                     What they leave out:\n\n{}\n\n@packageDocumentation",
+                    noted.join("\n")
+                ),
+                "",
+            ));
+            text.push_str("\n\n");
+        }
         for l in &lines {
             text.push_str(l);
             text.push('\n');
@@ -400,10 +426,10 @@ fn splice(current: &str, begin: &str, end: &str, block: &str, path: &Path) -> Re
 /// Every generated file of the Node.js client: `(path, content)`.
 pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let lib = repo_root.join(JS_SRC);
-    let (mut modules, registry) = crate::error_hierarchy::js::outputs(repo_root)?;
-    let mut out = vec![registry];
+    let (mut modules, files) = crate::error_hierarchy::js::outputs(repo_root)?;
+    let mut out = files;
     modules.extend(crate::config_consts::js::modules(repo_root)?);
-    out.push(crate::config_types::js::output(repo_root)?);
+    out.extend(crate::config_types::js::outputs(repo_root)?);
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for m in &modules {
         if !seen.insert((m.dir.clone(), m.stem.clone())) {
@@ -554,6 +580,7 @@ mod tests {
             stem: "x_error".into(),
             name: "XError".into(),
             content: String::new(),
+            notes: Vec::new(),
         };
         let lines = export_lines(&[&m]);
         assert_eq!(lines, ["export { XError } from './x_error';"]);

@@ -46,6 +46,7 @@
         "addon.c",
         "callback_queue.c",
         "error.c",
+        "error_payload.c",
         "producer.c",
         "record.c"
       ],

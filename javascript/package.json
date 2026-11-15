@@ -48,6 +48,10 @@
       "types": "./dist/common/protocol/types/index.d.ts",
       "default": "./dist/common/protocol/types/index.js"
     },
+    "./common/record": {
+      "types": "./dist/common/record/index.d.ts",
+      "default": "./dist/common/record/index.js"
+    },
     "./common/requests": {
       "types": "./dist/common/requests/index.d.ts",
       "default": "./dist/common/requests/index.js"
@@ -59,6 +63,10 @@
     "./common/security/auth": {
       "types": "./dist/common/security/auth/index.d.ts",
       "default": "./dist/common/security/auth/index.js"
+    },
+    "./common/serialization": {
+      "types": "./dist/common/serialization/index.d.ts",
+      "default": "./dist/common/serialization/index.js"
     },
     "./consumer": {
       "types": "./dist/consumer/index.d.ts",
@@ -95,6 +103,9 @@
       "common/protocol/types": [
         "dist/common/protocol/types/index.d.ts"
       ],
+      "common/record": [
+        "dist/common/record/index.d.ts"
+      ],
       "common/requests": [
         "dist/common/requests/index.d.ts"
       ],
@@ -103,6 +114,9 @@
       ],
       "common/security/auth": [
         "dist/common/security/auth/index.d.ts"
+      ],
+      "common/serialization": [
+        "dist/common/serialization/index.d.ts"
       ],
       "consumer": [
         "dist/consumer/index.d.ts"

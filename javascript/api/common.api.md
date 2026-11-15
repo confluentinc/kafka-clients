@@ -86,6 +86,172 @@ export namespace KafkaFuture {
     export type BiConsumer<A, B> = (a: A, b: B) => void;
 }
 
-// (No @packageDocumentation comment for this package)
+// @public
+export interface Metric {
+    metricName(): MetricName;
+    metricValue(): unknown;
+}
+
+// @public
+export class MetricName {
+    constructor(options: {
+        name: string;
+        group: string;
+        description: string;
+        tags: Map<string, string> | Readonly<Record<string, string>>;
+    });
+    description(): string;
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    group(): string;
+    hashCode(): number;
+    name(): string;
+    tags(): Map<string, string>;
+    toString(): string;
+}
+
+// @public
+export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
+    [Symbol.iterator](): IterableIterator<[MetricName, V]>;
+    constructor();
+    constructor(entries: Iterable<readonly [MetricName, V]>);
+    entries(): IterableIterator<[MetricName, V]>;
+    forEach(callback: (value: V, key: MetricName, map: MetricNameMap<V>) => void): void;
+    get(key: MetricName): V | null;
+    has(key: MetricName): boolean;
+    keys(): IterableIterator<MetricName>;
+    size(): number;
+    toJSON(): Record<string, V>;
+    values(): IterableIterator<V>;
+}
+
+// @public
+export class Node {
+    constructor(options: {
+        id: number;
+        host: string | null;
+        port: number;
+        rack: string | null;
+        isFenced: boolean;
+    });
+    constructor(options: {
+        id: number;
+        host: string | null;
+        port: number;
+        rack: string | null;
+        isFenced?: never;
+    });
+    constructor(options: {
+        id: number;
+        host: string | null;
+        port: number;
+        rack?: never;
+        isFenced?: never;
+    });
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
+    readonly hasRack: boolean;
+    readonly host: string | null;
+    readonly id: number;
+    readonly idString: string;
+    readonly isEmpty: boolean;
+    readonly isFenced: boolean;
+    static noNode(): Node;
+    readonly port: number;
+    readonly rack: string | null;
+    toString(): string;
+}
+
+// @public
+export class PartitionInfo {
+    constructor(options: {
+        topic: string | null;
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node> | null;
+        inSyncReplicas: Iterable<Node> | null;
+        offlineReplicas?: never;
+    });
+    constructor(options: {
+        topic: string | null;
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node> | null;
+        inSyncReplicas: Iterable<Node> | null;
+        offlineReplicas: Iterable<Node> | null;
+    });
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
+    inSyncReplicas(): Node[] | null;
+    leader(): Node | null;
+    offlineReplicas(): Node[] | null;
+    partition(): number;
+    replicas(): Node[] | null;
+    topic(): string | null;
+    toString(): string;
+}
+
+// @public
+export class TopicPartition {
+    constructor(options: {
+        topic: string | null;
+        partition: number;
+    });
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
+    readonly partition: number;
+    toJSON(): {
+        topic: string | null;
+        partition: number;
+    };
+    readonly topic: string | null;
+    toString(): string;
+}
+
+// @public
+export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
+    [Symbol.iterator](): IterableIterator<[TopicPartition, V]>;
+    constructor();
+    constructor(entries: Iterable<readonly [TopicPartition | null, V]>);
+    clear(): void;
+    delete(key: TopicPartition | null): boolean;
+    entries(): IterableIterator<[TopicPartition, V]>;
+    forEach(callback: (value: V, key: TopicPartition, map: TopicPartitionMap<V>) => void): void;
+    get(key: TopicPartition | null): V | null;
+    has(key: TopicPartition | null): boolean;
+    keys(): IterableIterator<TopicPartition>;
+    set(key: TopicPartition | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
+}
+
+// @public
+export class TopicPartitionSet implements Iterable<TopicPartition> {
+    [Symbol.iterator](): IterableIterator<TopicPartition>;
+    constructor();
+    constructor(values: Iterable<TopicPartition | null>);
+    add(value: TopicPartition | null): this;
+    clear(): void;
+    delete(value: TopicPartition | null): boolean;
+    forEach(callback: (value: TopicPartition, key: TopicPartition, set: TopicPartitionSet) => void): void;
+    has(value: TopicPartition | null): boolean;
+    size(): number;
+    toJSON(): Array<TopicPartition | null>;
+    toString(): string;
+    values(): IterableIterator<TopicPartition>;
+}
 
 ```

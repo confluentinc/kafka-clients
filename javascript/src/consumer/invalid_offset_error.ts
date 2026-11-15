@@ -16,8 +16,9 @@
 // the Java source of `org.apache.kafka.clients.consumer.InvalidOffsetException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../internal/throwable';
 import { KafkaError } from '../common/kafka_error';
+import type { TopicPartitionSet } from '../common/topic_partition_set';
+import { isCreate, setForms } from '../internal/throwable';
 
 /**
  * Thrown when the offset for a set of partitions is invalid (either undefined
@@ -48,11 +49,18 @@ export abstract class InvalidOffsetError extends KafkaError {
    */
   constructor(message: string | null);
   constructor(...args: unknown[]) {
-    if (new.target === InvalidOffsetError) {
+    if (new.target === InvalidOffsetError && !isCreate(args)) {
       throw new TypeError('InvalidOffsetError is an abstract catch-only base; it is never thrown directly');
     }
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));
   }
+
+  /**
+   * Java's abstract `partitions()`.
+   *
+   * @returns what the subclass gives
+   */
+  abstract partitions(): TopicPartitionSet;
 }
 
 setForms(InvalidOffsetError, [

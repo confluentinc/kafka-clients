@@ -26,6 +26,7 @@ const assert = require('node:assert/strict');
 const { encodeLikeJava } = require('../../../dist/internal/encode');
 const { configEntries } = require('../../../dist/internal/config');
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 // [what, string, Java's StringSerializer bytes, as hex]
@@ -50,7 +51,8 @@ test("strings are encoded as Java's StringSerializer encodes them, a lone surrog
   assert.equal(Buffer.from('a\uD800b', 'utf8').toString('hex'), '61efbfbd62');
 });
 
-test('a key, a value and a header key are encoded the Java way at send', () => {
+test('a key and a value through stringSerializer(), and a header key, are encoded the Java way', () => {
+  const serializer = stringSerializer();
   for (const [what, s, hex] of JAVA) {
     const record = new ProducerRecord({
       topic: 't',
@@ -59,7 +61,9 @@ test('a key, a value and a header key are encoded the Java way at send', () => {
       value: s,
       headers: [new Header({ key: s, value: null })],
     });
-    const [, , , key, value, headers] = record.internalToNative();
+    const key = serializer.serialize({ topic: 't', headers: record.headers, data: record.key });
+    const value = serializer.serialize({ topic: 't', headers: record.headers, data: record.value });
+    const [, , , , , headers] = record.internalToNative(key, value);
     assert.equal(Buffer.from(key).toString('hex'), hex, `${what}: key`);
     assert.equal(Buffer.from(value).toString('hex'), hex, `${what}: value`);
     // The header key crosses as its bytes, encodeLikeJava's.
