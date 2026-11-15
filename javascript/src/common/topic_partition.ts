@@ -137,14 +137,15 @@ export class TopicPartition {
 
   /**
    * The key of a `TopicPartitionMap` or `TopicPartitionSet`, the fields
-   * `equals` compares: `<topic>:<partition>`, such as `'orders:3'`, or the
-   * partition alone for a null topic. The partition is an integer, so two
-   * topic partitions never share a key. Called by `TopicPartitionMap` and
-   * `TopicPartitionSet`.
+   * `equals` compares: `<topic>:<partition>`, such as `'orders:3'`, or
+   * `-<partition>` for a null topic, which has no `:` and is never an
+   * integer-like property name, so `toJSON()` keeps the entries' order. The
+   * partition is an integer, so two topic partitions never share a key.
+   * Called by `TopicPartitionMap` and `TopicPartitionSet`.
    *
    * @internal
    */
   internalKey(): string {
-    return this.topic === null ? String(this.partition) : `${this.topic}:${this.partition}`;
+    return this.topic === null ? `-${this.partition}` : `${this.topic}:${this.partition}`;
   }
 }
