@@ -32,8 +32,14 @@ const { project, lint, lintRunner } = require('./_project');
 
 const ROOT = path.join(__dirname, '..', '..');
 
-/** Checks the shape of `rules` and returns their names. */
+/**
+ * Checks the shape of `rules` and returns their names.
+ *
+ * @param {import('./_project').Check[]} rules
+ * @returns {string[]}
+ */
 function shape(rules) {
+  /** @type {string[]} */
   const names = [];
   for (const rule of rules) {
     assert.match(rule.name, /^check-[a-z-]+$/);
@@ -93,7 +99,15 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-config',
   ]);
   // The three rules split by file type: each half reads its own files.
-  const half = (list, name) => list.find((r) => r.name === name).PART;
+  /**
+   * @param {import('./_project').Check[]} list
+   * @param {string} name
+   */
+  const half = (list, name) => {
+    const rule = list.find((r) => r.name === name);
+    assert.ok(rule, name);
+    return rule.PART;
+  };
   assert.deepEqual(
     ['check-no-todo', 'check-exception-word', 'check-java-line'].map((n) => [half(ESLINT_CHECKS, n), half(RULES, n)]),
     [
@@ -145,6 +159,7 @@ test('a rule that throws fails with the reason, and the others still run', () =>
 test('a rule that reports no positive item count fails', () => {
   const silent = { name: 'check-silent', kinds: ['s'], needs: [], hint: '', check: () => ({ findings: [] }) };
   const broken = { name: 'check-broken', kinds: ['b'], needs: [], hint: '', check: () => ({ checked: 1 }) };
+  // @ts-expect-error a check with no findings list: the runner reports that it cannot run
   const r = lintRunner(project({}), [], { rules: [silent, broken] });
   assert.equal(r.status, 1);
   assert.deepEqual(r.err, [
@@ -240,12 +255,14 @@ test("the real tree without baselines: exactly the findings the baselines list, 
     env: { ...process.env, KAFKA_LINT_NO_BASELINE: '1' },
     maxBuffer: 64 * 1024 * 1024,
   });
-  const keys = JSON.parse(r.stdout)
+  // ESLint's json formatter: one entry per file, with its messages.
+  const report = /** @type {{ messages: { ruleId: string | null, messageId?: string, message: string }[] }[]} */ (JSON.parse(r.stdout));
+  const keys = report
     .flatMap((f) => f.messages)
     .filter((m) => m.ruleId && m.ruleId.startsWith('kafka/'))
     .map((m) => `${m.messageId} ${m.message.slice(0, m.message.indexOf(': '))}`)
     .sort();
-  const listed = (file) =>
+  const listed = (/** @type {string} */ file) =>
     fs
       .readFileSync(path.join(ROOT, file), 'utf8')
       .split('\n')

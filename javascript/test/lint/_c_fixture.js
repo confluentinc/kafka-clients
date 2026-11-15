@@ -202,12 +202,23 @@ const FILES = {
     '// The one place a string becomes bytes (its body is no concern of the C rules).\nexport function encodeLikeJava(s: string): string {\n  return s;\n}\n',
 };
 
-/** The rule with the fixture's allowlists in place of the real tree's. */
+/**
+ * The rule with the fixture's allowlists in place of the real tree's.
+ *
+ * @template {object} T
+ * @param {T} rule
+ * @param {Record<string, unknown>} lists
+ * @returns {T}
+ */
 function withLists(rule, lists) {
   return Object.assign(Object.create(rule), lists);
 }
 
-/** The allowlists that fit the fixture. */
+/**
+ * The allowlists that fit the fixture.
+ *
+ * @type {Record<string, Record<string, { key: string, reason: string }[]>>}
+ */
 const LISTS = {
   'check-out-err': { ALLOWED: [] },
   'check-cb-twin-only': { ALLOWED: [] },

@@ -27,6 +27,10 @@ const RULE = 'check-waiting-call-promise';
 
 // The fixture has no KafkaFuture: the rule runs without the real tree's
 // DEPENDANTS, which would match nothing there.
+/**
+ * @param {string} root
+ * @param {string[]} names
+ */
 const lint = (root, names) => lintAll(root, names, { rules: [withLists(WAITING, { DEPENDANTS: [] })] });
 
 const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, ...FILES, ...files });
@@ -106,6 +110,7 @@ test('a native function with no registration, or no C definition, is unresolved'
 test('cannot run without the header, or the C sources', () => {
   let r = lint(project({ 'tsconfig.json': TSCONFIG, ...FILES, 'confluent_kafka_bindings.h': undefined }), [RULE]);
   assert.match(r.err[1], /^❌ check-waiting-call-promise: cannot run, no bindings header at /);
+  /** @type {Record<string, string | undefined>} */
   const files = { ...FILES };
   delete files['native/addon.c'];
   delete files['native/producer.c'];

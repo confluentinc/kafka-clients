@@ -76,7 +76,7 @@ test('cannot run without the C sources', () => {
 
 test("two files' static hooks of one name are each checked, as their own file's", () => {
   const noop = 'static void noop_notify(void* opaque) {\n    (void)opaque;\n}\n\n';
-  const install = (name) =>
+  const install = (/** @type {string} */ name) =>
     `void ${name}(void* p) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_P__set_callbacks_notify_err(p, noop_notify, NULL, &ffi_err));\n}\n`;
   const r = runN(RULE, {
     'native/producer.c': PRODUCER_C.replace('void js_setup(void* p) {', `${noop}${install('js_teardown')}\nvoid js_setup(void* p) {`),

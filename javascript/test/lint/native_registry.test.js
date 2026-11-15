@@ -81,6 +81,7 @@ test('a use through an alias of the handle counts', () => {
 });
 
 test('cannot run without the C sources', () => {
+  /** @type {Record<string, string | undefined>} */
   const files = { ...FILES };
   delete files['native/addon.c'];
   delete files['native/producer.c'];

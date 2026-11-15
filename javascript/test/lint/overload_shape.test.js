@@ -33,7 +33,7 @@ const REC_PER_FORM = REC.replace(
 ).replace('close(options?: { p0?: number }): void;', 'close(): void;\n  close(options: { p0: number }): void;');
 
 /** The findings but `signature-per-form`'s, which its own test covers: the tests of one options object's names. */
-const shapeFindings = (r) =>
+const shapeFindings = (/** @type {import('./_project').Report} */ r) =>
   findings(r).filter((f) => !f.includes('with one options signature: give each form its own overload signature'));
 
 test('overload sets taken as one options object, one signature per form, and the bare value of a one-parameter form, pass: the constructor, close(), close({p0}), close(p0)', () => {
@@ -135,7 +135,7 @@ test("one signature per Java form: each names exactly its form's parameters", ()
       ],
     }),
   ]);
-  const root = (signatures) =>
+  const root = (/** @type {string[]} */ signatures) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': index,
@@ -200,7 +200,7 @@ test('a Java form the options object does not name is its own finding, keyed by 
       ],
     }),
   ]);
-  const root = (options) =>
+  const root = (/** @type {string} */ options) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': index,
@@ -240,7 +240,7 @@ test('a Java form a function taking no parameter leaves out is its own finding, 
       overloads: [method('get', [], { param_names: [] }), method('get', ['long', 'TimeUnit'], { param_names: ['timeout', 'unit'] })],
     }),
   ]);
-  const root = (signature) =>
+  const root = (/** @type {string} */ signature) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': index,
@@ -314,7 +314,7 @@ test('an option every form takes is required, even one Java may take as null; sa
           }
         : c,
     );
-  const root = (options) =>
+  const root = (/** @type {string} */ options) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': javaIndex(classesWith()),
@@ -373,13 +373,13 @@ test("ProducerRecord's six forms: K and V keep their own kinds, so key and value
       overloads: forms.map(([params, names]) => method('ProducerRecord', params, { param_names: names })),
     }),
   ]);
-  const root = (options) =>
+  const root = (/** @type {string} */ options) =>
     project({
       'tsconfig.json': TSCONFIG,
       'java-index.json': index,
       'src/producer/producer_record.ts': `export class ProducerRecord {\n  constructor(options: ${options}) { void options; }\n}\n`,
     });
-  const T = (o) => `{ ${o}; }`;
+  const T = (/** @type {string} */ o) => `{ ${o}; }`;
   const rest = 'partition?: number; timestamp?: number; headers?: unknown[]';
   // topic and value required (every form takes them); key optional (not in
   // (topic, value)); partition, timestamp and headers optional.
@@ -401,6 +401,10 @@ test("ProducerRecord's six forms: K and V keep their own kinds, so key and value
 
 test("Java's long is a kind of its own, bigint: a long and an int at one position stay two options", () => {
   const { formOptionNames } = require('../../scripts/lint/rules/overload_shape');
+  /**
+   * @param {string[]} params
+   * @param {string[]} names
+   */
   const form = (params, names) => ({ params, param_names: names });
   // seek(long offset) / seek(int index): a bigint and a number, two names.
   assert.deepEqual(formOptionNames([form(['long'], ['offset']), form(['int'], ['index'])]), [['offset'], ['index']]);
@@ -432,7 +436,10 @@ test('each LEFT_OUT form names a public form of the shipped Java index (no stale
     const name = parts[parts.length - 1];
     const cls = index.classes.find((c) => c.package === pkg && c.path.join('.') === name);
     assert.ok(cls, `${key}: no Java class ${fqn}`);
-    const found = cls.overloads.some((o) => `${o.name}(${o.params.map((t) => t.replace(/<.*>$/, '')).join(',')})` === form);
+    const found = cls.overloads.some(
+      (/** @type {{ name: string, params: string[] }} */ o) =>
+        `${o.name}(${o.params.map((t) => t.replace(/<.*>$/, '')).join(',')})` === form,
+    );
     assert.ok(found, `${key}: ${fqn} has no form ${form}`);
   }
 });

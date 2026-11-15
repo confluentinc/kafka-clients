@@ -64,7 +64,14 @@ function realCopy() {
   return root;
 }
 
-/** Replaces `from` (which must occur) by `to` in root-relative file `rel`. */
+/**
+ * Replaces `from` (which must occur) by `to` in root-relative file `rel`.
+ *
+ * @param {string} root
+ * @param {string} rel
+ * @param {string} from
+ * @param {string} to
+ */
 function edit(root, rel, from, to) {
   const file = path.join(root, rel);
   const text = fs.readFileSync(file, 'utf8');
@@ -77,6 +84,11 @@ test('the unmutated copy passes every rule', () => {
   assert.equal(r.status, 0, r.text);
 });
 
+/**
+ * A mutation of the copy, and the rule (`rule`) or rules (`rules`) that must catch it.
+ *
+ * @type {{ rule?: string, rules?: string[], what: string, apply: (root: string) => void }[]}
+ */
 const MUTATIONS = [
   {
     rule: 'check-no-todo',
@@ -118,7 +130,13 @@ const MUTATIONS = [
   },
 ];
 
-/** Appends `text` as a new public module `rel` of the copy. */
+/**
+ * Appends `text` as a new public module `rel` of the copy.
+ *
+ * @param {string} root
+ * @param {string} rel
+ * @param {string} text
+ */
 function add(root, rel, text) {
   fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
   fs.writeFileSync(path.join(root, rel), text);
@@ -1048,7 +1066,8 @@ MUTATIONS.push(
 );
 
 for (const m of MUTATIONS) {
-  const rules = m.rules || [m.rule];
+  // Each mutation names its rule or its rules.
+  const rules = /** @type {string[]} */ (m.rules || [m.rule]);
   test(`${m.what} fails exactly ${rules.join(' and ')}`, () => {
     const root = realCopy();
     m.apply(root);

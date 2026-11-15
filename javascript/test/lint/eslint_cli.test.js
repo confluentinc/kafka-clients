@@ -57,19 +57,35 @@ function layout() {
   return { parent: fs.realpathSync(parent), root: fs.realpathSync(root) };
 }
 
-/** `eslint <args>` from `cwd`: `{status, messages}`, each message `<file relative to root>:<line> <rule> <text>`. */
+/**
+ * `eslint <args>` from `cwd`: `{status, messages}`, each message `<file relative to root>:<line> <rule> <text>`.
+ *
+ * @param {string} cwd
+ * @param {string} root
+ * @param {string[]} args
+ * @returns {{ status: number | null, messages: string[] }}
+ */
 function eslint(cwd, root, args) {
   const r = spawnSync(process.execPath, [BIN, '-f', 'json', ...args], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   assert.ok(r.stdout.startsWith('['), r.stderr);
   // ESLint reports real paths (a temporary directory's /var is /private/var).
   const real = fs.realpathSync(root);
-  const messages = JSON.parse(r.stdout).flatMap((f) =>
+  // ESLint's json formatter: one entry per file, with its messages.
+  const report = /** @type {{ filePath: string, messages: { line: number, ruleId: string | null, message: string }[] }[]} */ (
+    JSON.parse(r.stdout)
+  );
+  const messages = report.flatMap((f) =>
     f.messages.map((m) => `${path.relative(real, f.filePath).split(path.sep).join('/')}:${m.line} ${m.ruleId} ${m.message}`),
   );
   return { status: r.status, messages: messages.sort() };
 }
 
-/** Adds a member no Java class has to RecordMetadata (a kafka/java-members finding); returns its line. */
+/**
+ * Adds a member no Java class has to RecordMetadata (a kafka/java-members finding); returns its line.
+ *
+ * @param {string} root
+ * @returns {number}
+ */
 function addMember(root) {
   const file = path.join(root, 'src', 'producer', 'record_metadata.ts');
   const text = fs.readFileSync(file, 'utf8');
