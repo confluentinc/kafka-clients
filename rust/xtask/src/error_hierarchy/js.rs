@@ -34,9 +34,10 @@
 //! Java's constructor chain evaluated as JavaScript ([`js_eval`]), each
 //! payload parameter taken by its src/internal/payload.ts kind, and the
 //! payload getters are methods over private fields. A constructor or getter of
-//! a type the client does not translate (the consumer's `OffsetAndMetadata`,
-//! `TimestampType`) is left out and listed in the module's header comment, and
-//! so is a class in [`LEFT_OUT_PAYLOADS`]. An error the core reports carries
+//! a type the client does not translate is left out and listed in the
+//! module's header comment, and a Java nested enum is a class of a namespace
+//! merged with the class (`RecordDeserializationError.DeserializationExceptionOrigin`).
+//! An error the core reports carries
 //! its payload, read through the FFI's view of its class
 //! (`native/error_payload.c`, generated from [`CORE_READS`]); a payload field
 //! the view has no accessor for keeps its default and is listed. Java's
@@ -54,6 +55,7 @@ use super::{
     parse_ffi_enum_ids, python_name, snake, split_plus, throwable_like, CallKind, ClassInfo, Expr, Factory, GetterBody,
     Graph, JdkCtor, PyForm, PyModel, PyVal, KAFKA_EXCEPTION_FQN, TERMINAL_BASES,
 };
+use crate::java_parse::NestedEnum;
 use crate::javascript_gen::{header, js_str, rel_import, tsdoc, GeneratedFile, JsModule, JS_SRC};
 
 type Res<T> = anyhow::Result<T>;
@@ -77,15 +79,6 @@ const JS_ONLY_BUILTINS: &[(&str, &str, &[JdkCtor])] = &[(
     &[&[], &[("String", "message")]],
 )];
 
-/// The classes whose payload is not generated, with the reason: their
-/// constructors that take a payload, their payload getters and the payload of
-/// an error the core reports are left out, and listed in the module's header.
-const LEFT_OUT_PAYLOADS: &[(&str, &str)] = &[(
-    "org.apache.kafka.common.errors.RecordDeserializationException",
-    "its payload holds the consumer's `TimestampType` and Java's nested `DeserializationExceptionOrigin`, which the \
-     client does not translate before the consumer",
-)];
-
 /// A Java payload type the client translates: one of src/internal/payload.ts's
 /// kinds (how it is taken, read from the core and returned).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +93,15 @@ enum Kind {
     TopicPartition,
     TopicPartitionLongMap,
     KafkaMetric,
+    /// Java's `ByteBuffer`: a `Uint8Array` taken, a `Buffer` over the same
+    /// memory kept and returned.
+    Bytes,
+    /// Java's `Headers`: a `Headers`, kept, or an iterable of `Header`.
+    Headers,
+    /// An enum class: its TypeScript name (a nested one qualified).
+    Enum(&'static str),
+    /// Java's `Map<TopicPartition, OffsetAndMetadata>`.
+    OffsetMap,
 }
 
 impl Kind {
@@ -117,13 +119,30 @@ impl Kind {
             "TopicPartition" => Kind::TopicPartition,
             "Map<TopicPartition,Long>" => Kind::TopicPartitionLongMap,
             "KafkaMetric" => Kind::KafkaMetric,
+            "ByteBuffer" => Kind::Bytes,
+            "Headers" => Kind::Headers,
+            "TimestampType" => Kind::Enum("TimestampType"),
+            "DeserializationExceptionOrigin" => Kind::Enum("RecordDeserializationError.DeserializationExceptionOrigin"),
+            "Map<TopicPartition,OffsetAndMetadata>" => Kind::OffsetMap,
             _ => return None,
         })
+    }
+
+    /// Its kind in src/internal/payload.ts, as an expression.
+    fn expr(self) -> String {
+        match self {
+            Kind::Enum(name) => format!("P.enumOf({name})"),
+            other => format!("P.{}", other.export()),
+        }
     }
 
     /// Its export in src/internal/payload.ts.
     fn export(self) -> &'static str {
         match self {
+            Kind::Bytes => "bytes",
+            Kind::Headers => "headers",
+            Kind::Enum(_) => "enumOf",
+            Kind::OffsetMap => "topicPartitionOffsetMap",
             Kind::String => "string",
             Kind::Int => "int",
             Kind::Long => "long",
@@ -150,6 +169,10 @@ impl Kind {
             Kind::TopicPartition => "TopicPartition",
             Kind::TopicPartitionLongMap => "TopicPartitionMap<bigint | number>",
             Kind::KafkaMetric => "KafkaMetric",
+            Kind::Bytes => "Uint8Array",
+            Kind::Headers => "Headers | Iterable<Header>",
+            Kind::Enum(name) => name,
+            Kind::OffsetMap => "TopicPartitionMap<OffsetAndMetadata>",
         }
     }
 
@@ -165,6 +188,10 @@ impl Kind {
             Kind::TopicPartition => "TopicPartition",
             Kind::TopicPartitionLongMap => "TopicPartitionMap<bigint>",
             Kind::KafkaMetric => "KafkaMetric",
+            Kind::Bytes => "Buffer",
+            Kind::Headers => "Headers",
+            Kind::Enum(name) => name,
+            Kind::OffsetMap => "TopicPartitionMap<OffsetAndMetadata>",
         }
     }
 
@@ -197,6 +224,9 @@ impl Kind {
             Kind::TopicPartitions | Kind::TopicPartition => &["TopicPartition"],
             Kind::TopicPartitionLongMap => &["TopicPartitionMap"],
             Kind::KafkaMetric => &["KafkaMetric"],
+            Kind::Headers => &["Header", "Headers"],
+            Kind::Enum("TimestampType") => &["TimestampType"],
+            Kind::OffsetMap => &["OffsetAndMetadata", "TopicPartitionMap"],
             _ => &[],
         }
     }
@@ -208,8 +238,19 @@ impl Kind {
             Kind::TopicPartition => &["TopicPartition"],
             Kind::TopicPartitionLongMap => &["TopicPartitionMap"],
             Kind::KafkaMetric => &["KafkaMetric"],
+            Kind::Headers => &["Headers"],
+            Kind::Enum("TimestampType") => &["TimestampType"],
+            Kind::OffsetMap => &["OffsetAndMetadata", "TopicPartitionMap"],
             _ => &[],
         }
+    }
+
+    /// Whether a getter returns a copy of the stored collection.
+    fn copies(self) -> bool {
+        matches!(
+            self,
+            Kind::StringSet | Kind::TopicPartitions | Kind::TopicPartitionLongMap | Kind::OffsetMap
+        )
     }
 }
 
@@ -220,6 +261,10 @@ fn type_module(name: &str) -> &'static str {
         "TopicPartitionSet" => "common/topic_partition_set",
         "TopicPartitionMap" => "common/topic_partition_map",
         "KafkaMetric" => "common/metrics/kafka_metric",
+        "Header" => "common/header/header",
+        "Headers" => "common/header/headers",
+        "TimestampType" => "common/record/timestamp_type",
+        "OffsetAndMetadata" => "consumer/offset_and_metadata",
         other => unreachable!("no module for `{other}`"),
     }
 }
@@ -228,6 +273,12 @@ fn type_module(name: &str) -> &'static str {
 /// `payload_<conv>` helper).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CoreConv {
+    TopicPartition,
+    Int64,
+    EnumOrdinal(&'static str),
+    Bytes,
+    Headers,
+    TopicPartitionOffsetMap,
     StringList,
     TopicPartitionList,
     TopicPartitionLongMap,
@@ -240,6 +291,12 @@ impl CoreConv {
     /// The C type the accessor returns.
     fn c_type(self) -> &'static str {
         match self {
+            CoreConv::TopicPartition => "const kafka_common_TopicPartition_t*",
+            CoreConv::Int64 => "int64_t",
+            CoreConv::EnumOrdinal(ty) => ty,
+            CoreConv::Bytes => "kafka_Bytes_t",
+            CoreConv::Headers => "const kafka_common_header_internals_RecordHeaders_t*",
+            CoreConv::TopicPartitionOffsetMap => "kafka_Map_t*",
             CoreConv::StringList | CoreConv::TopicPartitionList => "kafka_List_t*",
             CoreConv::TopicPartitionLongMap => "kafka_Map_t*",
             CoreConv::String => "const char*",
@@ -251,7 +308,8 @@ impl CoreConv {
     /// The C value the accessor's result starts as.
     fn c_init(self) -> &'static str {
         match self {
-            CoreConv::Int32 => "0",
+            CoreConv::Int32 | CoreConv::Int64 => "0",
+            CoreConv::Bytes => "{ NULL, 0 }",
             CoreConv::Double => "0.0",
             _ => "NULL",
         }
@@ -259,6 +317,13 @@ impl CoreConv {
 
     fn helper(self) -> &'static str {
         match self {
+            CoreConv::TopicPartition => "payload_topic_partition",
+            CoreConv::Int64 => "payload_int64",
+            CoreConv::EnumOrdinal("const kafka_common_record_TimestampType_t*") => "payload_timestamp_type",
+            CoreConv::EnumOrdinal(_) => "payload_deserialization_origin",
+            CoreConv::Bytes => "payload_bytes",
+            CoreConv::Headers => "payload_headers",
+            CoreConv::TopicPartitionOffsetMap => "payload_topic_partition_offset_map",
             CoreConv::StringList => "payload_string_list",
             CoreConv::TopicPartitionList => "payload_topic_partition_list",
             CoreConv::TopicPartitionLongMap => "payload_topic_partition_long_map",
@@ -377,11 +442,62 @@ const CORE_READS: &[CoreRead] = &[
         "CONSUMER_LOG_TRUNCATION",
         "kafka_common_Error_consumer_log_truncation_err",
         "kafka_common_ConsumerLogTruncationError_t",
-        &[(
-            "offsetOutOfRangePartitions",
-            "kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions_err",
-            CoreConv::TopicPartitionLongMap,
-        )],
+        &[
+            (
+                "offsetOutOfRangePartitions",
+                "kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions_err",
+                CoreConv::TopicPartitionLongMap,
+            ),
+            (
+                "divergentOffsets",
+                "kafka_common_ConsumerLogTruncationError_divergent_offsets_err",
+                CoreConv::TopicPartitionOffsetMap,
+            ),
+        ],
+    ),
+    (
+        "org.apache.kafka.common.errors.RecordDeserializationException",
+        "RECORD_DESERIALIZATION",
+        "kafka_common_Error_record_deserialization_err",
+        "kafka_common_RecordDeserializationError_t",
+        &[
+            (
+                "origin",
+                "kafka_common_RecordDeserializationError_origin_err",
+                CoreConv::EnumOrdinal("const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t*"),
+            ),
+            (
+                "partition",
+                "kafka_common_RecordDeserializationError_topic_partition_err",
+                CoreConv::TopicPartition,
+            ),
+            ("offset", "kafka_common_RecordDeserializationError_offset_err", CoreConv::Int64),
+            (
+                "timestamp",
+                "kafka_common_RecordDeserializationError_timestamp_err",
+                CoreConv::Int64,
+            ),
+            (
+                "timestampType",
+                "kafka_common_RecordDeserializationError_timestamp_type_err",
+                CoreConv::EnumOrdinal("const kafka_common_record_TimestampType_t*"),
+            ),
+            (
+                "keyBuffer",
+                "kafka_common_RecordDeserializationError_key_buffer_err",
+                CoreConv::Bytes,
+            ),
+            (
+                "valueBuffer",
+                "kafka_common_RecordDeserializationError_value_buffer_err",
+                CoreConv::Bytes,
+            ),
+            (
+                "headers",
+                "kafka_common_RecordDeserializationError_headers_err",
+                CoreConv::Headers,
+            ),
+        ],
     ),
     (
         "org.apache.kafka.common.metrics.QuotaViolationException",
@@ -857,12 +973,9 @@ fn js_eval(g: &Graph, fqn: &str, idx: usize, env: &JsEnv, depth: usize) -> Res<J
     Ok(eff)
 }
 
-/// Whether a class's payload is generated: not left out, and with a payload
+/// Whether a class has a payload: a payload
 /// parameter, a field, a getter, a factory or a `toString()` override.
 fn has_payload(g: &Graph, info: &ClassInfo, model: &PyModel) -> bool {
-    if LEFT_OUT_PAYLOADS.iter().any(|(c, _)| *c == info.java_fqn) {
-        return false;
-    }
     !g.chain_fields(&info.java_fqn).is_empty()
         || !info.java.getters.is_empty()
         || !info.java.factories.is_empty()
@@ -1403,14 +1516,14 @@ fn payload_options(forms: &[JsForm], payload: &JsPayload) -> String {
         parts.push(format!("  order: [{}],", order.join(", ")));
     }
     if !params.is_empty() {
-        let p: Vec<String> = params.iter().map(|(n, k)| format!("{n}: P.{}", k.export())).collect();
+        let p: Vec<String> = params.iter().map(|(n, k)| format!("{n}: {}", k.expr())).collect();
         parts.push(format!("  params: {{ {} }},", p.join(", ")));
     }
     if !payload.chain_fields.is_empty() {
         let f: Vec<String> = payload
             .chain_fields
             .iter()
-            .map(|(n, k, d)| format!("{n}: [P.{}, {d}]", k.export()))
+            .map(|(n, k, d)| format!("{n}: [{}, {d}]", k.expr()))
             .collect();
         parts.push(format!("  fields: {{ {} }},", f.join(", ")));
     }
@@ -1418,6 +1531,90 @@ fn payload_options(forms: &[JsForm], payload: &JsPayload) -> String {
         return String::new();
     }
     format!("{{\n{}\n}}", parts.join("\n"))
+}
+
+/// Java's nested enum `e` of `info` as a class of the namespace merged with
+/// the error class (root CLAUDE.md, JavaScript Binding Conventions, Names,
+/// Q11: a nested Java type is a static member of its class): frozen
+/// constants with `java.lang.Enum`'s `name()`, `ordinal()`, `values()` and
+/// `valueOf()`, and `toString()` / `toJSON()` the name (Class family, Q12).
+fn render_nested_enum(info: &ClassInfo, e: &NestedEnum) -> String {
+    let n = &e.name;
+    let java = format!("{}.{n}", info.java_fqn);
+    let u = format!("ENUM_{}", info.java.enums.iter().position(|x| x.name == *n).unwrap_or(0));
+    let doc = |text: &str| tsdoc(text, "    ");
+    let mut out = Vec::new();
+    out.push(tsdoc(&format!("Java's nested enum `{java}`."), "  "));
+    out.push(format!("  export class {n} {{"));
+    out.push("    readonly #name: string;\n\n    readonly #ordinal: number;\n".to_string());
+    out.push(format!(
+        "{}\n    private constructor(ordinal: number, name: string) {{\n      this.#name = name;\n      \
+         this.#ordinal = ordinal;\n      Object.freeze(this);\n    }}\n",
+        doc("Made by this class only (the enum's constants).")
+    ));
+    for (i, c) in e.constants.iter().enumerate() {
+        out.push(format!(
+            "{}\n    static readonly {c}: {n} = new {n}({i}, {});\n",
+            doc(&format!("Java's `{c}`.")),
+            js_str(c)
+        ));
+    }
+    let all: Vec<String> = e.constants.iter().map(|c| format!("{n}.{c}")).collect();
+    out.push(format!(
+        "{}\n    static values(): {n}[] {{\n      P.readOnly('values', arguments.length);\n      return [{}];\n    }}\n",
+        doc(
+            "The constants in declaration order, Java's `values()`.\n\n@returns a new array of the constants\n\
+             @throws `TypeError` when it is given an argument: it only reads"
+        ),
+        all.join(", ")
+    ));
+    let value_of_doc = doc(
+        "The constant named exactly `name`, Java's `valueOf(String)`, the name on its own or named.\n\n\
+         @param name - the name of the constant to return\n@returns the constant with the specified name\n\
+         @throws `IllegalArgumentError` when no constant has that name, or the given parameters are not `{name}`\n\
+         @throws `TypeError` when the name is null or not a string",
+    );
+    let named_doc = doc(
+        "The constant named exactly `name`, the same as `valueOf(name)`.\n\n@param options - the constant's name\n\
+         @returns the constant",
+    );
+    out.push(format!(
+        "{value_of_doc}\n    static valueOf(name: string): {n};\n{named_doc}\n    static valueOf(options: {{\n      \
+         /** The name of the constant to return. */\n      name: string;\n    }}): {n};\n    \
+         static valueOf(options: unknown): {n} {{\n      {u}_VALUE_OF_FORMS.match(options, arguments.length);\n      \
+         const name = {u}_VALUE_OF_FORMS.value(options, 'name');\n      \
+         // java.lang.Enum.valueOf: requireNonNull's \"Name is null\".\n      \
+         if (name === null) throw new TypeError('Name is null');\n      \
+         if (typeof name !== 'string') throw new TypeError(`name must be a string, not ${{typeof name}}`);\n      \
+         const found = {n}.values().find((c) => c.#name === name);\n      \
+         if (found === undefined) throw illegalArgument(`No enum constant {java}.${{name}}`);\n      \
+         return found;\n    }}\n"
+    ));
+    out.push(format!(
+        "{}\n    name(): string {{\n      P.readOnly('name', arguments.length);\n      return this.#name;\n    }}\n",
+        doc(
+            "The name of this constant, exactly as declared, Java's `Enum.name()`.\n\n@returns the name\n\
+             @throws `TypeError` when it is given an argument: it only reads"
+        )
+    ));
+    out.push(format!(
+        "{}\n    ordinal(): number {{\n      P.readOnly('ordinal', arguments.length);\n      return this.#ordinal;\n    }}\n",
+        doc(
+            "The position of this constant in its enum declaration, the first one being 0, Java's \
+             `Enum.ordinal()`.\n\n@returns the ordinal\n@throws `TypeError` when it is given an argument: it only reads"
+        )
+    ));
+    out.push(format!(
+        "{}\n    toString(): string {{\n      return this.#name;\n    }}\n",
+        doc("The name of this constant, Java's `Enum.toString()`.\n\n@returns the name")
+    ));
+    out.push(format!(
+        "{}\n    toJSON(key?: string): string {{\n      void key;\n      return this.#name;\n    }}\n  }}",
+        doc("The name, which `JSON.stringify` writes for the constant.\n\n\
+             @param key - the key `JSON.stringify` passes, which is ignored\n@returns the name\n\n\
+             @remarks *(js-only)* JavaScript's JSON protocol.")
+    ));
+    out.join("\n")
 }
 
 /// A getter of a payload class, as TypeScript.
@@ -1437,13 +1634,11 @@ fn render_getter(gt: &JsGetter, own: &[(String, Kind)]) -> Res<String> {
                 kind.returned().to_string()
             };
             let body = match kind {
-                Kind::StringSet | Kind::TopicPartitions | Kind::TopicPartitionLongMap => {
-                    format!("return P.{}.copy(this.#{field}) as {ret};", kind.export())
-                },
+                k if k.copies() => format!("return {}.copy(this.#{field}) as {ret};", k.expr()),
                 _ if stored.stored() != ret => format!("return this.#{field} as {ret};"),
                 _ => format!("return this.#{field};"),
             };
-            let copy = matches!(kind, Kind::StringSet | Kind::TopicPartitions | Kind::TopicPartitionLongMap);
+            let copy = kind.copies();
             let returns = if copy {
                 format!(
                     "Java's `{field}`, as a new {} the caller may change",
@@ -1564,18 +1759,7 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
         notes.push(note.to_string());
         push_note(text, note);
     };
-    if let Some((_, why)) = LEFT_OUT_PAYLOADS.iter().find(|(c, _)| *c == info.java_fqn) {
-        let getters: Vec<String> = info.java.getters.iter().map(|gt| format!("`{}()`", gt.name)).collect();
-        push_note(
-            &mut text,
-            &format!(
-                "Not generated: Java's payload, as {why}: the constructors {}, the getters {}, and the payload of an \
-                 error the core reports.",
-                and_list(left_out),
-                and_list(&getters)
-            ),
-        );
-    } else if !left_out.is_empty() {
+    if !left_out.is_empty() {
         push_note(
             &mut text,
             &format!(
@@ -1624,10 +1808,16 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
     helpers.sort_unstable();
     let mut imports: Vec<String> = Vec::new();
     if let Some(p) = payload {
-        if !p.factories.is_empty() {
+        if !p.factories.is_empty() || !info.java.enums.is_empty() {
             imports.push(format!(
                 "import {{ JavaForms }} from '{}';\n",
                 rel_import(&dir, "internal/args")
+            ));
+        }
+        if !info.java.enums.is_empty() {
+            imports.push(format!(
+                "import {{ illegalArgument }} from '{}';\n",
+                rel_import(&dir, "internal/errors")
             ));
         }
         let mut strings: Vec<&str> = Vec::new();
@@ -1692,7 +1882,8 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
             }
         }
         for n in names {
-            let kw = if n == "TopicPartitionSet" && key_set {
+            // A kind's enum class is read at run time (`P.enumOf(TimestampType)`).
+            let kw = if (n == "TopicPartitionSet" && key_set) || n == "TimestampType" {
                 "import"
             } else {
                 "import type"
@@ -1721,6 +1912,13 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
     }
     for line in &imports {
         text.push_str(line);
+    }
+    for e in &info.java.enums {
+        let u = format!("ENUM_{}", info.java.enums.iter().position(|x| x.name == e.name).unwrap_or(0));
+        text.push_str(&format!(
+            "\nconst {u}_VALUE_OF_FORMS = new JavaForms('valueOf', [['name']], {{\n  \
+             bareTypes: {{ name: (value) => value === null || typeof value === 'string' }},\n}});\n"
+        ));
     }
     if let Some(p) = payload {
         for f in &p.factories {
@@ -1879,6 +2077,16 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
         text.push_str(&format!("{kw} {name} extends {parent} {{}}\n"));
     } else {
         text.push_str(&format!("{kw} {name} extends {parent} {{\n{}\n}}\n", body.join("\n\n")));
+    }
+    if !info.java.enums.is_empty() {
+        let enums: Vec<String> = info.java.enums.iter().map(|e| render_nested_enum(info, e)).collect();
+        text.push_str(&format!(
+            "\n// Java's nested types, static members of the class (root CLAUDE.md, JavaScript Binding\n\
+             // Conventions, Names, Q11).\n\
+             // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested enums, reached through the class name as in Java\n\
+             export namespace {name} {{\n{}\n}}\n",
+            enums.join("\n\n")
+        ));
     }
     match payload {
         Some(p) if !payload_options(forms, p).is_empty() => text.push_str(&format!(
@@ -2190,16 +2398,25 @@ mod tests {
         assert!(topic.content.contains(
             "/** Java's `Set<String> unauthorizedTopics`. */ unauthorizedTopics: Iterable<string>; name?: never });"
         ));
-        // A form whose parameter has a type the client does not translate is
-        // left out and listed, with the members of that type.
+        // The payload's types are translated: OffsetAndMetadata, TimestampType,
+        // and a nested enum as a class of the merged namespace.
         let truncation = find("LogTruncationError");
-        assert!(truncation
+        assert!(!truncation.content.contains("Not generated"));
+        assert!(truncation.content.contains(
+            "  fields: { offsetOutOfRangePartitions: [P.topicPartitionLongMap, null], divergentOffsets: \
+             [P.topicPartitionOffsetMap, null] },\n"
+        ));
+        let deserialization = find("RecordDeserializationError");
+        assert!(deserialization
             .content
-            .contains("// Not generated: Java's constructors that take a type the client does not\n"));
-        assert!(truncation.content.contains("`divergentOffsets()`.\n"));
-        assert!(truncation
+            .contains("export namespace RecordDeserializationError {\n"));
+        assert!(deserialization
             .content
-            .contains("  fields: { offsetOutOfRangePartitions: [P.topicPartitionLongMap, null] },\n"));
+            .contains("  export class DeserializationExceptionOrigin {\n"));
+        assert!(deserialization.content.contains("timestampType: P.enumOf(TimestampType)"));
+        assert!(deserialization
+            .content
+            .contains("import { TimestampType } from '../record/timestamp_type';\n"));
         // A payload field the FFI has no accessor for is listed, with its default.
         let mismatch = find("CorrelationIdMismatchError");
         assert!(mismatch
@@ -2238,9 +2455,6 @@ mod tests {
         assert!(commit.content.contains(
             "  [['cause'], { text: 'Offset commit failed with a retriable exception. You should retry committing the latest consumed offsets.' }],\n"
         ));
-        // A class whose every constructor takes an untranslated type cannot be constructed yet.
-        assert!(truncation.content.contains("  protected constructor(...args: unknown[]) {\n"));
-        assert!(truncation.content.contains("\nsetForms(LogTruncationError, [], {\n"));
         // Java's toString() override, and Java's Double.toString for a double.
         let quota = find("QuotaViolationError");
         assert!(quota.content.contains("javaDoubleString(this.#value)"));

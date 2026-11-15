@@ -15,19 +15,12 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.clients.consumer.LogTruncationException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// Not generated: Java's constructors that take a type the client does not
-// translate: `LogTruncationException(Map<TopicPartition, Long>,
-// Map<TopicPartition, OffsetAndMetadata>)` and `LogTruncationException(String,
-// Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)`.
-//
-// Not generated, for a type the client does not translate: the field
-// `Map<TopicPartition, OffsetAndMetadata> divergentOffsets` and
-// `divergentOffsets()`.
 
 import type { TopicPartitionMap } from '../common/topic_partition_map';
+import { javaString } from '../internal/java_string';
 import * as P from '../internal/payload';
-import { setForms } from '../internal/throwable';
+import { payloadOf, setForms } from '../internal/throwable';
+import type { OffsetAndMetadata } from './offset_and_metadata';
 import { OffsetOutOfRangeError } from './offset_out_of_range_error';
 
 /**
@@ -38,9 +31,6 @@ import { OffsetOutOfRangeError } from './offset_out_of_range_error';
  * first offset known to diverge from what the consumer previously read.
  *
  * Java: `org.apache.kafka.clients.consumer.LogTruncationException`.
- *
- * Not constructible yet: Java's constructors take a payload the client does not
- * translate yet; the client builds this error when the core reports it.
  */
 export class LogTruncationError extends OffsetOutOfRangeError {
   /**
@@ -48,6 +38,11 @@ export class LogTruncationError extends OffsetOutOfRangeError {
    * shape. It holds no state.
    */
   readonly #brand = true;
+
+  /**
+   * Java's field `Map<TopicPartition, OffsetAndMetadata> divergentOffsets`.
+   */
+  readonly #divergentOffsets: TopicPartitionMap<OffsetAndMetadata> | null;
 
   /**
    * The FFI id of the class, `kafka_common_Error_CONSUMER_LOG_TRUNCATION`, for
@@ -58,16 +53,45 @@ export class LogTruncationError extends OffsetOutOfRangeError {
   static override readonly _ffiId: number = -20;
 
   /**
-   * Not constructible yet: Java's constructors take a type the client does not
-   * translate yet.
+   * Java's `(Map<TopicPartition, Long> fetchOffsets, Map<TopicPartition,
+   * OffsetAndMetadata> divergentOffsets)` constructor. The message is the one
+   * Java's constructor builds from the payload.
    *
-   * @param args - refused: constructing the error throws `TypeError`
+   * @param options - the `fetchOffsets` and the `divergentOffsets`
    */
-  protected constructor(...args: unknown[]) {
+  constructor(options: { /** Java's `Map<TopicPartition, Long> fetchOffsets`. */ fetchOffsets: TopicPartitionMap<bigint | number>; /** Java's `Map<TopicPartition, OffsetAndMetadata> divergentOffsets`. */ divergentOffsets: TopicPartitionMap<OffsetAndMetadata>; name?: never });
+  /**
+   * Java's `(String message, Map<TopicPartition, Long> fetchOffsets,
+   * Map<TopicPartition, OffsetAndMetadata> divergentOffsets)` constructor.
+   *
+   * @param options - the message and the `fetchOffsets` and the
+   *   `divergentOffsets`
+   */
+  constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** Java's `Map<TopicPartition, Long> fetchOffsets`. */ fetchOffsets: TopicPartitionMap<bigint | number>; /** Java's `Map<TopicPartition, OffsetAndMetadata> divergentOffsets`. */ divergentOffsets: TopicPartitionMap<OffsetAndMetadata>; name?: never });
+  constructor(...args: unknown[]) {
     super(...(args as [{ offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>; name?: never }]));
+    const fields = payloadOf(this);
+    this.#divergentOffsets = fields.divergentOffsets as TopicPartitionMap<OffsetAndMetadata> | null;
+  }
+
+  /**
+   * Java's `divergentOffsets()`.
+   *
+   * @returns Java's `divergentOffsets`, as a new TopicPartitionMap the caller
+   *   may change
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  divergentOffsets(): TopicPartitionMap<OffsetAndMetadata> {
+    P.readOnly('divergentOffsets', arguments.length);
+    return P.topicPartitionOffsetMap.copy(this.#divergentOffsets) as TopicPartitionMap<OffsetAndMetadata>;
   }
 }
 
-setForms(LogTruncationError, [], {
-  fields: { offsetOutOfRangePartitions: [P.topicPartitionLongMap, null] },
+setForms(LogTruncationError, [
+  [['fetchOffsets', 'divergentOffsets'], (v) => 'Truncated partitions detected with divergent offsets ' + javaString(v.divergentOffsets), (v) => ({ offsetOutOfRangePartitions: v.fetchOffsets, divergentOffsets: P.nonNull(v.divergentOffsets, 'divergentOffsets') })],
+  [['message', 'fetchOffsets', 'divergentOffsets'], 'message', (v) => ({ offsetOutOfRangePartitions: v.fetchOffsets, divergentOffsets: P.nonNull(v.divergentOffsets, 'divergentOffsets') })],
+], {
+  order: ['message', 'fetchOffsets', 'divergentOffsets'],
+  params: { fetchOffsets: P.topicPartitionLongMap, divergentOffsets: P.topicPartitionOffsetMap },
+  fields: { offsetOutOfRangePartitions: [P.topicPartitionLongMap, null], divergentOffsets: [P.topicPartitionOffsetMap, null] },
 });

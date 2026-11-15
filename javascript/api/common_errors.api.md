@@ -4,6 +4,8 @@
 
 ```ts
 
+/// <reference types="node" />
+
 // @public (undocumented)
 export const __esModule: true;
 
@@ -1371,7 +1373,44 @@ export class RecordBatchTooLargeError extends InvalidConfigurationError {
 
 // @public
 export class RecordDeserializationError extends SerializationError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        origin: RecordDeserializationError.DeserializationExceptionOrigin; /** Java's `TopicPartition partition`. */
+        partition: TopicPartition; /** Java's `long offset`. */
+        offset: bigint | number; /** Java's `long timestamp`. */
+        timestamp: bigint | number; /** Java's `TimestampType timestampType`. */
+        timestampType: TimestampType; /** Java's `ByteBuffer keyBuffer`. */
+        keyBuffer: Uint8Array | null; /** Java's `ByteBuffer valueBuffer`. */
+        valueBuffer: Uint8Array | null; /** Java's `Headers headers`. */
+        headers: Headers_2 | Iterable<Header>; /** The message; `null` reads as `''`. */
+        message: string | null; /** The cause (`Error`'s `cause`). */
+        cause: unknown;
+        name?: never;
+    });
+    headers(): Headers_2;
+    keyBuffer(): Buffer | null;
+    offset(): bigint;
+    origin(): RecordDeserializationError.DeserializationExceptionOrigin;
+    timestamp(): bigint;
+    timestampType(): TimestampType;
+    topicPartition(): TopicPartition;
+    valueBuffer(): Buffer | null;
+}
+
+// @public (undocumented)
+export namespace RecordDeserializationError {
+    export class DeserializationExceptionOrigin {
+        static readonly KEY: DeserializationExceptionOrigin;
+        name(): string;
+        ordinal(): number;
+        toJSON(key?: string): string;
+        toString(): string;
+        static readonly VALUE: DeserializationExceptionOrigin;
+        static valueOf(name: string): DeserializationExceptionOrigin;
+        static valueOf(options: {
+            name: string;
+        }): DeserializationExceptionOrigin;
+        static values(): DeserializationExceptionOrigin[];
+    }
 }
 
 // @public
@@ -2013,5 +2052,7 @@ export class VoterNotFoundError extends ApiError {
 export class WakeupError extends KafkaError {
     constructor();
 }
+
+// (No @packageDocumentation comment for this package)
 
 ```

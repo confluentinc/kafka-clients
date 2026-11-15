@@ -79,8 +79,8 @@ export class QuotaViolationError extends KafkaError {
   /**
    * Java's `metric()`.
    *
-   * @returns Java's `metric` @throws `TypeError` when it is given an argument:
-   * it only reads
+   * @returns Java's `metric`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   metric(): KafkaMetric {
     P.readOnly('metric', arguments.length);
@@ -90,8 +90,8 @@ export class QuotaViolationError extends KafkaError {
   /**
    * Java's `value()`.
    *
-   * @returns Java's `value` @throws `TypeError` when it is given an argument:
-   * it only reads
+   * @returns Java's `value`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   value(): number {
     P.readOnly('value', arguments.length);
@@ -101,8 +101,8 @@ export class QuotaViolationError extends KafkaError {
   /**
    * Java's `bound()`.
    *
-   * @returns Java's `bound` @throws `TypeError` when it is given an argument:
-   * it only reads
+   * @returns Java's `bound`
+   * @throws `TypeError` when it is given an argument: it only reads
    */
   bound(): number {
     P.readOnly('bound', arguments.length);

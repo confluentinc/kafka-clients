@@ -112,6 +112,14 @@ const JAVA_NAMES = new Map([
     },
   ],
   [
+    'DeserializationExceptionOrigin',
+    {
+      reason:
+        "Java's nested enum RecordDeserializationException.DeserializationExceptionOrigin: only a class name's Exception " +
+        'suffix becomes Error (root CLAUDE.md, JavaScript Binding Conventions, Names), as the Python client keeps the name',
+    },
+  ],
+  [
     'exception',
     {
       reason:

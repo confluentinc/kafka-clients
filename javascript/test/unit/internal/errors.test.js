@@ -170,6 +170,11 @@ const PAYLOAD_MEMBERS = new Map([
   ['org.apache.kafka.clients.consumer.NoOffsetForPartitionException', ['partitions']],
   ['org.apache.kafka.common.metrics.QuotaViolationException', ['metric', 'value', 'bound', 'toString']],
   ['org.apache.kafka.common.requests.CorrelationIdMismatchException', ['requestCorrelationId', 'responseCorrelationId']],
+  ['org.apache.kafka.clients.consumer.LogTruncationException', ['divergentOffsets']],
+  [
+    'org.apache.kafka.common.errors.RecordDeserializationException',
+    ['origin', 'topicPartition', 'offset', 'timestampType', 'timestamp', 'keyBuffer', 'valueBuffer', 'headers'],
+  ],
 ]);
 
 /** Java's public instance methods of class `fqn` (getters and overrides), from the Java index. */
@@ -332,11 +337,11 @@ test('an error has no public field but name, message and cause: classify with in
     // Java's payload getters are methods over private fields (Q39).
     const payload = PAYLOAD_MEMBERS.get(JAVA_OF.get(cls)) ?? [];
     assert.deepEqual(Object.getOwnPropertyNames(cls.prototype).sort(), ['constructor', ...payload].sort(), cls.name);
-    // Every Java public method the class declares is a member, but those of a
-    // type the client does not translate, Java's fillInStackTrace() (a JVM
-    // stack-trace override JavaScript has no counterpart of), and an abstract
-    // base's abstract getter, which has no body.
-    const untranslated = new Set(['divergentOffsets', 'origin', 'topicPartition', 'offset', 'timestampType', 'timestamp', 'keyBuffer', 'valueBuffer', 'headers', 'fillInStackTrace']);
+    // Every Java public method the class declares is a member, but Java's
+    // fillInStackTrace() (a JVM stack-trace override JavaScript has no
+    // counterpart of), and an abstract base's abstract getter, which has no
+    // body.
+    const untranslated = new Set(['fillInStackTrace']);
     if (isAbstract(JAVA_OF.get(cls))) continue;
     for (const m of javaPayloadGetters(JAVA_OF.get(cls))) {
       if (!untranslated.has(m)) assert.ok(payload.includes(m), `${cls.name}.${m}`);
@@ -560,10 +565,10 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   assert.equal(new consumer.RetriableCommitFailedError(cause).cause, cause);
   assert.ok(new consumer.CommitFailedError().message.startsWith('Commit cannot be completed since the group has already rebalanced'));
   assert.equal(new consumer.CommitFailedError('mine').message, 'mine');
-  // A class whose every Java constructor takes a type the client does not translate cannot be constructed yet.
+  // A class whose every Java constructor takes a payload takes it by name only.
   assert.throws(() => new consumer.LogTruncationError('m'), {
-    name: 'TypeError',
-    message: 'LogTruncationError cannot be constructed: its Java constructors take a type the client does not translate yet',
+    name: 'IllegalArgumentError',
+    message: 'LogTruncationError() takes one of ({ fetchOffsets, divergentOffsets }), ({ message, fetchOffsets, divergentOffsets }); got a string',
   });
   assert.equal(Object.keys(new KafkaError('m')).includes('name'), false);
 });
