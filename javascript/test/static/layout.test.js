@@ -373,6 +373,8 @@ test('npm/ holds one folder per platform package of the preview, each published 
       repository: { ...pkg.repository, directory: `javascript/npm/${platform}` },
       ...selector,
       main: 'confluent-kafka-javascript.node',
+      // The main package's module type, which publint asks every package for.
+      type: pkg.type,
       // The root conventions' dist/ and NOTICE, which every package's files
       // name (a platform package has no dist/: the entry matches nothing).
       files: ['dist/', 'NOTICE', 'confluent-kafka-javascript.node', 'THIRD_PARTY_LICENSES.txt'],

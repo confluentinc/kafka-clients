@@ -1003,7 +1003,7 @@ The layout is the root conventions' (Layout and modules).
   as `stripInternal` leaves them out, and a warning failing the build. It is
   not part of `verify`; `test/static/docs.test.js` checks that it builds. `make
   build` (`build-ts`) compiles `src/` into `dist/` (`.js`, `.d.ts`, both with
-  maps): CommonJS (`module: nodenext`, the package having no `"type"`, root
+  maps): CommonJS (`module: nodenext`, the package's `"type"` being `"commonjs"`, root
   conventions, Layout and modules), so `require` loads it and an ES module
   `import`s it through Node's CommonJS interop, ES2022 (and ES2024's string
   methods) for Node >= 22.14.0, `engines.node` (root conventions, Build,
@@ -1112,9 +1112,13 @@ binding:
   folder, since npm packs a `LICENSE` only from there; npm adds the README
   and that LICENSE (root conventions, Q76). `test/static/layout.test.js`
   pins the repository's side.
-- The root conventions also ask CI for Prettier as the formatter and for
-  publint among the package checks (Build, packaging and release, Q74);
-  neither is set up yet.
+- publint is among the package checks (root conventions, Build, packaging
+  and release, Q74): `make pack-check` lints each tarball it packs before
+  installing it, and an error, a warning or a suggestion fails it. Its one
+  suggestion, to name the module type, is why every package declares
+  `"type": "commonjs"` (the platform packages the main one's,
+  `check-npm.py`). The root conventions also ask CI for Prettier as the
+  formatter, which is not set up yet.
 - No package has an install script or builds at install; `native/` (with
   `binding.gyp`), `src/`, `scripts/`, `test/`, `tools/` and the gRPC
   server are never published (`check-npm.py package` checks each tarball's
