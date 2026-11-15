@@ -88,7 +88,7 @@ HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (pro
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
-	test-verifiable-clients check-api update-api docs format format-check
+	test-verifiable-clients check-api update-api docs format format-check typecheck-tests
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -176,6 +176,15 @@ test-verifiable-clients: build
 # configurations; needs only the compiled library, not the addon.
 test-typing: build-ts
 	$(JEST_RUN) typing $(JEST_ARGS)
+
+# The type check of the tests (root conventions, Tests, Q67, and Build,
+# packaging and release, Q74; scripts/typecheck_tests.js): `tsc --strict` over
+# every file under test/ (test/tsconfig.json), the JavaScript tests through
+# checkJs, against the compiled declarations in dist/ as a user's code types
+# against them. A deliberate misuse is marked `// @ts-expect-error <why>`; the
+# root `lint-javascript` runs it.
+typecheck-tests: build-ts
+	$(NODE) scripts/typecheck_tests.js
 
 # The interface check (root conventions, Stability; scripts/api_report.js):
 # api-extractor's report of each import path's compiled declarations and the
