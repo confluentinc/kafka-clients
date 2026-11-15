@@ -134,15 +134,13 @@ test('only own enumerable keys are names, and value() reads only those', () => {
   assert.equal(RECORD.value(plain, 'partition'), undefined);
   assert.equal(CLOSE.match({ [Symbol('timeout')]: 5 }, 1), 0);
   // A polluted Object.prototype is no parameter either.
-  // @ts-expect-error a key added to Object.prototype: the own-key check does not read it
-  Object.prototype.partition = 0;
+  /** @type {Record<string, unknown>} */ (Object.prototype).partition = 0;
   try {
     const args = { topic: 't', value: 'v' };
     assert.equal(RECORD.match(args, 1), 5);
     assert.equal(RECORD.value(args, 'partition'), undefined);
   } finally {
-    // @ts-expect-error the key added to Object.prototype above, removed again
-    delete Object.prototype.partition;
+    delete (/** @type {Record<string, unknown>} */ (Object.prototype).partition);
   }
   // An object that is not a plain one is no options object: without a
   // one-parameter form, the form error.

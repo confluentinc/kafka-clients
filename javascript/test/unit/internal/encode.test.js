@@ -30,8 +30,8 @@ const { stringSerializer } = require('@confluentinc/kafka-javascript/common/seri
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 const { internalRecord } = require('../../_internal');
 
-// src/internal/config.ts's signature, which the compiled JavaScript does not carry.
-const configEntries = /** @type {(configs: unknown) => Array<[Buffer, Buffer]>} */ (untypedEntries);
+// The compiled JavaScript carries no signature: configEntries is typed by its source's.
+const configEntries = /** @type {typeof import('../../../src/internal/config').configEntries} */ (untypedEntries);
 
 // [what, string, Java's StringSerializer bytes, as hex]
 const JAVA = [

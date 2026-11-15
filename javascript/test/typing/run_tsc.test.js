@@ -73,11 +73,15 @@ test('the default compiler is run directly, with no shell', () => {
   /** @type {Array<SpawnCall>} */
   const calls = [];
   const original = childProcess.spawnSync;
-  // @ts-expect-error a stub with only the fields runTsc reads: the test records the arguments runTsc passes
-  childProcess.spawnSync = (/** @type {SpawnCall} */ ...callArgs) => {
-    calls.push(callArgs);
-    return { status: 0, stdout: 'ok', stderr: '' };
-  };
+  // A stub with only the fields runTsc reads: the test records the arguments runTsc passes.
+  childProcess.spawnSync = /** @type {typeof childProcess.spawnSync} */ (
+    /** @type {unknown} */ (
+      (/** @type {SpawnCall} */ ...callArgs) => {
+        calls.push(callArgs);
+        return { status: 0, stdout: 'ok', stderr: '' };
+      }
+    )
+  );
   // scripts/typescript.js reads spawnSync when it is loaded: load a fresh copy
   // that sees the stub.
   delete require.cache[SCRIPT];
