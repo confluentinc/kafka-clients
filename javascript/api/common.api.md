@@ -116,10 +116,19 @@ export class MetricName {
 export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
     [Symbol.iterator](): IterableIterator<[MetricName, V]>;
     constructor();
+    constructor(options: {
+        entries: Iterable<readonly [MetricName, V]>;
+    });
     constructor(entries: Iterable<readonly [MetricName, V]>);
     entries(): IterableIterator<[MetricName, V]>;
     forEach(callback: (value: V, key: MetricName, map: MetricNameMap<V>) => void): void;
+    get(options: {
+        key: MetricName;
+    }): V | null;
     get(key: MetricName): V | null;
+    has(options: {
+        key: MetricName;
+    }): boolean;
     has(key: MetricName): boolean;
     keys(): IterableIterator<MetricName>;
     size(): number;
@@ -223,12 +232,24 @@ export class TopicPartition {
 export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
     [Symbol.iterator](): IterableIterator<[TopicPartition, V]>;
     constructor();
+    constructor(options: {
+        entries: Iterable<readonly [TopicPartition | null, V]>;
+    });
     constructor(entries: Iterable<readonly [TopicPartition | null, V]>);
     clear(): void;
+    delete(options: {
+        key: TopicPartition | null;
+    }): boolean;
     delete(key: TopicPartition | null): boolean;
     entries(): IterableIterator<[TopicPartition, V]>;
     forEach(callback: (value: V, key: TopicPartition, map: TopicPartitionMap<V>) => void): void;
+    get(options: {
+        key: TopicPartition | null;
+    }): V | null;
     get(key: TopicPartition | null): V | null;
+    has(options: {
+        key: TopicPartition | null;
+    }): boolean;
     has(key: TopicPartition | null): boolean;
     keys(): IterableIterator<TopicPartition>;
     set(key: TopicPartition | null, value: V): this;
@@ -242,11 +263,23 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
 export class TopicPartitionSet implements Iterable<TopicPartition> {
     [Symbol.iterator](): IterableIterator<TopicPartition>;
     constructor();
+    constructor(options: {
+        values: Iterable<TopicPartition | null>;
+    });
     constructor(values: Iterable<TopicPartition | null>);
+    add(options: {
+        value: TopicPartition | null;
+    }): this;
     add(value: TopicPartition | null): this;
     clear(): void;
+    delete(options: {
+        value: TopicPartition | null;
+    }): boolean;
     delete(value: TopicPartition | null): boolean;
     forEach(callback: (value: TopicPartition, key: TopicPartition, set: TopicPartitionSet) => void): void;
+    has(options: {
+        value: TopicPartition | null;
+    }): boolean;
     has(value: TopicPartition | null): boolean;
     size(): number;
     toJSON(): Array<TopicPartition | null>;

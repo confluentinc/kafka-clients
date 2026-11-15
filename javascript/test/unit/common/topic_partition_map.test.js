@@ -41,7 +41,6 @@ test('a TopicPartitionMap is keyed by TopicPartition.equals, keeping the origina
   assert.equal(map.get(tp('orders', 3)), 1n);
   assert.equal(map.has(tp('orders', 4)), true);
   assert.equal(map.get(tp('orders', 5)), null);
-  // @ts-expect-error published type narrower than the run time: has() also takes Java's named form { key }
   assert.equal(map.has({ key: tp('payments', 3) }), false);
   assert.equal([...map.keys()][0], first);
   assert.deepEqual([...map.values()], [1n, 2n]);
@@ -72,7 +71,6 @@ test('set keeps the original key and its place; delete and clear remove entries'
   assert.equal([...map.keys()][0], first);
   assert.deepEqual([...map.values()], ['c', 'b']);
   assert.equal(map.delete(tp('orders', 3)), true);
-  // @ts-expect-error published type narrower than the run time: delete() also takes Java's named form { key }
   assert.equal(map.delete({ key: tp('orders', 3) }), false);
   assert.equal(map.size(), 1);
   map.clear();
@@ -160,7 +158,6 @@ test('a TopicPartitionSet compares its members by TopicPartition.equals, keeping
   const set = new TopicPartitionSet([first, tp('orders', 4), tp('orders', 3)]);
   assert.equal(set.size(), 2);
   assert.equal(set.has(tp('orders', 3)), true);
-  // @ts-expect-error published type narrower than the run time: has() also takes Java's named form { value }
   assert.equal(set.has({ value: tp('orders', 5) }), false);
   assert.equal([...set][0], first);
   assert.equal(set.add(tp('orders', 3)), set);
@@ -208,7 +205,6 @@ test("a null key or member is held, as Java's HashMap and HashSet hold one, and 
   ]);
   assert.equal(map.size(), 2);
   assert.equal(map.get(null), 1n);
-  // @ts-expect-error published type narrower than the run time: has() also takes Java's named form { key }
   assert.equal(map.has({ key: null }), true);
   assert.equal(map.get(tp('null', 0)), 2n);
   assert.equal([...map.keys()][0], null);
