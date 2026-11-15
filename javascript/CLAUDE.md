@@ -70,6 +70,14 @@ These decide every question, in this order:
      bytes". Why: every C reader stops at the first NUL, so the value would be
      truncated silently at the ABI. Goes when: these values cross the ABI with
      a length, as `kafka_Bytes_t` does.
+   - **Read-only headers' changes go to headers with no views**: on a
+     read-only `Headers`, `add` and `remove` are sent, with their arguments
+     unchanged, to the shared empty read-only `RecordHeaders`, so the core's
+     error comes from a handle whose views nothing holds
+     (`src/common/header/headers.ts` `#write`). Why: the FFI drops a handle's
+     views on every mutating call, refused or not, which would free the
+     `Header` views the app holds. Goes when: the FFI keeps them across a
+     refused call.
 
    No precondition of Java's is repeated (root conventions, Q35): a negative
    timeout goes to the FFI as it is, and the form called, not the value,
@@ -396,10 +404,21 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   refused when the header is made *(deviation: Java's `RecordHeader` keeps the
   `String`. Why: the C API takes the key as a NUL-terminated UTF-8 string.
   Goes when: for the NUL, the key crosses with a length; the `?` stays, as the
-  core holds the key as UTF-8)*. Java's
-  `remove` checks the read-only state before the key, the FFI the key first:
-  for a key the core or the binding refuses, `remove` first asks read-only
-  headers to remove nothing, which the core refuses with its own error.
+  core holds the key as UTF-8)*. A change to read-only headers goes to the
+  shared empty read-only `RecordHeaders`, which refuses it, so the views the
+  app holds stay valid (boundary rule 1). On read-only headers `remove(null)`
+  is the FFI's `IllegalArgumentError` "key cannot be null." *(deviation:
+  Java's `remove` checks `canWrite()` first, an `IllegalStateException`. Why:
+  root §4 has the FFI check a NULL argument first, and Q35 has the binding
+  repeat no precondition. Goes when: the FFI checks the read-only state
+  first)*. An iterator over a `Headers` or `headers(key)` reads the headers
+  when it is made *(deviation: a change during an iteration is not seen and
+  throws nothing, where Java's iterators throw
+  `ConcurrentModificationException`. Why: the FFI hands the headers out as a
+  list, and Java's `ArrayList` iterators fail fast only on a best-effort
+  basis. Goes when: never, unless it is emulated)*. A key holding a NUL is
+  refused by `add`, `remove`, `lastHeader` and an iterated `headers(key)` too,
+  where Java takes the key (the NUL check of boundary rule 1).
   Whether a record also takes headers as plain `[key, value]` pairs is not
   decided yet in the root conventions: `ProducerRecord` takes `Header`
   objects only, as before. A consumed record's `Headers` (over
