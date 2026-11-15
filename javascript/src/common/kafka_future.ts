@@ -307,7 +307,7 @@ export abstract class KafkaFuture<T> {
    *   (a bare plain object included)
    * @throws `TypeError` when `value` is `undefined`
    */
-  static completedFuture<U>(options: {
+  static completedFuture<U extends NonNullable<unknown> | null>(options: {
     /** The value. */
     value: U;
   }): KafkaFuture<U>;
