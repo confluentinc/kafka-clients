@@ -23,6 +23,9 @@
 
 import Tinypool from 'tinypool';
 
+// jest-light-runner's internals: the path of its test worker and its
+// `jest-light-runner-get-worker-data` message protocol, which hold for the
+// version package.json pins exactly (0.8.2). A version bump must check both.
 const WORKER = new URL('./worker-runner.js', import.meta.resolve('jest-light-runner'));
 
 export default class IsolatedLightRunner {
