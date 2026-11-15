@@ -42,6 +42,7 @@ test("forName finds Java's name field, valueOf the constant's name", () => {
     constructor: NoSuchElementError,
     message: 'Invalid timestamp type CREATE_TIME',
   });
+  // @ts-expect-error null for the name, which Java gives no meaning: no constant matches, NoSuchElementError
   assert.throws(() => TimestampType.forName(null), { constructor: NoSuchElementError, message: 'Invalid timestamp type null' });
   assert.equal(TimestampType.valueOf('NO_TIMESTAMP_TYPE'), TimestampType.NO_TIMESTAMP_TYPE);
   assert.throws(() => TimestampType.valueOf('CreateTime'), {
