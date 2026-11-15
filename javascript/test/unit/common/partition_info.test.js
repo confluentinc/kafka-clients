@@ -60,7 +60,9 @@ test("Java's getters stay methods, which only read; the arrays are new arrays ea
   // The constructor copies the iterable: changing it, or a returned array,
   // changes nothing.
   replicas.pop();
-  info.replicas().pop();
+  const returned = info.replicas();
+  assert.ok(returned);
+  returned.pop();
   assert.deepEqual(info.replicas(), [leader, other]);
   assert.deepEqual(info.inSyncReplicas(), [leader]);
   // Java's five-parameter constructor passes new Node[0].
@@ -70,7 +72,8 @@ test("Java's getters stay methods, which only read; the arrays are new arrays ea
     null,
   );
   assert.deepEqual(Object.keys(info), []);
-  for (const name of ['topic', 'partition', 'leader', 'replicas', 'inSyncReplicas', 'offlineReplicas', 'hashCode']) {
+  for (const name of /** @type {const} */ (['topic', 'partition', 'leader', 'replicas', 'inSyncReplicas', 'offlineReplicas', 'hashCode'])) {
+    // @ts-expect-error an argument to a reader: the read-only check throws TypeError
     assert.throws(() => info[name](1), { constructor: TypeError, message: `${name}() only reads: it takes no argument` });
   }
 });
@@ -121,6 +124,7 @@ test("equals and hashCode are Java's: the arrays element by element", () => {
   assert.equal(p1.equals(p1), true);
   assert.equal(p1.equals(null), false);
   assert.equal(p1.equals('sample'), false);
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => p1.equals(p1, p1), {
     constructor: IllegalArgumentError,
     message: 'equals() takes one of (obj); got 2 arguments, not one object of named parameters',
@@ -139,25 +143,30 @@ test('a null topic is accepted, as Java accepts it', () => {
 
 test('the constructor takes Java forms only, with run-time types', () => {
   const node = new Node({ id: 1, host: 'h', port: 1 });
+  // @ts-expect-error no leader or replicas: the form check throws IllegalArgumentError
   assert.throws(() => new PartitionInfo({ topic: 't', partition: 0 }), {
     constructor: IllegalArgumentError,
     message: `${FORMS}; got (topic, partition)`,
   });
   const base = { topic: 't', partition: 0, leader: node, replicas: [node], inSyncReplicas: [node] };
+  // @ts-expect-error a number topic: the type check throws TypeError
   assert.throws(() => new PartitionInfo({ ...base, topic: 1 }), { constructor: TypeError, message: 'topic must be a string or null' });
   assert.throws(() => new PartitionInfo({ ...base, partition: 0.5 }), { constructor: TypeError, message: 'partition must be an integer' });
   assert.throws(() => new PartitionInfo({ ...base, partition: 2 ** 31 }), {
     constructor: RangeError,
     message: 'partition must be from -2147483648 to 2147483647',
   });
+  // @ts-expect-error a plain object for a Node: the type check throws TypeError
   assert.throws(() => new PartitionInfo({ ...base, leader: { id: 1 } }), {
     constructor: TypeError,
     message: 'leader must be a Node or null',
   });
+  // @ts-expect-error a number for replicas: the type check throws TypeError
   assert.throws(() => new PartitionInfo({ ...base, replicas: 5 }), {
     constructor: TypeError,
     message: 'replicas must be an iterable of Node, or null',
   });
+  // @ts-expect-error a string among the replicas: the type check throws TypeError
   assert.throws(() => new PartitionInfo({ ...base, inSyncReplicas: [node, 'n'] }), {
     constructor: TypeError,
     message: 'inSyncReplicas must hold only Node, not a string',

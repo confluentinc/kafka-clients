@@ -34,6 +34,7 @@ test('an invalid config is a KafkaError with the core message', () => {
       // The FFI id is private (`_ffiId`, left out of the declarations): only
       // `name`, `message` and `cause` are public.
       assert.equal(errorFfiId(e), -10);
+      // @ts-expect-error the private FFI id, left out of the declarations: the test checks the class still carries it
       assert.equal(ConfigError._ffiId, -10);
       assert.ok(!Object.keys(e).includes('_ffiId'));
       assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
@@ -59,6 +60,7 @@ test('the cause chain follows Error_source', () => {
     (e) => {
       // A bare KafkaException: reported as UNKNOWN_SERVER_ERROR, but not an
       // ApiException, so not UnknownServerError.
+      assert.ok(e instanceof KafkaError);
       assert.equal(e.constructor, KafkaError);
       assert.equal(e.name, 'KafkaError');
       assert.equal(errorFfiId(e), -1);
@@ -88,12 +90,14 @@ test("Java's INSTANCE singletons: an instance of the class, built by Java's no-a
     assert.equal(cls.INSTANCE, instance);
     assert.throws(() => {
       'use strict';
+      // @ts-expect-error a write to Java's final field: the frozen class throws TypeError
       cls.INSTANCE = null;
     }, TypeError);
     assert.equal(cls.INSTANCE, instance);
   }
   // CoordinatorNotAvailableException's no-argument constructor is private:
   // only INSTANCE is built by it.
+  // @ts-expect-error no message: the form check throws IllegalArgumentError, as the no-argument constructor is private
   assert.throws(() => new errors.CoordinatorNotAvailableError(), {
     name: 'IllegalArgumentError',
     message: 'CoordinatorNotAvailableError() takes one of (message), ({ message, cause }); got ()',

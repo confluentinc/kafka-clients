@@ -43,8 +43,14 @@ const JAVA = [
   ['x\uDFFFy\uD83D', '783f793f'],
 ];
 
+/**
+ * @param {import('@confluentinc/kafka-javascript/common/serialization').Serializer<string>} serializer
+ * @param {string | null} data
+ * @returns {string | null}
+ */
 function serialize(serializer, data) {
   const out = serializer.serialize({ topic: 't', headers: new Headers(), data });
+  if (out instanceof Promise) throw new Error('stringSerializer serializes synchronously');
   return out === null ? null : Buffer.from(out).toString('hex');
 }
 
@@ -97,6 +103,7 @@ const CHARSETS = {
     'fefffffd fefffffdfffd fefffffd feff0078fffd0079fffd fefffffdfffd feffffff fefffeff',
 };
 // The JDK's aliases of each (Charset.aliases()).
+/** @type {Record<string, string[]>} */
 const ALIASES = {
   'US-ASCII': [
     '646',
@@ -203,23 +210,28 @@ test('key.serializer.encoding or value.serializer.encoding takes precedence over
 });
 
 test("stringSerializer takes Java's configure(configs, isKey) or nothing, and its serializer only strings", () => {
+  // @ts-expect-error configs without isKey: the form check throws IllegalArgumentError
   assert.throws(() => stringSerializer({ configs: {} }), {
     constructor: IllegalArgumentError,
     message: 'stringSerializer() takes one of (), (configs, isKey); got (configs)',
   });
+  // @ts-expect-error null configs: the configs check throws TypeError
   assert.throws(() => stringSerializer({ configs: null, isKey: true }), {
     constructor: TypeError,
     message: 'configs must be an object, not null',
   });
   // A Map's entries are no properties: refused rather than silently ignored.
+  // @ts-expect-error a Map for configs: the configs check throws TypeError
   assert.throws(() => stringSerializer({ configs: new Map([['serializer.encoding', 'UTF-16']]), isKey: false }), {
     constructor: TypeError,
     message: 'configs must be a plain object, not a Map',
   });
+  // @ts-expect-error a number for isKey: the type check throws TypeError
   assert.throws(() => stringSerializer({ configs: {}, isKey: 1 }), {
     constructor: TypeError,
     message: 'isKey must be a boolean, not a number',
   });
+  // @ts-expect-error a number for the data: the serializer's type check throws TypeError
   assert.throws(() => stringSerializer().serialize({ topic: 't', headers: new Headers(), data: 5 }), {
     constructor: TypeError,
     message: 'stringSerializer: data must be a string or null, not a number',
