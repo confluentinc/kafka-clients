@@ -29,8 +29,8 @@ import { SerializerDefaults } from './serializer_defaults';
  * null for Java's null (or one not given): the bytes the record holds then
  * cross as they are.
  *
- * @param value the serializer given, or null
- * @param name the argument's name, for the error
+ * @param value - the serializer given, or null
+ * @param name - the argument's name, for the error
  * @returns the serializer, or null
  *
  * @throws `IllegalArgumentError` for a function that is no serializer, the
@@ -55,7 +55,7 @@ export function checkSerializer(value: unknown, name: string): Serializer<unknow
 /**
  * Whether `value` is a class, which is no serde config function.
  *
- * @param value the function to test
+ * @param value - the function to test
  * @returns whether it is a class
  */
 function isClass(value: (...args: never[]) => unknown): boolean {
@@ -69,7 +69,7 @@ function isClass(value: (...args: never[]) => unknown): boolean {
 /**
  * Whether `value` is an object or a function with a `serialize` method, and a `close` method or none.
  *
- * @param value the value to test
+ * @param value - the value to test
  * @returns whether it is a serializer
  */
 function isSerializer(value: unknown): value is Serializer<unknown> {
@@ -92,9 +92,9 @@ function isSerializer(value: unknown): value is Serializer<unknown> {
  * `client.id`, and the function runs before the core checks it
  * *(deviation: the core doesn't exist yet; javascript/CLAUDE.md)*.
  *
- * @param configs the producer's configuration
- * @param key the serde config key
- * @param read collects the keys the function reads
+ * @param configs - the producer's configuration
+ * @param key - the serde config key
+ * @param read - collects the keys the function reads
  * @returns the serializer, or null
  *
  * @throws `ConfigError` when the value is a class name (a string), a
@@ -151,7 +151,7 @@ export function configuredSerializer(
 /**
  * Whether `value` is a thenable, which the producer awaits.
  *
- * @param value the value to test
+ * @param value - the value to test
  * @returns whether it is a thenable
  */
 export function isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -165,8 +165,8 @@ export function isThenable(value: unknown): value is PromiseLike<unknown> {
  * until the hand-over, like the app's bytes): a `Uint8Array` (a `Buffer` is
  * one) or null.
  *
- * @param out what the serializer returned
- * @param name the serializer's name, for the error
+ * @param out - what the serializer returned
+ * @param name - the serializer's name, for the error
  * @returns the bytes, or null
  *
  * @throws `TypeError` for any other value
@@ -182,8 +182,8 @@ export function serializedBytes(out: unknown, name: string): Uint8Array | null {
  * throws, or the rejection of a Promise it returns, goes to
  * `process.emitWarning`, never to the caller.
  *
- * @param serializer the serializer, or null
- * @param name the serializer's name, for the warning
+ * @param serializer - the serializer, or null
+ * @param name - the serializer's name, for the warning
  */
 export function closeSerializer(serializer: Serializer<unknown> | null, name: string): void {
   if (serializer === null) return;
@@ -205,7 +205,7 @@ export function closeSerializer(serializer: Serializer<unknown> | null, name: st
 /**
  * The text of a thrown value; it never throws.
  *
- * @param thrown the thrown value
+ * @param thrown - the thrown value
  * @returns its text
  */
 function describe(thrown: unknown): string {

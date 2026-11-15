@@ -43,8 +43,8 @@ const MEASURABLE_FORMS = new JavaForms('measurable', [[]], { reader: true });
 /**
  * The function named `name` of `value`, or undefined.
  *
- * @param value the object to read
- * @param name the method's name
+ * @param value - the object to read
+ * @param name - the method's name
  * @returns the method, or undefined
  */
 function method(value: unknown, name: string): ((...args: unknown[]) => unknown) | undefined {
@@ -58,7 +58,7 @@ function method(value: unknown, name: string): ((...args: unknown[]) => unknown)
  * anonymous one (a plain object, a function), as Java's synthetic and
  * anonymous classes.
  *
- * @param value the object to name
+ * @param value - the object to name
  * @returns its class name, or null
  */
 function className(value: unknown): string | null {
@@ -215,9 +215,9 @@ export class KafkaMetric implements Metric {
    * core measured it then, through a provider that returns it (a Measurable
    * one for a measurable metric). Called by the producer.
    *
-   * @param metricName the metric's name
-   * @param value the metric's value at the snapshot
-   * @param measurable whether the metric is a `Measurable`
+   * @param metricName - the metric's name
+   * @param value - the metric's value at the snapshot
+   * @param measurable - whether the metric is a `Measurable`
    * @returns the metric
    *
    * @internal

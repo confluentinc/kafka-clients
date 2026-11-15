@@ -89,7 +89,7 @@ const CHARSET_NAMES: ReadonlyMap<string, JavaCharset> = new Map(
  * aliases, ignoring case, as Java's `Charset.forName` matches them; null for
  * any other name.
  *
- * @param name the charset's name
+ * @param name - the charset's name
  * @returns the charset, or null
  */
 export function javaCharsetForName(name: string): JavaCharset | null {
@@ -112,8 +112,8 @@ function isLow(unit: number): boolean {
  * above `max` is unmappable and becomes `?`, a surrogate pair (one
  * character) one `?`, a lone surrogate `?` too.
  *
- * @param s the string to encode
- * @param max the highest code point the charset maps
+ * @param s - the string to encode
+ * @param max - the highest code point the charset maps
  * @returns the encoded bytes
  */
 function encodeSingleByte(s: string, max: number): Buffer {
@@ -136,9 +136,9 @@ function encodeSingleByte(s: string, max: number): Buffer {
  * code unit, a lone surrogate as U+FFFD; with `bom`, the big-endian byte
  * order mark `FE FF` first, unless the string is empty.
  *
- * @param s the string to encode
- * @param littleEndian whether to write the low byte first
- * @param bom whether to write the byte order mark first
+ * @param s - the string to encode
+ * @param littleEndian - whether to write the low byte first
+ * @param bom - whether to write the byte order mark first
  * @returns the encoded bytes
  */
 function encodeUtf16(s: string, littleEndian: boolean, bom: boolean): Buffer {
