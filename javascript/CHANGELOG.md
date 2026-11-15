@@ -368,9 +368,13 @@ newer.
 - Installing runs no build (`"gypfile": false`, no install scripts).
 - Every package declares `"type": "commonjs"`, and publint checks each
   tarball.
-- The tests run on Jest, and `tsc --strict` type-checks them
-  (`make typecheck-tests`, through `checkJs`), against the compiled
-  declarations, each deliberate misuse marked `@ts-expect-error`.
+- The tests run on Jest, and `tsc --strict` type-checks them, the
+  verifiable clients' included (`make typecheck-tests`, through `checkJs`),
+  against the compiled declarations, each deliberate misuse marked
+  `@ts-expect-error`. A misuse `tsc` lets through carries none, such as
+  `KafkaFuture.completedFuture({ value: undefined })`, whose value type is
+  left unconstrained so that generic code can pass its value by name; the run
+  time refuses it.
 - The sources are formatted with Prettier, and
   `make docs` builds the HTML reference with TypeDoc. A docs lint
   (`eslint-plugin-jsdoc`) checks that each doc comment in `src/`, on a
