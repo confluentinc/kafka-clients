@@ -114,7 +114,7 @@ verify-commit-checks: submodules
 # ── The Node.js client ───────────────────────────────────────────────────
 #
 # The Node.js client (javascript/). `verify` runs its build, its rule linter,
-# its type check and its unit tests (test-javascript-unit, through `test`, and
+# its format check, its type check and its unit tests (test-javascript-unit, through `test`, and
 # lint-javascript), so it needs Node.js 22.14 or newer and `npm ci` in
 # javascript/ first (typescript and eslint are devDependencies); its
 # broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
@@ -164,7 +164,7 @@ test-javascript-macos-docker: build-javascript
 # (javascript/java-index.json, `cargo xtask java-api`), not the kafka submodule.
 lint-javascript:
 	$(MAKE) -C rust build-all-features
-	$(MAKE) -C javascript lint-rules test-lint
+	$(MAKE) -C javascript lint-rules test-lint format-check
 
 verify-javascript: test-javascript lint-javascript
 

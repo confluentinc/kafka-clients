@@ -88,7 +88,7 @@ HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (pro
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
-	test-verifiable-clients check-api update-api docs
+	test-verifiable-clients check-api update-api docs format format-check
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -151,6 +151,16 @@ lint-rules:
 	$(NODE) $(ESLINT) . --format ./scripts/lint/eslint/formatter.js $(ESLINT_ARGS) || status=1; \
 	$(NODE) scripts/lint_rules.js $(LINT_RULES_ARGS) || status=1; \
 	exit $$status
+
+# The formatter (scripts/format.js, prettier.config.cjs; root conventions, Build,
+# packaging and release, Q74): Prettier over the client's TypeScript and
+# JavaScript, generated files left out. `format-check` fails on a file it
+# would change, and the root `lint-javascript` runs it; `format` rewrites them.
+format:
+	$(NODE) scripts/format.js write
+
+format-check:
+	$(NODE) scripts/format.js check
 
 # The rule linter's own tests: no build of the client.
 test-lint:
