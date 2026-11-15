@@ -180,14 +180,10 @@ export const kafkaMetric: Kind = {
 
 /**
  * Java's `Collections.singleton(x)` of a TopicPartition, as a
- * `TopicPartitionSet`.
- *
- * @throws `TypeError` when `x` is null: a `TopicPartitionSet` holds
- *   TopicPartitions only
+ * `TopicPartitionSet`: a null `x` is its one member, as Java's set holds it.
  */
-export function singleton(x: unknown, name: string): TopicPartitionSet {
-  if (x === null) throw new TypeError(`${name} must not be null`);
-  return topicPartitionSetOf([x], name);
+export function singleton(x: unknown): TopicPartitionSet {
+  return new TopicPartitionSet([x as TopicPartition | null]);
 }
 
 /**
