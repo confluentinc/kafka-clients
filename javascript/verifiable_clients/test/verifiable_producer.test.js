@@ -49,6 +49,12 @@ const { MockProducer } = require('./_mock_producer');
 const SCRIPT = path.join(__dirname, '..', 'verifiable_producer.js');
 const KAFKA_ERROR_CLASS = 'class @confluentinc/kafka-javascript/common.KafkaError';
 
+/**
+ * A VerifiableProducer over `producer`, topic `t`.
+ *
+ * @param {MockProducer} [producer]
+ * @param {{ throughput?: number, maxMessages?: number, valuePrefix?: number | null, createTime?: number | null, repeatingKeys?: number | null }} [options]
+ */
 function verifiable(producer = new MockProducer(), options = {}) {
   return new VerifiableProducer({
     producer,
@@ -61,20 +67,31 @@ function verifiable(producer = new MockProducer(), options = {}) {
   });
 }
 
-/** Captures the JSON lines the tool prints while `fn` runs. */
+/**
+ * Captures the JSON lines the tool prints while `fn` runs.
+ *
+ * @param {() => unknown} fn
+ * @returns {Promise<string[]>}
+ */
 async function captured(fn) {
+  /** @type {string[]} */
   const lines = [];
   const original = fs.writeSync;
-  fs.writeSync = (fd, buffer, ...rest) => {
-    if (fd !== 1) return original.call(fs, fd, buffer, ...rest);
-    lines.push(
-      ...Buffer.from(buffer)
-        .toString('utf8')
-        .split('\n')
-        .filter((l) => l !== ''),
-    );
-    return buffer.length;
-  };
+  // A stub with the form the tool calls, writeSync(fd, buffer), passing the others on.
+  fs.writeSync = /** @type {typeof fs.writeSync} */ (
+    /** @type {unknown} */ (
+      (/** @type {number} */ fd, /** @type {Uint8Array} */ buffer, /** @type {unknown[]} */ ...rest) => {
+        if (fd !== 1) return Reflect.apply(original, fs, [fd, buffer, ...rest]);
+        lines.push(
+          ...Buffer.from(buffer)
+            .toString('utf8')
+            .split('\n')
+            .filter((l) => l !== ''),
+        );
+        return buffer.length;
+      }
+    )
+  );
   try {
     await fn();
   } finally {
@@ -83,16 +100,26 @@ async function captured(fn) {
   return lines;
 }
 
+/**
+ * @param {string[]} lines
+ * @returns {Array<Record<string, unknown>>}
+ */
 function json(lines) {
   return lines.map((line) => JSON.parse(line));
 }
 
+/** @param {Record<string, unknown>} data */
 function withoutTimestamp(data) {
   assert.equal(typeof data.timestamp, 'number');
   const { timestamp: _, ...rest } = data;
   return rest;
 }
 
+/**
+ * @param {string} name
+ * @param {string} [contents]
+ * @returns {string}
+ */
 function tmpFile(name, contents) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-verifiable-'));
   const file = path.join(dir, name);
@@ -192,7 +219,9 @@ test('the create time is the record timestamp and advances', async () => {
   const [first, second] = mock.history().map((record) => record.timestamp);
   // Java's long: a bigint.
   assert.equal(first, 1_000n);
+  assert.ok(second);
   assert.ok(second >= 1_005n, `${second}`);
+  assert.ok(producer.createTime !== null);
   assert.ok(producer.createTime >= Number(second) + 5, `${producer.createTime}`);
 });
 
@@ -339,11 +368,19 @@ test('tool_data fields are in Java order', () => {
 // The command line
 // ---------------------------------------------------------------------------
 
+/** @param {...string} args */
 function parse(...args) {
   return parseArgs(argParser(), args);
 }
 
+/**
+ * The message of the ArgumentParserError the arguments give.
+ *
+ * @param {...string} args
+ * @returns {string}
+ */
 function parseError(...args) {
+  /** @type {string | undefined} */
   let message;
   assert.throws(
     () => parse(...args),
@@ -353,6 +390,7 @@ function parseError(...args) {
       return true;
     },
   );
+  assert.ok(message !== undefined);
   return message;
 }
 
@@ -463,6 +501,7 @@ test('the deprecated producer config still loads', async () => {
   const lines = await captured(() => {
     [, props] = parse('--topic', 't', '--bootstrap-server', 'b', '--producer.config', config);
   });
+  assert.ok(props);
   assert.equal(props['linger.ms'], '10');
   assert.deepEqual(lines, [
     'Option --producer.config has been deprecated and will be removed in a future version. Use --command-config instead.',
@@ -497,6 +536,10 @@ test('createFromArgs builds a KafkaProducer', async () => {
 // The script, end to end, against an unreachable broker
 // ---------------------------------------------------------------------------
 
+/**
+ * @param {string[]} args
+ * @param {number} [timeout]
+ */
 function runScript(args, timeout = 60_000) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', timeout });
 }
@@ -535,12 +578,20 @@ test('the script reports unacked sends then its summary', () => {
   );
 });
 
-/** Starts the script; `next()` resolves to its next stdout line, parsed. */
+/** @typedef {Record<string, unknown>} Line */
+
+/**
+ * Starts the script; `next()` resolves to its next stdout line, parsed.
+ *
+ * @param {string[]} args
+ */
 function startScript(args) {
   const child = spawn(process.execPath, [SCRIPT, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   let err = '';
+  /** @type {Array<(line: Line) => void>} */
   const waiters = [];
+  /** @type {Line[]} */
   const lines = [];
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -550,16 +601,21 @@ function startScript(args) {
     while ((nl = out.indexOf('\n')) >= 0) {
       lines.push(JSON.parse(out.slice(0, nl)));
       out = out.slice(nl + 1);
-      while (waiters.length > 0 && lines.length > 0) waiters.shift()(lines.shift());
+      // Both are non-empty here.
+      while (waiters.length > 0 && lines.length > 0)
+        /** @type {(line: Line) => void} */ (waiters.shift())(/** @type {Line} */ (lines.shift()));
     }
   });
   child.stderr.on('data', (chunk) => {
     err += chunk;
   });
+  /** @type {Promise<number | null>} */
   const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
   return {
     child,
-    next: () => (lines.length > 0 ? Promise.resolve(lines.shift()) : new Promise((resolve) => waiters.push(resolve))),
+    /** @returns {Promise<Line>} */
+    next: () => (lines.length > 0 ? Promise.resolve(/** @type {Line} */ (lines.shift())) : new Promise((resolve) => waiters.push(resolve))),
+    /** @param {number} timeoutMs */
     async end(timeoutMs) {
       const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
       const code = await exited;

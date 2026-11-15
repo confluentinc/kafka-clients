@@ -144,7 +144,8 @@ test('shared connection keys stay with the producer', () => {
 });
 
 test("the command line takes the Python soak's flags and defaults", () => {
-  const args = parseArgs(['-i', 'soak1', '-t', 'topic']);
+  // The tool's argument parser carries no types: its result is read as a record.
+  const args = /** @type {Record<string, unknown>} */ (parseArgs(['-i', 'soak1', '-t', 'topic']));
   assert.deepEqual(
     [args.testid, args.topic, args.rate, args.payloadSize, args.maxSendAttempts, args.runtimeSeconds, args.shutdownTimeout],
     ['soak1', 'topic', 80, 50, 10, 0, 60],
@@ -223,6 +224,12 @@ test("the metrics file holds one window per line in the Python soak's schema", (
 // Delivery accounting
 // ---------------------------------------------------------------------------
 
+/**
+ * A SoakClient over `mock`.
+ *
+ * @param {MockProducer} mock
+ * @param {Record<string, unknown>} [overrides] arguments over the defaults
+ */
 function soakOver(mock, overrides = {}) {
   const args = {
     testid: 't',
@@ -234,7 +241,11 @@ function soakOver(mock, overrides = {}) {
     metricsFile: null,
     ...overrides,
   };
-  return new SoakClient(args, { 'bootstrap.servers': 'x' }, { createProducer: () => mock });
+  // The stand-in has the members the soak client calls, not a KafkaProducer's others.
+  const producer = /** @type {import('@confluentinc/kafka-javascript/producer').KafkaProducer<Uint8Array, Uint8Array>} */ (
+    /** @type {unknown} */ (mock)
+  );
+  return new SoakClient(args, { 'bootstrap.servers': 'x' }, { createProducer: () => producer });
 }
 
 test('every delivered record is counted once and the run passes', async () => {
@@ -259,6 +270,7 @@ test('a second callback for a record fails the run', async () => {
   await soak.produceRecord();
   const [completion] = mock.pending;
   assert.ok(mock.completeNext());
+  assert.ok(completion.callback);
   completion.callback({ metadata: { topic: 'soak-t', partition: 0, offset: 7 }, exception: null });
   assert.equal(soak.duplicateReports, 1);
   assert.equal(soak.verdict(), 'FAIL (1 duplicate delivery report(s))');
@@ -306,6 +318,7 @@ test("a delivered offset at or below the partition's last one is a regression", 
   await soak.produceRecord();
   await soak.produceRecord();
   const [a, b] = mock.pending.splice(0);
+  assert.ok(a.callback && b.callback);
   b.callback({ metadata: { topic: 'soak-t', partition: 0, offset: 10 }, exception: null });
   a.callback({ metadata: { topic: 'soak-t', partition: 0, offset: 9 }, exception: null });
   assert.equal(soak.offsetRegressions, 1);
