@@ -29,6 +29,7 @@
 
 const runner = '<rootDir>/test/jest_runner.mjs';
 
+/** @type {(displayName: string, testMatch: string[]) => Record<string, unknown>} */
 const project = (displayName, testMatch) => ({
   displayName,
   rootDir: __dirname,
