@@ -185,6 +185,15 @@ test('shouldThrowNpeWhenAddingNullHeader', () => {
 test('shouldThrowNpeWhenAddingCollectionWithNullHeader', () => {
   assert.throws(() => new Headers(new Array(1).fill(null)), { name: 'TypeError', message: 'Header cannot be null.' });
   assert.throws(() => new Headers({ headers: [null] }), { name: 'TypeError', message: 'Header cannot be null.' });
+  // The core reports the first null, and nothing after it is read, as Java's
+  // loop stops there.
+  function* nullThenThrow() {
+    yield header('a', '1');
+    yield null;
+    throw new Error('read past the null');
+  }
+  assert.throws(() => new Headers(nullThenThrow()), { name: 'TypeError', message: 'Header cannot be null.' });
+  assert.throws(() => new Headers([header('a', '1'), null, 'not a header']), { name: 'TypeError', message: 'Header cannot be null.' });
 });
 
 // The rest: the forms, the null-key checks and toString.
@@ -295,9 +304,20 @@ test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () 
     name: 'TypeError',
     message: "key must not be undefined. Leave the argument out, or pass null for Java's null",
   });
-  // remove checks the read-only state first, as Java's canWrite() comes first.
+  // (deviation) Java's remove checks canWrite() before checkKey(): on read-only
+  // headers a null key is the FFI's error, which checks the NULL argument first.
   headers.internalSetReadOnly();
-  assert.throws(() => headers.remove(null), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+  assert.throws(
+    () => headers.remove(null),
+    (e) => {
+      assert.ok(e instanceof IllegalArgumentError);
+      assert.equal(e.message, 'key cannot be null.');
+      return true;
+    },
+  );
+  assert.throws(() => headers.remove({ key: 1 }), { name: 'TypeError', message: 'key must be a string' });
+  assert.throws(() => headers.remove('a'), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+  assert.equal(getCount(headers), 1);
 });
 
 test('headers(key) reads the headers when iterated; toArray is a copy', () => {
@@ -456,6 +476,7 @@ const PROBE = `
 const assert = require('node:assert/strict');
 const native = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'internal', 'native'))});
 const { Header, Headers } = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'common', 'header'))});
+const { KafkaProducer, ProducerRecord } = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'producer'))});
 
 // A few collections, with timer turns between them so the finalizers run
 // (an external Buffer's runs from a later task than a wrapped object's).
@@ -474,6 +495,62 @@ function churn() {
     if (round % 2 === 0) h.internalSetReadOnly();
     for (const x of h) x.value();
     [...new Headers(h).headers('a')];
+  }
+}
+
+async function refusedChangesKeepViews() {
+  const record = new ProducerRecord({
+    topic: 't',
+    partition: null,
+    key: null,
+    value: Buffer.from('v'),
+    headers: [
+      new Header({ key: 'trace', value: Buffer.from('abcdefgh') }),
+      new Header({ key: 'span', value: Buffer.from('s1') }),
+      new Header({ key: 'trace', value: Buffer.from('t2') }),
+    ],
+  });
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 } });
+  try {
+    // send() seals the record's headers; its delivery fails, which is not what is tested.
+    await producer.send(record).catch(() => {});
+    const headers = record.headers;
+    const read = headers.lastHeader('trace');
+    assert.equal(read.key(), 'trace');
+    assert.equal(read.value().toString(), 't2');
+    const unread = { last: headers.lastHeader('span'), array: headers.toArray(), iterated: [...headers], byKey: [...headers.headers('trace')] };
+    const closed = { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' };
+    assert.throws(() => headers.add(new Header({ key: 'x', value: Buffer.from('x') })), closed);
+    assert.throws(() => headers.add({ key: 'x', value: null }), closed);
+    assert.throws(() => headers.remove('span'), closed);
+    assert.throws(() => headers.remove(null), { name: 'IllegalArgumentError', message: 'key cannot be null.' });
+    // The record sent again: a second seal.
+    await producer.send(record).catch(() => {});
+    globalThis.gc();
+    const expect = (h, key, value) => {
+      assert.equal(h.key(), key);
+      assert.equal(h.value().toString(), value);
+    };
+    expect(unread.last, 'span', 's1');
+    for (const list of [unread.array, unread.iterated]) {
+      expect(list[0], 'trace', 'abcdefgh');
+      expect(list[1], 'span', 's1');
+      expect(list[2], 'trace', 't2');
+    }
+    expect(unread.byKey[0], 'trace', 'abcdefgh');
+    expect(unread.byKey[1], 'trace', 't2');
+    // A view already read, and the others, passed on to other headers.
+    const passed = new Headers([read, unread.array[1]]);
+    const other = new Headers();
+    other.add(read).add(unread.byKey[0]).add({ key: 'k', value: null });
+    assert.deepEqual(passed.toArray().map((h) => [h.key(), h.value().toString()]), [['trace', 't2'], ['span', 's1']]);
+    assert.deepEqual(
+      other.toArray().map((h) => [h.key(), h.value() === null ? null : h.value().toString()]),
+      [['trace', 't2'], ['trace', 'abcdefgh'], ['k', null]],
+    );
+    assert.ok(headers.equals(new Headers(record.headers)));
+  } finally {
+    await producer.close();
   }
 }
 
@@ -518,6 +595,15 @@ function churn() {
   assert.deepEqual(live(), { headers: 0, header: 1 }, 'a copy does not keep its Headers');
   assert.equal(copy.value().toString(), 'copied');
   copy = null;
+
+  // The views of read-only headers stay valid through a refused add or remove,
+  // as Java's Header does: the FFI drops a handle's views on every mutating
+  // call, refused or not, so the binding takes the core's refusal from headers
+  // that hand out none. Some views are read before the refused calls, some
+  // after, and a second seal (the record sent again) keeps them too.
+  await refusedChangesKeepViews();
+  await collect();
+  assert.deepEqual(live(), { headers: 0, header: 0 }, 'the views and their Headers freed after the refused calls');
 
   // Many of each, dropped (in a function of their own, whose frame then holds
   // none): every handle destroyed exactly once.

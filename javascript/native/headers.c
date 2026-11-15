@@ -222,10 +222,15 @@ static napi_value undefined_value(napi_env env) {
 }
 
 // The Header JS gets for `record`, a header of `box`'s list: a view, holding
-// a reference on `box`, while the headers are read-only (they never change
-// again, so the view stays valid); the binding's own copy of its key and
-// value otherwise, which stays valid after the headers change, as Java's
-// Header does (option 1).
+// a reference on `box`, while the headers are read-only; the binding's own
+// copy of its key and value otherwise, which stays valid after the headers
+// change, as Java's Header does (option 1). Read-only headers never change
+// again, but the FFI frees the views a handle handed out on every mutating
+// call on it (`add_*`, `remove`), refused ones included, so a view stays
+// valid only because the binding never makes such a call on read-only
+// headers: src/common/header/headers.ts sends it to the shared empty
+// read-only headers instead, which hand out no view (javascript/CLAUDE.md,
+// boundary rule 1). Sealing again (`set_read_only`) keeps the views.
 static napi_value header_out(napi_env env, HeadersBox* box, const kafka_common_header_internals_RecordHeader_t* record,
                              int read_only) {
     if (read_only) {
@@ -297,7 +302,8 @@ static napi_value list_out(napi_env env, HeadersBox* box, kafka_List_t* list) {
 // headersNew(headers, form): Java's RecordHeaders() (form 0, headers null),
 // RecordHeaders(Header[]) (form 1) or RecordHeaders(Iterable<Header>) (form
 // 2), `headers` an array of header handle objects, whose headers the core
-// copies.
+// copies; a null element goes to the core as NULL, which reports Java's
+// error ("Header cannot be null.").
 napi_value js_headers_new(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value argv[2];
@@ -328,6 +334,8 @@ napi_value js_headers_new(napi_env env, napi_callback_info info) {
         if (napi_get_element(env, argv[0], i, &item) != napi_ok) {
             js_throw_last_napi_error(env, "napi_get_element");
             thrown = 1;
+        } else if (is_nullish(env, item)) {
+            err = FFI_ERR(kafka_List_add_err(list, NULL, &ffi_err));
         } else if ((header = unwrap_header(env, item)) == NULL) {
             thrown = 1;
         } else {

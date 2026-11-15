@@ -197,8 +197,8 @@ interface Native {
   ): void;
   // Java's RecordHeaders() (form 0, headers null), RecordHeaders(Header[])
   // (form 1) and RecordHeaders(Iterable<Header>) (form 2); the core copies
-  // the given headers.
-  headersNew(headers: HeaderHandle[] | null, form: 0 | 1 | 2): HeadersHandle;
+  // the given headers, and a null one is the core's error.
+  headersNew(headers: (HeaderHandle | null)[] | null, form: 0 | 1 | 2): HeadersHandle;
   // Java's new RecordHeaders(headers) of a RecordHeaders: a writable copy.
   headersCopy(headers: HeadersHandle): HeadersHandle;
   // Java's add(Header): the core stores a copy; null is the core's error.
