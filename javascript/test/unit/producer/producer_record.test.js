@@ -387,8 +387,7 @@ test('every set of parameters that is not a Java constructor is an IllegalArgume
     }
     rejected += 1;
     assert.throws(
-      // @ts-expect-error a set of keys no Java constructor has: the form check throws IllegalArgumentError
-      () => new ProducerRecord(options),
+      () => new AnyForm(options),
       (e) => {
         assert.ok(e instanceof IllegalArgumentError);
         assert.equal(e.message, `${FORMS}; got (${given.join(', ')})`);
@@ -551,7 +550,7 @@ test('the record is frozen: a field cannot be reassigned, so send reads what the
     headers: [H('h', bytes('x'))],
   });
   assert.equal(Object.isFrozen(r), true);
-  for (const [field, value] of /** @type {Array<[string, unknown]>} */ ([
+  for (const [field, value] of /** @type {const} */ ([
     ['value', undefined],
     ['key', 42],
     ['partition', -5],
