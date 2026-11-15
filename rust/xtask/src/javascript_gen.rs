@@ -13,24 +13,26 @@
 // limitations under the License.
 
 //! The generated files of the Node.js client (`javascript/src/`, TypeScript
-//! sources that `make -C javascript build` compiles into `javascript/dist/`),
-//! from the same Java sources and FFI enum as the Python client's
-//! (`javascript/CLAUDE.md`, "Generated files"):
+//! sources that `make -C javascript build` compiles into `javascript/dist/`,
+//! and `javascript/native/`, the addon's C sources), from the same Java
+//! sources and FFI enum as the Python client's (`javascript/CLAUDE.md`,
+//! "Generated files"):
 //!
 //!   - the error hierarchy ([`crate::error_hierarchy::js`]): one class per
 //!     Python error class, in the folder of its Java package, plus
-//!     `src/internal/error_registry.ts`;
+//!     `src/internal/error_registry.ts` and `native/error_payload.c`;
 //!   - the config classes' constants ([`crate::config_consts::js`]);
-//!   - the producer's key-type table `src/internal/config_types.ts`
-//!     ([`crate::config_types::js`]).
+//!   - the producer's configuration keys ([`crate::config_types::js`]): the
+//!     `ProducerConfigs` type, `src/producer/producer_configs.ts`, and the
+//!     key list `src/internal/producer_config_keys.ts`.
 //!
-//! Every generated module carries [`GENERATED_MARKER`]. A folder holding only
+//! Every generated file carries [`GENERATED_MARKER`]. A folder holding only
 //! generated modules gets a generated `index.ts`; a folder that also holds
 //! hand-written ones ([`MIXED_DIRS`]) keeps its hand-written `index.ts`, and the
 //! generator owns the marked block in it ([`EXPORTS_BEGIN`]). A generated
 //! module no generator produces any more (a `.ts`, or a `.js` left from the
-//! JavaScript sources the client had before) is removed by `generate` and
-//! reported by `check-generated`.
+//! JavaScript sources the client had before, or a `.c` / `.h` of the addon) is
+//! removed by `generate` and reported by `check-generated`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -40,6 +42,8 @@ type Res<T> = anyhow::Result<T>;
 
 /// The Node.js client's sources, relative to the repository root.
 pub(crate) const JS_SRC: &str = "javascript/src";
+/// The addon's C sources, where `native/error_payload.c` is generated.
+const JS_NATIVE: &str = "javascript/native";
 
 /// The marker of every generated module (in its leading comment block).
 pub(crate) const GENERATED_MARKER: &str = "GENERATED, DO NOT EDIT";
@@ -447,28 +451,38 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     Ok(out)
 }
 
-/// Generated modules under src/ that no generator produces any more: `.ts`
-/// files carrying [`GENERATED_MARKER`] that are not among `outputs`, and any
-/// `.js` one (the generated JavaScript modules the client had before its
-/// sources became TypeScript).
+/// Generated files that no generator produces any more: a file carrying
+/// [`GENERATED_MARKER`] that is not among `outputs`, a `.ts` (or a `.js`, of
+/// the JavaScript sources the client had before its sources became
+/// TypeScript) under src/, or a `.c` / `.h` of the addon under native/ (its
+/// `build/` output left out).
 fn orphaned(repo_root: &Path, outputs: &[(PathBuf, String)]) -> Res<Vec<PathBuf>> {
     let expected: BTreeSet<&PathBuf> = outputs.iter().map(|(p, _)| p).collect();
     let mut orphans = Vec::new();
-    let mut stack = vec![repo_root.join(JS_SRC)];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if !(name.ends_with(".ts") || name.ends_with(".js")) || expected.contains(&path) {
-                continue;
-            }
-            let text = fs::read_to_string(&path)?;
-            if text.lines().take(20).any(|l| l.contains(GENERATED_MARKER)) {
-                orphans.push(path);
+    let roots: [(&str, &[&str]); 2] = [(JS_SRC, &[".ts", ".js"]), (JS_NATIVE, &[".c", ".h"])];
+    for (root, kinds) in roots {
+        let top = repo_root.join(root);
+        if !top.is_dir() {
+            continue;
+        }
+        let mut stack = vec![top.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    if !(root == JS_NATIVE && path == top.join("build")) {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if !kinds.iter().any(|k| name.ends_with(k)) || expected.contains(&path) {
+                    continue;
+                }
+                let text = fs::read_to_string(&path)?;
+                if text.lines().take(20).any(|l| l.contains(GENERATED_MARKER)) {
+                    orphans.push(path);
+                }
             }
         }
     }
@@ -598,6 +612,47 @@ mod tests {
             .unwrap();
         assert!(errors.1.ends_with(&format!("{ES_MODULE_MARKER}\n")));
         assert!(errors.1.contains("export { ApiError } from './api_error';\n"));
+    }
+
+    #[test]
+    fn test_orphaned_reports_stale_generated_sources_and_native_files() {
+        let root = std::env::temp_dir().join(format!("javascript-gen-orphans-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let generated = format!("// {GENERATED_MARKER}\n");
+        let files = [
+            ("javascript/src/kept.ts", generated.as_str()),
+            ("javascript/src/common/stale.ts", generated.as_str()),
+            ("javascript/src/old.js", generated.as_str()),
+            ("javascript/src/hand_written.ts", "// hand-written\n"),
+            ("javascript/native/error_payload.c", generated.as_str()),
+            ("javascript/native/stale_payload.c", generated.as_str()),
+            ("javascript/native/stale.h", generated.as_str()),
+            ("javascript/native/headers.c", "// hand-written\n"),
+            ("javascript/native/build/Release/copy.c", generated.as_str()),
+            ("javascript/native/binding.gyp", generated.as_str()),
+        ];
+        for (rel, text) in files {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, text).unwrap();
+        }
+        let outputs = [
+            (root.join("javascript/src/kept.ts"), String::new()),
+            (root.join("javascript/native/error_payload.c"), String::new()),
+        ];
+        let found = orphaned(&root, &outputs).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let rel: Vec<_> = found.iter().map(|p| p.strip_prefix(&root).unwrap().to_path_buf()).collect();
+        assert_eq!(
+            rel,
+            [
+                "javascript/native/stale.h",
+                "javascript/native/stale_payload.c",
+                "javascript/src/common/stale.ts",
+                "javascript/src/old.js",
+            ]
+            .map(PathBuf::from)
+        );
     }
 
     #[test]
