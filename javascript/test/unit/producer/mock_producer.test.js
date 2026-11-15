@@ -127,7 +127,9 @@ test('shouldThrowOnSendIfProducerIsClosed', async () => {
 test('shouldThrowOnFlushProducerIfProducerIsClosed', async () => {
   const producer = buildMockProducer(true);
   await producer.close();
-  await holdingTheLoop(() => assert.rejects(producer.flush(), { constructor: IllegalStateError, message: 'MockProducer is already closed.' }));
+  await holdingTheLoop(() =>
+    assert.rejects(producer.flush(), { constructor: IllegalStateError, message: 'MockProducer is already closed.' }),
+  );
 });
 
 test('shouldThrowClassCastException', async () => {
@@ -201,7 +203,10 @@ test('testMetadataOnException', async () => {
 
 test("the constructor takes Java's () and (autoComplete, partitioner, keySerializer, valueSerializer)", async () => {
   const forms = 'MockProducer() takes one of (), (autoComplete, partitioner, keySerializer, valueSerializer)';
-  assert.throws(() => new MockProducer({ autoComplete: true }), { constructor: IllegalArgumentError, message: `${forms}; got (autoComplete)` });
+  assert.throws(() => new MockProducer({ autoComplete: true }), {
+    constructor: IllegalArgumentError,
+    message: `${forms}; got (autoComplete)`,
+  });
   assert.throws(() => new MockProducer({ autoComplete: 1, partitioner: null, keySerializer: null, valueSerializer: null }), {
     constructor: TypeError,
     message: 'autoComplete must be a boolean',
@@ -217,7 +222,12 @@ test("the constructor takes Java's () and (autoComplete, partitioner, keySeriali
   assert.ok(producer.completeNext());
   assert.equal((await future.get()).offset, 0n);
   // The partitioner is never called: the mock's cluster is empty.
-  const partitioned = new MockProducer({ autoComplete: true, partitioner: { partition: () => assert.fail('called') }, keySerializer: null, valueSerializer: null });
+  const partitioned = new MockProducer({
+    autoComplete: true,
+    partitioner: { partition: () => assert.fail('called') },
+    keySerializer: null,
+    valueSerializer: null,
+  });
   assert.equal((await (await partitioned.send(record1)).get()).partition, 0);
   await partitioned.close();
   await producer.close();
@@ -255,7 +265,12 @@ test('the serializers run on every send, each with fresh empty headers, and the 
       return null;
     },
   });
-  const producer = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: serializer('key'), valueSerializer: serializer('value') });
+  const producer = new MockProducer({
+    autoComplete: true,
+    partitioner: null,
+    keySerializer: serializer('key'),
+    valueSerializer: serializer('value'),
+  });
   const record = new ProducerRecord({ topic, partition: null, key: 'k', value: 'v', headers: [] });
   await producer.send(record);
   // Java's mock gives each serializer a new RecordHeaders: the value
@@ -299,7 +314,10 @@ test('each error setter makes its call throw the very same value; null clears it
   await producer.close({ timeout: 0 });
   assert.ok(producer.closed());
 
-  assert.throws(() => producer.setSendException({ sendException: 'boom' }), { constructor: TypeError, message: 'sendException must be an Error or null' });
+  assert.throws(() => producer.setSendException({ sendException: 'boom' }), {
+    constructor: TypeError,
+    message: 'sendException must be an Error or null',
+  });
   assert.throws(() => producer.setSendException('boom'), {
     constructor: IllegalArgumentError,
     message: 'setSendException() takes one of (sendException); got a string',
@@ -354,8 +372,14 @@ test("a callback that throws makes the completing call throw it, as Java's mock 
   const manual = new MockProducer();
   const futures = [];
   for (let i = 0; i < 3; i++) futures.push(await manual.send({ record: record1, callback: throwing }));
-  assert.throws(() => manual.completeNext(), (e) => e === thrown);
-  assert.throws(() => manual.errorNext(new KafkaError('next')), (e) => e === thrown);
+  assert.throws(
+    () => manual.completeNext(),
+    (e) => e === thrown,
+  );
+  assert.throws(
+    () => manual.errorNext(new KafkaError('next')),
+    (e) => e === thrown,
+  );
   await assert.rejects(manual.flush(), (e) => e === thrown);
   // The calls after it are not affected.
   await manual.send(record2);
@@ -371,15 +395,23 @@ test('flush() completes every waiting record before it rejects with the first th
   const ran = [];
   const futures = [];
   for (const name of ['cb0', 'cb1', 'cb2']) {
-    futures.push(await mock.send({ record: record1, callback: () => {
-      ran.push(name);
-      throw new Error(name);
-    } }));
+    futures.push(
+      await mock.send({
+        record: record1,
+        callback: () => {
+          ran.push(name);
+          throw new Error(name);
+        },
+      }),
+    );
   }
   await assert.rejects(mock.flush(), { message: 'cb0' });
   // Java's flush() stops at cb0, leaving two records waiting; the core's mock completes them all.
   assert.deepEqual(ran, ['cb0', 'cb1', 'cb2']);
-  assert.deepEqual(futures.map((f) => f.isDone()), [true, true, true]);
+  assert.deepEqual(
+    futures.map((f) => f.isDone()),
+    [true, true, true],
+  );
   assert.equal(mock.completeNext(), false);
   await mock.close();
 });
@@ -406,7 +438,7 @@ test("Java's empty-cluster mock sends to partition 0 whatever the record says, w
   await producer.close();
 });
 
-test("a refused send is not in history() and keeps nothing: its callback never runs", async () => {
+test('a refused send is not in history() and keeps nothing: its callback never runs', async () => {
   const producer = new MockProducer();
   const error = new KafkaError('refused');
   producer.setSendException(error);
@@ -431,8 +463,11 @@ function runNode(script, timeout = 60000) {
 // destroyed (its threads gone), whatever sends were still waiting at its
 // close or dropped by clear(): the addon holds a waiting send's delivery
 // function weakly, the mock strongly (native/producer.c, SendCtx.mock_pending).
-(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)('a closed mock is destroyed when collected, a send pending at close() or dropped by clear() included', () => {
-  const r = runNode(`
+(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)(
+  'a closed mock is destroyed when collected, a send pending at close() or dropped by clear() included',
+  () => {
+    const r = runNode(
+      `
     const { execSync } = require('node:child_process');
     const fs = require('node:fs');
     const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
@@ -485,15 +520,25 @@ function runNode(script, timeout = 60000) {
       console.log('completeNext after close', m.completeNext(), ran);
       clearInterval(hold);
     })();
-  `, 120000);
-  assert.equal(r.status, 0, r.stderr);
-  const lines = r.stdout.trim().split('\n');
-  assert.equal(lines[2], 'completeNext after close true true', r.stdout);
-  const counts = lines.slice(0, 2).map((l) => /^(.*) (\d+) (-?\d+)$/.exec(l));
-  assert.deepEqual(counts.map((m) => m && [m[1], m[2]]), [['pending at close', '5'], ['dropped by clear', '5']], r.stdout);
-  // About 18 threads per live mock: five leaked mocks would leave about 90.
-  for (const m of counts) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
-});
+  `,
+      120000,
+    );
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.trim().split('\n');
+    assert.equal(lines[2], 'completeNext after close true true', r.stdout);
+    const counts = lines.slice(0, 2).map((l) => /^(.*) (\d+) (-?\d+)$/.exec(l));
+    assert.deepEqual(
+      counts.map((m) => m && [m[1], m[2]]),
+      [
+        ['pending at close', '5'],
+        ['dropped by clear', '5'],
+      ],
+      r.stdout,
+    );
+    // About 18 threads per live mock: five leaked mocks would leave about 90.
+    for (const m of counts) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
+  },
+);
 
 // An open mock keeps neither the records it refused nor the errors it was
 // given once the core is done with them (native/producer.c,

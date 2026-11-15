@@ -75,7 +75,11 @@ const FUTURE_TS =
   'export class KafkaFuture<T> {\n  private constructor(private readonly v: T) {}\n' +
   '  static of<T>(): KafkaFuture<T> { return null as unknown as KafkaFuture<T>; }\n' +
   '  get(): Promise<T> { return Promise.resolve(this.v); }\n}\n';
-const classes = [...CLASSES, TYPED, javaClass('common.KafkaFuture', { abstract: true, overloads: [method('get', [], { return_type: 'T' })] })];
+const classes = [
+  ...CLASSES,
+  TYPED,
+  javaClass('common.KafkaFuture', { abstract: true, overloads: [method('get', [], { return_type: 'T' })] }),
+];
 const fixture = (files = {}) =>
   project({
     'tsconfig.json': TSCONFIG,
@@ -119,7 +123,11 @@ test('Java byte[] is bytes only: a string, or bytes or a string, is a type-misma
 test("Java's long is a bigint returned, and a bigint or a number taken", () => {
   for (const [from, to, finding] of [
     ['get count(): bigint { return 1n; }', 'get count(): number { return 1; }', 'Typed.count: type: Java long is not TypeScript number'],
-    ['get count(): bigint { return 1n; }', 'get count(): bigint | number { return 1; }', 'Typed.count: type: Java long is not TypeScript number | bigint'],
+    [
+      'get count(): bigint { return 1n; }',
+      'get count(): bigint | number { return 1; }',
+      'Typed.count: type: Java long is not TypeScript number | bigint',
+    ],
     ['seek(offset: bigint | number)', 'seek(offset: number)', 'Typed.seek: parameter offset: Java long is not TypeScript number'],
     ['seek(offset: bigint | number)', 'seek(offset: bigint)', 'Typed.seek: parameter offset: Java long is not TypeScript bigint'],
   ]) {
@@ -147,7 +155,7 @@ test('a type off the table is a type-mismatch; a Java type with no row is unmapp
     'Typed.wait: parameter timeout: Java Duration is not TypeScript string',
     'Typed.widget: return: Java Widget has no row in the table (TypeScript unknown)',
     'Typed.flush: return: Java void is not TypeScript Promise<void>',
-    'Typed.pause: parameter timeoutMs: it translates Java\'s Duration timeout, so it is named timeout',
+    "Typed.pause: parameter timeoutMs: it translates Java's Duration timeout, so it is named timeout",
     'Typed.pick: option x: Java String | int is not TypeScript string',
   ]);
 });
@@ -156,13 +164,18 @@ test('a Duration is a number of milliseconds or a Temporal.Duration, nothing els
   const pause = (type) => TYPED_TS.replace(PAUSE, `  pause(timeout: ${type}): void { void timeout; }`);
   // A Temporal.Duration alone, without a number, is not Java's Duration as the client takes it.
   let r = lint(fixture({ 'src/producer/typed.ts': pause('{ total(options: { unit: "millisecond" }): number }') }), [RULE]);
-  assert.deepEqual(findings(r), ['Typed.pause: parameter timeout: Java Duration is not TypeScript { total(options: { unit: "millisecond"; }): number; }']);
+  assert.deepEqual(findings(r), [
+    'Typed.pause: parameter timeout: Java Duration is not TypeScript { total(options: { unit: "millisecond"; }): number; }',
+  ]);
   r = lint(fixture({ 'src/producer/typed.ts': pause('number | { other(): void }') }), [RULE]);
   assert.deepEqual(findings(r), ['Typed.pause: parameter timeout: Java Duration is not TypeScript number | { other(): void; }']);
 });
 
 test('a union holding the translated class and more is a mismatch', () => {
-  const r = lint(fixture({ 'src/producer/typed.ts': TYPED_TS.replace('future(): KafkaFuture<Rec>', 'future(): KafkaFuture<Rec | string>') }), [RULE]);
+  const r = lint(
+    fixture({ 'src/producer/typed.ts': TYPED_TS.replace('future(): KafkaFuture<Rec>', 'future(): KafkaFuture<Rec | string>') }),
+    [RULE],
+  );
   assert.deepEqual(findings(r), ['Typed.future: return: Java Future<Rec> is not TypeScript KafkaFuture<string | Rec>']);
 });
 
@@ -174,7 +187,11 @@ test("KafkaFuture's rows: CompletionStage, its nested function types, Throwable,
       method('get', ['long', 'TimeUnit'], { return_type: 'T', param_names: ['timeout', 'unit'] }),
       method('toCompletionStage', [], { return_type: 'CompletionStage<T>' }),
       // As the real index has them: the erased type, and the type as written.
-      method('thenApply', ['BaseFunction'], { param_types: ['BaseFunction<T, R>'], return_type: 'KafkaFuture<R>', param_names: ['function'] }),
+      method('thenApply', ['BaseFunction'], {
+        param_types: ['BaseFunction<T, R>'],
+        return_type: 'KafkaFuture<R>',
+        param_names: ['function'],
+      }),
       method('whenComplete', ['BiConsumer'], {
         param_types: ['BiConsumer<? super T, ? super Throwable>'],
         return_type: 'KafkaFuture<T>',
@@ -183,7 +200,12 @@ test("KafkaFuture's rows: CompletionStage, its nested function types, Throwable,
       method('getNow', ['T'], { return_type: 'T', param_names: ['valueIfAbsent'] }),
       // A bare form with the type-level check, `...check`, which is no Java parameter.
       method('completedFuture', ['U'], { return_type: 'KafkaFuture<U>', param_names: ['value'], static: true }),
-      method('allOf', ['KafkaFuture[]'], { param_types: ['KafkaFuture<?>[]'], return_type: 'KafkaFuture<Void>', param_names: ['futures'], static: true }),
+      method('allOf', ['KafkaFuture[]'], {
+        param_types: ['KafkaFuture<?>[]'],
+        return_type: 'KafkaFuture<Void>',
+        param_names: ['futures'],
+        static: true,
+      }),
     ],
   });
   const DURATION = "number | { readonly [Symbol.toStringTag]: 'Temporal.Duration'; total(options: { unit: 'millisecond' }): number }";
@@ -278,7 +300,10 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing mapped fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...FILES, 'src/producer/producer.ts': 'export {};\n' }), [RULE]);
+  const r = lint(
+    project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), ...FILES, 'src/producer/producer.ts': 'export {};\n' }),
+    [RULE],
+  );
   assert.ok(r.err.includes('❌ check-type-mapping: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
 
@@ -369,7 +394,9 @@ test('a Java array or collection taken is any iterable; one returned is an array
   const source = (members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
     "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
-    `void TopicPartition;\nexport class Coll {\n${Object.values(members).map((m) => `  ${m}\n`).join('')}}\n`;
+    `void TopicPartition;\nexport class Coll {\n${Object.values(members)
+      .map((m) => `  ${m}\n`)
+      .join('')}}\n`;
   const files = (members) =>
     project({
       'tsconfig.json': TSCONFIG,
@@ -393,11 +420,31 @@ test('a Java array or collection taken is any iterable; one returned is an array
     ['nodes', 'nodes(): Iterable<Node> { return []; }', 'Coll.nodes: return: Java Node[] is not TypeScript Iterable<Node>'],
     ['names', 'names(): Iterable<string> { return []; }', 'Coll.names: return: Java List<String> is not TypeScript Iterable<string>'],
     ['tags', 'tags(): string[] { return []; }', 'Coll.tags: return: Java Set<String> is not TypeScript string[]'],
-    ['parts', 'parts(): Set<TopicPartition> { return new Set(); }', 'Coll.parts: return: Java Set<TopicPartition> is not TypeScript Set<TopicPartition>'],
-    ['lags', 'lags(): TopicPartitionMap<number> { return new TopicPartitionMap(); }', 'Coll.lags: return: Java Map<TopicPartition, Long> is not TypeScript TopicPartitionMap<number>'],
-    ['labels', 'labels(): ReadonlyMap<string, string> { return new Map(); }', 'Coll.labels: return: Java Map<String, String> is not TypeScript ReadonlyMap<string, string>'],
-    ['label', 'label(labels: Record<string, number>): void { void labels; }', 'Coll.label: parameter labels: Java Map<String, String> is not TypeScript Record<string, number>'],
-    ['metrics', 'metrics(): Map<MetricName, Metric> { return new Map(); }', 'Coll.metrics: return: Java Map<MetricName, Metric> is not TypeScript Map<MetricName, Metric>'],
+    [
+      'parts',
+      'parts(): Set<TopicPartition> { return new Set(); }',
+      'Coll.parts: return: Java Set<TopicPartition> is not TypeScript Set<TopicPartition>',
+    ],
+    [
+      'lags',
+      'lags(): TopicPartitionMap<number> { return new TopicPartitionMap(); }',
+      'Coll.lags: return: Java Map<TopicPartition, Long> is not TypeScript TopicPartitionMap<number>',
+    ],
+    [
+      'labels',
+      'labels(): ReadonlyMap<string, string> { return new Map(); }',
+      'Coll.labels: return: Java Map<String, String> is not TypeScript ReadonlyMap<string, string>',
+    ],
+    [
+      'label',
+      'label(labels: Record<string, number>): void { void labels; }',
+      'Coll.label: parameter labels: Java Map<String, String> is not TypeScript Record<string, number>',
+    ],
+    [
+      'metrics',
+      'metrics(): Map<MetricName, Metric> { return new Map(); }',
+      'Coll.metrics: return: Java Map<MetricName, Metric> is not TypeScript Map<MetricName, Metric>',
+    ],
   ]) {
     r = lint(files({ ...GOOD, [name]: member }), [RULE]);
     assert.deepEqual(findings(r), [finding], member);

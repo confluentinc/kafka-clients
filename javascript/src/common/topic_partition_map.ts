@@ -111,7 +111,7 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
         throw new TypeError('an entry must be a [TopicPartition, value] pair');
       }
       const tp = entry[0] as TopicPartition | null;
-      this.#entries.set(keyOf(tp), [tp, valueOf(entry[1], 'an entry\'s value')]);
+      this.#entries.set(keyOf(tp), [tp, valueOf(entry[1], "an entry's value")]);
     }
   }
 

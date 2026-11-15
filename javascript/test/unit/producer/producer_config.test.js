@@ -63,7 +63,7 @@ test('every literal constant of ProducerConfig matches Java; a deprecated one is
   }
 });
 
-test("the constants Java takes from CommonClientConfigs and AbstractConfig", () => {
+test('the constants Java takes from CommonClientConfigs and AbstractConfig', () => {
   assert.equal(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, 'bootstrap.servers');
   assert.equal(ProducerConfig.SECURITY_PROVIDERS_CONFIG, 'security.providers');
   assert.equal(ProducerConfig.CONFIG_PROVIDERS_CONFIG, 'config.providers');
@@ -78,19 +78,42 @@ test('ProducerConfig is not instantiable', () => {
 });
 
 const REJECTED = [
-  ['ProducerConfigTest.testInvalidCompressionType', ProducerConfig.COMPRESSION_TYPE_CONFIG, 'abc', 'String must be one of: none, gzip, snappy, lz4, zstd'],
-  ['ProducerConfigTest.testInvalidSecurityProtocol', 'security.protocol', 'abc', 'String must be one of (case insensitive): SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT'],
-  ['ProducerConfigTest.testInvalidMetadataRecoveryStrategy', 'metadata.recovery.strategy', 'abc', 'String must be one of (case insensitive): REBOOTSTRAP, NONE'],
-  ['ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy', ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG, 'abc', 'String must be one of (case insensitive): FULL, INCREMENTAL'],
+  [
+    'ProducerConfigTest.testInvalidCompressionType',
+    ProducerConfig.COMPRESSION_TYPE_CONFIG,
+    'abc',
+    'String must be one of: none, gzip, snappy, lz4, zstd',
+  ],
+  [
+    'ProducerConfigTest.testInvalidSecurityProtocol',
+    'security.protocol',
+    'abc',
+    'String must be one of (case insensitive): SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT',
+  ],
+  [
+    'ProducerConfigTest.testInvalidMetadataRecoveryStrategy',
+    'metadata.recovery.strategy',
+    'abc',
+    'String must be one of (case insensitive): REBOOTSTRAP, NONE',
+  ],
+  [
+    'ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy',
+    ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+    'abc',
+    'String must be one of (case insensitive): FULL, INCREMENTAL',
+  ],
 ];
 
 for (const [label, key, value, message] of REJECTED) {
   test(`${label}: the producer refuses ${key}=${value}`, () => {
-    assert.throws(() => new KafkaProducer({ ...BOOTSTRAP, [key]: value }), (e) => {
-      assert.ok(e instanceof ConfigError, `${e}`);
-      assert.equal(e.message, `Invalid value ${value} for configuration ${key}: ${message}`);
-      return true;
-    });
+    assert.throws(
+      () => new KafkaProducer({ ...BOOTSTRAP, [key]: value }),
+      (e) => {
+        assert.ok(e instanceof ConfigError, `${e}`);
+        assert.equal(e.message, `Invalid value ${value} for configuration ${key}: ${message}`);
+        return true;
+      },
+    );
   });
 }
 

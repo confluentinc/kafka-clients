@@ -40,7 +40,14 @@ const common = {
 const producer = pkg('producer');
 const consumer = pkg('consumer');
 const { ERRORS, FFI_NAMES } = require('../../../dist/internal/error_registry');
-const { LOCAL_NULL_POINTER, UNKNOWN_SERVER_ERROR, classForFfiId, errorClasses, errorFfiId, fromNative } = require('../../../dist/internal/errors');
+const {
+  LOCAL_NULL_POINTER,
+  UNKNOWN_SERVER_ERROR,
+  classForFfiId,
+  errorClasses,
+  errorFfiId,
+  fromNative,
+} = require('../../../dist/internal/errors');
 const { create, ownFfiId, ownForms } = require('../../../dist/internal/throwable');
 
 const { javaClass } = require('../../_java_source');
@@ -181,7 +188,9 @@ function javaPayloadGetters(fqn) {
   if (fqn.startsWith('java.')) return [];
   const cls = javaClass(fqn);
   const simple = cls.path[cls.path.length - 1];
-  return [...new Set(cls.overloads.filter((o) => o.name !== simple && !o.static && o.visibility === 'public' && !o.abstract).map((o) => o.name))];
+  return [
+    ...new Set(cls.overloads.filter((o) => o.name !== simple && !o.static && o.visibility === 'public' && !o.abstract).map((o) => o.name)),
+  ];
 }
 
 /** An instance of `cls`, as the core reports one. */
@@ -203,10 +212,14 @@ function javaParent(fqn) {
 function folderOf(fqn) {
   const pkg = fqn.slice(0, fqn.lastIndexOf('.'));
   if (pkg.startsWith('java.')) return '';
-  return pkg.replace(/^org\.apache\.kafka\./, '').replace(/^clients\./, '').split('.').join('/');
+  return pkg
+    .replace(/^org\.apache\.kafka\./, '')
+    .replace(/^clients\./, '')
+    .split('.')
+    .join('/');
 }
 
-test('every Java class has its class, whose parent is the Java parent\'s class', () => {
+test("every Java class has its class, whose parent is the Java parent's class", () => {
   assert.equal(BY_JAVA.size, 176);
   for (const [java, cls] of BY_JAVA) {
     const parent = Object.getPrototypeOf(cls);
@@ -261,8 +274,14 @@ test('a class keeps its Java name with the Exception suffix as Error, in the fol
 });
 
 test('the Java built-ins are at the root and are not KafkaErrors', () => {
-  for (const cls of [IllegalStateError, NoSuchElementError, ExecutionError,
-    root.ConcurrentModificationError, root.TimeoutError, root.UnsupportedOperationError]) {
+  for (const cls of [
+    IllegalStateError,
+    NoSuchElementError,
+    ExecutionError,
+    root.ConcurrentModificationError,
+    root.TimeoutError,
+    root.UnsupportedOperationError,
+  ]) {
     assert.equal(Object.getPrototypeOf(cls), Error, cls.name);
     assert.ok(!(instance(cls) instanceof KafkaError), cls.name);
   }
@@ -298,7 +317,10 @@ test("every class's own FFI id names its class, and the id table is a bijection"
   // Every FFI id but NONE and the Rust-only LOCAL_CALLBACK and LOCAL_NULL_POINTER has a class.
   const rustOnly = new Set(['NONE', 'LOCAL_CALLBACK', 'LOCAL_NULL_POINTER']);
   const named = [...FFI_NAMES].filter(([, n]) => !rustOnly.has(n)).map(([v]) => v);
-  assert.deepEqual([...ids.keys()].sort((a, b) => a - b), named.sort((a, b) => a - b));
+  assert.deepEqual(
+    [...ids.keys()].sort((a, b) => a - b),
+    named.sort((a, b) => a - b),
+  );
 });
 
 test('the base carries UNKNOWN_SERVER_ERROR, which UnknownServerError owns', () => {
@@ -354,15 +376,11 @@ test("every class takes Java's message and cause forms, both ways", () => {
   for (const cls of errorClasses()) {
     const java = JAVA_OF.get(cls);
     const forms = (ownForms(cls) ?? []).map(([params]) => params).filter(plainForm);
-    assert.deepEqual(
-      forms.map((f) => f.join(',')).sort(),
-      [...new Set(javaForms(java).map((f) => f.join(',')))].sort(),
-      java,
-    );
+    assert.deepEqual(forms.map((f) => f.join(',')).sort(), [...new Set(javaForms(java).map((f) => f.join(',')))].sort(), java);
   }
 });
 
-test('each form gives Java\'s message and cause, and a call no form takes is refused with the exact message', () => {
+test("each form gives Java's message and cause, and a call no form takes is refused with the exact message", () => {
   const cause = new TopicAuthorizationError('inner');
   for (const cls of errorClasses()) {
     const java = JAVA_OF.get(cls);
@@ -394,9 +412,8 @@ test('each form gives Java\'s message and cause, and a call no form takes is ref
       // fixed text where the constructor passes one, else the message, the
       // cause's toString() for (cause), Java's null ('') for ().
       const fixed = javaFixedTexts(java).get(params.join(','));
-      const want = fixed !== undefined ? fixed
-        : params.includes('message') ? 'm'
-          : params.includes('cause') ? 'TopicAuthorizationError: inner' : '';
+      const want =
+        fixed !== undefined ? fixed : params.includes('message') ? 'm' : params.includes('cause') ? 'TopicAuthorizationError: inner' : '';
       assert.equal(e.message, want, `${cls.name}(${params})`);
       if (params.includes('cause')) assert.equal(e.cause, cause);
       else assert.ok(!Object.hasOwn(e, 'cause'), `${cls.name}(${params})`);
@@ -404,10 +421,14 @@ test('each form gives Java\'s message and cause, and a call no form takes is ref
     for (const missing of [['message', 'cause'], ['message'], ['cause'], []]) {
       if (registered.some(([params]) => params.join() === missing.join())) continue;
       const args = Object.fromEntries(missing.map((p) => [p, p === 'cause' ? cause : 'm']));
-      assert.throws(() => (missing.length === 0 ? new target() : new target(args)), {
-        name: 'IllegalArgumentError',
-        message: `${cls.name}() takes one of ${list}; got (${missing.join(', ')})`,
-      }, `${cls.name}(${missing})`);
+      assert.throws(
+        () => (missing.length === 0 ? new target() : new target(args)),
+        {
+          name: 'IllegalArgumentError',
+          message: `${cls.name}() takes one of ${list}; got (${missing.join(', ')})`,
+        },
+        `${cls.name}(${missing})`,
+      );
     }
   }
 });
@@ -524,7 +545,8 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   });
   assert.throws(() => new TopicAuthorizationError('m', cause, 3), {
     name: 'IllegalArgumentError',
-    message: 'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 3 arguments',
+    message:
+      'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 3 arguments',
   });
   assert.throws(() => new common.errors.CoordinatorNotAvailableError('m', cause), {
     name: 'IllegalArgumentError',
@@ -538,7 +560,8 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   // (String, Throwable) constructor.
   assert.throws(() => new TopicAuthorizationError({ message: 'm', cause }), {
     name: 'IllegalArgumentError',
-    message: 'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got (message, cause)',
+    message:
+      'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got (message, cause)',
   });
   // Java's own messages, pinned in full (python/test/unit/test_errors.py's
   // test_constructors_with_a_literal_message).
@@ -567,7 +590,8 @@ test("the constructors are Java's message and cause, by name or bare", () => {
   // A class whose every Java constructor takes a payload takes it by name only.
   assert.throws(() => new consumer.LogTruncationError('m'), {
     name: 'IllegalArgumentError',
-    message: 'LogTruncationError() takes one of ({ fetchOffsets, divergentOffsets }), ({ message, fetchOffsets, divergentOffsets }); got a string',
+    message:
+      'LogTruncationError() takes one of ({ fetchOffsets, divergentOffsets }), ({ message, fetchOffsets, divergentOffsets }); got a string',
   });
   assert.equal(Object.keys(new KafkaError('m')).includes('name'), false);
 });
@@ -579,7 +603,7 @@ function assertCallerFrames(error, what) {
   assert.ok(!frames[0].includes('throwable'), `${what}: the first frame is create's own: ${frames[0]}`);
 }
 
-test('errors built without their constructor keep the caller\'s stack frames', async () => {
+test("errors built without their constructor keep the caller's stack frames", async () => {
   // A core error, built by fromNative (as the addon does).
   const core = fromNative({ code: 29, message: 'denied', apiError: true });
   assertCallerFrames(core, 'fromNative');
@@ -597,7 +621,10 @@ test('errors built without their constructor keep the caller\'s stack frames', a
   // A closed producer's IllegalStateError.
   const p = new producer.KafkaProducer({ 'bootstrap.servers': 'localhost:1' });
   await p.close();
-  const closed = await p.send(new producer.ProducerRecord({ topic: 't', value: Buffer.from('v') })).then(() => null, (e) => e);
+  const closed = await p.send(new producer.ProducerRecord({ topic: 't', value: Buffer.from('v') })).then(
+    () => null,
+    (e) => e,
+  );
   assert.ok(closed instanceof IllegalStateError);
   assertCallerFrames(closed, 'a closed producer');
   assert.match(closed.stack, /kafka_producer/);
@@ -701,10 +728,14 @@ test("every error class's form error lists its forms as JavaScript calls them, b
       .map(([params]) => params)
       .sort((a, b) => a.length - b.length)
       .map(shapeOf);
-    assert.throws(() => new target({ message: null }, null), {
-      name: 'IllegalArgumentError',
-      message: `${cls.name}() takes one of ${shapes.join(', ')}; got 2 arguments`,
-    }, cls.name);
+    assert.throws(
+      () => new target({ message: null }, null),
+      {
+        name: 'IllegalArgumentError',
+        message: `${cls.name}() takes one of ${shapes.join(', ')}; got 2 arguments`,
+      },
+      cls.name,
+    );
     checked += 1;
   }
   assert.ok(checked > 50, `${checked} classes`);

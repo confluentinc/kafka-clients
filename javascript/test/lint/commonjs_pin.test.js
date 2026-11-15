@@ -37,11 +37,14 @@ test('a "type", another module setting and other export conditions are findings'
   const r = lint(
     project({
       'tsconfig.json': '{ "compilerOptions": { "module": "node16" } }\n',
-      'package.json': PACKAGE({ type: 'module' }, {
-        '.': { default: './dist/index.js', types: './dist/index.d.ts' },
-        './producer': { types: './dist/producer/index.d.ts', import: './x.mjs', default: './dist/producer/index.js' },
-        './common': './dist/common/index.js',
-      }),
+      'package.json': PACKAGE(
+        { type: 'module' },
+        {
+          '.': { default: './dist/index.js', types: './dist/index.d.ts' },
+          './producer': { types: './dist/producer/index.d.ts', import: './x.mjs', default: './dist/producer/index.js' },
+          './common': './dist/common/index.js',
+        },
+      ),
     }),
     [RULE],
   );

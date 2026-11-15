@@ -87,11 +87,11 @@ test('each finding kind, with its exact text', () => {
   );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'src/oops.ts:Oops: exports Oops, which names no Java class of java.*: list it in lint-mapping.json\'s invented, or javaTargets',
+    "src/oops.ts:Oops: exports Oops, which names no Java class of java.*: list it in lint-mapping.json's invented, or javaTargets",
     'src/producer/alpha.ts:Beta: exports Beta (clients.producer.Beta); the file must be beta.ts',
-    'src/producer/bar_exception.ts:BarException: translates clients.producer.BarException: an exception\'s class is named BarError',
+    "src/producer/bar_exception.ts:BarException: translates clients.producer.BarException: an exception's class is named BarError",
     'src/producer/baz_error.ts:BazError: translates common.errors.BazException, of common.errors: its file belongs in src/common/errors/',
-    'src/producer/opts.ts:Opts: exports Opts, which names no Java class of clients.producer: list it in lint-mapping.json\'s invented, or javaTargets',
+    "src/producer/opts.ts:Opts: exports Opts, which names no Java class of clients.producer: list it in lint-mapping.json's invented, or javaTargets",
     'src/producer/the_record.ts:Record: exports Record (clients.producer.Record); the file must be record.ts',
     'src/producer/alpha.ts: holds 2 public Java types (Alpha, Beta); a file holds one',
   ]);
@@ -116,11 +116,11 @@ test('every export the type checker lists is seen: re-exports, ambient classes, 
   );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'src/producer/foo_bar.ts:FooBar: exports FooBar, which names no Java class of clients.producer: list it in lint-mapping.json\'s invented, or javaTargets',
-    'src/producer/widget.ts:Widget: exports Widget, which names no Java class of clients.producer: list it in lint-mapping.json\'s invented, or javaTargets',
+    "src/producer/foo_bar.ts:FooBar: exports FooBar, which names no Java class of clients.producer: list it in lint-mapping.json's invented, or javaTargets",
+    "src/producer/widget.ts:Widget: exports Widget, which names no Java class of clients.producer: list it in lint-mapping.json's invented, or javaTargets",
     'src/producer/acks.ts:Acks: exports Acks as a TypeScript enum, a form no Java type translates to: make it a class',
-    'src/producer/create.ts:createProducer: exports the function createProducer, which no Java class translates to: list it in lint-mapping.json\'s invented',
-    'src/producer/create.ts:DEFAULT_ACKS: exports the variable DEFAULT_ACKS, which no Java class translates to: list it in lint-mapping.json\'s invented',
+    "src/producer/create.ts:createProducer: exports the function createProducer, which no Java class translates to: list it in lint-mapping.json's invented",
+    "src/producer/create.ts:DEFAULT_ACKS: exports the variable DEFAULT_ACKS, which no Java class translates to: list it in lint-mapping.json's invented",
     'src/producer/space.ts:Space: exports Space as a TypeScript namespace, a form no Java type translates to: make it a class',
   ]);
 });
@@ -143,10 +143,13 @@ test('a file holds one public Java type: Header beside ProducerRecord is a findi
     }),
     [RULE],
   );
-  assert.deepEqual(findings(r).filter((f) => f.includes('holds')), [
-    'src/producer/producer_record.ts: holds 2 public Java types (ProducerRecord, Header); a file holds one',
-    'src/producer/rec.ts: holds 2 public Java types (Rec, Header); a file holds one',
-  ]);
+  assert.deepEqual(
+    findings(r).filter((f) => f.includes('holds')),
+    [
+      'src/producer/producer_record.ts: holds 2 public Java types (ProducerRecord, Header); a file holds one',
+      'src/producer/rec.ts: holds 2 public Java types (Rec, Header); a file holds one',
+    ],
+  );
 });
 
 test('an overloaded function is one item, listed once', () => {
@@ -158,7 +161,7 @@ test('an overloaded function is one item, listed once', () => {
   assert.equal(r.status, 0, r.text);
   r = lint(fixture({ 'src/producer/helpers.ts': overloads }), [RULE]);
   assert.deepEqual(findings(r), [
-    'src/producer/helpers.ts:parseSize: exports the function parseSize, which no Java class translates to: list it in lint-mapping.json\'s invented',
+    "src/producer/helpers.ts:parseSize: exports the function parseSize, which no Java class translates to: list it in lint-mapping.json's invented",
   ]);
 });
 

@@ -242,9 +242,7 @@ function argParser() {
   connectionGroup.addArgument('--bootstrap-server', {
     dest: 'bootstrapServer',
     metavar: 'HOST1:PORT1[,HOST2:PORT2[...]]',
-    help:
-      'REQUIRED: The server(s) to connect to. Comma-separated list of Kafka brokers in the form ' +
-      'HOST1:PORT1,HOST2:PORT2,...',
+    help: 'REQUIRED: The server(s) to connect to. Comma-separated list of Kafka brokers in the form ' + 'HOST1:PORT1,HOST2:PORT2,...',
   });
   parser.addArgument('--max-messages', {
     type: 'int',
@@ -272,15 +270,14 @@ function argParser() {
     dest: 'producerConfig',
     metavar: 'CONFIG-FILE',
     help:
-      '(DEPRECATED) Producer config properties file. This option will be removed in a future version. Use ' +
-      '--command-config instead.',
+      '(DEPRECATED) Producer config properties file. This option will be removed in a future version. Use ' + '--command-config instead.',
   });
   parser.addArgument('--message-create-time', {
     type: 'int',
     defaultValue: -1,
     dest: 'createTime',
     metavar: 'CREATE-TIME',
-    help: "Send messages with creation time starting at the arguments value, in milliseconds since epoch",
+    help: 'Send messages with creation time starting at the arguments value, in milliseconds since epoch',
   });
   parser.addArgument('--value-prefix', {
     type: 'int',
@@ -325,10 +322,7 @@ function parseArgs(parser, args) {
   producerProps['key.serializer'] = stringSerializer;
   producerProps['value.serializer'] = stringSerializer;
   if (res.producerConfig !== null) {
-    printLine(
-      'Option --producer.config has been deprecated and will be removed in a future version. Use ' +
-        '--command-config instead.',
-    );
+    printLine('Option --producer.config has been deprecated and will be removed in a future version. Use ' + '--command-config instead.');
     Object.assign(producerProps, loadProps(res.producerConfig));
   }
   if (res.commandConfigFile !== null) Object.assign(producerProps, loadProps(res.commandConfigFile));

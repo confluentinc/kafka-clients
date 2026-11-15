@@ -95,7 +95,10 @@ function parseIndex(dir) {
     }
     const named = /^export\s+(type\s+)?\{([\w\s,]+)\}\s*from\s*'(\.\/[\w/]+)'$/.exec(statement);
     if (named !== null) {
-      const names = named[2].split(',').map((n) => n.trim()).filter(Boolean);
+      const names = named[2]
+        .split(',')
+        .map((n) => n.trim())
+        .filter(Boolean);
       reexports.push({ kind: named[1] === undefined ? 'value' : 'type', names, path: named[3] });
       continue;
     }
@@ -132,9 +135,24 @@ test('the root index.ts exports only the Java built-in errors and Duration', () 
   const reexports = parseIndex('');
   assert.ok(reexports.length > 0, 'src/index.ts exports nothing');
   for (const r of reexports) {
-    assert.match(r.path, /_error$|^\.\/duration$/, `src/index.ts re-exports ${r.path}: the root exports only Java built-in errors and Duration`);
-    if (r.path === './duration') assert.deepEqual(r, { kind: 'type', names: ['Duration'], path: './duration' }, 'the root exports the type Duration only');
-    else assert.deepEqual(r.names, [r.path.slice(2).replace(/_([a-z])/g, (_m, c) => c.toUpperCase()).replace(/^[a-z]/, (c) => c.toUpperCase())], `src/index.ts re-exports ${r.path} under its class name only`);
+    assert.match(
+      r.path,
+      /_error$|^\.\/duration$/,
+      `src/index.ts re-exports ${r.path}: the root exports only Java built-in errors and Duration`,
+    );
+    if (r.path === './duration')
+      assert.deepEqual(r, { kind: 'type', names: ['Duration'], path: './duration' }, 'the root exports the type Duration only');
+    else
+      assert.deepEqual(
+        r.names,
+        [
+          r.path
+            .slice(2)
+            .replace(/_([a-z])/g, (_m, c) => c.toUpperCase())
+            .replace(/^[a-z]/, (c) => c.toUpperCase()),
+        ],
+        `src/index.ts re-exports ${r.path} under its class name only`,
+      );
   }
 });
 
@@ -250,7 +268,22 @@ test('package.json files hold the compiled library, not the build inputs, the te
   for (const entry of pkg.files) {
     const top = entry.replace(/^\.\//, '').split('/')[0];
     assert.ok(
-      !['binding.gyp', 'addon.exports.map', 'native', 'scripts', 'test', 'tools', 'build', 'examples', 'src', 'tsconfig.json', 'npm', 'api', 'verifiable_clients', 'grpc-server'].includes(top),
+      ![
+        'binding.gyp',
+        'addon.exports.map',
+        'native',
+        'scripts',
+        'test',
+        'tools',
+        'build',
+        'examples',
+        'src',
+        'tsconfig.json',
+        'npm',
+        'api',
+        'verifiable_clients',
+        'grpc-server',
+      ].includes(top),
       `files includes ${entry}`,
     );
     assert.ok(!/grpc/i.test(entry), `files includes ${entry}`);
@@ -263,7 +296,10 @@ test('package.json files hold the compiled library, not the build inputs, the te
   assert.deepEqual(pkg.files.filter((f) => tops.includes(f)).sort(), tops, 'files names the folders behind the import paths');
   // Apache Kafka's credit line, which the package carries as Kafka's NOTICE asks.
   assert.ok(pkg.files.includes('NOTICE'));
-  assert.match(fs.readFileSync(path.join(ROOT, 'NOTICE'), 'utf8'), /This product includes software developed at\nThe Apache Software Foundation \(https:\/\/www\.apache\.org\/\)\./);
+  assert.match(
+    fs.readFileSync(path.join(ROOT, 'NOTICE'), 'utf8'),
+    /This product includes software developed at\nThe Apache Software Foundation \(https:\/\/www\.apache\.org\/\)\./,
+  );
 });
 
 test('only native/util.h includes the bindings header', () => {
@@ -301,7 +337,10 @@ test('every source file carries the Apache 2.0 header of Confluent Inc.', () => 
     'tsconfig.json',
     'Dockerfile.grpc',
   ].filter((f) => /\.(js|ts|c|h)$|(^|\/)binding\.gyp$|(^|\/)addon\.exports\.map$|^Makefile$|^tsconfig\.json$|^Dockerfile\.grpc$/.test(f));
-  assert.ok(files.includes('native/binding.gyp') && files.includes('native/addon.exports.map'), 'native/ has no binding.gyp or addon.exports.map');
+  assert.ok(
+    files.includes('native/binding.gyp') && files.includes('native/addon.exports.map'),
+    'native/ has no binding.gyp or addon.exports.map',
+  );
   for (const expected of ['grpc-server/grpc_server.js', 'grpc-server/grpc_translate.js', 'verifiable_clients/verifiable_producer.js']) {
     assert.ok(files.includes(expected), `${expected} is not among the files checked`);
   }
@@ -357,31 +396,41 @@ test('npm/ holds one folder per platform package of the preview, each published 
     'linux-x64-gnu': { os: ['linux'], cpu: ['x64'], libc: ['glibc'] },
     'darwin-arm64': { os: ['darwin'], cpu: ['arm64'] },
   };
-  const folders = fs.readdirSync(npmDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  const folders = fs
+    .readdirSync(npmDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
   assert.deepEqual(folders.sort(), Object.keys(selectors).sort());
   for (const [platform, selector] of Object.entries(selectors)) {
     const listed = sourceFiles([`npm/${platform}`]).map((f) => f.slice(`npm/${platform}/`.length));
     assert.deepEqual(listed.sort(), ['README.md', 'package.json'], `npm/${platform}`);
     const manifest = JSON.parse(fs.readFileSync(path.join(npmDir, platform, 'package.json'), 'utf8'));
-    assert.deepEqual(manifest, {
-      name: `@confluentinc/kafka-javascript-${platform}`,
-      version: pkg.version,
-      description: `The ${platform} native binary of @confluentinc/kafka-javascript`,
-      license: pkg.license,
-      repository: { ...pkg.repository, directory: `javascript/npm/${platform}` },
-      ...selector,
-      main: 'confluent-kafka-javascript.node',
-      // The main package's module type, which publint asks every package for.
-      type: pkg.type,
-      // The root conventions' dist/ and NOTICE, which every package's files
-      // name (a platform package has no dist/: the entry matches nothing).
-      files: ['dist/', 'NOTICE', 'confluent-kafka-javascript.node', 'THIRD_PARTY_LICENSES.txt'],
-      engines: pkg.engines,
-    }, `npm/${platform}/package.json`);
+    assert.deepEqual(
+      manifest,
+      {
+        name: `@confluentinc/kafka-javascript-${platform}`,
+        version: pkg.version,
+        description: `The ${platform} native binary of @confluentinc/kafka-javascript`,
+        license: pkg.license,
+        repository: { ...pkg.repository, directory: `javascript/npm/${platform}` },
+        ...selector,
+        main: 'confluent-kafka-javascript.node',
+        // The main package's module type, which publint asks every package for.
+        type: pkg.type,
+        // The root conventions' dist/ and NOTICE, which every package's files
+        // name (a platform package has no dist/: the entry matches nothing).
+        files: ['dist/', 'NOTICE', 'confluent-kafka-javascript.node', 'THIRD_PARTY_LICENSES.txt'],
+        engines: pkg.engines,
+      },
+      `npm/${platform}/package.json`,
+    );
   }
   // The cargo-about configuration and template of THIRD_PARTY_LICENSES.txt.
   for (const name of ['about.toml', 'about.hbs', 'README.md']) {
     assert.ok(fs.existsSync(path.join(npmDir, name)), `npm/${name} is missing`);
   }
-  assert.match(fs.readFileSync(path.join(npmDir, 'about.hbs'), 'utf8'), /^Third-party licences of the native addon of @confluentinc\/kafka-javascript$/m);
+  assert.match(
+    fs.readFileSync(path.join(npmDir, 'about.hbs'), 'utf8'),
+    /^Third-party licences of the native addon of @confluentinc\/kafka-javascript$/m,
+  );
 });

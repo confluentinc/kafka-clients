@@ -51,17 +51,27 @@ test("the constructor keeps Java's message for a null key; a header value is byt
   assert.throws(() => new Header({ key: 1, value: null }), { name: 'TypeError', message: 'key must be a string' });
   assert.throws(() => new Header({ key: 'k', value: 'v' }), {
     name: 'TypeError',
-    message: "value must be a Buffer, a Uint8Array or null, not a string: a header value is bytes, so encode it first (Buffer.from(value, 'utf8'))",
+    message:
+      "value must be a Buffer, a Uint8Array or null, not a string: a header value is bytes, so encode it first (Buffer.from(value, 'utf8'))",
   });
   assert.throws(() => new Header({ key: 'k', value: 5 }), { name: 'TypeError', message: 'value must be a Buffer, a Uint8Array or null' });
-  assert.throws(() => new Header({ key: 'k', value: new Uint16Array(1) }), { name: 'TypeError', message: 'value must be a Buffer, a Uint8Array or null' });
-  assert.throws(() => new Header({ key: 'k', value: undefined }), { name: 'TypeError', message: "value must not be undefined. Pass null for Java's null" });
+  assert.throws(() => new Header({ key: 'k', value: new Uint16Array(1) }), {
+    name: 'TypeError',
+    message: 'value must be a Buffer, a Uint8Array or null',
+  });
+  assert.throws(() => new Header({ key: 'k', value: undefined }), {
+    name: 'TypeError',
+    message: "value must not be undefined. Pass null for Java's null",
+  });
   assert.throws(() => new Header({ key: 'k' }), { name: 'IllegalArgumentError', message: 'Header() takes one of (key, value); got (key)' });
   assert.throws(() => new Header('k'), { name: 'IllegalArgumentError', message: 'Header() takes one of (key, value); got a string' });
 });
 
 test("toString is RecordHeader's", () => {
-  assert.equal(String(new Header({ key: 'k', value: Buffer.from([0, 127, 128, 255]) })), 'RecordHeader(key = k, value = [0, 127, -128, -1])');
+  assert.equal(
+    String(new Header({ key: 'k', value: Buffer.from([0, 127, 128, 255]) })),
+    'RecordHeader(key = k, value = [0, 127, -128, -1])',
+  );
   assert.equal(String(new Header({ key: 'k', value: null })), 'RecordHeader(key = k, value = null)');
   assert.equal(String(new Header({ key: 'k', value: new Uint8Array(0) })), 'RecordHeader(key = k, value = [])');
 });

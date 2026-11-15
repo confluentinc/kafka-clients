@@ -76,16 +76,21 @@ function guarded(code, from, to, at) {
 }
 
 /** The C delivery-completion functions, with why they are one. */
-const COMPLETIONS = [
-  { key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" },
-];
+const COMPLETIONS = [{ key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" }];
 
 /** The native functions whose function argument completes a wait on a record's future, not a delivery. */
 const WAITS = new Set(['recordFutureGet']);
 
 module.exports = {
   name: 'check-completion-order',
-  kinds: ['completion-order', 'completion-count', 'completion-unlisted', 'completion-unresolved', 'report-unguarded', 'order-unused-allowance'],
+  kinds: [
+    'completion-order',
+    'completion-count',
+    'completion-unlisted',
+    'completion-unresolved',
+    'report-unguarded',
+    'order-unused-allowance',
+  ],
   needs: ['program', 'native', 'header'],
   COMPLETIONS,
   hint:

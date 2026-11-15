@@ -40,10 +40,19 @@ test('a TopicPartitionMap is keyed by TopicPartition.equals, keeping the origina
   assert.equal(map.has({ key: tp('payments', 3) }), false);
   assert.equal([...map.keys()][0], first);
   assert.deepEqual([...map.values()], [1n, 2n]);
-  assert.deepEqual([...map].map(([k, v]) => [k.toString(), v]), [['orders-3', 1n], ['orders-4', 2n]]);
+  assert.deepEqual(
+    [...map].map(([k, v]) => [k.toString(), v]),
+    [
+      ['orders-3', 1n],
+      ['orders-4', 2n],
+    ],
+  );
   const seen = [];
   map.forEach((value, key, m) => seen.push([key.toString(), value, m === map]));
-  assert.deepEqual(seen, [['orders-3', 1n, true], ['orders-4', 2n, true]]);
+  assert.deepEqual(seen, [
+    ['orders-3', 1n, true],
+    ['orders-4', 2n, true],
+  ]);
   assert.equal(map instanceof Map, false);
 });
 
@@ -61,7 +70,10 @@ test('set keeps the original key and its place; delete and clear remove entries'
   assert.equal(map.size(), 1);
   map.clear();
   assert.equal(map.size(), 0);
-  assert.throws(() => map.set({ topic: 'orders', partition: 3 }, 'x'), { constructor: TypeError, message: 'key must be a TopicPartition or null' });
+  assert.throws(() => map.set({ topic: 'orders', partition: 3 }, 'x'), {
+    constructor: TypeError,
+    message: 'key must be a TopicPartition or null',
+  });
 });
 
 test('a null topic and the topic "null" are different keys, as Java keeps them apart', () => {
@@ -88,12 +100,23 @@ test("toString is Java's AbstractMap.toString; toJSON keys by 'topic:partition' 
   assert.equal(JSON.stringify({ m: map }), '{"m":{"orders:0":"5","orders:1":"7"}}');
   assert.deepEqual(new TopicPartitionMap([[tp('t', 0), { a: 1 }]]).toJSON(), { 't:0': { a: 1 } });
   // A null topic's key is no integer-like name, so the entries keep their order.
-  assert.equal(JSON.stringify(new TopicPartitionMap([[tp('t', 1), 1n], [tp(null, 3), 2n]])), '{"t:1":"1","-3":"2"}');
+  assert.equal(
+    JSON.stringify(
+      new TopicPartitionMap([
+        [tp('t', 1), 1n],
+        [tp(null, 3), 2n],
+      ]),
+    ),
+    '{"t:1":"1","-3":"2"}',
+  );
   // A value is never undefined: null is Java's null.
   const m = new TopicPartitionMap();
   assert.throws(() => m.set(tp('t', 0)), { constructor: TypeError, message: "value must not be undefined: pass null for Java's null" });
   assert.throws(() => m.set(tp('t', 0), undefined), { constructor: TypeError });
-  assert.throws(() => new TopicPartitionMap([[tp('t', 0)]]), { constructor: TypeError, message: "an entry's value must not be undefined: pass null for Java's null" });
+  assert.throws(() => new TopicPartitionMap([[tp('t', 0)]]), {
+    constructor: TypeError,
+    message: "an entry's value must not be undefined: pass null for Java's null",
+  });
   assert.equal(m.set(tp('t', 0), null).get(tp('t', 0)), null);
 });
 
@@ -102,8 +125,14 @@ test("a TopicPartitionMap's arguments are checked", () => {
   assert.throws(() => map.get('x'), { constructor: IllegalArgumentError, message: 'get() takes one of (key); got a string' });
   assert.throws(() => map.has({ key: 'x' }), { constructor: TypeError, message: 'key must be a TopicPartition or null' });
   assert.throws(() => map.size(1), { constructor: TypeError, message: 'size() only reads: it takes no argument' });
-  assert.throws(() => new TopicPartitionMap(undefined), { constructor: TypeError, message: "entries must not be undefined. Leave the argument out, or pass null for Java's null" });
-  assert.throws(() => new TopicPartitionMap([[1, 2]]), { constructor: TypeError, message: 'an entry must be a [TopicPartition, value] pair' });
+  assert.throws(() => new TopicPartitionMap(undefined), {
+    constructor: TypeError,
+    message: "entries must not be undefined. Leave the argument out, or pass null for Java's null",
+  });
+  assert.throws(() => new TopicPartitionMap([[1, 2]]), {
+    constructor: TypeError,
+    message: 'an entry must be a [TopicPartition, value] pair',
+  });
   assert.throws(() => new TopicPartitionMap(new Map([[tp('t', 0), 1]]), 2), { constructor: IllegalArgumentError });
   // Another map's entries, a TopicPartitionMap's included.
   const copy = new TopicPartitionMap(new TopicPartitionMap([[tp('t', 0), 1]]));
@@ -122,7 +151,10 @@ test('a TopicPartitionSet compares its members by TopicPartition.equals, keeping
   assert.equal([...set.values()][0], first);
   const seen = [];
   set.forEach((value, key, s) => seen.push([value.toString(), key === value, s === set]));
-  assert.deepEqual(seen, [['orders-3', true, true], ['orders-4', true, true]]);
+  assert.deepEqual(seen, [
+    ['orders-3', true, true],
+    ['orders-4', true, true],
+  ]);
   assert.equal(set.delete(tp('orders', 3)), true);
   assert.equal(set.delete(tp('orders', 3)), false);
   set.clear();
@@ -147,7 +179,10 @@ test("a TopicPartitionSet's arguments are checked", () => {
 });
 
 test("a null key or member is held, as Java's HashMap and HashSet hold one, and prints as Java's null", () => {
-  const map = new TopicPartitionMap([[null, 1n], [tp('null', 0), 2n]]);
+  const map = new TopicPartitionMap([
+    [null, 1n],
+    [tp('null', 0), 2n],
+  ]);
   assert.equal(map.size(), 2);
   assert.equal(map.get(null), 1n);
   assert.equal(map.has({ key: null }), true);

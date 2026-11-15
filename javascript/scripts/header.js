@@ -26,9 +26,7 @@ const { stripComments, declaredFunctions } = require('./lint/c_source');
 
 /** The bindings header the addon is built against. */
 function headerPath() {
-  const dir = path.resolve(
-    process.env.CONFLUENT_KAFKA_INCLUDE_DIR || path.join(__dirname, '..', '..', 'rust', 'target', 'include'),
-  );
+  const dir = path.resolve(process.env.CONFLUENT_KAFKA_INCLUDE_DIR || path.join(__dirname, '..', '..', 'rust', 'target', 'include'));
   return path.join(dir, 'confluent_kafka_bindings.h');
 }
 

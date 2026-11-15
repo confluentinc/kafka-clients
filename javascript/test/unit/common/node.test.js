@@ -26,7 +26,10 @@ const FIELDS = ['id', 'idString', 'host', 'port', 'hasRack', 'rack', 'isFenced',
 
 test("Java's three constructors, and what the shorter ones pass", () => {
   const plain = new Node({ id: 1, host: 'localhost', port: 9092 });
-  assert.deepEqual({ ...plain }, { id: 1, idString: '1', host: 'localhost', port: 9092, hasRack: false, rack: null, isFenced: false, isEmpty: false });
+  assert.deepEqual(
+    { ...plain },
+    { id: 1, idString: '1', host: 'localhost', port: 9092, hasRack: false, rack: null, isFenced: false, isEmpty: false },
+  );
   const racked = new Node({ id: 2, host: 'h', port: 1, rack: 'r1' });
   assert.equal(racked.hasRack, true);
   assert.equal(racked.rack, 'r1');
@@ -71,10 +74,7 @@ test("noNode() is Java's placeholder, the same object every call", () => {
 
 test("toString() is Java's", () => {
   assert.equal(new Node({ id: 0, host: 'localhost', port: 9092 }).toString(), 'localhost:9092 (id: 0 rack: null isFenced: false)');
-  assert.equal(
-    new Node({ id: 7, host: 'b', port: 1, rack: 'r', isFenced: true }).toString(),
-    'b:1 (id: 7 rack: r isFenced: true)',
-  );
+  assert.equal(new Node({ id: 7, host: 'b', port: 1, rack: 'r', isFenced: true }).toString(), 'b:1 (id: 7 rack: r isFenced: true)');
 });
 
 test('the constructor takes one of Java forms, with run-time types', () => {
@@ -91,7 +91,10 @@ test('the constructor takes one of Java forms, with run-time types', () => {
   assert.throws(() => new Node({ id: '1', host: 'h', port: 1 }), { constructor: TypeError, message: 'id must be an integer' });
   assert.throws(() => new Node({ id: 1, host: 2, port: 1 }), { constructor: TypeError, message: 'host must be a string or null' });
   assert.throws(() => new Node({ id: 1, host: 'h', port: null }), { constructor: TypeError, message: 'port must be an integer' });
-  assert.throws(() => new Node({ id: 1, host: 'h', port: 1, rack: 3 }), { constructor: TypeError, message: 'rack must be a string or null' });
+  assert.throws(() => new Node({ id: 1, host: 'h', port: 1, rack: 3 }), {
+    constructor: TypeError,
+    message: 'rack must be a string or null',
+  });
   assert.throws(() => new Node({ id: 1, host: 'h', port: 1, rack: null, isFenced: null }), {
     constructor: TypeError,
     message: 'isFenced must be a boolean',
@@ -108,7 +111,10 @@ test("equals and hashCode are Java's; the id and the port are Java's int", () =>
   const n3 = new Node({ id: 2, host: 'h', port: 1, rack: null, isFenced: true });
   const n4 = new Node({ id: -1, host: null, port: -1 });
   // Java: new Node(...).hashCode() on the same values.
-  assert.deepEqual([n1, n2, n3, n4].map((n) => n.hashCode()), [-1768335861, 1588053297, 124737109, 28599636]);
+  assert.deepEqual(
+    [n1, n2, n3, n4].map((n) => n.hashCode()),
+    [-1768335861, 1588053297, 124737109, 28599636],
+  );
   assert.equal(n1.equals(new Node({ id: 0, host: 'localhost', port: 9092, rack: null, isFenced: false })), true);
   assert.equal(n1.equals({ obj: new Node({ id: 0, host: 'localhost', port: 9092 }) }), true);
   assert.equal(n1.equals(new Node({ id: 0, host: 'localhost', port: 9092, rack: 'r' })), false);

@@ -152,10 +152,9 @@ export function loadAddon(load: (id: string) => unknown, key: string, devBuildDi
         : '') +
       'Install @confluentinc/kafka-javascript on a supported platform, with its optional dependencies ' +
       '(not --omit=optional); to install it for another machine, or to make a lockfile that also serves ' +
-      'another OS, give npm that machine\'s `--os`, `--cpu` and ' +
+      "another OS, give npm that machine's `--os`, `--cpu` and " +
       '`--libc`. Or build it from source with `make -C javascript build`, after building libconfluent_kafka ' +
       `(\`make -C rust build-all-features\`). Supported platforms: ${SUPPORTED_PLATFORMS.join(', ')}`,
     { cause: new AggregateError(failures, 'every candidate addon failed to load') },
   );
 }
-

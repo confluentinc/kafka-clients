@@ -86,7 +86,11 @@ function jsCopies(ctx) {
         checked += 1;
         const e = n.expression;
         const first = n.arguments[0];
-        if ((named(e, 'Buffer', 'from') || named(e, 'Buffer', 'copyBytesFrom') || named(e, 'Uint8Array', 'from')) && first && isBytes(first)) {
+        if (
+          (named(e, 'Buffer', 'from') || named(e, 'Buffer', 'copyBytesFrom') || named(e, 'Uint8Array', 'from')) &&
+          first &&
+          isBytes(first)
+        ) {
           copied = `${e.getText(sf)}(${first.getText(sf)})`;
         } else if (ts.isPropertyAccessExpression(e) && ['slice', 'copy'].includes(e.name.text) && isBytes(e.expression)) {
           copied = `${e.getText(sf)}()`;
@@ -139,8 +143,11 @@ const ALLOWED = [
   { key: 'native/producer.c:js_producer_send:calloc#1', reason: "the send's context" },
   { key: 'native/producer.c:js_producer_flush:calloc#1', reason: "the flush's context" },
   { key: 'native/producer.c:js_producer_partitions_for:calloc#1', reason: "one partitionsFor call's context, not a record's" },
-  { key: 'native/producer.c:slot_take:realloc#1', reason: "the producer's table of record futures, grown by doubling: a context pointer per slot" },
-  { key: 'native/producer.c:slot_take:realloc#2', reason: "the free list of that table, grown with it" },
+  {
+    key: 'native/producer.c:slot_take:realloc#1',
+    reason: "the producer's table of record futures, grown by doubling: a context pointer per slot",
+  },
+  { key: 'native/producer.c:slot_take:realloc#2', reason: 'the free list of that table, grown with it' },
   { key: 'native/producer.c:js_record_future_get:calloc#1', reason: "one wait's context on a record's future" },
   { key: 'native/producer.c:js_producer_close:calloc#1', reason: "the close's context" },
   { key: 'native/producer.c:new_kafka_producer:calloc#1', reason: "the configuration's string array" },
@@ -186,8 +193,7 @@ function unconditional(model, c) {
 function dropsAlways(model, start, field) {
   if (!start) return false;
   const re = new RegExp(`\\b${field}\\b`);
-  const own = (b) =>
-    model.calls.filter((c) => c.file === b.file && c.function === b.name && unconditional(model, c));
+  const own = (b) => model.calls.filter((c) => c.file === b.file && c.function === b.name && unconditional(model, c));
   for (const c of own(start)) {
     if (RELEASES.has(c.name) && (c.args || []).some((a) => re.test(a))) return true;
     const callee = model.resolve(c.name, c.file);

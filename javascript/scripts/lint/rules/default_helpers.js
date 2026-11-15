@@ -80,7 +80,9 @@ module.exports = {
       if (!rel.startsWith('src/internal/')) continue;
       for (const st of sf.statements) {
         if (!ts.isClassDeclaration(st) || !st.name || !st.name.text.endsWith('Defaults')) continue;
-        const methods = new Set(st.members.filter((m) => ts.isMethodDeclaration(m) && m.name && ts.isIdentifier(m.name)).map((m) => m.name.text));
+        const methods = new Set(
+          st.members.filter((m) => ts.isMethodDeclaration(m) && m.name && ts.isIdentifier(m.name)).map((m) => m.name.text),
+        );
         helpers.set(st.name.text, { rel, methods });
       }
     }

@@ -52,7 +52,10 @@ test('a member finding is reported on the member', () => {
 });
 
 test('a registration src/ never uses is reported on src/internal/native.ts, naming it', () => {
-  const addon = ADDON.replace('{"setFactories"', '{"extra", NULL, js_extra, NULL, NULL, NULL, napi_default, NULL},\n        {"setFactories"');
+  const addon = ADDON.replace(
+    '{"setFactories"',
+    '{"extra", NULL, js_extra, NULL, NULL, NULL, napi_default, NULL},\n        {"setFactories"',
+  );
   const root = project({ 'tsconfig.json': TSCONFIG, ...FILES, 'native/addon.c': addon });
   const found = of(eslintMessages(root), 'kafka/native-registry');
   assert.deepEqual(
@@ -62,16 +65,27 @@ test('a registration src/ never uses is reported on src/internal/native.ts, nami
 });
 
 /** Every file ESLint lints in `files`' project, sorted: where a project finding is reported. */
-const linted = (files) => Object.keys(files).filter((f) => /\.(ts|js|cjs|mjs)$/.test(f)).sort();
+const linted = (files) =>
+  Object.keys(files)
+    .filter((f) => /\.(ts|js|cjs|mjs)$/.test(f))
+    .sort();
 
 test('a rule that cannot run is reported on every file it visits, line 1', () => {
   const files = { 'tsconfig.json': TSCONFIG, ...LIB };
   const text = 'cannot-run check-java-name: cannot run, no Java index at java-index.json (run `cargo xtask java-api` from rust/)';
-  assert.deepEqual(of(eslintMessages(project(files)), 'kafka/java-name'), linted(files).map((f) => `${f}:1 ${text}`));
+  assert.deepEqual(
+    of(eslintMessages(project(files)), 'kafka/java-name'),
+    linted(files).map((f) => `${f}:1 ${text}`),
+  );
 });
 
 test('a rule that checks nothing is reported on every file it visits', () => {
-  const files = { 'tsconfig.json': TSCONFIG, 'java-index.json': INDEX, 'src/index.ts': 'export {};\n', 'src/b.ts': 'const b = 1;\nvoid b;\n' };
+  const files = {
+    'tsconfig.json': TSCONFIG,
+    'java-index.json': INDEX,
+    'src/index.ts': 'export {};\n',
+    'src/b.ts': 'const b = 1;\nvoid b;\n',
+  };
   assert.deepEqual(of(eslintMessages(project(files)), 'kafka/java-name'), [
     'src/b.ts:1 nothing-checked check-java-name: 0 item(s) checked; a rule that checks nothing cannot pass',
     'src/index.ts:1 nothing-checked check-java-name: 0 item(s) checked; a rule that checks nothing cannot pass',
@@ -86,8 +100,12 @@ test('a stale baseline line is reported on every file by the rule owning its kin
     'eslint-baseline.txt': 'missing clients.producer.Rec#gone\nno-such-kind x\n',
   };
   const messages = eslintMessages(project(files));
-  const text = 'baseline eslint-baseline.txt: missing clients.producer.Rec#gone: stale entry: no finding matches it any more; delete the line';
-  assert.deepEqual(of(messages, 'kafka/java-completeness'), linted(files).map((f) => `${f}:1 ${text}`));
+  const text =
+    'baseline eslint-baseline.txt: missing clients.producer.Rec#gone: stale entry: no finding matches it any more; delete the line';
+  assert.deepEqual(
+    of(messages, 'kafka/java-completeness'),
+    linted(files).map((f) => `${f}:1 ${text}`),
+  );
   // A rule cannot run here (no C sources, no header): the lines no rule owns are not judged.
   assert.deepEqual(of(messages, 'kafka/baseline'), []);
 });
@@ -104,16 +122,32 @@ test('an unknown kind is reported on every file by kafka/baseline, once every ru
     'baseline eslint-baseline.txt: no-such-kind x: stale entry: no finding matches it any more; delete the line',
     'baseline eslint-baseline.txt: prefix:nowhere/: stale entry: no finding starts with it any more; delete the line',
   ];
-  assert.deepEqual(of(eslintMessages(project(files)), 'kafka/baseline'), linted(files).flatMap((f) => texts.map((t) => `${f}:1 ${t}`)));
+  assert.deepEqual(
+    of(eslintMessages(project(files)), 'kafka/baseline'),
+    linted(files).flatMap((f) => texts.map((t) => `${f}:1 ${t}`)),
+  );
 });
 
 test('an unused allowlist entry is located on the entry, in the rule module that lists it, and reported everywhere', () => {
-  const root = project({ 'src/index.ts': 'export {};\n', 'scripts/rule.js': "module.exports = {\n  ALLOWED: [\n    'kept',\n    'gone',\n  ],\n};\n" });
+  const root = project({
+    'src/index.ts': 'export {};\n',
+    'scripts/rule.js': "module.exports = {\n  ALLOWED: [\n    'kept',\n    'gone',\n  ],\n};\n",
+  });
   const check = require(path.join(root, 'scripts', 'rule.js'));
   const p = new Project(root, { checks: [check] });
-  assert.deepEqual(p.locate(check, { subject: 'gone', unusedEntry: 'gone' }), { file: 'scripts/rule.js', line: 4, column: 0, global: true });
+  assert.deepEqual(p.locate(check, { subject: 'gone', unusedEntry: 'gone' }), {
+    file: 'scripts/rule.js',
+    line: 4,
+    column: 0,
+    global: true,
+  });
   // A module outside the directory (a test's copy of a rule) has no line of its own.
-  assert.deepEqual(p.locate({ name: 'check-x' }, { subject: 'gone', unusedEntry: 'gone' }), { file: null, line: 1, column: 0, global: true });
+  assert.deepEqual(p.locate({ name: 'check-x' }, { subject: 'gone', unusedEntry: 'gone' }), {
+    file: null,
+    line: 1,
+    column: 0,
+    global: true,
+  });
 });
 
 test('kafka/directives: a disable names one rule, not a kafka/ one, with a reason; no inline configuration', () => {
@@ -121,11 +155,26 @@ test('kafka/directives: a disable names one rule, not a kafka/ one, with a reaso
   const cases = [
     ['// eslint-disable-next-line no-console -- the reason', []],
     ['/* eslint-disable no-console -- a block, one rule, a reason */', []],
-    ['// eslint-disable-next-line kafka/java-name -- later', ['disable-kafka eslint-disable-next-line names kafka/java-name: a kafka/ finding is waived only in eslint-baseline.txt']],
-    ['/* eslint-disable */', ['disable-unnamed eslint-disable names no rule: name the one rule it disables', 'disable-no-reason eslint-disable gives no reason: add `-- <reason>`']],
-    ['// eslint-disable-line no-console, no-debugger -- two', ['disable-several eslint-disable-line names 2 rules: disable one rule per directive']],
+    [
+      '// eslint-disable-next-line kafka/java-name -- later',
+      ['disable-kafka eslint-disable-next-line names kafka/java-name: a kafka/ finding is waived only in eslint-baseline.txt'],
+    ],
+    [
+      '/* eslint-disable */',
+      [
+        'disable-unnamed eslint-disable names no rule: name the one rule it disables',
+        'disable-no-reason eslint-disable gives no reason: add `-- <reason>`',
+      ],
+    ],
+    [
+      '// eslint-disable-line no-console, no-debugger -- two',
+      ['disable-several eslint-disable-line names 2 rules: disable one rule per directive'],
+    ],
     ['// eslint-disable-next-line no-console', ['disable-no-reason eslint-disable-next-line gives no reason: add `-- <reason>`']],
-    ['/* eslint kafka/java-name: "off" */', ['config-inline an inline configuration (eslint): rules are configured in eslint.config.cjs only']],
+    [
+      '/* eslint kafka/java-name: "off" */',
+      ['config-inline an inline configuration (eslint): rules are configured in eslint.config.cjs only'],
+    ],
     ['/* eslint "no-undef": "off" */', ['config-inline an inline configuration (eslint): rules are configured in eslint.config.cjs only']],
     ['/* eslint-env node */', ['config-inline an inline configuration (eslint-env): rules are configured in eslint.config.cjs only']],
   ];
@@ -134,13 +183,22 @@ test('kafka/directives: a disable names one rule, not a kafka/ one, with a reaso
     const messages = eslintMessages(root).filter((m) => m.ruleId === 'kafka/directives');
     // Each finding is reported on every file: deduplicated here.
     const got = [...new Set(messages.map((m) => `${m.messageId} ${m.message}`))];
-    assert.deepEqual(got, want.map((w) => w.replace(' ', ' src/x.ts:1: ')), comment);
+    assert.deepEqual(
+      got,
+      want.map((w) => w.replace(' ', ' src/x.ts:1: ')),
+      comment,
+    );
   }
   // A `/* eslint-disable */` silences its own file, but not the other files, where the finding stands too.
   const root = project({ ...files, 'src/x.ts': '/* eslint-disable */\nconst x = 1;\nvoid x;\n' });
-  const where = eslintMessages(root).filter((m) => m.ruleId === 'kafka/directives').map((m) => m.rel);
+  const where = eslintMessages(root)
+    .filter((m) => m.ruleId === 'kafka/directives')
+    .map((m) => m.rel);
   assert.ok(!where.includes('src/x.ts'));
-  assert.deepEqual([...new Set(where)], linted({ ...files, 'src/x.ts': '' }).filter((f) => f !== 'src/x.ts'));
+  assert.deepEqual(
+    [...new Set(where)],
+    linted({ ...files, 'src/x.ts': '' }).filter((f) => f !== 'src/x.ts'),
+  );
 });
 
 test('kafka/directives reads every inline form ESLint accepts, as ESLint itself reads it', () => {
@@ -197,7 +255,10 @@ test('what ESLint reads but the check does not is directive-unread', () => {
   });
   // With its own reading on, the check reports both comments, and ESLint's reading adds nothing.
   let found = directives.check(new Context({ root })).findings;
-  assert.deepEqual(found.map((f) => `${f.subject} ${f.kind}`), ['src/x.ts:2 config-inline', 'src/x.ts:3 disable-kafka']);
+  assert.deepEqual(
+    found.map((f) => `${f.subject} ${f.kind}`),
+    ['src/x.ts:2 config-inline', 'src/x.ts:3 disable-kafka'],
+  );
   // With it off, ESLint's reading alone finds both, as directive-unread, reported everywhere and at 1:0.
   const blind = Object.assign(Object.create(directives), { OWN_READING: false });
   found = blind.check(new Context({ root })).findings;
@@ -232,7 +293,12 @@ test('kafka/config: an ESLint configuration besides eslint.config.cjs is reporte
     'other-config test/.eslintrc.json: is an ESLint configuration besides eslint.config.cjs: the files below it would lose the kafka/ rules',
   ];
   const got = of(eslintMessages(project(files)), 'kafka/config').sort();
-  assert.deepEqual(got, linted(files).flatMap((f) => texts.map((t) => `${f}:1 ${t}`)).sort());
+  assert.deepEqual(
+    got,
+    linted(files)
+      .flatMap((f) => texts.map((t) => `${f}:1 ${t}`))
+      .sort(),
+  );
 });
 
 test('the formatter groups a message the same rule reports on several files, and counts it once', () => {
@@ -262,9 +328,15 @@ test('the formatter groups a message the same rule reports on several files, and
   assert.equal(format([{ filePath: '/c/a.ts', messages: [] }], { cwd: '/c' }), '');
 });
 
-test('the formatter groups only kafka/ messages: another rule\'s identical messages stay under their files', () => {
+test("the formatter groups only kafka/ messages: another rule's identical messages stay under their files", () => {
   const format = require('../../scripts/lint/eslint/formatter');
-  const any = (line, column) => ({ ruleId: '@typescript-eslint/no-explicit-any', message: 'Unexpected any. Specify a different type.', line, column, severity: 2 });
+  const any = (line, column) => ({
+    ruleId: '@typescript-eslint/no-explicit-any',
+    message: 'Unexpected any. Specify a different type.',
+    line,
+    column,
+    severity: 2,
+  });
   const out = format(
     [
       { filePath: '/c/src/internal/config.ts', messages: [any(182, 22)] },

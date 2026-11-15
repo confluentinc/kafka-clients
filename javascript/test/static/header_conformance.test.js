@@ -92,7 +92,10 @@ test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both w
   const FFI_NAMES = [...body.matchAll(/^ {2}\[(-?\d+), '([A-Z0-9_]+)'\],$/gm)].map((m) => [Number(m[1]), m[2]]);
   assert.ok(FFI_NAMES.length > 0, 'FFI_NAMES has no rows');
   const values = new Map(errorEnumerators(header));
-  assert.deepEqual([...FFI_NAMES].sort((a, b) => a[0] - b[0]), [...values].map(([n, v]) => [v, n]).sort((a, b) => a[0] - b[0]));
+  assert.deepEqual(
+    [...FFI_NAMES].sort((a, b) => a[0] - b[0]),
+    [...values].map(([n, v]) => [v, n]).sort((a, b) => a[0] - b[0]),
+  );
   assert.equal(values.get('LOCAL_ILLEGAL_ARGUMENT'), -3);
   assert.equal(values.get('LOCAL_ILLEGAL_STATE'), -4);
 });
@@ -184,10 +187,18 @@ test('every call of a kafka_* function passes the arguments of its header protot
     for (const call of calls(fs.readFileSync(path.join(NATIVE, source), 'utf8'))) {
       const params = protos.get(call.name);
       assert.ok(params !== undefined, `${source}:${call.at}: ${call.name} has no prototype in confluent_kafka_bindings.h`);
-      assert.equal(call.args.length, params.length, `${source}:${call.at}: ${call.name} takes ${params.length} arguments (${params.join(', ')}), not ${call.args.length}`);
+      assert.equal(
+        call.args.length,
+        params.length,
+        `${source}:${call.at}: ${call.name} takes ${params.length} arguments (${params.join(', ')}), not ${call.args.length}`,
+      );
       // A fallible function's trailing out_err is the call's error slot.
       if (/\*\s*\*\s*out_err$/.test(params[params.length - 1] ?? '')) {
-        assert.match(call.args[call.args.length - 1], /^&?\w*err\w*$/, `${source}:${call.at}: ${call.name}'s out_err is ${call.args[call.args.length - 1]}`);
+        assert.match(
+          call.args[call.args.length - 1],
+          /^&?\w*err\w*$/,
+          `${source}:${call.at}: ${call.name}'s out_err is ${call.args[call.args.length - 1]}`,
+        );
         withOutErr += 1;
       }
       checked += 1;
@@ -200,7 +211,11 @@ test('the addon declares no prototype of its own for a kafka_* function, and bui
   for (const source of sources) {
     const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
     // A declaration is at file scope, at column 0; a statement is indented.
-    assert.doesNotMatch(code, /^(?!(?:else|return|if|while|for|do|case)\b)(?:extern\s+)?[A-Za-z_][\w \t*]*\bkafka_\w+\s*\([^;{]*\)\s*;/m, `${source} redeclares a function of the bindings header`);
+    assert.doesNotMatch(
+      code,
+      /^(?!(?:else|return|if|while|for|do|case)\b)(?:extern\s+)?[A-Za-z_][\w \t*]*\bkafka_\w+\s*\([^;{]*\)\s*;/m,
+      `${source} redeclares a function of the bindings header`,
+    );
   }
   const gyp = fs.readFileSync(path.join(NATIVE, 'binding.gyp'), 'utf8');
   for (const flag of ['"-Wall"', '"-Wextra"', '"-Werror"']) {
@@ -221,7 +236,10 @@ test('a source using a GNU extension of glibc defines _GNU_SOURCE before its fir
     users += 1;
     const define = code.search(/^[ \t]*#[ \t]*define[ \t]+_GNU_SOURCE\b/m);
     const include = code.search(/^[ \t]*#[ \t]*include\b/m);
-    assert.ok(define >= 0 && (include < 0 || define < include), `native/${source} uses dladdr or Dl_info without #define _GNU_SOURCE before its first #include`);
+    assert.ok(
+      define >= 0 && (include < 0 || define < include),
+      `native/${source} uses dladdr or Dl_info without #define _GNU_SOURCE before its first #include`,
+    );
   }
   assert.ok(users > 0, 'no native source uses dladdr: the check has nothing to check');
 });

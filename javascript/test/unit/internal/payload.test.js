@@ -39,8 +39,13 @@ const {
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaMetric, QuotaViolationError } = require('@confluentinc/kafka-javascript/common/metrics');
 const { CorrelationIdMismatchError } = require('@confluentinc/kafka-javascript/common/requests');
-const { InvalidOffsetError, LogTruncationError, NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError } =
-  require('@confluentinc/kafka-javascript/consumer');
+const {
+  InvalidOffsetError,
+  LogTruncationError,
+  NoOffsetForPartitionError,
+  OffsetAndMetadata,
+  OffsetOutOfRangeError,
+} = require('@confluentinc/kafka-javascript/consumer');
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
 const { TimestampType } = require('@confluentinc/kafka-javascript/common/record');
 const { fromNative } = require('../../../dist/internal/errors');
@@ -97,17 +102,26 @@ test("TopicAuthorizationError: Java's three constructors and unauthorizedTopics(
   });
   assert.throws(() => new TopicAuthorizationError({ message: 'm', unauthorizedTopics: [] }, 2), {
     constructor: IllegalArgumentError,
-    message: 'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 2 arguments',
+    message:
+      'TopicAuthorizationError() takes one of ({ unauthorizedTopics }), (message), ({ message, unauthorizedTopics }); got 2 arguments',
   });
   // A getter only reads.
-  assert.throws(() => built.unauthorizedTopics(1), { constructor: TypeError, message: 'unauthorizedTopics() only reads: it takes no argument' });
+  assert.throws(() => built.unauthorizedTopics(1), {
+    constructor: TypeError,
+    message: 'unauthorizedTopics() only reads: it takes no argument',
+  });
   // The payload is private: no public field.
   assert.deepEqual(Object.keys(built), []);
 });
 
 test('InvalidTopicError: the message and cause forms set an empty set; the payload forms keep it', () => {
   const cause = new Error('inner');
-  for (const e of [new InvalidTopicError(), new InvalidTopicError('m'), new InvalidTopicError(cause), new InvalidTopicError({ message: 'm', cause })]) {
+  for (const e of [
+    new InvalidTopicError(),
+    new InvalidTopicError('m'),
+    new InvalidTopicError(cause),
+    new InvalidTopicError({ message: 'm', cause }),
+  ]) {
     assert.deepEqual(e.invalidTopics(), new Set());
   }
   assert.equal(new InvalidTopicError({ invalidTopics: ['bad topic'] }).message, 'Invalid topics: [bad topic]');
@@ -116,7 +130,8 @@ test('InvalidTopicError: the message and cause forms set an empty set; the paylo
   assert.deepEqual(both.invalidTopics(), new Set(['x']));
   assert.throws(() => new InvalidTopicError({ cause, invalidTopics: [] }), {
     constructor: IllegalArgumentError,
-    message: 'InvalidTopicError() takes one of (), (message), (cause), ({ invalidTopics }), ({ message, cause }), ({ message, invalidTopics }); got (cause, invalidTopics)',
+    message:
+      'InvalidTopicError() takes one of (), (message), (cause), ({ invalidTopics }), ({ message, cause }), ({ message, invalidTopics }); got (cause, invalidTopics)',
   });
 });
 
@@ -145,7 +160,10 @@ test('RecordTooLargeError: recordTooLargePartitions is a TopicPartitionMap<bigin
 });
 
 test('OffsetOutOfRangeError: offsetOutOfRangePartitions and partitions(), its key set', () => {
-  const offsets = new TopicPartitionMap([[tp('t', 0), 7n], [tp('t', 1), 9n]]);
+  const offsets = new TopicPartitionMap([
+    [tp('t', 0), 7n],
+    [tp('t', 1), 9n],
+  ]);
   const e = new OffsetOutOfRangeError({ offsetOutOfRangePartitions: offsets });
   assert.equal(e.message, 'Offsets out of range with no configured reset policy for partitions: {t-0=7, t-1=9}');
   assert.equal(e.offsetOutOfRangePartitions().toString(), '{t-0=7, t-1=9}');
@@ -159,7 +177,8 @@ test('OffsetOutOfRangeError: offsetOutOfRangePartitions and partitions(), its ke
   assert.throws(() => empty.partitions(), { constructor: TypeError, message: 'offsetOutOfRangePartitions must not be null' });
   assert.throws(() => new OffsetOutOfRangeError('m'), {
     constructor: IllegalArgumentError,
-    message: 'OffsetOutOfRangeError() takes one of ({ offsetOutOfRangePartitions }), ({ message, offsetOutOfRangePartitions }); got a string',
+    message:
+      'OffsetOutOfRangeError() takes one of ({ offsetOutOfRangePartitions }), ({ message, offsetOutOfRangePartitions }); got a string',
   });
 });
 
@@ -172,9 +191,18 @@ test('NoOffsetForPartitionError: one partition or a collection, kept as a TopicP
   assert.equal(many.message, 'Undefined offset with no reset policy for partitions: [t-0, t-1, t-0]');
   assert.equal(many.partitions().size(), 2);
   // Set.copyOf dereferences the collection and refuses a null element.
-  assert.throws(() => new NoOffsetForPartitionError({ partitions: null }), { constructor: TypeError, message: 'partitions must not be null' });
-  assert.throws(() => new NoOffsetForPartitionError({ partitions: [null] }), { constructor: TypeError, message: 'partitions must not contain null' });
-  assert.throws(() => new NoOffsetForPartitionError({ partition: 't-0' }), { constructor: TypeError, message: 'partition must be a TopicPartition' });
+  assert.throws(() => new NoOffsetForPartitionError({ partitions: null }), {
+    constructor: TypeError,
+    message: 'partitions must not be null',
+  });
+  assert.throws(() => new NoOffsetForPartitionError({ partitions: [null] }), {
+    constructor: TypeError,
+    message: 'partitions must not contain null',
+  });
+  assert.throws(() => new NoOffsetForPartitionError({ partition: 't-0' }), {
+    constructor: TypeError,
+    message: 'partition must be a TopicPartition',
+  });
   // Java's Collections.singleton(null) holds the null.
   const none = new NoOffsetForPartitionError({ partition: null });
   assert.equal(none.message, 'Undefined offset with no reset policy for partition: null');
@@ -187,7 +215,10 @@ test("LogTruncationError: Java's two constructors, divergentOffsets() a TopicPar
   const epoch = new OffsetAndMetadata({ offset: 3n, leaderEpoch: 2, metadata: '' });
   const divergentOffsets = new TopicPartitionMap([[tp('t', 0), epoch]]);
   const e = new LogTruncationError({ fetchOffsets, divergentOffsets });
-  assert.equal(e.message, "Truncated partitions detected with divergent offsets {t-0=OffsetAndMetadata{offset=3, leaderEpoch=2, metadata=''}}");
+  assert.equal(
+    e.message,
+    "Truncated partitions detected with divergent offsets {t-0=OffsetAndMetadata{offset=3, leaderEpoch=2, metadata=''}}",
+  );
   assert.ok(e instanceof OffsetOutOfRangeError);
   assert.equal(e.offsetOutOfRangePartitions().get(tp('t', 0)), 5n);
   assert.equal(e.divergentOffsets().get(tp('t', 0)), epoch);
@@ -195,21 +226,39 @@ test("LogTruncationError: Java's two constructors, divergentOffsets() a TopicPar
   assert.equal(e.partitions().toString(), '[t-0]');
   assert.equal(new LogTruncationError({ message: 'm', fetchOffsets, divergentOffsets }).message, 'm');
   // Collections.unmodifiableMap dereferences the map.
-  assert.throws(() => new LogTruncationError({ fetchOffsets, divergentOffsets: null }), { constructor: TypeError, message: 'divergentOffsets must not be null' });
+  assert.throws(() => new LogTruncationError({ fetchOffsets, divergentOffsets: null }), {
+    constructor: TypeError,
+    message: 'divergentOffsets must not be null',
+  });
   assert.throws(() => new LogTruncationError({ fetchOffsets, divergentOffsets: new TopicPartitionMap([[tp('t', 0), 1n]]) }), {
     constructor: TypeError,
     message: 'a value of divergentOffsets must be an OffsetAndMetadata',
   });
   // The core's payload: both maps.
-  const core = fromNative({ code: -20, message: 'truncated', payload: { offsetOutOfRangePartitions: [['t', 0, 3n]], divergentOffsets: [['t', 0, 9n, -1, 'm']] } });
+  const core = fromNative({
+    code: -20,
+    message: 'truncated',
+    payload: { offsetOutOfRangePartitions: [['t', 0, 3n]], divergentOffsets: [['t', 0, 9n, -1, 'm']] },
+  });
   assert.ok(core instanceof LogTruncationError);
   assert.equal(core.offsetOutOfRangePartitions().get(tp('t', 0)), 3n);
-  assert.ok(core.divergentOffsets().get(tp('t', 0)).equals(new OffsetAndMetadata({ offset: 9n, metadata: 'm' })));
+  assert.ok(
+    core
+      .divergentOffsets()
+      .get(tp('t', 0))
+      .equals(new OffsetAndMetadata({ offset: 9n, metadata: 'm' })),
+  );
 });
 
 test("RecordDeserializationError: Java's constructor, its getters and its nested DeserializationExceptionOrigin", () => {
   const Origin = RecordDeserializationError.DeserializationExceptionOrigin;
-  assert.deepEqual(Origin.values().map((o) => [o.name(), o.ordinal(), String(o)]), [['KEY', 0, 'KEY'], ['VALUE', 1, 'VALUE']]);
+  assert.deepEqual(
+    Origin.values().map((o) => [o.name(), o.ordinal(), String(o)]),
+    [
+      ['KEY', 0, 'KEY'],
+      ['VALUE', 1, 'VALUE'],
+    ],
+  );
   assert.equal(Origin.valueOf('VALUE'), Origin.VALUE);
   assert.throws(() => Origin.valueOf('X'), {
     constructor: IllegalArgumentError,
@@ -244,21 +293,53 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
   assert.equal(e.headers(), headers);
   // An iterable of Header is a new Headers.
   const listed = new RecordDeserializationError({
-    origin: Origin.VALUE, partition: tp('t', 1), offset: 0, timestamp: -1, timestampType: TimestampType.NO_TIMESTAMP_TYPE,
-    keyBuffer: null, valueBuffer: null, headers: [new Header({ key: 'h', value: null })], message: null, cause: null,
+    origin: Origin.VALUE,
+    partition: tp('t', 1),
+    offset: 0,
+    timestamp: -1,
+    timestampType: TimestampType.NO_TIMESTAMP_TYPE,
+    keyBuffer: null,
+    valueBuffer: null,
+    headers: [new Header({ key: 'h', value: null })],
+    message: null,
+    cause: null,
   });
   assert.equal(listed.headers().lastHeader('h').key(), 'h');
   assert.equal(listed.message, '');
-  assert.throws(() => new RecordDeserializationError({ origin: 'KEY', partition: tp('t', 1), offset: 0, timestamp: 0, timestampType: null, keyBuffer: null, valueBuffer: null, headers: null, message: null, cause: null }), {
-    constructor: TypeError,
-    message: 'origin must be a DeserializationExceptionOrigin',
-  });
+  assert.throws(
+    () =>
+      new RecordDeserializationError({
+        origin: 'KEY',
+        partition: tp('t', 1),
+        offset: 0,
+        timestamp: 0,
+        timestampType: null,
+        keyBuffer: null,
+        valueBuffer: null,
+        headers: null,
+        message: null,
+        cause: null,
+      }),
+    {
+      constructor: TypeError,
+      message: 'origin must be a DeserializationExceptionOrigin',
+    },
+  );
   assert.throws(() => new RecordDeserializationError({ message: 'm', cause }), { constructor: IllegalArgumentError });
   // The core's payload.
   const core = fromNative({
     code: -27,
     message: 'x',
-    payload: { origin: 1, partition: ['t', 0], offset: 3n, timestamp: -1n, timestampType: 0, keyBuffer: null, valueBuffer: Buffer.from('v'), headers: [['a', Buffer.from('b')]] },
+    payload: {
+      origin: 1,
+      partition: ['t', 0],
+      offset: 3n,
+      timestamp: -1n,
+      timestampType: 0,
+      keyBuffer: null,
+      valueBuffer: Buffer.from('v'),
+      headers: [['a', Buffer.from('b')]],
+    },
   });
   assert.equal(core.origin(), Origin.VALUE);
   assert.equal(core.timestampType(), TimestampType.NO_TIMESTAMP_TYPE);
@@ -281,7 +362,10 @@ test('the String payloads: groupId, resource; GroupAuthorizationError.forGroupId
     constructor: IllegalArgumentError,
     message: 'forGroupId() takes one of (groupId); got a number',
   });
-  assert.throws(() => new GroupAuthorizationError({ message: 'm', groupId: 5 }), { constructor: TypeError, message: 'groupId must be a string or null' });
+  assert.throws(() => new GroupAuthorizationError({ message: 'm', groupId: 5 }), {
+    constructor: TypeError,
+    message: 'groupId must be a string or null',
+  });
   for (const cls of [ResourceNotFoundError, DuplicateResourceError]) {
     const cause = new Error('c');
     assert.equal(new cls('m').resource(), null, cls.name);
@@ -304,13 +388,22 @@ test('the number payloads: throttleTimeMs, the correlation ids, QuotaViolationEr
   const core = fromNative({ code: -24, message: 'mismatch' });
   assert.deepEqual([core.requestCorrelationId(), core.responseCorrelationId()], [-1, -1]);
   const metricName = new MetricName({ name: 'n', group: 'g', description: 'd', tags: new Map() });
-  const metric = new KafkaMetric({ lock: {}, metricName, valueProvider: { measure: () => 1 }, config: null, time: { milliseconds: () => 0 } });
+  const metric = new KafkaMetric({
+    lock: {},
+    metricName,
+    valueProvider: { measure: () => 1 },
+    config: null,
+    time: { milliseconds: () => 0 },
+  });
   const quota = new QuotaViolationError({ metric, value: 2, bound: 1.5 });
   assert.equal(quota.metric(), metric);
   assert.deepEqual([quota.value(), quota.bound()], [2, 1.5]);
   assert.equal(quota.message, '');
   // Java's toString() override, its doubles as Java's Double.toString writes them.
-  assert.equal(String(quota), "QuotaViolationError: 'MetricName [name=n, group=g, description=d, tags={}]' violated quota. Actual: 2.0, Threshold: 1.5");
+  assert.equal(
+    String(quota),
+    "QuotaViolationError: 'MetricName [name=n, group=g, description=d, tags={}]' violated quota. Actual: 2.0, Threshold: 1.5",
+  );
   // The core gives the value and the bound, not the KafkaMetric.
   const reported = fromNative({ code: -26, message: '', payload: { value: 3, bound: 1 } });
   assert.deepEqual([reported.metric(), reported.value(), reported.bound()], [null, 3, 1]);
@@ -336,7 +429,16 @@ test('an error the core reports carries the payload the FFI view gives', () => {
   assert.equal(large.recordTooLargePartitions().get(tp('t', 1)), 2n);
   const none = fromNative({ code: 10, message: 'large', apiError: true, payload: { recordTooLargePartitions: null } });
   assert.equal(none.recordTooLargePartitions(), null);
-  const partitions = fromNative({ code: -21, message: 'no offset', payload: { partitions: [['t', 0], [null, 1]] } });
+  const partitions = fromNative({
+    code: -21,
+    message: 'no offset',
+    payload: {
+      partitions: [
+        ['t', 0],
+        [null, 1],
+      ],
+    },
+  });
   assert.equal(partitions.partitions().toString(), '[t-0, null-1]');
   assert.equal(fromNative({ code: 30, message: 'g', apiError: true, payload: { groupId: null } }).groupId(), null);
   assert.equal(fromNative({ code: 89, message: 'q', apiError: true, payload: { throttleTimeMs: 7 } }).throttleTimeMs(), 7);

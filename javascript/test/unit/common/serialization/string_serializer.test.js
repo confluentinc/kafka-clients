@@ -64,21 +64,71 @@ test('stringSerdeShouldSupportDifferentEncodings', () => {
 // an empty array): ASCII, DEL, the first byte beyond ASCII, Latin-1 letters,
 // the first character beyond Latin-1, BMP characters, a surrogate pair, lone
 // and reversed surrogates, U+FFFF and a BOM character.
-const STRINGS = ['', 'abc', '\u007f', '\u0080', '\u00e9', '\u00ff', '\u0100', '\u20ac', '\u65e5\u672c', '\uD83D\uDE00', 'a\uD800b', '\uDC00', '\uD800\uD800', '\uDBFF', 'x\uDFFFy\uD83D', '\uDC00\uD800', '\uFFFF', '\uFEFF'];
+const STRINGS = [
+  '',
+  'abc',
+  '\u007f',
+  '\u0080',
+  '\u00e9',
+  '\u00ff',
+  '\u0100',
+  '\u20ac',
+  '\u65e5\u672c',
+  '\uD83D\uDE00',
+  'a\uD800b',
+  '\uDC00',
+  '\uD800\uD800',
+  '\uDBFF',
+  'x\uDFFFy\uD83D',
+  '\uDC00\uD800',
+  '\uFFFF',
+  '\uFEFF',
+];
 const CHARSETS = {
   'US-ASCII': '- 616263 7f 3f 3f 3f 3f 3f 3f3f 3f 613f62 3f 3f3f 3f 783f793f 3f3f 3f 3f',
   'ISO-8859-1': '- 616263 7f 80 e9 ff 3f 3f 3f3f 3f 613f62 3f 3f3f 3f 783f793f 3f3f 3f 3f',
   'UTF-8': '- 616263 7f c280 c3a9 c3bf c480 e282ac e697a5e69cac f09f9880 613f62 3f 3f3f 3f 783f793f 3f3f efbfbf efbbbf',
-  'UTF-16BE': '- 006100620063 007f 0080 00e9 00ff 0100 20ac 65e5672c d83dde00 0061fffd0062 fffd fffdfffd fffd 0078fffd0079fffd fffdfffd ffff feff',
-  'UTF-16LE': '- 610062006300 7f00 8000 e900 ff00 0001 ac20 e5652c67 3dd800de 6100fdff6200 fdff fdfffdff fdff 7800fdff7900fdff fdfffdff ffff fffe',
+  'UTF-16BE':
+    '- 006100620063 007f 0080 00e9 00ff 0100 20ac 65e5672c d83dde00 0061fffd0062 fffd fffdfffd fffd 0078fffd0079fffd fffdfffd ffff feff',
+  'UTF-16LE':
+    '- 610062006300 7f00 8000 e900 ff00 0001 ac20 e5652c67 3dd800de 6100fdff6200 fdff fdfffdff fdff 7800fdff7900fdff fdfffdff ffff fffe',
   'UTF-16':
     '- feff006100620063 feff007f feff0080 feff00e9 feff00ff feff0100 feff20ac feff65e5672c feffd83dde00 feff0061fffd0062 ' +
     'fefffffd fefffffdfffd fefffffd feff0078fffd0079fffd fefffffdfffd feffffff fefffeff',
 };
 // The JDK's aliases of each (Charset.aliases()).
 const ALIASES = {
-  'US-ASCII': ['646', 'ANSI_X3.4-1968', 'ANSI_X3.4-1986', 'ASCII', 'IBM367', 'ISO646-US', 'ISO_646.irv:1991', 'ascii7', 'cp367', 'csASCII', 'iso-ir-6', 'iso_646.irv:1983', 'us'],
-  'ISO-8859-1': ['819', '8859_1', 'IBM-819', 'IBM819', 'ISO8859-1', 'ISO8859_1', 'ISO_8859-1', 'ISO_8859-1:1987', 'ISO_8859_1', 'cp819', 'csISOLatin1', 'iso-ir-100', 'l1', 'latin1'],
+  'US-ASCII': [
+    '646',
+    'ANSI_X3.4-1968',
+    'ANSI_X3.4-1986',
+    'ASCII',
+    'IBM367',
+    'ISO646-US',
+    'ISO_646.irv:1991',
+    'ascii7',
+    'cp367',
+    'csASCII',
+    'iso-ir-6',
+    'iso_646.irv:1983',
+    'us',
+  ],
+  'ISO-8859-1': [
+    '819',
+    '8859_1',
+    'IBM-819',
+    'IBM819',
+    'ISO8859-1',
+    'ISO8859_1',
+    'ISO_8859-1',
+    'ISO_8859-1:1987',
+    'ISO_8859_1',
+    'cp819',
+    'csISOLatin1',
+    'iso-ir-100',
+    'l1',
+    'latin1',
+  ],
   'UTF-8': ['UTF8', 'unicode-1-1-utf-8'],
   'UTF-16BE': ['ISO-10646-UCS-2', 'UTF_16BE', 'UnicodeBigUnmarked', 'X-UTF-16BE'],
   'UTF-16LE': ['UTF_16LE', 'UnicodeLittleUnmarked', 'X-UTF-16LE'],
@@ -123,12 +173,18 @@ test('key.serializer.encoding or value.serializer.encoding takes precedence over
   // Java: the key serializer reads key.serializer.encoding, the value one
   // falls back to serializer.encoding, an unknown charset.
   assert.equal(serialize(stringSerializer({ configs, isKey: true }), 'a'), '61');
-  assert.throws(() => stringSerializer({ configs, isKey: false }), (e) => {
-    assert.ok(e instanceof SerializationError);
-    assert.equal(e.message, 'Unsupported encoding nope-charset');
-    return true;
-  });
-  assert.equal(serialize(stringSerializer({ configs: { 'value.serializer.encoding': 'utf8', 'serializer.encoding': 'x' }, isKey: false }), 'a'), '61');
+  assert.throws(
+    () => stringSerializer({ configs, isKey: false }),
+    (e) => {
+      assert.ok(e instanceof SerializationError);
+      assert.equal(e.message, 'Unsupported encoding nope-charset');
+      return true;
+    },
+  );
+  assert.equal(
+    serialize(stringSerializer({ configs: { 'value.serializer.encoding': 'utf8', 'serializer.encoding': 'x' }, isKey: false }), 'a'),
+    '61',
+  );
   // Java's key/value precedence, with two charsets that differ.
   const both = { 'key.serializer.encoding': 'UTF-16BE', 'serializer.encoding': 'UTF-8' };
   assert.equal(serialize(stringSerializer({ configs: both, isKey: true }), 'a'), '0061');
@@ -151,13 +207,19 @@ test("stringSerializer takes Java's configure(configs, isKey) or nothing, and it
     constructor: IllegalArgumentError,
     message: 'stringSerializer() takes one of (), (configs, isKey); got (configs)',
   });
-  assert.throws(() => stringSerializer({ configs: null, isKey: true }), { constructor: TypeError, message: 'configs must be an object, not null' });
+  assert.throws(() => stringSerializer({ configs: null, isKey: true }), {
+    constructor: TypeError,
+    message: 'configs must be an object, not null',
+  });
   // A Map's entries are no properties: refused rather than silently ignored.
   assert.throws(() => stringSerializer({ configs: new Map([['serializer.encoding', 'UTF-16']]), isKey: false }), {
     constructor: TypeError,
     message: 'configs must be a plain object, not a Map',
   });
-  assert.throws(() => stringSerializer({ configs: {}, isKey: 1 }), { constructor: TypeError, message: 'isKey must be a boolean, not a number' });
+  assert.throws(() => stringSerializer({ configs: {}, isKey: 1 }), {
+    constructor: TypeError,
+    message: 'isKey must be a boolean, not a number',
+  });
   assert.throws(() => stringSerializer().serialize({ topic: 't', headers: new Headers(), data: 5 }), {
     constructor: TypeError,
     message: 'stringSerializer: data must be a string or null, not a number',

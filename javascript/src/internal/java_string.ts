@@ -31,7 +31,8 @@ export function javaString(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   if (typeof value === 'string') return value;
   if (Array.isArray(value) || value instanceof Set) return `[${[...(value as Iterable<unknown>)].map(javaString).join(', ')}]`;
-  if (value instanceof Map) return `{${[...(value as Map<unknown, unknown>)].map(([k, v]) => `${javaString(k)}=${javaString(v)}`).join(', ')}}`;
+  if (value instanceof Map)
+    return `{${[...(value as Map<unknown, unknown>)].map(([k, v]) => `${javaString(k)}=${javaString(v)}`).join(', ')}}`;
   // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's String.valueOf calls toString(), whatever the object is
   return String(value);
 }

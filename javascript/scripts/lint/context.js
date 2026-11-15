@@ -100,8 +100,7 @@ const INPUTS = {
   header: (ctx) =>
     fs.existsSync(ctx.headerPath)
       ? null
-      : `no bindings header at ${ctx.headerPath} ` +
-        '(build the Rust library first: `make build-javascript` from the repository root)',
+      : `no bindings header at ${ctx.headerPath} ` + '(build the Rust library first: `make build-javascript` from the repository root)',
 };
 
 class Context {

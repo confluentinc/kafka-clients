@@ -359,7 +359,11 @@ function signaturesOf(ts, node) {
   const same = members.filter((o) =>
     ts.isConstructorDeclaration(node)
       ? ts.isConstructorDeclaration(o)
-      : (ts.isMethodDeclaration(o) || ts.isMethodSignature(o)) && o.name && node.name && o.name.getText() === node.name.getText() && (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
+      : (ts.isMethodDeclaration(o) || ts.isMethodSignature(o)) &&
+        o.name &&
+        node.name &&
+        o.name.getText() === node.name.getText() &&
+        (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
   );
   const overloads = same.filter((o) => o.body === undefined);
   return overloads.length > 0 ? overloads : same.length > 0 ? same : [node];
@@ -426,10 +430,7 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
     for (const c of chain) {
       const found = c.overloads.filter(
         (o) =>
-          o.name === name &&
-          o.name !== c.path[c.path.length - 1] &&
-          (arity === undefined || o.params.length === arity) &&
-          fits(o.static),
+          o.name === name && o.name !== c.path[c.path.length - 1] && (arity === undefined || o.params.length === arity) && fits(o.static),
       );
       if (found.length > 0) return { kind: 'methods', name, owner: c, overloads: found };
     }
@@ -555,9 +556,7 @@ function exportedItems(ctx) {
         bySymbol.set(target, { rel, dir, sf, name: exported.name, node, kind, tags, declaredHere });
       }
     }
-    return [...bySymbol.values()].sort((a, b) =>
-      a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : a.node.getStart() - b.node.getStart(),
-    );
+    return [...bySymbol.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : a.node.getStart() - b.node.getStart()));
   });
 }
 

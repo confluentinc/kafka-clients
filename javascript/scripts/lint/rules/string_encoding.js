@@ -104,7 +104,11 @@ module.exports = {
           }
         } else if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'Buffer') {
           checked += 1;
-          findings.push({ kind: 'string-encoded', subject: at(n), message: `new Buffer(...) ${why} (use ${ENCODE_FUNCTION} of ${ENCODER})` });
+          findings.push({
+            kind: 'string-encoded',
+            subject: at(n),
+            message: `new Buffer(...) ${why} (use ${ENCODE_FUNCTION} of ${ENCODER})`,
+          });
         } else if (ts.isIdentifier(n) && n.text === 'TextEncoder') {
           checked += 1;
           findings.push({

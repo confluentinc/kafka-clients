@@ -240,9 +240,7 @@ test('a producer workload streams its records, a marker, its stats, then Finishe
   const duplicate = new FakeCall({ workload_id: 'p1', config: UNREACHABLE, topic: 'chaos-t' });
   handlers.RunProducer(duplicate);
   assert.equal(duplicate.ended, true);
-  assert.deepEqual(duplicate.events(), [
-    { failed: { error: { code: -3, message: "js server: workload_id 'p1' is already running" } } },
-  ]);
+  assert.deepEqual(duplicate.events(), [{ failed: { error: { code: -3, message: "js server: workload_id 'p1' is already running" } } }]);
 
   await new Promise((resolve) => setTimeout(resolve, 600));
   assert.deepEqual(await unary(handlers.MarkWorkload, { workload_id: 'p1', marker: '7' }), { found: true });
@@ -260,7 +258,10 @@ test('a producer workload streams its records, a marker, its stats, then Finishe
   );
   // No broker: every record sent fails, after its Sent, once.
   const failedIndexes = events.filter((e) => e.send_failed).map((e) => e.send_failed.index);
-  assert.deepEqual([...failedIndexes].sort((a, b) => a - b), sentIndexes);
+  assert.deepEqual(
+    [...failedIndexes].sort((a, b) => a - b),
+    sentIndexes,
+  );
   for (const index of sentIndexes) {
     const sentAt = events.findIndex((e) => e.sent && e.sent.index === index);
     const settledAt = events.findIndex((e) => e.send_failed && e.send_failed.index === index);

@@ -132,7 +132,11 @@ async function main() {
     process.report.excludeNetwork = previous;
   }
   const addons = objects.filter((file) => file.endsWith('.node'));
-  assert.deepEqual(addons.map((file) => fs.realpathSync(file)), [addonPath], `the addons loaded are ${addons}`);
+  assert.deepEqual(
+    addons.map((file) => fs.realpathSync(file)),
+    [addonPath],
+    `the addons loaded are ${addons}`,
+  );
   console.log(`the addon is ${addonPath}`);
 
   // A producer opens, takes a record with headers and closes; nothing
@@ -158,7 +162,10 @@ async function main() {
     () => 'sent',
     (error) => error.name,
   );
-  assert.throws(() => record.headers.add({ key: 'late', value: null }), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+  assert.throws(() => record.headers.add({ key: 'late', value: null }), {
+    name: 'IllegalStateError',
+    message: 'RecordHeaders has been closed.',
+  });
   await producer.close({ timeout: 0 });
   console.log(`the send of a record with headers ended: ${await sent}`);
   console.log(`${MAIN} ${version} works on ${platform}`);

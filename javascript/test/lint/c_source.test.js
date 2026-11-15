@@ -142,7 +142,10 @@ test('prototypes: the header functions with their parameters, typedefs and comme
     ],
   });
   assert.deepEqual(p.get('kafka_x_last'), { name: 'kafka_x_last', returnType: 'const kafka_common_Error_t *', params: [], doc: '' });
-  assert.deepEqual(p.get('kafka_x_flush_cb').params.map((x) => x.name), ['self_', 'cb', 'opaque']);
+  assert.deepEqual(
+    p.get('kafka_x_flush_cb').params.map((x) => x.name),
+    ['self_', 'cb', 'opaque'],
+  );
 });
 
 test('the shared helpers of the header-conformance test keep their behaviour', () => {
@@ -156,7 +159,8 @@ test('the shared helpers of the header-conformance test keep their behaviour', (
 });
 
 test('prototypes carry the doc comment right before them; signatureParams reads a definition', () => {
-  const header = '/**\n * Sends.\n *\n * `callback` (consumed).\n */\nvoid kafka_x_send(kafka_x_Callback_t *callback);\n\nvoid kafka_x_bare(void);\n';
+  const header =
+    '/**\n * Sends.\n *\n * `callback` (consumed).\n */\nvoid kafka_x_send(kafka_x_Callback_t *callback);\n\nvoid kafka_x_bare(void);\n';
   const p = c.prototypes(header);
   assert.equal(p.get('kafka_x_send').doc, 'Sends.\n\n`callback` (consumed).');
   assert.equal(p.get('kafka_x_bare').doc, '');
@@ -169,7 +173,8 @@ test('prototypes carry the doc comment right before them; signatureParams reads 
 });
 
 test("a typedef's doc before a function's is not taken for the function's", () => {
-  const header = '/**\n * The completion.\n */\ntypedef void (*kafka_x_done_t)(void *opaque);\n\n/**\n * Closes.\n */\nvoid kafka_x_close(void);\n';
+  const header =
+    '/**\n * The completion.\n */\ntypedef void (*kafka_x_done_t)(void *opaque);\n\n/**\n * Closes.\n */\nvoid kafka_x_close(void);\n';
   assert.equal(c.prototypes(header).get('kafka_x_close').doc, 'Closes.');
 });
 

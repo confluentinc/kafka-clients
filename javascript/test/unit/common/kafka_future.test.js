@@ -38,7 +38,13 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateError, TimeoutError } = require('@confluentinc/kafka-javascript');
+const {
+  CancellationError,
+  ExecutionError,
+  IllegalArgumentError,
+  IllegalStateError,
+  TimeoutError,
+} = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 
 // Java's get(5, TimeUnit.MINUTES).
@@ -583,7 +589,10 @@ test('each member takes the bare value or its options object, as Java names the 
 
 test('a form no Java overload has is refused with the form error', async () => {
   const future = newFuture();
-  assert.throws(() => KafkaFuture.completedFuture(), { name: 'IllegalArgumentError', message: 'completedFuture() takes one of (value); got ()' });
+  assert.throws(() => KafkaFuture.completedFuture(), {
+    name: 'IllegalArgumentError',
+    message: 'completedFuture() takes one of (value); got ()',
+  });
   assert.throws(() => KafkaFuture.completedFuture(1, 2), IllegalArgumentError);
   // A bare plain object is the options object, so a record-shaped value is a form error.
   assert.throws(() => KafkaFuture.completedFuture({ key: 'k', value: 'v' }), {
@@ -591,10 +600,14 @@ test('a form no Java overload has is refused with the form error', async () => {
     message: 'completedFuture() takes one of (value); got (value, key)',
   });
   assert.throws(() => KafkaFuture.completedFuture({ a: 1 }), { message: 'completedFuture() takes one of (value); got (a)' });
-  assert.throws(() => future.getNow({ valueIfAbsent: 1, other: 2 }), { message: 'getNow() takes one of (valueIfAbsent); got (valueIfAbsent, other)' });
+  assert.throws(() => future.getNow({ valueIfAbsent: 1, other: 2 }), {
+    message: 'getNow() takes one of (valueIfAbsent); got (valueIfAbsent, other)',
+  });
   assert.throws(() => future.getNow({ b: 2 }), { message: 'getNow() takes one of (valueIfAbsent); got (b)' });
   assert.throws(() => KafkaFuture.allOf(), { message: 'allOf() takes one of (futures); got ()' });
-  assert.throws(() => KafkaFuture.allOf([], []), { message: 'allOf() takes one of (futures); got 2 arguments, not one object of named parameters' });
+  assert.throws(() => KafkaFuture.allOf([], []), {
+    message: 'allOf() takes one of (futures); got 2 arguments, not one object of named parameters',
+  });
   assert.throws(() => future.thenApply({ fn: () => 1 }), { message: 'thenApply() takes one of (function); got (fn)' });
   assert.throws(() => future.whenComplete({ callback: () => 1 }), { message: 'whenComplete() takes one of (action); got (callback)' });
   assert.throws(() => future.cancel(), { message: 'cancel() takes one of (mayInterruptIfRunning); got ()' });
@@ -606,12 +619,14 @@ test('a form no Java overload has is refused with the form error', async () => {
     }
   }
   // A method returning a Promise rejects instead of throwing.
-  await assert.rejects(future.get(1, 2), { message: 'get() takes one of (), (timeout); got 2 arguments, not one object of named parameters' });
+  await assert.rejects(future.get(1, 2), {
+    message: 'get() takes one of (), (timeout); got 2 arguments, not one object of named parameters',
+  });
   await assert.rejects(future.get({ timeoutMs: 1 }), { message: 'get() takes one of (), (timeout); got (timeoutMs)' });
   await assert.rejects(future.toCompletionStage(1), { message: 'toCompletionStage() takes one of (); got a number' });
 });
 
-test('undefined is refused, null is Java\'s null', async () => {
+test("undefined is refused, null is Java's null", async () => {
   const future = newFuture();
   assert.throws(() => KafkaFuture.completedFuture(undefined), {
     name: 'TypeError',
@@ -632,16 +647,40 @@ test('undefined is refused, null is Java\'s null', async () => {
   assert.throws(() => future.thenApply(null), { name: 'TypeError', message: 'function must not be null' });
   // A bare value of the wrong type fits no form; named, it is the parameter's TypeError.
   assert.throws(() => future.thenApply(1), { name: 'IllegalArgumentError', message: 'thenApply() takes one of (function); got a number' });
-  assert.throws(() => future.thenApply({ function: 1 }), { name: 'TypeError', message: 'function must be a function (value) => result, not number' });
+  assert.throws(() => future.thenApply({ function: 1 }), {
+    name: 'TypeError',
+    message: 'function must be a function (value) => result, not number',
+  });
   assert.throws(() => future.whenComplete(null), { name: 'TypeError', message: 'action must not be null' });
-  assert.throws(() => future.whenComplete('x'), { name: 'IllegalArgumentError', message: 'whenComplete() takes one of (action); got a string' });
-  assert.throws(() => future.whenComplete({ action: 'x' }), { name: 'TypeError', message: 'action must be a function (value, error) => void, not string' });
-  assert.throws(() => future.cancel(null), { name: 'IllegalArgumentError', message: 'cancel() takes one of (mayInterruptIfRunning); got null' });
-  assert.throws(() => future.cancel({ mayInterruptIfRunning: null }), { name: 'TypeError', message: 'mayInterruptIfRunning must be a boolean, not null' });
-  assert.throws(() => future.cancel(1), { name: 'IllegalArgumentError', message: 'cancel() takes one of (mayInterruptIfRunning); got a number' });
+  assert.throws(() => future.whenComplete('x'), {
+    name: 'IllegalArgumentError',
+    message: 'whenComplete() takes one of (action); got a string',
+  });
+  assert.throws(() => future.whenComplete({ action: 'x' }), {
+    name: 'TypeError',
+    message: 'action must be a function (value, error) => void, not string',
+  });
+  assert.throws(() => future.cancel(null), {
+    name: 'IllegalArgumentError',
+    message: 'cancel() takes one of (mayInterruptIfRunning); got null',
+  });
+  assert.throws(() => future.cancel({ mayInterruptIfRunning: null }), {
+    name: 'TypeError',
+    message: 'mayInterruptIfRunning must be a boolean, not null',
+  });
+  assert.throws(() => future.cancel(1), {
+    name: 'IllegalArgumentError',
+    message: 'cancel() takes one of (mayInterruptIfRunning); got a number',
+  });
   assert.throws(() => KafkaFuture.allOf(null), { name: 'TypeError', message: 'futures must not be null' });
-  assert.throws(() => KafkaFuture.allOf(future), { name: 'IllegalArgumentError', message: 'allOf() takes one of (futures); got a KafkaFuture' });
-  assert.throws(() => KafkaFuture.allOf({ futures: future }), { name: 'TypeError', message: 'futures must be an array of KafkaFuture, not object' });
+  assert.throws(() => KafkaFuture.allOf(future), {
+    name: 'IllegalArgumentError',
+    message: 'allOf() takes one of (futures); got a KafkaFuture',
+  });
+  assert.throws(() => KafkaFuture.allOf({ futures: future }), {
+    name: 'TypeError',
+    message: 'futures must be an array of KafkaFuture, not object',
+  });
   assert.throws(() => KafkaFuture.allOf([future, null]), { name: 'TypeError', message: 'futures must not contain null' });
   assert.throws(() => KafkaFuture.allOf([undefined]), { name: 'TypeError', message: 'futures must not contain undefined' });
   assert.throws(() => KafkaFuture.allOf([1]), { name: 'TypeError', message: 'futures must contain only KafkaFutures, not number' });
@@ -659,7 +698,10 @@ test('undefined is refused, null is Java\'s null', async () => {
   });
   await assert.rejects(future.get(NaN), { name: 'RangeError' });
   await assert.rejects(future.get('5'), { name: 'IllegalArgumentError', message: 'get() takes one of (), (timeout); got a string' });
-  await assert.rejects(future.get({ timeout: '5' }), { name: 'TypeError', message: 'timeout must be a number of milliseconds or a Temporal.Duration' });
+  await assert.rejects(future.get({ timeout: '5' }), {
+    name: 'TypeError',
+    message: 'timeout must be a number of milliseconds or a Temporal.Duration',
+  });
 });
 
 // --- The two value sources ---------------------------------------------------
@@ -836,7 +878,7 @@ test("an ExecutionError's message for a null cause is the (cause) form's, whethe
 // Java's KafkaFutureImpl: an explicit completion inside another future's
 // function runs its own postComplete, so its dependants, and an allOf over it,
 // are done when it returns.
-test('cancel() inside a function completes the cancelled future\'s dependants and allOf before it returns', () => {
+test("cancel() inside a function completes the cancelled future's dependants and allOf before it returns", () => {
   for (const via of ['thenApply', 'whenComplete']) {
     const src = newFuture();
     const other = newFuture();
@@ -880,10 +922,13 @@ test('allOf is done once its last source is, whichever waiter completes that sou
   completeExceptionally(b, new Error('b'));
   assert.equal(both.isDone(), false);
   completeExceptionally(a, new Error('a'));
-  assert.throws(() => both.getNow(null), (e) => e.cause.message === 'a');
+  assert.throws(
+    () => both.getNow(null),
+    (e) => e.cause.message === 'a',
+  );
 });
 
-test('internalComplete inside a function completes its future\'s dependants before it returns', () => {
+test("internalComplete inside a function completes its future's dependants before it returns", () => {
   const src = newFuture();
   const other = newFuture();
   const otherDep = other.thenApply((x) => x + 1);
@@ -904,7 +949,7 @@ test('cancelling the head of a chain of 100,000 dependants cancels them all with
   await assertIsCancelled(tail);
 });
 
-test('a chain of 100,000 dependants completes without overflowing the stack, as Java\'s does', async () => {
+test("a chain of 100,000 dependants completes without overflowing the stack, as Java's does", async () => {
   const src = newFuture();
   let tail = src;
   for (let i = 0; i < 100_000; i++) tail = tail.thenApply((v) => v + 1);
@@ -959,13 +1004,16 @@ test('a function that throws a CancellationError cancels the dependant, as Java 
   await awaitAndAssertCancelled(dependant, 'stop');
 });
 
-test('CancellationError is Java\'s CancellationException: an IllegalStateError', () => {
+test("CancellationError is Java's CancellationException: an IllegalStateError", () => {
   const e = new CancellationError('m');
   assert.ok(e instanceof IllegalStateError);
   assert.equal(e.name, 'CancellationError');
   assert.equal(e.message, 'm');
   assert.equal(new CancellationError().message, '');
-  assert.throws(() => new CancellationError({ cause: e }), { name: 'IllegalArgumentError', message: 'CancellationError() takes one of (), (message); got (cause)' });
+  assert.throws(() => new CancellationError({ cause: e }), {
+    name: 'IllegalArgumentError',
+    message: 'CancellationError() takes one of (), (message); got (cause)',
+  });
 });
 
 test('toCompletionStage settles with the future: the value, or the failure itself', async () => {
@@ -1086,15 +1134,19 @@ setTimeout(() => {
 }, 50);
 `;
 
-test("completing a million record futures, each with a get() waiting, runs no minor GC", () => {
-  const r = spawnSync(process.execPath, ['--expose-gc', '-e', GC_SCRIPT], { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 120_000 });
+test('completing a million record futures, each with a get() waiting, runs no minor GC', () => {
+  const r = spawnSync(process.execPath, ['--expose-gc', '-e', GC_SCRIPT], {
+    cwd: path.join(__dirname, '..', '..', '..'),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
   assert.equal(r.status, 0, r.stderr);
   const { ns, minor } = JSON.parse(r.stdout);
   console.log(`${ns.toFixed(1)} ns per completion`);
   assert.equal(minor, 0, `${minor} minor GC(s) while completing; ${ns.toFixed(1)} ns per completion`);
 });
 
-test('KafkaFuture is abstract, as Java\'s: constructing it throws; a subclass may be built', async () => {
+test("KafkaFuture is abstract, as Java's: constructing it throws; a subclass may be built", async () => {
   assert.throws(() => new KafkaFuture(), {
     name: 'TypeError',
     message: 'KafkaFuture cannot be constructed directly; use KafkaFuture.completedFuture(...) or KafkaFuture.allOf(...)',

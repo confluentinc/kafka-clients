@@ -36,7 +36,8 @@ const KEPT =
 test('identifiers without the word pass; comments and strings may name Java classes', () => {
   const root = project({
     'src/a.ts': `// IllegalStateException is Java's\n/** Throws an Exception. */\nexport const msg = 'KafkaException';\nexport const t = \`\${msg} Exception\`;\n${KEPT}`,
-    'native/a.c': '// an Exception\nconst char* s = "Exception";\nint f(void) { return napi_is_exception_pending(0) + node_api_exception_x(); }\n',
+    'native/a.c':
+      '// an Exception\nconst char* s = "Exception";\nint f(void) { return napi_is_exception_pending(0) + node_api_exception_x(); }\n',
   });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 0, r.text);
@@ -97,15 +98,15 @@ test('an exemption no identifier uses is a finding', () => {
   assert.deepEqual(findings(r), [
     'isCompletedExceptionally: exempt as Java\'s KafkaFuture#isCompletedExceptionally, which javascript/CLAUDE.md keeps ("KafkaFuture is Java\'s"), but no src/ identifier is named so: delete the exemption',
     "sendException: exempt as Java's public field MockProducer#sendException, the parameter of its setter (plan §5 item 2; Python's set_send_exception), but no src/ identifier is named so: delete the exemption",
-    'setSendException: exempt as the setter of Java\'s public field MockProducer#sendException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption',
+    "setSendException: exempt as the setter of Java's public field MockProducer#sendException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption",
     "flushException: exempt as Java's public field MockProducer#flushException, the parameter of its setter (plan §5 item 2; Python's set_flush_exception), but no src/ identifier is named so: delete the exemption",
-    'setFlushException: exempt as the setter of Java\'s public field MockProducer#flushException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption',
+    "setFlushException: exempt as the setter of Java's public field MockProducer#flushException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption",
     "partitionsForException: exempt as Java's public field MockProducer#partitionsForException, the parameter of its setter (plan §5 item 2; Python's set_partitions_for_exception), but no src/ identifier is named so: delete the exemption",
-    'setPartitionsForException: exempt as the setter of Java\'s public field MockProducer#partitionsForException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption',
+    "setPartitionsForException: exempt as the setter of Java's public field MockProducer#partitionsForException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption",
     "closeException: exempt as Java's public field MockProducer#closeException, the parameter of its setter (plan §5 item 2; Python's set_close_exception), but no src/ identifier is named so: delete the exemption",
-    'setCloseException: exempt as the setter of Java\'s public field MockProducer#closeException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption',
+    "setCloseException: exempt as the setter of Java's public field MockProducer#closeException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption",
     "DeserializationExceptionOrigin: exempt as Java's nested enum RecordDeserializationException.DeserializationExceptionOrigin: only a class name's Exception suffix becomes Error (root CLAUDE.md, JavaScript Binding Conventions, Names), as the Python client keeps the name, but no src/ identifier is named so: delete the exemption",
-    'exception: exempt as the parameter of Java\'s Callback#onCompletion, a named parameter of the send callback\'s one object (javascript/CLAUDE.md "Java shape, JS idiom": parameters are named as Java names them, as the Python client\'s are), as a property name only, but no src/ identifier is named so: delete the exemption',
+    "exception: exempt as the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object (javascript/CLAUDE.md \"Java shape, JS idiom\": parameters are named as Java names them, as the Python client's are), as a property name only, but no src/ identifier is named so: delete the exemption",
   ]);
 });
 

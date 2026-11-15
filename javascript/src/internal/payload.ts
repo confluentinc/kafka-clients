@@ -237,7 +237,8 @@ export const topicPartitionLongMap: Kind = {
   core(raw) {
     if (raw === null) return null;
     const map = new TopicPartitionMap<bigint>();
-    for (const [topic, partition, offset] of raw as Array<[string | null, number, bigint]>) map.set(new TopicPartition({ topic, partition }), offset);
+    for (const [topic, partition, offset] of raw as Array<[string | null, number, bigint]>)
+      map.set(new TopicPartition({ topic, partition }), offset);
     return map;
   },
   copy: (stored) => (stored === null ? null : new TopicPartitionMap(stored as TopicPartitionMap<unknown>)),

@@ -138,7 +138,10 @@ module.exports = {
         const reason = cut === null ? '' : ` ${rest}`.slice(cut.index + cut[0].length).trim();
         const names = ruleNames(named);
         for (const r of names.filter((n) => n.startsWith('kafka/'))) {
-          const why = directive === 'eslint-enable' ? 'a kafka/ rule is never disabled or enabled inline' : 'a kafka/ finding is waived only in eslint-baseline.txt';
+          const why =
+            directive === 'eslint-enable'
+              ? 'a kafka/ rule is never disabled or enabled inline'
+              : 'a kafka/ finding is waived only in eslint-baseline.txt';
           push('disable-kafka', `${directive} names ${r}: ${why}`, r);
         }
         if (directive === 'eslint-enable') continue;
