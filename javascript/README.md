@@ -87,6 +87,7 @@ make -C javascript build             # the addon (node-gyp) and the library (tsc
 make -C javascript test-static       # header conformance and package layout, no build needed
 make -C javascript test-unit         # no broker needed (Jest; JEST_ARGS='-t <name>' picks tests)
 make -C javascript test-typing       # dist/'s declarations type-check under --strict
+make -C javascript format-check      # Prettier (make -C javascript format rewrites)
 make -C javascript check-api         # the interface check: dist/'s declarations and the exports
                                      # map against the API report in api/ (update-api records it)
 make -C javascript test-integration  # starts a scratch broker with docker, or uses

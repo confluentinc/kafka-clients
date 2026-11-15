@@ -1076,8 +1076,16 @@ binding:
   installing it, and an error, a warning or a suggestion fails it. Its one
   suggestion, to name the module type, is why every package declares
   `"type": "commonjs"` (the platform packages the main one's,
-  `check-npm.py`). The root conventions also ask CI for Prettier as the
-  formatter, which is not set up yet.
+  `check-npm.py`).
+- Prettier is the formatter (root conventions, Build, packaging and release,
+  Q74): `prettier.config.cjs` (width 140, single quotes, trailing commas, the
+  style the sources had), run by `scripts/format.js` over the TypeScript and
+  JavaScript of `src/`, `test/`, `scripts/`, `verifiable_clients/`,
+  `grpc-server/`, `tools/`, `examples/` and the root's config files. `make
+  format-check` fails on a file Prettier would change, and the root
+  `lint-javascript` runs it, so `verify` does; `make format` rewrites them. A
+  generated file (its "GENERATED, DO NOT EDIT" header) is left out: its
+  generator's output is what `cargo xtask check-generated` accepts.
 - No package has an install script or builds at install; `native/` (with
   `binding.gyp`), `src/`, `scripts/`, `test/`, `tools/` and the gRPC
   server are never published (`check-npm.py package` checks each tarball's
