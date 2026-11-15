@@ -34,7 +34,7 @@ const SIZE_FORMS = new JavaForms('size', [[]], { reader: true });
 /**
  * The key of `name`, which must be a MetricName.
  *
- * @param name the name given
+ * @param name - the name given
  * @returns its key
  */
 function keyOf(name: unknown): string {

@@ -55,7 +55,7 @@ function typeName(value: unknown): string {
 /**
  * A value as Java's `String.valueOf` writes it in a ConfigException message.
  *
- * @param value the config value
+ * @param value - the config value
  * @returns its text
  */
 function shown(value: unknown): string {
@@ -70,7 +70,7 @@ function shown(value: unknown): string {
 /**
  * Whether `key` is one of the producer's own serde keys, which never reach the core.
  *
- * @param key the config key
+ * @param key - the config key
  * @returns whether it is a serde key
  */
 function isSerializerKey(key: string): boolean {
@@ -86,7 +86,7 @@ const NONE: ReadonlySet<string> = new Set();
  * `ConfigDef` parses. `NaN` and the infinities are written as JavaScript
  * writes them, for the core to refuse.
  *
- * @param n the number to write
+ * @param n - the number to write
  * @returns its decimal text
  */
 export function decimal(n: number): string {
@@ -110,7 +110,7 @@ export function decimal(n: number): string {
  * and bigints in decimal, an array's items each written so and joined with
  * commas, anything else by `String()`.
  *
- * @param value the config value
+ * @param value - the config value
  * @returns the string the core gets
  */
 function configValue(value: unknown): string {
@@ -137,7 +137,7 @@ function configValue(value: unknown): string {
  * is not a plain one) is refused, so that its entries are not silently
  * ignored, and so is a key that is not a string.
  *
- * @param configs the configuration given
+ * @param configs - the configuration given
  * @returns the configuration, a plain object
  */
 export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>> {
@@ -179,8 +179,8 @@ export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>
  * config function read, except the producer keys of Java's, which the core
  * uses.
  *
- * @param configs the configuration given
- * @param leftOut the keys not to send to the core
+ * @param configs - the configuration given
+ * @param leftOut - the keys not to send to the core
  * @returns the keys and values to send, encoded
  */
 export function configEntries(configs: unknown, leftOut: ReadonlySet<string> = NONE): Array<[Buffer, Buffer]> {

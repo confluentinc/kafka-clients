@@ -18,7 +18,7 @@
 /**
  * Java's `Arrays.toString(byte[])`: the signed bytes, `[1, -1]`, or `null`.
  *
- * @param value the bytes, or null
+ * @param value - the bytes, or null
  * @returns their text
  */
 export function bytesToString(value: Uint8Array | null): string {

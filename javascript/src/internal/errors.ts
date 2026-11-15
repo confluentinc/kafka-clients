@@ -110,7 +110,7 @@ function table(): Map<number, ErrorClass> {
 /**
  * The class of an FFI id; the base `KafkaError` when the id is unknown.
  *
- * @param id the FFI id
+ * @param id - the FFI id
  * @returns its class
  */
 export function classForFfiId(id: number): ErrorClass {
@@ -123,7 +123,7 @@ export function classForFfiId(id: number): ErrorClass {
  * class's (or nearest ancestor's) otherwise, `UNKNOWN_SERVER_ERROR` for a
  * class without one; `undefined` for any other value.
  *
- * @param error the value to read
+ * @param error - the value to read
  * @returns its FFI id, or undefined
  */
 export function errorFfiId(error: unknown): number | undefined {
@@ -135,7 +135,7 @@ export function errorFfiId(error: unknown): number | undefined {
  * The error for the plain object the native layer builds; anything else
  * (an `Error` already, `null`) is returned as it is.
  *
- * @param fields what the native layer gave
+ * @param fields - what the native layer gave
  * @returns the error, or the value as it is
  */
 export function fromNative(fields: unknown): unknown {
@@ -154,7 +154,7 @@ export function fromNative(fields: unknown): unknown {
 /**
  * A binding-side check where Java throws `IllegalArgumentException`.
  *
- * @param message the error's message
+ * @param message - the error's message
  * @returns the error
  */
 export function illegalArgument(message: string): IllegalArgumentError {
@@ -164,7 +164,7 @@ export function illegalArgument(message: string): IllegalArgumentError {
 /**
  * A binding-side check where Java throws `IllegalStateException`.
  *
- * @param message the error's message
+ * @param message - the error's message
  * @returns the error
  */
 export function illegalState(message: string): IllegalStateError {
