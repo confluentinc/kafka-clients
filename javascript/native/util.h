@@ -113,6 +113,22 @@ void error_throw_owned(napi_env env, kafka_common_Error_t* e);
 // error: everywhere else an error with nowhere to go is error_warn'ed.
 void error_discard(kafka_common_Error_t* e);
 
+// The payload of an error the core reports, as a plain object keyed by Java
+// field name, or NULL when its class has none (native/error_payload.c,
+// generated). Each field is set by one of the payload_* helpers below
+// (native/error.c), given the value an FFI accessor returned and the owned
+// error it failed with, or NULL: a failure leaves the field out. They return
+// -1 when a Node-API call failed, 0 otherwise, and free an owned value.
+napi_value error_payload_to_js(napi_env env, int code, const kafka_common_Error_t* e);
+int payload_string_list(napi_env env, napi_value obj, const char* name, kafka_List_t* list, kafka_common_Error_t* failed);
+int payload_topic_partition_list(napi_env env, napi_value obj, const char* name, kafka_List_t* list,
+                                 kafka_common_Error_t* failed);
+int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* name, kafka_Map_t* map,
+                                     kafka_common_Error_t* failed);
+int payload_string(napi_env env, napi_value obj, const char* name, const char* value, kafka_common_Error_t* failed);
+int payload_int32(napi_env env, napi_value obj, const char* name, int32_t value, kafka_common_Error_t* failed);
+int payload_double(napi_env env, napi_value obj, const char* name, double value, kafka_common_Error_t* failed);
+
 // An OWNED error with nowhere else to go: when `js` (JS may run here: not an
 // environment teardown), it is converted and handed to process.emitWarning
 // (a pending JS exception is kept and thrown again after), then destroyed;

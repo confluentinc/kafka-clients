@@ -942,3 +942,35 @@ test('metrics() counts the records sent, read again on each call', { skip: SKIP,
     await producer.close();
   }
 });
+
+test("an error the core reports carries its payload: an invalid topic's InvalidTopicError lists it", { skip: SKIP, timeout: 120000 }, async () => {
+  const { InvalidTopicError } = require('@confluentinc/kafka-javascript/common/errors');
+  // Java's Metadata.maybeThrowExceptionForTopic throws
+  // InvalidTopicException(Collections.singleton(topic)) for the broker's
+  // INVALID_TOPIC_EXCEPTION: the payload crosses the FFI through its view
+  // (kafka_common_Error_invalid_topic, then its invalid_topics accessor).
+  const topic = 'invalid topic name!';
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'max.block.ms': 30000 } });
+  try {
+    let error;
+    try {
+      await producer.partitionsFor(topic);
+    } catch (e) {
+      error = e;
+    }
+    assert.ok(error instanceof InvalidTopicError, String(error));
+    assert.equal(error.message, `Invalid topics: [${topic}]`);
+    assert.deepEqual(error.invalidTopics(), new Set([topic]));
+    // The send path reports the same error with its payload, through the record's future.
+    let sendError;
+    try {
+      await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
+    } catch (e) {
+      sendError = e instanceof ExecutionError ? e.cause : e;
+    }
+    assert.ok(sendError instanceof InvalidTopicError, String(sendError));
+    assert.ok(sendError.invalidTopics() instanceof Set);
+  } finally {
+    await producer.close();
+  }
+});

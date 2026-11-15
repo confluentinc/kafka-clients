@@ -37,8 +37,9 @@
 //! a type the client does not translate (the consumer's `OffsetAndMetadata`,
 //! `TimestampType`) is left out and listed in the module's header comment, and
 //! so is a class in [`LEFT_OUT_PAYLOADS`]. An error the core reports carries
-//! the payload the FFI's view of its class gives ([`CORE_READS`]); a payload
-//! field the view has no accessor for keeps its default and is listed. Java's
+//! its payload, read through the FFI's view of its class
+//! (`native/error_payload.c`, generated from [`CORE_READS`]); a payload field
+//! the view has no accessor for keeps its default and is listed. Java's
 //! `public static final` instances (`DisconnectException.INSTANCE`) are
 //! static properties of their class, built by Java's no-argument chain
 //! whatever its constructors' visibility, not writable, as Java's `final`
@@ -233,6 +234,39 @@ enum CoreConv {
     String,
     Int32,
     Double,
+}
+
+impl CoreConv {
+    /// The C type the accessor returns.
+    fn c_type(self) -> &'static str {
+        match self {
+            CoreConv::StringList | CoreConv::TopicPartitionList => "kafka_List_t*",
+            CoreConv::TopicPartitionLongMap => "kafka_Map_t*",
+            CoreConv::String => "const char*",
+            CoreConv::Int32 => "int32_t",
+            CoreConv::Double => "double",
+        }
+    }
+
+    /// The C value the accessor's result starts as.
+    fn c_init(self) -> &'static str {
+        match self {
+            CoreConv::Int32 => "0",
+            CoreConv::Double => "0.0",
+            _ => "NULL",
+        }
+    }
+
+    fn helper(self) -> &'static str {
+        match self {
+            CoreConv::StringList => "payload_string_list",
+            CoreConv::TopicPartitionList => "payload_topic_partition_list",
+            CoreConv::TopicPartitionLongMap => "payload_topic_partition_long_map",
+            CoreConv::String => "payload_string",
+            CoreConv::Int32 => "payload_int32",
+            CoreConv::Double => "payload_double",
+        }
+    }
 }
 
 /// The payload of an error the core reports, as the FFI's view of the class
@@ -1870,6 +1904,75 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
     Ok(JsModule { dir, stem: info.file_stem(), name: info.py_name.clone(), content: text })
 }
 
+/// native/error_payload.c: the payload of an error the core reports, read
+/// through the FFI's view of its class ([`CORE_READS`]), as a plain object
+/// keyed by Java field name, which src/internal/throwable.ts turns into the
+/// class's fields. Each field is read by native/error.c's `payload_<conv>`
+/// helper; a view the error is not (NULL) gives no payload.
+fn c_payload_source(classes: &BTreeMap<String, ClassInfo>, ids: &BTreeMap<String, i32>) -> Res<String> {
+    let mut out = String::from(
+        "// Copyright 2026 Confluent Inc.\n\
+         //\n\
+         // Licensed under the Apache License, Version 2.0 (the \"License\");\n\
+         // you may not use this file except in compliance with the License.\n\
+         // You may obtain a copy of the License at\n\
+         //\n\
+         //     http://www.apache.org/licenses/LICENSE-2.0\n\
+         //\n\
+         // Unless required by applicable law or agreed to in writing, software\n\
+         // distributed under the License is distributed on an \"AS IS\" BASIS,\n\
+         // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n\
+         // See the License for the specific language governing permissions and\n\
+         // limitations under the License.\n\
+         \n\
+         // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from\n\
+         // the table of the FFI's error views in rust/xtask/src/error_hierarchy/js.rs;\n\
+         // `cargo xtask check-generated` checks it is up to date.\n\
+         //\n\
+         // The payload of an error the core reports (root CLAUDE.md, JavaScript Binding\n\
+         // Conventions, Errors, Q39): the FFI's view of its class\n\
+         // (kafka_common_Error_<class>, NULL for another class), then the view's\n\
+         // accessors, each field set on a plain object by native/error.c's payload_*\n\
+         // helper, keyed by its Java field name. NULL when the class has none.\n\
+         \n\
+         #include \"util.h\"\n\
+         \n\
+         napi_value error_payload_to_js(napi_env env, int code, const kafka_common_Error_t* e) {\n    \
+         kafka_common_Error_t* ffi_err = NULL;\n    \
+         napi_value obj = NULL;\n    \
+         switch (code) {\n",
+    );
+    for (fqn, code, view, view_ty, fields) in CORE_READS {
+        if !classes.contains_key(*fqn) {
+            anyhow::bail!("javascript errors: the FFI view of `{fqn}` names no generated class");
+        }
+        if !ids.contains_key(*code) {
+            anyhow::bail!("javascript errors: `kafka_common_Error_{code}` is no FFI id");
+        }
+        out.push_str(&format!(
+            "    case kafka_common_Error_{code}: {{\n        \
+             const {view_ty}* view = NULL;\n        \
+             error_discard(FFI_SET(view, {view}(e, &ffi_err)));\n        \
+             if (view == NULL || napi_create_object(env, &obj) != napi_ok) return NULL;\n"
+        ));
+        for (field, accessor, conv) in *fields {
+            // The accessor's owned error, or NULL, goes to the helper, which
+            // leaves the field out on a failure.
+            out.push_str(&format!(
+                "        {{\n            {} value = {};\n            \
+                 kafka_common_Error_t* failed = FFI_SET(value, {accessor}(view, &ffi_err));\n            \
+                 if ({}(env, obj, \"{field}\", value, failed)) return NULL;\n        }}\n",
+                conv.c_type(),
+                conv.c_init(),
+                conv.helper()
+            ));
+        }
+        out.push_str("        return obj;\n    }\n");
+    }
+    out.push_str("    default:\n        return NULL;\n    }\n}\n");
+    Ok(out)
+}
+
 /// The class modules and `src/internal/error_registry.ts`.
 pub(crate) fn outputs(repo_root: &Path) -> Res<(Vec<JsModule>, Vec<GeneratedFile>)> {
     let classes = js_graph(repo_root)?;
@@ -1945,7 +2048,9 @@ pub(crate) fn outputs(repo_root: &Path) -> Res<(Vec<JsModule>, Vec<GeneratedFile
     }
     registry.push_str("]);\n");
     let path = repo_root.join(JS_SRC).join("internal").join("error_registry.ts");
-    Ok((modules, vec![(path, registry)]))
+    let payload = c_payload_source(&classes, &parse_ffi_enum_ids(repo_root)?)?;
+    let c_path = repo_root.join("javascript").join("native").join("error_payload.c");
+    Ok((modules, vec![(path, registry), (c_path, payload)]))
 }
 
 #[cfg(test)]
@@ -2137,6 +2242,20 @@ mod tests {
         assert!(quota
             .content
             .contains("    if (this.#metric === null) return super.toString();\n"));
+        // The generated C reads each payload through the FFI's view of its class.
+        let c = &files[1].1;
+        assert!(files[1].0.ends_with("javascript/native/error_payload.c"));
+        assert!(c.contains(
+            "    case kafka_common_Error_TOPIC_AUTHORIZATION_FAILED: {\n        \
+             const kafka_common_TopicAuthorizationError_t* view = NULL;\n        \
+             error_discard(FFI_SET(view, kafka_common_Error_topic_authorization_error_err(e, &ffi_err)));\n"
+        ));
+        assert!(c.contains(
+            "            kafka_Map_t* value = NULL;\n            \
+             kafka_common_Error_t* failed = FFI_SET(value, \
+             kafka_common_RecordTooLargeError_record_too_large_partitions_err(view, &ffi_err));\n            \
+             if (payload_topic_partition_long_map(env, obj, \"recordTooLargePartitions\", value, failed)) return NULL;\n"
+        ));
         // A class with its parent's signatures declares no constructor.
         let buffer = find("BufferExhaustedError");
         assert_eq!(buffer.dir, "producer");
