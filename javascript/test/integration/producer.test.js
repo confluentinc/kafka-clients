@@ -29,13 +29,18 @@ const { stringSerializer } = require('@confluentinc/kafka-javascript/common/seri
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 
-const BOOTSTRAP = process.env.KAFKA_BOOTSTRAP_SERVERS;
+/** @typedef {import('@confluentinc/kafka-javascript/producer').Callback} Callback */
+/** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
+
+// A string in every test that runs: the tests are skipped when it is unset.
+const BOOTSTRAP = /** @type {string} */ (process.env.KAFKA_BOOTSTRAP_SERVERS);
 const SKIP = BOOTSTRAP ? false : 'KAFKA_BOOTSTRAP_SERVERS is not set: no broker to produce to';
 if (SKIP) console.log(`skipping the integration tests: ${SKIP}`);
 
 // A topic no earlier test produced to: its metadata is fetched on the first
 // send, so the records queue for it in the core.
 let topicCount = 0;
+/** @param {string} what */
 function freshTopic(what) {
   return `js-it-${what}-${process.pid}-${Date.now()}-${topicCount++}`;
 }
@@ -50,6 +55,7 @@ const N = 300;
     try {
       const before = Date.now();
       let callbacks = 0;
+      /** @type {RecordMetadata | undefined} */
       let callbackMetadata;
       const future = await producer.send({
         record: new ProducerRecord({
@@ -71,6 +77,7 @@ const N = 300;
       assert.equal(future.isDone(), true);
       assert.equal(future.isCompletedExceptionally(), false);
       assert.ok(metadata instanceof RecordMetadata);
+      assert.ok(callbackMetadata);
       assert.equal(callbackMetadata.toString(), metadata.toString());
       assert.equal(metadata.topic, topic);
       assert.equal(metadata.partition >= 0, true);
@@ -106,6 +113,7 @@ const N = 300;
       assert.equal(await future.get(1000), metadata);
       assert.equal(future.getNow(null), metadata);
       assert.equal(await future.toCompletionStage(), metadata);
+      // @ts-expect-error published type narrower than the run time: getNow takes any value if absent, here a number for a bigint
       assert.equal(future.thenApply((m) => m.offset).getNow(-1), metadata.offset);
       assert.equal(await KafkaFuture.allOf([future]).get(), null);
       // A record's future is never cancelled.
@@ -125,12 +133,10 @@ const N = 300;
 
       const { records } = await fetchRecords(BOOTSTRAP, topic, metadata.partition);
       assert.deepEqual(
-        records.map((r) => [
-          r.offset,
-          r.key && r.key.toString(),
-          r.value.toString(),
-          r.headers.map((h) => [h.key, h.value && h.value.toString()]),
-        ]),
+        records.map((r) => {
+          assert.ok(r.value);
+          return [r.offset, r.key && r.key.toString(), r.value.toString(), r.headers.map((h) => [h.key, h.value && h.value.toString()])];
+        }),
         [
           [
             Number(metadata.offset),
@@ -169,9 +175,13 @@ const N = 300;
       const sibling = future.thenApply((m) => m.topic);
       // A cancel() inside a dependant's action finishes the cancelled future's
       // own dependants, and an allOf over it, before it returns.
-      const other = KafkaFuture.internalCreate(false);
+      // The library's own factory, which the published types leave out.
+      const other = /** @type {typeof KafkaFuture & { internalCreate<T>(record: boolean): KafkaFuture<T> }} */ (KafkaFuture).internalCreate(
+        false,
+      );
       const otherDep = other.whenComplete(() => {});
       const otherAll = KafkaFuture.allOf([other]);
+      /** @type {boolean[]} */
       const seen = [];
       future.whenComplete(() => {
         seen.push(other.cancel(true), otherDep.isDone(), otherDep.isCancelled(), otherAll.isDone(), otherAll.isCancelled());
@@ -179,7 +189,7 @@ const N = 300;
       const metadata = await future.get(10000);
       assert.equal(metadata.topic, topic);
       assert.equal(sibling.getNow(null), topic);
-      await assert.rejects(failed, (e) => e.constructor === ExecutionError && e.cause === revoked.proxy);
+      await assert.rejects(failed, (/** @type {ExecutionError} */ e) => e.constructor === ExecutionError && e.cause === revoked.proxy);
       assert.equal(failing.isCompletedExceptionally(), true);
       assert.deepEqual(seen, [true, true, true, true, true]);
     } finally {
@@ -198,34 +208,42 @@ const N = 300;
     try {
       // The topic's metadata first, so the next record is taken at once.
       await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('warm-up') }))).get();
+      /** @type {string[]} */
       const order = [];
-      let future = null;
+      let future = /** @type {KafkaFuture<RecordMetadata> | null} */ (null);
       future = await producer.send({
         record: new ProducerRecord({ topic, value: Buffer.from('v') }),
         callback: () => {
+          assert.ok(future);
           order.push(`callback done=${future.isDone()}`);
         },
       });
       future.whenComplete(() => order.push('dependant'));
       assert.equal(future.isDone(), false);
+      // @ts-expect-error published type narrower than the run time: getNow takes any value if absent, here a string for a RecordMetadata
       assert.equal(future.getNow('absent'), 'absent');
       // The FFI keeps the time of a timed wait: no JavaScript timer runs.
       const setTimeoutBefore = globalThis.setTimeout;
       let timers = 0;
-      globalThis.setTimeout = (...args) => {
-        timers += 1;
-        return setTimeoutBefore(...args);
-      };
+      globalThis.setTimeout = /** @type {typeof setTimeout} */ (
+        /** @param {Parameters<typeof setTimeout>} args */
+        (...args) => {
+          timers += 1;
+          return setTimeoutBefore(...args);
+        }
+      );
       try {
         // The root TimeoutError (Java's java.util.concurrent.TimeoutException),
         // with the core's message; a negative timeout does not wait.
         await assert.rejects(
           future.get({ timeout: 100 }),
-          (e) => e.constructor === RootTimeoutError && e.message === 'Timed out waiting for KafkaFuture after 100 ms',
+          (/** @type {RootTimeoutError} */ e) =>
+            e.constructor === RootTimeoutError && e.message === 'Timed out waiting for KafkaFuture after 100 ms',
         );
         await assert.rejects(
           future.get(-1),
-          (e) => e.constructor === RootTimeoutError && e.message === 'Timed out waiting for KafkaFuture after 0 ms',
+          (/** @type {RootTimeoutError} */ e) =>
+            e.constructor === RootTimeoutError && e.message === 'Timed out waiting for KafkaFuture after 0 ms',
         );
       } finally {
         globalThis.setTimeout = setTimeoutBefore;
@@ -433,7 +451,9 @@ const N = 300;
         ).get();
         partition = metadata.partition;
       }
+      assert.ok(partition !== undefined);
       const { records } = await fetchRecords(BOOTSTRAP, topic, partition);
+      /** @param {string | Uint8Array} d */
       const bytes = (d) => (typeof d === 'string' ? Buffer.from(d, 'utf8') : Buffer.from(d));
       assert.deepEqual(
         records.map((r) => [r.key, r.value, r.headers]),
@@ -450,7 +470,9 @@ const N = 300;
   'the serializers bytes, a header one adds and the sizes reach the broker',
   async () => {
     const topic = freshTopic('serde');
+    /** @type {Serializer<number>} */
     const keySerializer = { serialize: ({ data }) => (data === null ? null : Buffer.from(`key-${data}`)) };
+    /** @type {Serializer<{ a: number }>} */
     const valueSerializer = {
       serialize: async ({ headers, data }) => {
         headers.add({ key: 'type', value: Buffer.from('json') });
@@ -514,7 +536,10 @@ const N = 300;
 
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.deepEqual(
-        records.map((r) => [r.value.toString(), r.timestamp]),
+        records.map((r) => {
+          assert.ok(r.value);
+          return [r.value.toString(), r.timestamp];
+        }),
         [
           ['a', explicit],
           ['b', explicit + 1],
@@ -530,6 +555,12 @@ const N = 300;
 
 // Sends N records to partition 0 of `topic`, awaiting each send() (the
 // hand-over) before the next, and returns their futures in send order.
+/**
+ * @param {KafkaProducer} producer
+ * @param {string} topic
+ * @param {number} n
+ * @param {(i: number) => string} value
+ */
 async function sendSequentially(producer, topic, n, value) {
   const futures = [];
   for (let i = 0; i < n; i++) {
@@ -538,7 +569,9 @@ async function sendSequentially(producer, topic, n, value) {
   return futures;
 }
 
+/** @param {KafkaFuture<RecordMetadata>[]} futures */
 async function assertSendOrder(futures) {
+  /** @type {bigint[]} */
   const offsets = [];
   for (const future of futures) offsets.push((await future.get()).offset);
   const outOfOrder = offsets.filter((offset, i) => i > 0 && offset <= offsets[i - 1]).length;
@@ -561,7 +594,10 @@ async function assertSendOrder(futures) {
       );
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.deepEqual(
-        records.map((r) => r.value.toString()),
+        records.map((r) => {
+          assert.ok(r.value);
+          return r.value.toString();
+        }),
         Array.from({ length: N }, (_, i) => String(i)),
       );
     } finally {
@@ -672,7 +708,10 @@ async function assertSendOrder(futures) {
       await assertSendOrder(futures);
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.deepEqual(
-        records.map((r) => r.value.toString()),
+        records.map((r) => {
+          assert.ok(r.value);
+          return r.value.toString();
+        }),
         Array.from({ length: 20 }, (_, i) => `value-${String(i).padStart(2, '0')}`),
       );
     } finally {
@@ -704,7 +743,17 @@ async function assertSendOrder(futures) {
       await future.get();
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.deepEqual(
-        records.map((r) => [r.key && r.key.toString(), r.value.toString(), r.headers.map((h) => h.value.toString())]),
+        records.map((r) => {
+          assert.ok(r.value);
+          return [
+            r.key && r.key.toString(),
+            r.value.toString(),
+            r.headers.map((h) => {
+              assert.ok(h.value);
+              return h.value.toString();
+            }),
+          ];
+        }),
         [['key-0', 'value-0', ['header-0']]],
       );
     } finally {
@@ -788,7 +837,10 @@ async function assertSendOrder(futures) {
       }
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.deepEqual(
-        records.map((r) => [r.key.toString('hex'), r.value.toString('hex'), r.headers[0].keyBytes.toString('hex')]),
+        records.map((r) => {
+          assert.ok(r.key && r.value);
+          return [r.key.toString('hex'), r.value.toString('hex'), r.headers[0].keyBytes.toString('hex')];
+        }),
         cases.map(([, hex]) => [hex, hex, hex]),
       );
     } finally {
@@ -805,22 +857,26 @@ async function assertSendOrder(futures) {
     // keys reach the core, and only schema.registry.url, which the core doesn't
     // know, is kept from it.
     const topic = freshTopic('spread');
-    let seen = null;
+    let seen = /** @type {Record<string, unknown> | null} */ (null);
     const producer = new KafkaProducer({
       'bootstrap.servers': BOOTSTRAP,
       'schema.registry.url': 'http://sr',
       'value.serializer': ({ configs }) => {
         seen = { ...configs };
-        return { serialize: ({ data }) => Buffer.from(JSON.stringify(data)) };
+        return /** @type {Serializer<string>} */ ({ serialize: ({ data }) => Buffer.from(JSON.stringify(data)) });
       },
     });
     try {
+      assert.ok(seen);
       assert.equal(seen['bootstrap.servers'], BOOTSTRAP);
       const metadata = await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: 'spread' }))).get();
       assert.equal(metadata.topic, topic);
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.deepEqual(
-        records.map((r) => r.value.toString()),
+        records.map((r) => {
+          assert.ok(r.value);
+          return r.value.toString();
+        }),
         ['"spread"'],
       );
     } finally {
@@ -864,8 +920,12 @@ async function assertSendOrder(futures) {
 // bounded whatever the load, unlike a timer's gap. One turn is due at least
 // after FAST_PATH_YIELD_EVERY + 1 sends taken at once, so two consecutive
 // turns are at most about 2 x 1001 sends apart.
+/** @typedef {{ turns: number, sends: number, maxSendsPerTurn: number, running: boolean, stop: () => void }} EventLoopWatch */
+
+/** @returns {EventLoopWatch} */
 function eventLoopWatch() {
-  const watch = { turns: 0, sends: 0, maxSendsPerTurn: 0, running: true };
+  // Its stop() is set below.
+  const watch = /** @type {EventLoopWatch} */ ({ turns: 0, sends: 0, maxSendsPerTurn: 0, running: true });
   const turn = () => {
     if (!watch.running) return;
     watch.turns++;
@@ -882,6 +942,7 @@ function eventLoopWatch() {
 }
 const MAX_SENDS_PER_TURN = 2 * 1001 + 64;
 
+/** @param {string} what */
 async function warmedProducer(what) {
   const topic = freshTopic(what);
   const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 5 } });
@@ -900,7 +961,7 @@ async function warmedProducer(what) {
       const value = Buffer.alloc(100, 0x78);
       const watch = eventLoopWatch();
       let callbacks = 0;
-      let nested = null;
+      let nested = /** @type {Promise<KafkaFuture<RecordMetadata>> | null} */ (null);
       const rssBefore = process.memoryUsage().rss;
       let rssPeak = rssBefore;
       for (let i = 0; i < SENDS; i++) {
@@ -953,6 +1014,7 @@ async function warmedProducer(what) {
       const timer = setInterval(() => ticks++, 1);
       const watch = eventLoopWatch();
       let callbacks = 0;
+      /** @param {Parameters<Callback>[0]} options */
       const callback = ({ metadata: m, exception: error }) => {
         assert.equal(error, null);
         callbacks++;
@@ -1052,6 +1114,7 @@ async function warmedProducer(what) {
       let inSend = false;
       let callbacks = 0;
       let callbacksInsideSend = 0;
+      /** @param {Parameters<Callback>[0]} options */
       const callback = ({ metadata: m, exception: error }) => {
         assert.equal(error, null);
         callbacks++;
@@ -1096,20 +1159,24 @@ async function warmedProducer(what) {
       assert.equal(info.topic(), topic);
       assert.equal(info.partition(), 0);
       assert.ok(info.leader() instanceof Node);
-      assert.equal(info.leader().isEmpty, false);
+      const leader = info.leader();
+      const replicas = info.replicas();
+      const inSyncReplicas = info.inSyncReplicas();
+      assert.ok(leader && replicas && inSyncReplicas);
+      assert.equal(leader.isEmpty, false);
       assert.deepEqual(
-        info.replicas().map((n) => n.id),
-        [info.leader().id],
+        replicas.map((n) => n.id),
+        [leader.id],
       );
-      assert.ok(info.replicas()[0].equals(info.leader()));
+      assert.ok(replicas[0].equals(leader));
       assert.deepEqual(
-        info.inSyncReplicas().map((n) => n.id),
-        [info.leader().id],
+        inSyncReplicas.map((n) => n.id),
+        [leader.id],
       );
       assert.deepEqual(info.offlineReplicas(), []);
       assert.equal(
         info.toString(),
-        `Partition(topic = ${topic}, partition = 0, leader = ${info.leader().id}, replicas = [${info.leader().id}], isr = [${info.leader().id}], offlineReplicas = [])`,
+        `Partition(topic = ${topic}, partition = 0, leader = ${leader.id}, replicas = [${leader.id}], isr = [${leader.id}], offlineReplicas = [])`,
       );
     } finally {
       await producer.close();
@@ -1131,9 +1198,13 @@ async function warmedProducer(what) {
         description: '',
         tags: new Map([['client-id', 'js-it-metrics']]),
       });
-      assert.equal(producer.metrics().get(key).metricValue(), 0);
+      const before = producer.metrics().get(key);
+      assert.ok(before);
+      assert.equal(before.metricValue(), 0);
       for (let i = 0; i < 3; i++) await (await producer.send(new ProducerRecord({ topic, value: Buffer.from(`v${i}`) }))).get();
-      assert.equal(producer.metrics().get(key).metricValue(), 3);
+      const after = producer.metrics().get(key);
+      assert.ok(after);
+      assert.equal(after.metricValue(), 3);
     } finally {
       await producer.close();
     }

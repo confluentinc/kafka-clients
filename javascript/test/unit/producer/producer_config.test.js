@@ -59,7 +59,7 @@ test('every literal constant of ProducerConfig matches Java; a deprecated one is
   assert.ok(deprecated.has('PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG'));
   for (const [name, value] of literals) {
     if (deprecated.has(name)) assert.ok(!(name in ProducerConfig), name);
-    else assert.equal(ProducerConfig[name], value, name);
+    else assert.equal(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (ProducerConfig))[name], value, name);
   }
 });
 
@@ -71,6 +71,7 @@ test('the constants Java takes from CommonClientConfigs and AbstractConfig', () 
 });
 
 test('ProducerConfig is not instantiable', () => {
+  // @ts-expect-error a private constructor: the constructor throws TypeError
   assert.throws(() => new ProducerConfig({ 'bootstrap.servers': 'x' }), {
     name: 'TypeError',
     message: 'ProducerConfig is not instantiable: its ConfigDef machinery is not translated; a configuration is a plain object of its keys',
