@@ -27,13 +27,24 @@ const assert = require('node:assert/strict');
 const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
 
+/** @param {string} s */
 const bytes = (s) => Buffer.from(s, 'utf8');
+/**
+ * @param {string} key
+ * @param {string} value
+ */
 const header = (key, value) => new Header({ key, value: bytes(value) });
 
+/** @param {Headers} headers */
 function getCount(headers) {
   return headers.toArray().length;
 }
 
+/**
+ * @param {string} key
+ * @param {string} value
+ * @param {unknown} actual
+ */
 function assertHeader(key, value, actual) {
   assert.ok(actual instanceof Header);
   assert.equal(actual.key(), key);
@@ -130,7 +141,9 @@ test('testReadOnly', () => {
   const headers = new Headers();
   headers.add(header('key', 'value'));
   const before = headers[Symbol.iterator]();
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   headers.internalSetReadOnly();
+  /** @param {unknown} e */
   const closed = (e) => {
     assert.ok(e instanceof IllegalStateError);
     assert.equal(e.message, 'RecordHeaders has been closed.');
@@ -165,6 +178,7 @@ test('testHeaders', () => {
 test('testNew', () => {
   const headers = new Headers();
   headers.add(header('key', 'value'));
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   headers.internalSetReadOnly();
   const newHeaders = new Headers(headers);
   newHeaders.add(header('key', 'value2'));
@@ -178,12 +192,15 @@ test('testNew', () => {
 
 test('shouldThrowNpeWhenAddingNullHeader', () => {
   const recordHeaders = new Headers();
+  // @ts-expect-error a null header: add throws TypeError with Java's message
   assert.throws(() => recordHeaders.add(null), { name: 'TypeError', message: 'Header cannot be null.' });
+  // @ts-expect-error a null header: add throws TypeError with Java's message
   assert.throws(() => recordHeaders.add({ header: null }), { name: 'TypeError', message: 'Header cannot be null.' });
 });
 
 test('shouldThrowNpeWhenAddingCollectionWithNullHeader', () => {
   assert.throws(() => new Headers(new Array(1).fill(null)), { name: 'TypeError', message: 'Header cannot be null.' });
+  // @ts-expect-error a null among the headers: the constructor throws TypeError with Java's message
   assert.throws(() => new Headers({ headers: [null] }), { name: 'TypeError', message: 'Header cannot be null.' });
   // The core reports the first null, and nothing after it is read, as Java's
   // loop stops there.
@@ -192,7 +209,9 @@ test('shouldThrowNpeWhenAddingCollectionWithNullHeader', () => {
     yield null;
     throw new Error('read past the null');
   }
+  // @ts-expect-error a generator yielding null: the constructor throws TypeError with Java's message
   assert.throws(() => new Headers(nullThenThrow()), { name: 'TypeError', message: 'Header cannot be null.' });
+  // @ts-expect-error a null and a string among the headers: the constructor throws TypeError with Java's message
   assert.throws(() => new Headers([header('a', '1'), null, 'not a header']), { name: 'TypeError', message: 'Header cannot be null.' });
 });
 
@@ -210,12 +229,14 @@ test("the constructor takes Java's three forms, as {headers} or bare; null is no
     assert.notEqual(first, h);
   }
   // undefined is never "not given".
+  // @ts-expect-error undefined for the headers: the undefined check throws TypeError
   assert.throws(() => new Headers(undefined), {
     name: 'TypeError',
     message: "headers must not be undefined. Leave the argument out, or pass null for Java's null",
   });
   // A copy of a read-only Headers is writable.
   const sealed = new Headers([h]);
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   sealed.internalSetReadOnly();
   new Headers({ headers: sealed }).add(h);
   for (const [args, message] of [
@@ -224,8 +245,10 @@ test("the constructor takes Java's three forms, as {headers} or bare; null is no
     // Java takes only Header objects: a [key, value] pair is no header.
     [[['k', null]], 'a header must be a Header'],
   ]) {
+    // @ts-expect-error values that are no Header: the header check throws TypeError
     assert.throws(() => new Headers(args), { name: 'TypeError', message }, String(args));
   }
+  // @ts-expect-error a string for the headers: the type check throws TypeError
   assert.throws(() => new Headers({ headers: 'x' }), {
     name: 'TypeError',
     message: 'headers must be a Headers, or an iterable of Header',
@@ -235,15 +258,18 @@ test("the constructor takes Java's three forms, as {headers} or bare; null is no
     ['x', 'a string'],
     [5, 'a number'],
   ]) {
+    // @ts-expect-error a bare string or number: the form check throws IllegalArgumentError
     assert.throws(() => new Headers(bare), {
       name: 'IllegalArgumentError',
       message: `Headers() takes one of (), (headers); got ${kind}`,
     });
   }
+  // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
   assert.throws(() => new Headers({ headers: [], other: 1 }), {
     name: 'IllegalArgumentError',
     message: 'Headers() takes one of (), (headers); got (headers, other)',
   });
+  // @ts-expect-error undefined headers: the undefined check throws TypeError
   assert.throws(() => new Headers({ headers: undefined }), {
     name: 'TypeError',
     message: "headers must not be undefined. Leave the key out, or pass null for Java's null",
@@ -260,33 +286,45 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
     headers.toArray().map((x) => x.key()),
     ['a', 'a', 'b'],
   );
+  // @ts-expect-error a null key: the header constructor throws TypeError with Java's message
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
+  // @ts-expect-error a string value: the value check throws TypeError
   assert.throws(() => headers.add({ key: 'k', value: 'v' }), { name: 'TypeError' });
+  // @ts-expect-error a plain object for a Header: the header check throws TypeError
   assert.throws(() => headers.add({ header: { key: 'k', value: null } }), { name: 'TypeError', message: 'header must be a Header' });
   // A bare value that is no Header fits no form.
+  // @ts-expect-error a bare string: the form check throws IllegalArgumentError
   assert.throws(() => headers.add('k'), {
     name: 'IllegalArgumentError',
     message: 'add() takes one of (header), (key, value); got a string',
   });
+  // @ts-expect-error a key without a value: the form check throws IllegalArgumentError
   assert.throws(() => headers.add({ key: 'k' }), {
     name: 'IllegalArgumentError',
     message: 'add() takes one of (header), (key, value); got (key)',
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => headers.add(h, h), {
     name: 'IllegalArgumentError',
     message: 'add() takes one of (header), (key, value); got 2 arguments, not one object of named parameters',
   });
   // Java's add(key, value) builds the header before the read-only check.
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   headers.internalSetReadOnly();
+  // @ts-expect-error a null key: the header constructor throws TypeError before the read-only check
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
 });
 
 test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () => {
   const headers = new Headers([header('a', '1')]);
   for (const call of [
+    // @ts-expect-error a null key: remove throws IllegalArgumentError with Java's message
     () => headers.remove(null),
+    // @ts-expect-error a null key: lastHeader throws IllegalArgumentError with Java's message
     () => headers.lastHeader(null),
+    // @ts-expect-error a null key: headers throws IllegalArgumentError with Java's message
     () => headers.headers(null),
+    // @ts-expect-error a null key: remove throws IllegalArgumentError with Java's message
     () => headers.remove({ key: null }),
   ]) {
     assert.throws(call, (e) => {
@@ -295,19 +333,24 @@ test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () 
       return true;
     });
   }
+  // @ts-expect-error a number key: the key check throws TypeError
   assert.throws(() => headers.lastHeader({ key: 1 }), { name: 'TypeError', message: 'key must be a string' });
+  // @ts-expect-error a bare number: the form check throws IllegalArgumentError
   assert.throws(() => headers.lastHeader(1), {
     name: 'IllegalArgumentError',
     message: 'lastHeader() takes one of (key); got a number',
   });
+  // @ts-expect-error undefined for the key: the undefined check throws TypeError
   assert.throws(() => headers.headers(undefined), {
     name: 'TypeError',
     message: "key must not be undefined. Leave the argument out, or pass null for Java's null",
   });
   // (deviation) Java's remove checks canWrite() before checkKey(): on read-only
   // headers a null key is the FFI's error, which checks the NULL argument first.
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   headers.internalSetReadOnly();
   assert.throws(
+    // @ts-expect-error a null key: remove throws IllegalArgumentError with Java's message
     () => headers.remove(null),
     (e) => {
       assert.ok(e instanceof IllegalArgumentError);
@@ -315,6 +358,7 @@ test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () 
       return true;
     },
   );
+  // @ts-expect-error a number key: the key check throws TypeError
   assert.throws(() => headers.remove({ key: 1 }), { name: 'TypeError', message: 'key must be a string' });
   assert.throws(() => headers.remove('a'), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
   assert.equal(getCount(headers), 1);
@@ -325,13 +369,18 @@ test('headers(key) reads the headers when iterated; toArray is a copy', () => {
   const byKey = headers.headers('a');
   headers.add(header('a', '2'));
   assert.deepEqual(
-    [...byKey].map((h) => h.value().toString()),
+    [...byKey].map((h) => {
+      const value = h.value();
+      assert.ok(value);
+      return value.toString();
+    }),
     ['1', '2'],
   );
   assert.deepEqual([...headers.headers('none')], []);
   const array = headers.toArray();
   array.pop();
   assert.equal(getCount(headers), 2);
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => headers.toArray(1), { name: 'TypeError', message: 'toArray() only reads: it takes no argument' });
 });
 
@@ -341,6 +390,7 @@ test("toString is RecordHeaders' and RecordHeader's; JSON writes the array", () 
     String(headers),
     'RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), RecordHeader(key = n, value = null)], isReadOnly = false)',
   );
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   headers.internalSetReadOnly();
   assert.equal(String(new Headers()), 'RecordHeaders(headers = [], isReadOnly = false)');
   assert.match(String(headers), /isReadOnly = true\)$/);
@@ -362,6 +412,7 @@ test("equals and hashCode are RecordHeaders'", () => {
   assert.ok(headers.equals(same));
   assert.equal(headers.hashCode(), same.hashCode());
   // The read-only state is not compared.
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   same.internalSetReadOnly();
   assert.throws(() => same.add(h1), { name: 'IllegalStateError' });
   assert.ok(headers.equals({ o: same }));
@@ -370,6 +421,7 @@ test("equals and hashCode are RecordHeaders'", () => {
   assert.ok(!headers.equals(new Headers([h1])));
   assert.ok(new Headers().equals(new Headers([])));
   for (const o of [null, [h1, h2], 'headers']) assert.equal(headers.equals({ o }), false);
+  // @ts-expect-error no argument: the form check throws IllegalArgumentError
   assert.throws(() => headers.equals(), { name: 'IllegalArgumentError', message: 'equals() takes one of (o); got ()' });
 });
 
@@ -381,11 +433,18 @@ test("equals and hashCode are RecordHeaders'", () => {
 
 const native = require('../../../../dist/internal/native');
 
-/** How the addon's counts moved while `fn` ran. */
+/**
+ * How the addon's counts moved while `fn` ran.
+ *
+ * @template T
+ * @param {() => T} fn
+ * @returns {{ result: T, delta: Record<string, number> }}
+ */
 function counted(fn) {
   const before = native.headerStats();
   const result = fn();
   const after = native.headerStats();
+  /** @type {Record<string, number>} */
   const delta = {};
   for (const name of Object.keys(after)) delta[name] = after[name] - before[name];
   return { result, delta };
@@ -404,6 +463,7 @@ test('a Header read from headers that can still change is a copy, which keeps it
   // One copy per header handed out (1 + 2 + 2 + 1), and no view.
   assert.equal(delta.headerCopies, 6);
   assert.equal(delta.headerViews, 0);
+  assert.ok(read.last);
   const value = read.last.value();
   // The headers change: Java's Header stays as it was, and so does the copy.
   headers.add({ key: 'trace', value: bytes('t2') });
@@ -424,6 +484,7 @@ test('a Header read from read-only headers is a view of the native header, with 
   const headers = new Headers();
   headers.add({ key: 'trace', value: bytes('t1') });
   headers.add({ key: 'span', value: null });
+  // @ts-expect-error the internal read-only setter, left out of the declarations: the test seals the headers as send() does
   headers.internalSetReadOnly();
   const { result: read, delta } = counted(() => ({
     last: headers.lastHeader('trace'),
@@ -434,7 +495,10 @@ test('a Header read from read-only headers is a view of the native header, with 
   assert.equal(delta.headerCopies, 0);
   assert.equal(delta.headerViews, 6);
   // The value is a Buffer over the native header's bytes, not a copy of them.
-  const { result: value, delta: valueDelta } = counted(() => read.last.value());
+  const { result: value, delta: valueDelta } = counted(() => {
+    assert.ok(read.last);
+    return read.last.value();
+  });
   assert.deepEqual(value, bytes('t1'));
   assert.equal(valueDelta.valueExternal, 1);
   assert.equal(valueDelta.valueCopied, 0);
@@ -443,6 +507,8 @@ test('a Header read from read-only headers is a view of the native header, with 
   assert.equal(read.byKey[0].value(), null);
   // A view reads what a copy reads: equal headers.
   const copy = new Headers(headers).lastHeader('trace');
+  assert.ok(copy);
+  assert.ok(read.last);
   assert.ok(copy.equals(read.last));
   assert.equal(copy.hashCode(), read.last.hashCode());
 });

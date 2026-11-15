@@ -48,6 +48,8 @@ test("forName finds Java's name field, valueOf the constant's name", () => {
     constructor: IllegalArgumentError,
     message: 'No enum constant org.apache.kafka.common.record.TimestampType.CreateTime',
   });
+  // @ts-expect-error a null name: valueOf throws TypeError
   assert.throws(() => TimestampType.valueOf(null), { constructor: TypeError, message: 'Name is null' });
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => TimestampType.values(1), { constructor: TypeError });
 });

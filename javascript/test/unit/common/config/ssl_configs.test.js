@@ -31,17 +31,19 @@ const assert = require('node:assert/strict');
 const { javaStringConstants } = require('../../../_java_source');
 const { SslConfigs, SaslConfigs, SecurityConfig } = require('@confluentinc/kafka-javascript/common/config');
 
-for (const [cls, fqn] of [
+/** @type {Array<[typeof SslConfigs | typeof SaslConfigs | typeof SecurityConfig, string]>} */
+const classes = [
   [SslConfigs, 'org.apache.kafka.common.config.SslConfigs'],
   [SaslConfigs, 'org.apache.kafka.common.config.SaslConfigs'],
   [SecurityConfig, 'org.apache.kafka.common.config.SecurityConfig'],
-]) {
+];
+for (const [cls, fqn] of classes) {
   test(`every literal constant of ${cls.name} matches Java`, () => {
     const { literals, deprecated } = javaStringConstants(fqn);
     assert.ok(literals.length > 0);
     for (const [name, value] of literals) {
       if (deprecated.has(name)) assert.ok(!(name in cls), name);
-      else assert.equal(cls[name], value, name);
+      else assert.equal(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (cls))[name], value, name);
     }
   });
 

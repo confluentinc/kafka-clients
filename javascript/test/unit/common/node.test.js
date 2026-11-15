@@ -44,6 +44,7 @@ test('a data object: the fields are own data properties, kept by spread and JSON
   assert.deepEqual(Object.keys(node), FIELDS);
   for (const name of FIELDS) {
     const d = Object.getOwnPropertyDescriptor(node, name);
+    assert.ok(d);
     assert.ok('value' in d && d.enumerable, `${name} is an own enumerable data property`);
     assert.equal(Object.getOwnPropertyDescriptor(Node.prototype, name), undefined);
   }
@@ -51,6 +52,7 @@ test('a data object: the fields are own data properties, kept by spread and JSON
   // Frozen when it is created: a field cannot be reassigned.
   assert.equal(Object.isFrozen(node), true);
   assert.throws(() => {
+    // @ts-expect-error a write to a field of a frozen data object: the write throws TypeError
     node.port = 1;
   }, TypeError);
 });
@@ -69,6 +71,7 @@ test("noNode() is Java's placeholder, the same object every call", () => {
   assert.equal(none.host, '');
   assert.equal(none.port, -1);
   assert.equal(none.isEmpty, true);
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => Node.noNode(1), { constructor: TypeError, message: 'noNode() only reads: it takes no argument' });
 });
 
@@ -79,26 +82,35 @@ test("toString() is Java's", () => {
 
 test('the constructor takes one of Java forms, with run-time types', () => {
   const forms = 'Node() takes one of (id, host, port), (id, host, port, rack), (id, host, port, rack, isFenced)';
+  // @ts-expect-error no port: the form check throws IllegalArgumentError
   assert.throws(() => new Node({ id: 1, host: 'h' }), { constructor: IllegalArgumentError, message: `${forms}; got (id, host)` });
+  // @ts-expect-error isFenced without rack: the form check throws IllegalArgumentError
   assert.throws(() => new Node({ id: 1, host: 'h', port: 1, isFenced: true }), {
     constructor: IllegalArgumentError,
     message: `${forms}; got (id, host, port, isFenced)`,
   });
+  // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
   assert.throws(() => new Node({ id: 1, host: 'h', port: 1, idString: '1' }), {
     constructor: IllegalArgumentError,
     message: `${forms}; got (id, host, port, idString)`,
   });
+  // @ts-expect-error a string id: the type check throws TypeError
   assert.throws(() => new Node({ id: '1', host: 'h', port: 1 }), { constructor: TypeError, message: 'id must be an integer' });
+  // @ts-expect-error a number host: the type check throws TypeError
   assert.throws(() => new Node({ id: 1, host: 2, port: 1 }), { constructor: TypeError, message: 'host must be a string or null' });
+  // @ts-expect-error a null port: the type check throws TypeError
   assert.throws(() => new Node({ id: 1, host: 'h', port: null }), { constructor: TypeError, message: 'port must be an integer' });
+  // @ts-expect-error a number rack: the type check throws TypeError
   assert.throws(() => new Node({ id: 1, host: 'h', port: 1, rack: 3 }), {
     constructor: TypeError,
     message: 'rack must be a string or null',
   });
+  // @ts-expect-error a null isFenced: the type check throws TypeError
   assert.throws(() => new Node({ id: 1, host: 'h', port: 1, rack: null, isFenced: null }), {
     constructor: TypeError,
     message: 'isFenced must be a boolean',
   });
+  // @ts-expect-error an undefined host: the undefined check throws TypeError
   assert.throws(() => new Node({ id: 1, host: undefined, port: 1 }), {
     constructor: TypeError,
     message: "host must not be undefined. Leave the key out, or pass null for Java's null",

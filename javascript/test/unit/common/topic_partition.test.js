@@ -28,6 +28,7 @@ const { TopicPartition } = require('@confluentinc/kafka-javascript/common');
 const topicName = 'mytopic';
 const partNum = 5;
 
+/** @param {import('@confluentinc/kafka-javascript/common').TopicPartition} tp */
 function checkValues(tp) {
   assert.equal(tp.partition, partNum, `partition number should be ${partNum} but got ${tp.partition}`);
   assert.equal(tp.topic, topicName, `topic should be ${topicName} but got ${tp.topic}`);
@@ -46,10 +47,12 @@ test('a data object, frozen when created, with Java toString()', () => {
   assert.deepEqual(Object.keys(tp), ['topic', 'partition']);
   for (const name of ['topic', 'partition']) {
     const d = Object.getOwnPropertyDescriptor(tp, name);
+    assert.ok(d);
     assert.ok('value' in d && d.enumerable, `${name} is an own enumerable data property`);
   }
   assert.equal(Object.isFrozen(tp), true);
   assert.throws(() => {
+    // @ts-expect-error a write to a field of a frozen data object: the write throws TypeError
     tp.partition = 4;
   }, TypeError);
   assert.equal(tp.partition, 3);
@@ -63,26 +66,32 @@ test('a data object, frozen when created, with Java toString()', () => {
 });
 
 test('the constructor takes Java form only, with run-time types', () => {
+  // @ts-expect-error no partition: the form check throws IllegalArgumentError
   assert.throws(() => new TopicPartition({ topic: 't' }), {
     constructor: IllegalArgumentError,
     message: 'TopicPartition() takes one of (topic, partition); got (topic)',
   });
+  // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
   assert.throws(() => new TopicPartition({ topic: 't', partition: 0, offset: 1 }), {
     constructor: IllegalArgumentError,
     message: 'TopicPartition() takes one of (topic, partition); got (topic, partition, offset)',
   });
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => new TopicPartition({ topic: 't', partition: 0 }, 1), {
     constructor: IllegalArgumentError,
     message: 'TopicPartition() takes one of (topic, partition); got 2 arguments, not one object of named parameters',
   });
+  // @ts-expect-error a bare string: the form check throws IllegalArgumentError
   assert.throws(() => new TopicPartition('t-0'), {
     constructor: IllegalArgumentError,
     message: 'TopicPartition() takes one of (topic, partition); got a string',
   });
+  // @ts-expect-error an undefined partition: the undefined check throws TypeError
   assert.throws(() => new TopicPartition({ topic: 't', partition: undefined }), {
     constructor: TypeError,
     message: "partition must not be undefined. Leave the key out, or pass null for Java's null",
   });
+  // @ts-expect-error a number topic: the type check throws TypeError
   assert.throws(() => new TopicPartition({ topic: 1, partition: 0 }), {
     constructor: TypeError,
     message: 'topic must be a string or null',
@@ -91,6 +100,7 @@ test('the constructor takes Java form only, with run-time types', () => {
     constructor: TypeError,
     message: 'partition must be an integer',
   });
+  // @ts-expect-error a null partition: the type check throws TypeError
   assert.throws(() => new TopicPartition({ topic: 't', partition: null }), {
     constructor: TypeError,
     message: 'partition must be an integer',
@@ -111,6 +121,7 @@ test("equals and hashCode are Java's; the partition is Java's int", () => {
   assert.equal(new TopicPartition({ topic: null, partition: 0 }).equals(new TopicPartition({ topic: null, partition: 0 })), true);
   assert.equal(tp.equals(null), false);
   assert.equal(tp.equals('mytopic-5'), false);
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => tp.hashCode(1), { constructor: TypeError, message: 'hashCode() only reads: it takes no argument' });
   for (const partition of [2 ** 31, -(2 ** 31) - 1]) {
     assert.throws(() => new TopicPartition({ topic: 't', partition }), {

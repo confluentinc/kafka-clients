@@ -25,6 +25,7 @@ const assert = require('node:assert/strict');
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 const { OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
 
+/** @param {import('@confluentinc/kafka-javascript/consumer').OffsetAndMetadata} om */
 const roundTrip = (om) => {
   const { offset, leaderEpoch, metadata } = JSON.parse(JSON.stringify(om));
   return new OffsetAndMetadata({ offset: BigInt(offset), leaderEpoch, metadata });
@@ -76,12 +77,14 @@ test("a frozen data object with Java's toString and hashCode", () => {
 
 test("the constructor takes Java's three forms only", () => {
   assert.equal(new OffsetAndMetadata({ offset: 1, metadata: 'm' }).leaderEpoch, null);
+  // @ts-expect-error a leader epoch without metadata: the form check throws IllegalArgumentError
   assert.throws(() => new OffsetAndMetadata({ offset: 1, leaderEpoch: 2 }), {
     constructor: IllegalArgumentError,
     message: 'OffsetAndMetadata() takes one of (offset, leaderEpoch, metadata), (offset, metadata), (offset); got (offset, leaderEpoch)',
   });
   assert.throws(() => new OffsetAndMetadata(1.5), { constructor: TypeError });
   assert.throws(() => new OffsetAndMetadata({ offset: 1, leaderEpoch: 2 ** 31, metadata: '' }), { constructor: RangeError });
+  // @ts-expect-error a number for the metadata: the type check throws TypeError
   assert.throws(() => new OffsetAndMetadata({ offset: 1, metadata: 5 }), {
     constructor: TypeError,
     message: 'metadata must be a string or null',

@@ -44,23 +44,28 @@ test('SslClientAuth', () => {
   assert.equal(SslClientAuth.forConfig({ key: null }), SslClientAuth.NONE);
   assert.equal(SslClientAuth.forConfig({ key: 'required' }), SslClientAuth.REQUIRED);
   // undefined is not Java's null: a TypeError naming the parameter.
+  // @ts-expect-error undefined for the key: the undefined check throws TypeError
   assert.throws(() => SslClientAuth.forConfig(undefined), {
     name: 'TypeError',
     message: "key must not be undefined. Leave the argument out, or pass null for Java's null",
   });
+  // @ts-expect-error no key: the form check throws IllegalArgumentError
   assert.throws(() => SslClientAuth.forConfig(), {
     name: 'IllegalArgumentError',
     message: 'forConfig() takes one of (key); got ()',
   });
   // A second argument is refused, not dropped.
+  // @ts-expect-error a second argument: the form check throws IllegalArgumentError
   assert.throws(() => SslClientAuth.forConfig('required', 'x'), {
     name: 'IllegalArgumentError',
     message: 'forConfig() takes one of (key); got 2 arguments, not one object of named parameters',
   });
+  // @ts-expect-error an undefined key: the undefined check throws TypeError
   assert.throws(() => SslClientAuth.forConfig({ key: undefined }), {
     name: 'TypeError',
     message: "key must not be undefined. Leave the key out, or pass null for Java's null",
   });
+  // @ts-expect-error an unknown key: the form check throws IllegalArgumentError
   assert.throws(() => SslClientAuth.forConfig({ name: 'required' }), {
     name: 'IllegalArgumentError',
     message: 'forConfig() takes one of (key); got (name)',
@@ -68,7 +73,9 @@ test('SslClientAuth', () => {
   assert.equal(SslClientAuth.forConfig('required'), SslClientAuth.REQUIRED);
   assert.equal(SslClientAuth.forConfig('ReQuEsTeD'), SslClientAuth.REQUESTED);
   assert.equal(SslClientAuth.forConfig('other'), null);
+  // @ts-expect-error a number for the key: the type check throws TypeError
   assert.throws(() => SslClientAuth.forConfig({ key: 5 }), { name: 'TypeError', message: 'key must be a string, not number' });
+  // @ts-expect-error a bare number: the form check throws IllegalArgumentError
   assert.throws(() => SslClientAuth.forConfig(5), {
     name: 'IllegalArgumentError',
     message: 'forConfig() takes one of (key); got a number',
@@ -97,14 +104,20 @@ test("SslClientAuth has java.lang.Enum's members", () => {
       return true;
     },
   );
+  // @ts-expect-error a null name: valueOf throws TypeError
   assert.throws(() => SslClientAuth.valueOf(null), { name: 'TypeError', message: 'Name is null' });
+  // @ts-expect-error undefined for the name: the undefined check throws TypeError
   assert.throws(() => SslClientAuth.valueOf(undefined), {
     name: 'TypeError',
     message: "name must not be undefined. Leave the argument out, or pass null for Java's null",
   });
+  // @ts-expect-error no name: the form check throws IllegalArgumentError
   assert.throws(() => SslClientAuth.valueOf(), { name: 'IllegalArgumentError', message: 'valueOf() takes one of (name); got ()' });
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => SslClientAuth.values(1), { name: 'TypeError', message: 'values() only reads: it takes no argument' });
+  // @ts-expect-error an argument to a reader: the read-only check throws TypeError
   assert.throws(() => SslClientAuth.NONE.name('x'), { name: 'TypeError', message: 'name() only reads: it takes no argument' });
+  // @ts-expect-error arguments to a reader: the read-only check throws TypeError
   assert.throws(() => SslClientAuth.NONE.ordinal(1, 2), { name: 'TypeError', message: 'ordinal() only reads: it takes no argument' });
 
   // JSON writes the name, not toString()'s lower case.
