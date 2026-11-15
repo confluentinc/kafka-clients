@@ -1051,9 +1051,12 @@ The layout is the root conventions' (Layout and modules).
   `@packageDocumentation` TSDoc, so the declarations show it (the API report
   records only that the package has one). The docs lint, the `require-param` and
   `require-returns` rules of `eslint-plugin-jsdoc` (Documentation, Q64, Q74),
-  runs in `make lint-rules` (The rule linter), and an HTML reference is built
-  with TypeDoc (root conventions, Documentation, Q64), which is not set up
-  yet. `make
+  runs in `make lint-rules` (The rule linter), and `make docs` builds the HTML
+  reference with TypeDoc (`typedoc.config.cjs`, root conventions,
+  Documentation, Q64) into `build/docs/`: one module per import path, each
+  package's `@packageDocumentation` its page, the `@internal` members left out
+  as `stripInternal` leaves them out, and a warning failing the build. It is
+  not part of `verify`; `test/static/docs.test.js` checks that it builds. `make
   build` (`build-ts`) compiles `src/` into `dist/` (`.js`, `.d.ts`, both with
   maps): CommonJS (`module: nodenext`, the package having no `"type"`, root
   conventions, Layout and modules), so `require` loads it and an ES module

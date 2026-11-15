@@ -91,7 +91,7 @@ HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (pro
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
-	test-verifiable-clients check-api update-api
+	test-verifiable-clients check-api update-api docs
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -180,6 +180,13 @@ check-api: build-ts
 
 update-api: build-ts
 	$(NODE) scripts/api_report.js update
+
+# The HTML reference (typedoc.config.cjs; root conventions, Documentation,
+# Q64): TypeDoc over src/, one module per import path, into build/docs/. Not
+# part of `verify`; test/static/docs.test.js checks that it builds.
+TYPEDOC ?= node_modules/.bin/typedoc
+docs:
+	$(NODE) $(TYPEDOC) --options typedoc.config.cjs
 
 # Against KAFKA_BOOTSTRAP_SERVERS when set; otherwise against a scratch broker
 # this target starts with `docker run` and removes afterwards.
