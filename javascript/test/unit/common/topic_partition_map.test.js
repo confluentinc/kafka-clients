@@ -88,6 +88,14 @@ test("toString is Java's AbstractMap.toString; toJSON keys by 'topic:partition' 
   assert.deepEqual(map.toJSON(), { 'orders:0': '5', 'orders:1': '7' });
   assert.equal(JSON.stringify({ m: map }), '{"m":{"orders:0":"5","orders:1":"7"}}');
   assert.deepEqual(new TopicPartitionMap([[tp('t', 0), { a: 1 }]]).toJSON(), { 't:0': { a: 1 } });
+  // A null topic's key is no integer-like name, so the entries keep their order.
+  assert.equal(JSON.stringify(new TopicPartitionMap([[tp('t', 1), 1n], [tp(null, 3), 2n]])), '{"t:1":"1","-3":"2"}');
+  // A value is never undefined: null is Java's null.
+  const m = new TopicPartitionMap();
+  assert.throws(() => m.set(tp('t', 0)), { constructor: TypeError, message: "value must not be undefined: pass null for Java's null" });
+  assert.throws(() => m.set(tp('t', 0), undefined), { constructor: TypeError });
+  assert.throws(() => new TopicPartitionMap([[tp('t', 0)]]), { constructor: TypeError, message: "an entry's value must not be undefined: pass null for Java's null" });
+  assert.equal(m.set(tp('t', 0), null).get(tp('t', 0)), null);
 });
 
 test("a TopicPartitionMap's arguments are checked", () => {
