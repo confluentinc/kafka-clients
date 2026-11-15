@@ -45,7 +45,7 @@ import { Header } from './header';
 /**
  * Whether `value` is an object with a callable `[Symbol.iterator]` (an array, a `Headers`, a `Set`, ...).
  *
- * @param value the value to test
+ * @param value - the value to test
  * @returns whether it is an iterable object
  */
 function isIterableObject(value: unknown): boolean {
@@ -59,7 +59,7 @@ function isIterableObject(value: unknown): boolean {
 /**
  * Whether `value` is a key, a string, or Java's null.
  *
- * @param value the value to test
+ * @param value - the value to test
  * @returns whether it is a header key
  */
 function isKey(value: unknown): boolean {
@@ -115,7 +115,7 @@ function sealedEmpty(): object {
  * write U+FFFD for a lone surrogate), or null, which the core refuses with
  * Java's IllegalArgumentException "key cannot be null.".
  *
- * @param key the key given
+ * @param key - the key given
  * @returns its bytes, or null
  */
 function keyBytes(key: unknown): Uint8Array | null {
@@ -129,7 +129,7 @@ function keyBytes(key: unknown): Uint8Array | null {
  * core refuses as Java's `Objects.requireNonNull(header, "Header cannot be
  * null.")` does.
  *
- * @param item an element of the iterable given
+ * @param item - an element of the iterable given
  * @returns the element's native header, or null
  */
 function nativeHeaderOf(item: unknown): object | null {
@@ -142,7 +142,7 @@ function nativeHeaderOf(item: unknown): object | null {
 /**
  * The headers the addon handed out, as `Header` objects.
  *
- * @param handles the native headers
+ * @param handles - the native headers
  * @returns them as `Header` objects, in order
  */
 function wrapAll(handles: object[]): Header[] {
@@ -229,7 +229,7 @@ export class Headers implements Iterable<Header> {
    * RecordHeaders(Header[]) and RecordHeaders(Iterable<Header>) take them, or
    * null for none.
    *
-   * @param headers the headers given, or null
+   * @param headers - the headers given, or null
    * @returns their native RecordHeaders, or null
    */
   static #taken(headers: unknown): object | null {
@@ -266,7 +266,7 @@ export class Headers implements Iterable<Header> {
    * `ProducerRecord` takes them (`new RecordHeaders(headers)`): null is none,
    * a `Headers` is copied. Throws the constructor's errors.
    *
-   * @param headers the headers given to a record
+   * @param headers - the headers given to a record
    * @returns a `Headers` holding them
    *
    * @internal

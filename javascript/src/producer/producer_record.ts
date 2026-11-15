@@ -742,6 +742,12 @@ export class ProducerRecord<out K = never, out V = never> {
     return result;
   }
 
+  /**
+   * The record as Java's `ProducerRecord.toString()` writes it.
+   *
+   * @returns `ProducerRecord(topic=..., partition=..., headers=..., key=...,
+   *   value=..., timestamp=...)`
+   */
   toString(): string {
     return (
       `ProducerRecord(topic=${this.topic}, partition=${this.partition}, ` +
@@ -793,8 +799,8 @@ export class ProducerRecord<out K = never, out V = never> {
    * anything else a `TypeError`, a string's pointing to `stringSerializer()`
    * (the headers are then left writable).
    *
-   * @param key the serialized key, or null; the record's key when left out
-   * @param value the serialized value, or null; the record's value when left out
+   * @param key - the serialized key, or null; the record's key when left out
+   * @param value - the serialized value, or null; the record's value when left out
    * @returns the native send's arguments
    *
    * @internal
