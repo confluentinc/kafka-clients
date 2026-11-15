@@ -28,8 +28,8 @@ const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 
-// src/internal/config.ts's signature, which the compiled JavaScript does not carry.
-const entriesAsBytes = /** @type {(configs: unknown, leftOut?: ReadonlySet<string>) => Array<[Buffer, Buffer]>} */ (untypedEntries);
+// The compiled JavaScript carries no signature: configEntries is typed by its source's.
+const entriesAsBytes = /** @type {typeof import('../../../src/internal/config').configEntries} */ (untypedEntries);
 
 /**
  * The `[key, value]` pairs as strings: configEntries hands the addon encodeLikeJava's bytes.
