@@ -28,6 +28,25 @@ const tseslint = require('typescript-eslint');
 
 const plugin = require('./plugin');
 
+// The declarations the docs lint reads: eslint-plugin-jsdoc's defaults
+// (functions, and `declare function`), plus the body-less ones, where the
+// public docs live: the overload signatures of a function, method or
+// constructor and an abstract method (`TSEmptyBodyFunctionExpression`, under
+// `TSDeclareFunction` for a function), and an interface's methods
+// (`TSMethodSignature`).
+const FUNCTION_CONTEXTS = ['ArrowFunctionExpression', 'FunctionDeclaration', 'FunctionExpression', 'TSDeclareFunction'];
+const BODYLESS_CONTEXTS = ['TSEmptyBodyFunctionExpression', 'TSMethodSignature'];
+const PARAM_CONTEXTS = [...FUNCTION_CONTEXTS, ...BODYLESS_CONTEXTS];
+// A body-less declaration has no body to read a return from, so its
+// `@returns` is required by its return type: any but `void` and
+// `Promise<void>` (`forceRequireReturn`, which would flag a `void` one too).
+const RETURNS_VALUE =
+  ":not([returnType.typeAnnotation.type='TSVoidKeyword']):not([returnType.typeAnnotation.typeName.name='Promise'][returnType.typeAnnotation.typeArguments.params.0.type='TSVoidKeyword'])";
+const RETURNS_CONTEXTS = [
+  ...FUNCTION_CONTEXTS.filter((c) => c !== 'TSDeclareFunction'),
+  ...['TSDeclareFunction', ...BODYLESS_CONTEXTS].map((c) => ({ context: `${c}${RETURNS_VALUE}`, forceRequireReturn: true })),
+];
+
 /** Every `kafka` rule, as an error. */
 const KAFKA_RULES = Object.fromEntries(Object.keys(plugin.rules).map((name) => [`kafka/${name}`, 'error']));
 
@@ -63,8 +82,10 @@ function config(root, { typed = true } = {}) {
       plugins: { jsdoc },
       settings: { jsdoc: { mode: 'typescript' } },
       rules: {
-        'jsdoc/require-param': ['error', { checkDestructured: false }],
-        'jsdoc/require-returns': 'error',
+        'jsdoc/require-param': ['error', { checkDestructured: false, contexts: PARAM_CONTEXTS }],
+        'jsdoc/require-returns': ['error', { contexts: RETURNS_CONTEXTS }],
+        // TSDoc's form, `@param name - text`.
+        'jsdoc/require-hyphen-before-param-description': ['error', 'always'],
       },
     },
     {

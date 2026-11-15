@@ -57,9 +57,9 @@ export class SecurityProtocol {
   /**
    * Made by this class only (the enum's constants).
    *
-   * @param ordinal the constant's position in Java's declaration, its `ordinal()`
-   * @param id Java's `id`
-   * @param name the constant's name, its `name()`
+   * @param ordinal - the constant's position in Java's declaration, its `ordinal()`
+   * @param id - Java's `id`
+   * @param name - the constant's name, its `name()`
    */
   private constructor(ordinal: number, id: number, name: string) {
     this.id = id;
@@ -148,6 +148,10 @@ export class SecurityProtocol {
   /**
    * The protocol whose `id` is `id`, or `null`, as Java's map lookup returns
    * `null`. The id is given on its own, `forId(1)`, or named, `forId({ id: 1 })`.
+   *
+   * @param id - the protocol's id
+   * @returns the protocol, or `null` when no protocol has that id
+   * @throws `TypeError` when the id is not a number
    */
   static forId(id: number): SecurityProtocol | null;
   /**
@@ -173,8 +177,11 @@ export class SecurityProtocol {
    * `valueOf(name.toUpperCase(Locale.ROOT))`. The name is given on its own,
    * `forName('ssl')`, or named, `forName({ name: 'ssl' })`.
    *
+   * @param name - the protocol's name, in any case
+   * @returns the protocol
    * @throws `IllegalArgumentError` when no protocol has that name, or the
    *   given parameters are not `{name}`
+   * @throws `TypeError` when the name is null or not a string
    */
   static forName(name: string): SecurityProtocol;
   /**

@@ -1607,8 +1607,8 @@ fn render_nested_enum(info: &ClassInfo, e: &NestedEnum) -> String {
         "{}\n    private constructor(ordinal: number, name: string) {{\n      this.#name = name;\n      \
          this.#ordinal = ordinal;\n      Object.freeze(this);\n    }}\n",
         doc(
-            "Made by this class only (the enum's constants).\n\n@param ordinal the constant's position in \
-             Java's declaration, its `ordinal()`\n@param name the constant's name, its `name()`"
+            "Made by this class only (the enum's constants).\n\n@param ordinal - the constant's position in \
+             Java's declaration, its `ordinal()`\n@param name - the constant's name, its `name()`"
         )
     ));
     for (i, c) in e.constants.iter().enumerate() {
