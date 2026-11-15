@@ -1328,7 +1328,9 @@ test('terminating a worker with records in flight tears its producer down cleanl
       const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
       const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 50, 'linger.ms': 0 } });
       for (let i = 0; i < 200; i++) {
-        p.send({ record: new ProducerRecord({ topic: 'teardown', value: String(i) }), callback: () => {} });
+        // A Buffer value, so every record is handed over and waits in the
+        // core; a refusal must not crash the worker before 'sent' is posted.
+        p.send({ record: new ProducerRecord({ topic: 'teardown', value: Buffer.from(String(i)) }), callback: () => {} }).catch(() => {});
       }
       parentPort.postMessage('sent');
     \`;
