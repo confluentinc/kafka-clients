@@ -54,8 +54,17 @@
 // asked as a class is.
 
 const { atNode } = require('../location');
-const { ENUM_IMPLICIT, PLACEHOLDERS, javaIndexOf, mappedItems, itemMembers, javaMember, shortName, constantsOnly, functionType } =
-  require('../java_ts');
+const {
+  ENUM_IMPLICIT,
+  PLACEHOLDERS,
+  javaIndexOf,
+  mappedItems,
+  itemMembers,
+  javaMember,
+  shortName,
+  constantsOnly,
+  functionType,
+} = require('../java_ts');
 
 /** The instance method JavaScript adds to every enum (root CLAUDE.md, JavaScript Binding Conventions, Class family). */
 const ENUM_TO_JSON = 'toJSON';
@@ -124,7 +133,12 @@ function errorFindings(ctx, ts, index, item, cls, findings) {
   for (const name of wanted) {
     checked += 1;
     if (!covered.has(name)) {
-      findings.push({ kind: 'missing', subject: `${shortName(cls)}#${name}`, at: atNode(ctx, item.node), message: `${item.name} does not translate it` });
+      findings.push({
+        kind: 'missing',
+        subject: `${shortName(cls)}#${name}`,
+        at: atNode(ctx, item.node),
+        message: `${item.name} does not translate it`,
+      });
     }
   }
   if (cls.abstract || item.kind !== 'class') return checked;
@@ -178,7 +192,12 @@ module.exports = {
         if (jm && jm.owner === cls) covered.add(jm.name);
         // java.lang.Enum's members, which the index may not list: the
         // method of that name, static for `values` / `valueOf` only.
-        else if (cls.kind === 'enum' && ENUM_IMPLICIT.has(m.name) && m.kind === 'method' && m.isStatic === (m.name === 'values' || m.name === 'valueOf')) {
+        else if (
+          cls.kind === 'enum' &&
+          ENUM_IMPLICIT.has(m.name) &&
+          m.kind === 'method' &&
+          m.isStatic === (m.name === 'values' || m.name === 'valueOf')
+        ) {
           covered.add(m.name);
         } else if (cls.kind === 'enum' && m.name === ENUM_TO_JSON && m.kind === 'method' && !m.isStatic) {
           covered.add(m.name);
@@ -209,7 +228,8 @@ module.exports = {
         if (!covered.has(name)) {
           findings.push({
             kind: 'missing',
-            subject: `${shortName(cls)}#${name}`, at: atNode(ctx, item.node),
+            subject: `${shortName(cls)}#${name}`,
+            at: atNode(ctx, item.node),
             message: name === className ? `${item.name} has no public constructor` : `${item.name} does not translate it`,
           });
         }

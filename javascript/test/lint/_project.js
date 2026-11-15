@@ -162,11 +162,18 @@ function eslintSections(root, selected, all, options, everything) {
       expect(id, [{ kind: 'nothing-checked', text: `${check.name}: ${r.nothing}`, global: true }]);
       sections.push({ name: check.name, nothing: r.nothing });
     } else {
-      expect(id, r.findings.map((f) => ({ kind: f.kind, text: `${f.subject}: ${f.message}`, global: f.where.global, atStart: f.where.atStart })));
+      expect(
+        id,
+        r.findings.map((f) => ({ kind: f.kind, text: `${f.subject}: ${f.message}`, global: f.where.global, atStart: f.where.atStart })),
+      );
       // The findings ESLint shows: not those an inline directive suppressed everywhere.
       const shown = new Set((byRule.get(id) || []).filter((m) => !m.suppressed).map((m) => m.message));
       const findings = r.findings.filter((f) => shown.has(`${f.subject}: ${f.message}`));
-      sections.push(findings.length > 0 ? { name: check.name, hint: check.hint, findings, checked: r.checked } : { name: check.name, checked: r.checked });
+      sections.push(
+        findings.length > 0
+          ? { name: check.name, hint: check.hint, findings, checked: r.checked }
+          : { name: check.name, checked: r.checked },
+      );
     }
   }
   if (everything) {
@@ -253,9 +260,15 @@ function lint(root, args = [], options = {}) {
     // neither (a test's own) is the runner's.
     const names = (list) => new Set(list.map((c) => c.name));
     const [r, e] = [names(RUNNER_CHECKS), names(ESLINT_CHECKS)];
-    eslintChecks = withOverrides(ESLINT_CHECKS.filter((c) => opts.set.some((x) => x.name === c.name)), opts.set);
+    eslintChecks = withOverrides(
+      ESLINT_CHECKS.filter((c) => opts.set.some((x) => x.name === c.name)),
+      opts.set,
+    );
     runnerChecks = [
-      ...withOverrides(RUNNER_CHECKS.filter((c) => opts.set.some((x) => x.name === c.name)), opts.set),
+      ...withOverrides(
+        RUNNER_CHECKS.filter((c) => opts.set.some((x) => x.name === c.name)),
+        opts.set,
+      ),
       ...opts.set.filter((x) => !r.has(x.name) && !e.has(x.name)),
     ];
   }
@@ -277,7 +290,11 @@ function lint(root, args = [], options = {}) {
     bySide.push(eslintSections(root, selected, eslintChecks, { ...opts, noBaseline }, only === undefined));
   }
   if ((only === undefined && runnerChecks.length > 0) || inRunner) {
-    const result = evaluate(only === undefined ? args : [only, ...(noBaseline ? ['--no-baseline'] : [])], { ...opts, root, rules: runnerChecks });
+    const result = evaluate(only === undefined ? args : [only, ...(noBaseline ? ['--no-baseline'] : [])], {
+      ...opts,
+      root,
+      rules: runnerChecks,
+    });
     bySide.push(result.sections.filter((x) => !disabled.includes(x.name)));
   }
   const sections = [];
@@ -353,7 +370,12 @@ function baselineCurrent(root) {
     ['lint-baseline.txt', RUNNER_CHECKS],
   ]) {
     const listed = fs.existsSync(path.join(root, file))
-      ? new Set(fs.readFileSync(path.join(root, file), 'utf8').split('\n').map((l) => l.trim()))
+      ? new Set(
+          fs
+            .readFileSync(path.join(root, file), 'utf8')
+            .split('\n')
+            .map((l) => l.trim()),
+        )
       : new Set();
     const lines = keys(checks).filter((l) => !listed.has(l));
     added[file] = lines;

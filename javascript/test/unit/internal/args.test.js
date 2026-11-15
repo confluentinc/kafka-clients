@@ -108,7 +108,10 @@ test('a name no form has is rejected the same way, listed after the others, befo
   );
   // An unknown name is present whatever its value.
   assert.throws(() => CLOSE.match({ timeoutMs: undefined }, 1), illegal('close() takes one of (), (timeout); got (timeoutMs)'));
-  assert.throws(() => RECORD.match({ topic: 't', value: undefined, extra: null }, 1), illegal(`${RECORD_FORMS}; got (topic, value, extra)`));
+  assert.throws(
+    () => RECORD.match({ topic: 't', value: undefined, extra: null }, 1),
+    illegal(`${RECORD_FORMS}; got (topic, value, extra)`),
+  );
 });
 
 test('only own enumerable keys are names, and value() reads only those', () => {
@@ -251,7 +254,10 @@ test('more than one argument is refused with the form error, never dropped', () 
     () => SEND.match({}, 2),
     illegal('send() takes one of (record), (record, callback); got 2 arguments, not one object of named parameters'),
   );
-  assert.throws(() => CLOSE.match(5, 3), illegal('close() takes one of (), (timeout); got 3 arguments, not one object of named parameters'));
+  assert.throws(
+    () => CLOSE.match(5, 3),
+    illegal('close() takes one of (), (timeout); got 3 arguments, not one object of named parameters'),
+  );
 });
 
 test("callShapes lists an error constructor's forms as JavaScript calls them", () => {
@@ -264,7 +270,10 @@ test("callShapes lists an error constructor's forms as JavaScript calls them", (
   assert.throws(() => E.match('m', 2), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments'));
   assert.throws(() => E.match({ reason: 1 }, 1), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got (reason)'));
   // Ties keep Java's order.
-  const F = new JavaForms('F', [['cause'], ['message']], { callShapes: true, bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error } });
+  const F = new JavaForms('F', [['cause'], ['message']], {
+    callShapes: true,
+    bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error },
+  });
   assert.throws(() => F.match(5, 1), illegal('F() takes one of (cause), (message); got a number'));
 });
 
@@ -303,5 +312,7 @@ test('the message order may be given, and must hold every name', () => {
     () => subscribe.match({ callback: null, pattern: 'p', topics: [] }, 1),
     illegal('subscribe() takes one of (topics), (topics, callback), (pattern, callback), (pattern); got (topics, pattern, callback)'),
   );
-  assert.throws(() => new JavaForms('m', [['a', 'b']], { order: ['a'] }), { message: "JavaForms(m): the order a is not the forms' names a, b" });
+  assert.throws(() => new JavaForms('m', [['a', 'b']], { order: ['a'] }), {
+    message: "JavaForms(m): the order a is not the forms' names a, b",
+  });
 });

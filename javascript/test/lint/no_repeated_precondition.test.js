@@ -50,9 +50,9 @@ test('each precondition message the FFI or the core checks is a finding, in Type
   );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    "src/a.ts:1: writes \"The timeout cannot be negative.\", the message of a precondition the binding does not repeat (Java's KafkaProducer.close and AsyncKafkaConsumer.close; the producer FFI's close checks it)",
-    "src/a.ts:2: writes \"Invalid negative timeout\", the message of a precondition the binding does not repeat (Java's Timer; the consumer FFI checks a negative timeout)",
-    "native/a.c:1: writes \"Timeout must not be negative\", the message of a precondition the binding does not repeat (the core's _with_timeout check, which the consumer FFI reports)",
+    'src/a.ts:1: writes "The timeout cannot be negative.", the message of a precondition the binding does not repeat (Java\'s KafkaProducer.close and AsyncKafkaConsumer.close; the producer FFI\'s close checks it)',
+    'src/a.ts:2: writes "Invalid negative timeout", the message of a precondition the binding does not repeat (Java\'s Timer; the consumer FFI checks a negative timeout)',
+    'native/a.c:1: writes "Timeout must not be negative", the message of a precondition the binding does not repeat (the core\'s _with_timeout check, which the consumer FFI reports)',
   ]);
 });
 

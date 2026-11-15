@@ -22,14 +22,20 @@ const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 const { SslClientAuth } = require('@confluentinc/kafka-javascript/common/config');
 
 test('SslClientAuth', () => {
-  assert.deepEqual(SslClientAuth.VALUES.map((a) => a.name()), ['REQUIRED', 'REQUESTED', 'NONE']);
+  assert.deepEqual(
+    SslClientAuth.VALUES.map((a) => a.name()),
+    ['REQUIRED', 'REQUESTED', 'NONE'],
+  );
   assert.deepEqual(SslClientAuth.VALUES, [SslClientAuth.REQUIRED, SslClientAuth.REQUESTED, SslClientAuth.NONE]);
   assert.equal(SslClientAuth.VALUES[0], SslClientAuth.REQUIRED);
   assert.ok(Object.isFrozen(SslClientAuth.VALUES));
   assert.ok(Object.isFrozen(SslClientAuth.NONE));
   // Java's toString() override, the name in lower case; name() and toJSON()
   // keep the name.
-  assert.deepEqual(SslClientAuth.VALUES.map((a) => a.toString()), ['required', 'requested', 'none']);
+  assert.deepEqual(
+    SslClientAuth.VALUES.map((a) => a.toString()),
+    ['required', 'requested', 'none'],
+  );
   assert.equal(String(SslClientAuth.REQUESTED), 'requested');
   assert.equal(`${SslClientAuth.NONE}`, 'none');
   assert.equal(SslClientAuth.REQUESTED.name(), 'REQUESTED');
@@ -63,21 +69,34 @@ test('SslClientAuth', () => {
   assert.equal(SslClientAuth.forConfig('ReQuEsTeD'), SslClientAuth.REQUESTED);
   assert.equal(SslClientAuth.forConfig('other'), null);
   assert.throws(() => SslClientAuth.forConfig({ key: 5 }), { name: 'TypeError', message: 'key must be a string, not number' });
-  assert.throws(() => SslClientAuth.forConfig(5), { name: 'IllegalArgumentError', message: 'forConfig() takes one of (key); got a number' });
+  assert.throws(() => SslClientAuth.forConfig(5), {
+    name: 'IllegalArgumentError',
+    message: 'forConfig() takes one of (key); got a number',
+  });
 });
 
 // java.lang.Enum's members: name(), ordinal(), values(), valueOf(), and JSON.
 test("SslClientAuth has java.lang.Enum's members", () => {
-  assert.deepEqual(SslClientAuth.values().map((a) => [a.name(), a.ordinal()]), [['REQUIRED', 0], ['REQUESTED', 1], ['NONE', 2]]);
+  assert.deepEqual(
+    SslClientAuth.values().map((a) => [a.name(), a.ordinal()]),
+    [
+      ['REQUIRED', 0],
+      ['REQUESTED', 1],
+      ['NONE', 2],
+    ],
+  );
   assert.deepEqual(SslClientAuth.values(), [...SslClientAuth.VALUES]);
   assert.notEqual(SslClientAuth.values(), SslClientAuth.VALUES);
   assert.equal(SslClientAuth.valueOf('NONE'), SslClientAuth.NONE);
   assert.equal(SslClientAuth.valueOf({ name: 'REQUESTED' }), SslClientAuth.REQUESTED);
-  assert.throws(() => SslClientAuth.valueOf('none'), (e) => {
-    assert.ok(e instanceof IllegalArgumentError);
-    assert.equal(e.message, 'No enum constant org.apache.kafka.common.config.SslClientAuth.none');
-    return true;
-  });
+  assert.throws(
+    () => SslClientAuth.valueOf('none'),
+    (e) => {
+      assert.ok(e instanceof IllegalArgumentError);
+      assert.equal(e.message, 'No enum constant org.apache.kafka.common.config.SslClientAuth.none');
+      return true;
+    },
+  );
   assert.throws(() => SslClientAuth.valueOf(null), { name: 'TypeError', message: 'Name is null' });
   assert.throws(() => SslClientAuth.valueOf(undefined), {
     name: 'TypeError',

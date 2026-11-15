@@ -226,8 +226,7 @@ class SoakClient {
       }
       if (this.drCnt % this.disprate === 0) {
         this.logger.debug(
-          `producer: delivered message to ${metadata.topic} [${metadata.partition}] at offset ${metadata.offset} ` +
-            `in ${latencyMs} ms`,
+          `producer: delivered message to ${metadata.topic} [${metadata.partition}] at offset ${metadata.offset} ` + `in ${latencyMs} ms`,
         );
       }
     };

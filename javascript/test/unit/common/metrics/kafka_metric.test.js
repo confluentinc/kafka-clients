@@ -37,21 +37,39 @@ const metricConfig = () => ({});
 
 test('testIsMeasurable', () => {
   const metricValueProvider = { measure: (config, now) => (void config, void now, 0) };
-  const metric = new KafkaMetric({ lock: {}, metricName: METRIC_NAME_1, valueProvider: metricValueProvider, config: metricConfig(), time: mockTime() });
+  const metric = new KafkaMetric({
+    lock: {},
+    metricName: METRIC_NAME_1,
+    valueProvider: metricValueProvider,
+    config: metricConfig(),
+    time: mockTime(),
+  });
   assert.equal(metric.isMeasurable(), true);
   assert.equal(metric.measurable(), metricValueProvider);
 });
 
 test('testIsMeasurableWithGaugeProvider', () => {
   const metricValueProvider = { value: () => 0.0 };
-  const metric = new KafkaMetric({ lock: {}, metricName: METRIC_NAME_1, valueProvider: metricValueProvider, config: metricConfig(), time: mockTime() });
+  const metric = new KafkaMetric({
+    lock: {},
+    metricName: METRIC_NAME_1,
+    valueProvider: metricValueProvider,
+    config: metricConfig(),
+    time: mockTime(),
+  });
   assert.equal(metric.isMeasurable(), false);
   assert.throws(() => metric.measurable(), { constructor: IllegalStateError, message: 'Not a measurable: class object' });
 });
 
 test('testKafkaMetricAcceptsNonMeasurableNonGaugeProvider', () => {
   const provider = { value: () => 'metric value provider' };
-  const metric = new KafkaMetric({ lock: {}, metricName: METRIC_NAME_1, valueProvider: provider, config: metricConfig(), time: mockTime() });
+  const metric = new KafkaMetric({
+    lock: {},
+    metricName: METRIC_NAME_1,
+    valueProvider: provider,
+    config: metricConfig(),
+    time: mockTime(),
+  });
   const value = metric.metricValue();
   assert.equal(value, 'metric value provider');
 });
@@ -64,7 +82,13 @@ test('testConstructorWithNullProvider', () => {
 });
 
 function testToStringOnLambdaOrAnonymousClass(metricValueProvider) {
-  const metric = new KafkaMetric({ lock: {}, metricName: METRIC_NAME_2, valueProvider: metricValueProvider, config: metricConfig(), time: mockTime() });
+  const metric = new KafkaMetric({
+    lock: {},
+    metricName: METRIC_NAME_2,
+    valueProvider: metricValueProvider,
+    config: metricConfig(),
+    time: mockTime(),
+  });
   const result = metric.toString();
   assert.equal(
     result,
@@ -95,7 +119,13 @@ test('testToStringWithStatProvider', () => {
       return 0;
     }
   }
-  const metric = new KafkaMetric({ lock: {}, metricName: METRIC_NAME_2, valueProvider: new Avg(), config: metricConfig(), time: mockTime() });
+  const metric = new KafkaMetric({
+    lock: {},
+    metricName: METRIC_NAME_2,
+    valueProvider: new Avg(),
+    config: metricConfig(),
+    time: mockTime(),
+  });
   assert.equal(
     metric.toString(),
     'KafkaMetric [metricName=MetricName [name=request-latency-avg, ' +

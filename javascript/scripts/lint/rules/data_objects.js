@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // J8 check-data-objects (javascript/CLAUDE.md "Java shape, JS idiom": a data
@@ -45,7 +44,16 @@
 // cannot fail; anything that might not stays a method.
 
 const { atNode } = require('../location');
-const { DATA_CLASSES, ENUM_IMPLICIT, ERROR_ALLOWANCE, exportedItems, errorRegistry, publicMembers, mappedItems, javaIndexOf } = require('../java_ts');
+const {
+  DATA_CLASSES,
+  ENUM_IMPLICIT,
+  ERROR_ALLOWANCE,
+  exportedItems,
+  errorRegistry,
+  publicMembers,
+  mappedItems,
+  javaIndexOf,
+} = require('../java_ts');
 
 /** The members every Java object has, which stay methods on a data class. */
 const OBJECT_METHODS = new Set(['toString', 'equals', 'hashCode']);
@@ -76,9 +84,7 @@ function freezesInstances(ts, cls) {
 
 /** Whether Java class `cls`, or a Java supertype, declares a public final instance field `name`. */
 function javaFinalField(index, cls, name) {
-  return index
-    .chain(cls)
-    .some((c) => c.fields.some((f) => f.name === name && f.visibility === 'public' && f.final && !f.static));
+  return index.chain(cls).some((c) => c.fields.some((f) => f.name === name && f.visibility === 'public' && f.final && !f.static));
 }
 
 /**
@@ -90,7 +96,8 @@ function javaGetters(cls) {
   const ctor = cls.path[cls.path.length - 1];
   const out = new Set();
   for (const o of cls.overloads) {
-    if (o.name === ctor || o.static || o.visibility !== 'public' || o.deprecated || o.params.length !== 0 || o.return_type === 'void') continue;
+    if (o.name === ctor || o.static || o.visibility !== 'public' || o.deprecated || o.params.length !== 0 || o.return_type === 'void')
+      continue;
     if (OBJECT_METHODS.has(o.name) || /^get[A-Z]/.test(o.name)) continue;
     out.add(o.name);
   }
@@ -146,7 +153,12 @@ module.exports = {
           findings.push({ kind: 'setter', subject, at, message: 'is a set accessor: the property is read-only' });
         } else if (getter && m.kind !== 'property') {
           const what = m.kind === 'get' ? 'a get accessor' : 'a method';
-          findings.push({ kind: 'getter-not-field', subject, at, message: `is ${what}: on a data class, Java's ${m.name}() is a public readonly field` });
+          findings.push({
+            kind: 'getter-not-field',
+            subject,
+            at,
+            message: `is ${what}: on a data class, Java's ${m.name}() is a public readonly field`,
+          });
         } else if (getter && !m.isReadonly) {
           findings.push({ kind: 'mutable-field', subject, at, message: 'is a public mutable field: make it readonly' });
         } else if (getter) {
@@ -178,7 +190,11 @@ module.exports = {
     for (const fqn of dataClasses) {
       checked += 1;
       if (!seenData.has(fqn)) {
-        findings.push({ kind: 'stale-data-class', subject: fqn, message: 'is listed as a data class, but no exported class translates it: delete the entry' });
+        findings.push({
+          kind: 'stale-data-class',
+          subject: fqn,
+          message: 'is listed as a data class, but no exported class translates it: delete the entry',
+        });
       }
     }
     return { findings, checked };

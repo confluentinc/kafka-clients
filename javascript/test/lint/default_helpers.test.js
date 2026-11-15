@@ -31,8 +31,7 @@ const LISTENER = javaClass('clients.consumer.ConsumerRebalanceListener', {
 const LISTENER_TS =
   'export interface ConsumerRebalanceListener {\n  onPartitionsRevoked(options: { partitions: unknown }): void;\n' +
   '  onPartitionsLost?(options: { partitions: unknown }): void;\n}\n';
-const HELPER =
-  'export class ConsumerRebalanceListenerDefaults {\n  onPartitionsLost(): void {}\n}\n';
+const HELPER = 'export class ConsumerRebalanceListenerDefaults {\n  onPartitionsLost(): void {}\n}\n';
 
 const fixture = (files = {}) =>
   project({
@@ -43,7 +42,7 @@ const fixture = (files = {}) =>
     ...files,
   });
 
-test("an interface the user implements with a default method has its helper class; one with none needs none", () => {
+test('an interface the user implements with a default method has its helper class; one with none needs none', () => {
   const r = lint(fixture({ 'src/internal/consumer_rebalance_listener_defaults.ts': HELPER }), [RULE]);
   assert.equal(r.status, 0, r.text);
   // Callback, Header and ConsumerRebalanceListener, then the one helper.
@@ -71,7 +70,7 @@ test('a missing helper, a missing default method and a helper nothing asks for a
 // A root-shaped Serializer (root CLAUDE.md, JavaScript Binding Conventions,
 // Serialization): one serialize for Java's two, no configure, close optional.
 // Only close, the one default it keeps, asks for a helper method.
-test("only the Java defaults the TypeScript interface keeps as optional members need a helper method", () => {
+test('only the Java defaults the TypeScript interface keeps as optional members need a helper method', () => {
   const serializer = javaClass('common.serialization.Serializer', {
     kind: 'interface',
     overloads: [
@@ -98,9 +97,12 @@ test("only the Java defaults the TypeScript interface keeps as optional members 
   ]);
 });
 
-test('an interface an exported class implements is the client\'s, not the user\'s: it needs no helper', () => {
+test("an interface an exported class implements is the client's, not the user's: it needs no helper", () => {
   const r = lint(
-    fixture({ 'src/consumer/listener_impl.ts': "import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';\nexport class ListenerImpl implements ConsumerRebalanceListener {\n  onPartitionsRevoked(): void {}\n}\n" }),
+    fixture({
+      'src/consumer/listener_impl.ts':
+        "import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';\nexport class ListenerImpl implements ConsumerRebalanceListener {\n  onPartitionsRevoked(): void {}\n}\n",
+    }),
     [RULE],
   );
   assert.equal(r.status, 0, r.text);

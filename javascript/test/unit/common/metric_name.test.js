@@ -38,9 +38,18 @@ test("Java's getters are methods; tags() is the Map the constructor was given", 
   assert.equal(name.group(), 'consumer-fetch-manager-metrics');
   assert.equal(name.description(), 'd');
   assert.ok(name.tags() instanceof Map);
-  assert.deepEqual([...name.tags()], [['client-id', 'consumer-1'], ['a', 'b']]);
+  assert.deepEqual(
+    [...name.tags()],
+    [
+      ['client-id', 'consumer-1'],
+      ['a', 'b'],
+    ],
+  );
   assert.equal(name.tags(), name.tags());
-  assert.equal(name.toString(), 'MetricName [name=request-latency-avg, group=consumer-fetch-manager-metrics, description=d, tags={client-id=consumer-1, a=b}]');
+  assert.equal(
+    name.toString(),
+    'MetricName [name=request-latency-avg, group=consumer-fetch-manager-metrics, description=d, tags={client-id=consumer-1, a=b}]',
+  );
 });
 
 test("equals and hashCode are Java's: group, name and tags, not the description", () => {
@@ -76,7 +85,13 @@ test('a Map of tags is kept as given, as Java keeps it; a plain object becomes a
   // A later change to the given Map shows in the name, as in Java: equality
   // and the hash code follow the current contents.
   given.set('other', 'x');
-  assert.deepEqual([...fromMap.tags()], [['client-id', 'c'], ['other', 'x']]);
+  assert.deepEqual(
+    [...fromMap.tags()],
+    [
+      ['client-id', 'c'],
+      ['other', 'x'],
+    ],
+  );
   assert.equal(fromMap.equals(fromObject), false);
   assert.notEqual(fromMap.hashCode(), fromObject.hashCode());
   assert.deepEqual([...new MetricName({ name: 'n', group: 'g', description: '', tags: {} }).tags()], []);
@@ -111,10 +126,19 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   assert.equal(map.get(new MetricName({ name: 'y', group: 'g', description: '', tags: new Map() })), null);
   assert.equal([...map.keys()][0], first);
   assert.deepEqual([...map.values()], [1, 2]);
-  assert.deepEqual([...map].map(([k, v]) => [k.name(), v]), [['request-latency-avg', 1], ['x', 2]]);
+  assert.deepEqual(
+    [...map].map(([k, v]) => [k.name(), v]),
+    [
+      ['request-latency-avg', 1],
+      ['x', 2],
+    ],
+  );
   const seen = [];
   map.forEach((value, key, m) => seen.push([key.name(), value, m === map]));
-  assert.deepEqual(seen, [['request-latency-avg', 1, true], ['x', 2, true]]);
+  assert.deepEqual(seen, [
+    ['request-latency-avg', 1, true],
+    ['x', 2, true],
+  ]);
   assert.equal(map instanceof Map, false);
   // toJSON: the entries by the map's string key, the group, the name and the sorted tags.
   assert.deepEqual(JSON.parse(JSON.stringify(map)), {
@@ -125,6 +149,9 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   assert.equal(new MetricNameMap().size(), 0);
   assert.throws(() => map.get('x'), { constructor: IllegalArgumentError, message: 'get() takes one of (key); got a string' });
   assert.throws(() => map.has({ key: 'x' }), { constructor: TypeError, message: 'key must be a MetricName' });
-  assert.throws(() => new MetricNameMap(undefined), { constructor: TypeError, message: "entries must not be undefined. Leave the argument out, or pass null for Java's null" });
+  assert.throws(() => new MetricNameMap(undefined), {
+    constructor: TypeError,
+    message: "entries must not be undefined. Leave the argument out, or pass null for Java's null",
+  });
   assert.throws(() => new MetricNameMap([[1, 2]]), { constructor: TypeError, message: 'an entry must be a [MetricName, value] pair' });
 });

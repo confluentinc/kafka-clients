@@ -25,7 +25,12 @@ const { SecurityProtocol } = require('@confluentinc/kafka-javascript/common/secu
 test('SecurityProtocol', () => {
   assert.deepEqual(
     SecurityProtocol.values().map((p) => [p.name(), p.ordinal(), p.id]),
-    [['PLAINTEXT', 0, 0], ['SSL', 1, 1], ['SASL_PLAINTEXT', 2, 2], ['SASL_SSL', 3, 3]],
+    [
+      ['PLAINTEXT', 0, 0],
+      ['SSL', 1, 1],
+      ['SASL_PLAINTEXT', 2, 2],
+      ['SASL_SSL', 3, 3],
+    ],
   );
   assert.deepEqual(SecurityProtocol.names(), ['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL']);
   assert.equal(SecurityProtocol.forId(3), SecurityProtocol.SASL_SSL);
@@ -38,11 +43,14 @@ test('SecurityProtocol', () => {
   assert.equal(SecurityProtocol.forName('sasl_plaintext'), SecurityProtocol.SASL_PLAINTEXT);
   assert.equal(String(SecurityProtocol.SSL), 'SSL');
   assert.ok(Object.isFrozen(SecurityProtocol.SSL));
-  assert.throws(() => SecurityProtocol.forName('tls'), (e) => {
-    assert.ok(e instanceof IllegalArgumentError);
-    assert.equal(e.message, 'No enum constant org.apache.kafka.common.security.auth.SecurityProtocol.TLS');
-    return true;
-  });
+  assert.throws(
+    () => SecurityProtocol.forName('tls'),
+    (e) => {
+      assert.ok(e instanceof IllegalArgumentError);
+      assert.equal(e.message, 'No enum constant org.apache.kafka.common.security.auth.SecurityProtocol.TLS');
+      return true;
+    },
+  );
   assert.throws(() => SecurityProtocol.forName(null), { name: 'TypeError', message: 'name must not be null' });
   // Java's one-parameter forId(Short id) and forName(String name): the value
   // on its own or named.
@@ -85,14 +93,20 @@ test("SecurityProtocol has java.lang.Enum's members", () => {
   assert.equal(SecurityProtocol.valueOf('SSL'), SecurityProtocol.SSL);
   assert.equal(SecurityProtocol.valueOf({ name: 'SASL_PLAINTEXT' }), SecurityProtocol.SASL_PLAINTEXT);
   // Java's Enum.valueOf is exact: no case folding (that is forName's).
-  assert.throws(() => SecurityProtocol.valueOf('ssl'), (e) => {
-    assert.ok(e instanceof IllegalArgumentError);
-    assert.equal(e.message, 'No enum constant org.apache.kafka.common.security.auth.SecurityProtocol.ssl');
-    return true;
-  });
+  assert.throws(
+    () => SecurityProtocol.valueOf('ssl'),
+    (e) => {
+      assert.ok(e instanceof IllegalArgumentError);
+      assert.equal(e.message, 'No enum constant org.apache.kafka.common.security.auth.SecurityProtocol.ssl');
+      return true;
+    },
+  );
   assert.throws(() => SecurityProtocol.valueOf(null), { name: 'TypeError', message: 'Name is null' });
   assert.throws(() => SecurityProtocol.valueOf({ name: 1 }), { name: 'TypeError', message: 'name must be a string, not number' });
-  assert.throws(() => SecurityProtocol.valueOf(1), { name: 'IllegalArgumentError', message: 'valueOf() takes one of (name); got a number' });
+  assert.throws(() => SecurityProtocol.valueOf(1), {
+    name: 'IllegalArgumentError',
+    message: 'valueOf() takes one of (name); got a number',
+  });
   assert.throws(() => SecurityProtocol.valueOf(undefined), {
     name: 'TypeError',
     message: "name must not be undefined. Leave the argument out, or pass null for Java's null",
@@ -102,7 +116,10 @@ test("SecurityProtocol has java.lang.Enum's members", () => {
     name: 'IllegalArgumentError',
     message: 'valueOf() takes one of (name); got 2 arguments, not one object of named parameters',
   });
-  assert.throws(() => SecurityProtocol.valueOf({ id: 1 }), { name: 'IllegalArgumentError', message: 'valueOf() takes one of (name); got (id)' });
+  assert.throws(() => SecurityProtocol.valueOf({ id: 1 }), {
+    name: 'IllegalArgumentError',
+    message: 'valueOf() takes one of (name); got (id)',
+  });
   // name() and ordinal() take no argument.
   assert.throws(() => SecurityProtocol.SSL.name(1), { name: 'TypeError', message: 'name() only reads: it takes no argument' });
   assert.throws(() => SecurityProtocol.SSL.ordinal({ x: 1 }), { name: 'TypeError', message: 'ordinal() only reads: it takes no argument' });

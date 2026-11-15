@@ -57,8 +57,7 @@ function delivery(future) {
 
 const CTOR_FORMS = 'KafkaProducer() takes one of (configs), (configs, keySerializer, valueSerializer)';
 
-const FLUSH_IN_CALLBACK =
-  'KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.';
+const FLUSH_IN_CALLBACK = 'KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.';
 
 test('send resolves at hand-over; the future fails after the callback ran once', async () => {
   const producer = new KafkaProducer({ configs: UNREACHABLE });
@@ -97,7 +96,10 @@ test('send resolves at hand-over; the future fails after the callback ran once',
     const [{ metadata, error }] = calls;
     // The callback gets the raw error; get() and getNow() wrap that very error.
     await assert.rejects(future.get(), (e) => e instanceof ExecutionError && e.cause === error);
-    assert.throws(() => future.getNow(null), (e) => e instanceof ExecutionError && e.cause === error);
+    assert.throws(
+      () => future.getNow(null),
+      (e) => e instanceof ExecutionError && e.cause === error,
+    );
     assert.ok(metadata instanceof RecordMetadata);
     assert.equal(metadata.topic, 'unit-t');
     assert.equal(metadata.partition, RecordMetadata.UNKNOWN_PARTITION);
@@ -269,7 +271,10 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
   assert.equal(closed, false);
   release();
   await closing;
-  await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
+  await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
+    name: 'IllegalStateError',
+    message: CLOSED_MESSAGE,
+  });
   // Disposing again resolves, as close() again does: the core's second
   // close, which holds Node until its answer, as any call made on a closed
   // producer does (javascript/CLAUDE.md, "Threads and liveness").
@@ -337,7 +342,7 @@ test('KafkaFuture is made by the client, through its library-only factory', () =
 // A ProducerRecord field reassigned from plain JavaScript after the
 // constructor checked it: send() rejects with the constructor's error, and
 // nothing reaches the core.
-test("after close every call goes to the core: send rejects with its closed error, flush and close resolve", async () => {
+test('after close every call goes to the core: send rejects with its closed error, flush and close resolve', async () => {
   const closedError = (e) => {
     // Java's IllegalStateException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalStateError);
@@ -368,7 +373,7 @@ test("after close every call goes to the core: send rejects with its closed erro
   await producer.flush();
 });
 
-test('close checks its timeout, open or closed: the closed state is the core\'s', async () => {
+test("close checks its timeout, open or closed: the closed state is the core's", async () => {
   const negative = (e) => {
     // Java's IllegalArgumentException is a java.lang exception, not a KafkaException.
     assert.ok(e instanceof IllegalArgumentError);
@@ -403,7 +408,10 @@ test('close checks its timeout, open or closed: the closed state is the core\'s'
       message: "timeout must not be undefined. Leave the argument out, or pass null for Java's null",
     });
     for (const value of [NaN, -Infinity]) {
-      await assert.rejects(producer.close(value), { name: 'RangeError', message: `timeout must be a number of milliseconds, not ${value}` });
+      await assert.rejects(producer.close(value), {
+        name: 'RangeError',
+        message: `timeout must be a number of milliseconds, not ${value}`,
+      });
     }
     await assert.rejects(producer.close({ timeout: 2 ** 53 }), {
       name: 'RangeError',
@@ -423,7 +431,13 @@ test('close checks its timeout, open or closed: the closed state is the core\'s'
   // Closed: the same checks, the same errors.
   await checks(producer);
   // Accepted: a whole or fractional number, Infinity, a Temporal.Duration, bare or named.
-  for (const timeout of [{ timeout: 0 }, 1.5, Infinity, { timeout: Temporal.Duration.from({ seconds: 1 }) }, Temporal.Duration.from({ seconds: 1 })]) {
+  for (const timeout of [
+    { timeout: 0 },
+    1.5,
+    Infinity,
+    { timeout: Temporal.Duration.from({ seconds: 1 }) },
+    Temporal.Duration.from({ seconds: 1 }),
+  ]) {
     await new KafkaProducer({ configs: UNREACHABLE }).close(timeout);
   }
 });
@@ -540,7 +554,10 @@ test("flush() takes no argument: Java's flush(), never 1.x's flush(timeout, call
       name: 'IllegalArgumentError',
       message: 'flush() takes one of (); got 2 arguments, not one object of named parameters',
     });
-    await assert.rejects(producer.flush({ timeout: 100 }), { name: 'IllegalArgumentError', message: 'flush() takes one of (); got (timeout)' });
+    await assert.rejects(producer.flush({ timeout: 100 }), {
+      name: 'IllegalArgumentError',
+      message: 'flush() takes one of (); got (timeout)',
+    });
     await assert.rejects(producer.flush(100), { name: 'IllegalArgumentError', message: 'flush() takes one of (); got a number' });
     assert.equal(ran, 0);
     // undefined is never "not given": flush(undefined) is refused; flush({}) is flush().
@@ -588,7 +605,7 @@ test('send reads only the parameters the form check saw: own enumerable keys', a
   }
 });
 
-test('a closed producer checks a send\'s record and callback before the core reports it closed', async () => {
+test("a closed producer checks a send's record and callback before the core reports it closed", async () => {
   // The binding keeps no closed state: the record is checked and converted
   // in JavaScript, then the core refuses it, where Java's doSend checks the
   // closed producer first (a deviation, documented on send()).
@@ -601,10 +618,19 @@ test('a closed producer checks a send\'s record and callback before the core rep
     name: 'TypeError',
     message: 'callback must be a function ({ metadata, exception }) => void',
   });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }) }), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }) }), {
+    name: 'IllegalStateError',
+    message: CLOSED_MESSAGE,
+  });
   // The form is checked first: a bare value that fits no form included.
-  await assert.rejects(producer.send({}), { name: 'IllegalArgumentError', message: 'send() takes one of (record), (record, callback); got ()' });
-  await assert.rejects(producer.send(42), { name: 'IllegalArgumentError', message: 'send() takes one of (record), (record, callback); got a number' });
+  await assert.rejects(producer.send({}), {
+    name: 'IllegalArgumentError',
+    message: 'send() takes one of (record), (record, callback); got ()',
+  });
+  await assert.rejects(producer.send(42), {
+    name: 'IllegalArgumentError',
+    message: 'send() takes one of (record), (record, callback); got a number',
+  });
 });
 
 test("the constructor takes Java's {configs} or the configs on their own, a plain object", async () => {
@@ -686,7 +712,9 @@ test('a negative close timeout on an open producer is rejected first and changes
     assert.equal(e.message, TIMEOUT_MESSAGE('unit-n'));
     return true;
   });
-  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) }), { message: CLOSED_MESSAGE });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) }), {
+    message: CLOSED_MESSAGE,
+  });
 
   // A close() in the same turn is a close of its own, not the rejected one.
   const other = new KafkaProducer({ configs: UNREACHABLE });
@@ -694,15 +722,20 @@ test('a negative close timeout on an open producer is rejected first and changes
   const closed = other.close();
   await assert.rejects(rejectedToo, negative);
   await closed;
-  await assert.rejects(other.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) }), { message: CLOSED_MESSAGE });
+  await assert.rejects(other.send({ record: new ProducerRecord({ topic: 'unit-n', value: Buffer.from('v') }) }), {
+    message: CLOSED_MESSAGE,
+  });
 });
 
 test('close() while a send waits for metadata rejects that send with a bare KafkaError', async () => {
   const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'max.block.ms': 60000 } });
   const calls = [];
-  const sent = producer.send({ record: new ProducerRecord({ topic: 'unit-close-waiting', value: Buffer.from('v') }), callback: () => {
+  const sent = producer.send({
+    record: new ProducerRecord({ topic: 'unit-close-waiting', value: Buffer.from('v') }),
+    callback: () => {
       calls.push('callback');
-    } });
+    },
+  });
   let settled = false;
   sent.then(
     () => (settled = true),
@@ -798,7 +831,13 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
   });
   await assert.rejects(
     producer.send({
-      record: new ProducerRecord({ topic: 'unit-nul', partition: null, key: null, value: Buffer.from('v'), headers: [new Header({ key: 'k\0x', value: Buffer.from('h') })] }),
+      record: new ProducerRecord({
+        topic: 'unit-nul',
+        partition: null,
+        key: null,
+        value: Buffer.from('v'),
+        headers: [new Header({ key: 'k\0x', value: Buffer.from('h') })],
+      }),
       callback,
     }),
     { name: 'TypeError', message: 'a header key must be a string without null bytes' },
@@ -829,8 +868,7 @@ test('a refused NUL-holding send leaves nothing pending: the producer then close
   assert.equal(r.status, 0, r.stderr);
   assert.equal(
     r.stdout,
-    'TypeError topic must be a string without null bytes\n' +
-      'TypeError a header key must be a string without null bytes\n',
+    'TypeError topic must be a string without null bytes\n' + 'TypeError a header key must be a string without null bytes\n',
   );
   assert.ok(r.ms < 30000, `took ${r.ms} ms`);
 });
@@ -1027,10 +1065,7 @@ test("a late close() and flush() settle while nothing else holds Node, after a r
     })();
   `);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(
-    r.stdout,
-    `callback: TimeoutError: ${TIMEOUT_MESSAGE('t')}\nclosed\nlate close: resolved\nlate flush: resolved\n`,
-  );
+  assert.equal(r.stdout, `callback: TimeoutError: ${TIMEOUT_MESSAGE('t')}\nclosed\nlate close: resolved\nlate flush: resolved\n`);
 });
 
 // Two calls at once, awaited together (javascript/CLAUDE.md, "How the client
@@ -1108,7 +1143,7 @@ test('an open producer keeps the process running after a call made on it settled
 // A guard of Java's answer and of the exit: this call is answered before the
 // close's completion, while the open producer still holds Node, so it passes
 // without the count of waiting calls too.
-test('a send waiting for metadata across close(0) rejects with Java\'s error and the process exits, in each of 25 rounds', () => {
+test("a send waiting for metadata across close(0) rejects with Java's error and the process exits, in each of 25 rounds", () => {
   // The record waits for metadata in the core when close(0) comes. Java's
   // doSend throws KafkaException("Producer closed while send in progress"),
   // caused by "Requested metadata update after close". Each producer stays
@@ -1226,9 +1261,11 @@ test('a closed producer lets the process exit, and is destroyed when garbage col
 // the finalizer destroyed it. A send refused once the core reported the
 // close, or failed by the close, leaves no JS function of its own alive
 // that would hold the producer (javascript/CLAUDE.md, rule 10).
-(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)('a closed producer is destroyed when collected, a send refused after close() or failed by it included', () => {
-  const r = runNode(
-    `
+(!['linux', 'darwin'].includes(process.platform) ? test.skip : test)(
+  'a closed producer is destroyed when collected, a send refused after close() or failed by it included',
+  () => {
+    const r = runNode(
+      `
     const { execSync } = require('node:child_process');
     const fs = require('node:fs');
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
@@ -1281,17 +1318,29 @@ test('a closed producer lets the process exit, and is destroyed when garbage col
       clearInterval(hold);
     })();
   `,
-    120000,
-    ['--expose-gc', '--no-warnings'],
-  );
-  assert.equal(r.status, 0, r.stderr);
-  // Five producers collected per case, and fewer threads left over than one
-  // live producer runs (about 18): each destroyed producer took its threads
-  // with it. A leak shows as 5 live producers, about 90 threads.
-  const lines = r.stdout.trim().split('\n').map((l) => /^(.*) (\d+) (-?\d+)$/.exec(l));
-  assert.deepEqual(lines.map((m) => m && [m[1], m[2]]), [['close', '5'], ['send after close', '5'], ['send failed by close', '5']], r.stdout);
-  for (const m of lines) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
-});
+      120000,
+      ['--expose-gc', '--no-warnings'],
+    );
+    assert.equal(r.status, 0, r.stderr);
+    // Five producers collected per case, and fewer threads left over than one
+    // live producer runs (about 18): each destroyed producer took its threads
+    // with it. A leak shows as 5 live producers, about 90 threads.
+    const lines = r.stdout
+      .trim()
+      .split('\n')
+      .map((l) => /^(.*) (\d+) (-?\d+)$/.exec(l));
+    assert.deepEqual(
+      lines.map((m) => m && [m[1], m[2]]),
+      [
+        ['close', '5'],
+        ['send after close', '5'],
+        ['send failed by close', '5'],
+      ],
+      r.stdout,
+    );
+    for (const m of lines) assert.ok(Number(m[3]) < 10, `${m[1]}: ${m[3]} threads left over`);
+  },
+);
 
 test('the preview notice is one ExperimentalWarning per process, which --no-warnings silences', () => {
   const script = `
@@ -1381,16 +1430,28 @@ test('the serializers run in send(), key then value, with the topic, the headers
   try {
     const record = new ProducerRecord({ topic: 'unit-serde', key: 7, value: { a: 1 } });
     const future = await producer.send(record);
-    assert.deepEqual(calls.map((c) => [c.topic, c.data]), [['unit-serde', 7], ['unit-serde', { a: 1 }]]);
+    assert.deepEqual(
+      calls.map((c) => [c.topic, c.data]),
+      [
+        ['unit-serde', 7],
+        ['unit-serde', { a: 1 }],
+      ],
+    );
     // The record's own headers, which the serializer may change before the
     // hand-over seals them.
     assert.equal(calls[0].headers, record.headers);
-    assert.throws(() => record.headers.add({ key: 'late', value: null }), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+    assert.throws(() => record.headers.add({ key: 'late', value: null }), {
+      name: 'IllegalStateError',
+      message: 'RecordHeaders has been closed.',
+    });
     await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-serde') });
     // A null key is passed to the serializer, which decides what it maps to.
     calls.length = 0;
     await producer.send(new ProducerRecord({ topic: 'unit-serde', value: null }));
-    assert.deepEqual(calls.map((c) => c.data), [null, null]);
+    assert.deepEqual(
+      calls.map((c) => c.data),
+      [null, null],
+    );
   } finally {
     await producer.close();
   }
@@ -1418,7 +1479,10 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
   const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: recording(() => null, calls) });
   try {
     await producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: Buffer.from('k'), value: 'anything' }));
-    assert.deepEqual(calls.map((c) => c.data), ['anything']);
+    assert.deepEqual(
+      calls.map((c) => c.data),
+      ['anything'],
+    );
     // Without a key serializer the key must be bytes; a string points to stringSerializer() (root Q24, Q27).
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 3, value: 'v' })), {
       name: 'TypeError',
@@ -1501,11 +1565,27 @@ test('the value serializer runs after the key serializer Promise settled', async
 test('what a serializer throws, rejects with or returns that is no bytes rejects send()', async () => {
   const boom = new Error('boom');
   for (const [serializer, expected] of [
-    [{ serialize: () => { throw boom; } }, (e) => e === boom],
+    [
+      {
+        serialize: () => {
+          throw boom;
+        },
+      },
+      (e) => e === boom,
+    ],
     [{ serialize: () => Promise.reject(boom) }, (e) => e === boom],
-    [{ serialize: () => 'text' }, { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not a string' }],
-    [{ serialize: () => undefined }, { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not an undefined' }],
-    [{ serialize: async () => 5 }, { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not a number' }],
+    [
+      { serialize: () => 'text' },
+      { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not a string' },
+    ],
+    [
+      { serialize: () => undefined },
+      { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not an undefined' },
+    ],
+    [
+      { serialize: async () => 5 },
+      { name: 'TypeError', message: 'valueSerializer.serialize() must return a Uint8Array or null, not a number' },
+    ],
   ]) {
     const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: serializer });
     try {
@@ -1538,10 +1618,20 @@ test('a producer closed while a serializer Promise is pending rejects that send 
   // The binding keeps no closed state: on a closed producer the serializers
   // still run, and the core reports the closed producer at the hand-over.
   const calls = [];
-  const closed = new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: recording(() => Buffer.from('v'), calls) });
+  const closed = new KafkaProducer({
+    configs: UNREACHABLE,
+    keySerializer: null,
+    valueSerializer: recording(() => Buffer.from('v'), calls),
+  });
   await closed.close();
-  await assert.rejects(closed.send(new ProducerRecord({ topic: 'unit-serde-c', value: 'v' })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
-  assert.deepEqual(calls.map((c) => c.data), ['v']);
+  await assert.rejects(closed.send(new ProducerRecord({ topic: 'unit-serde-c', value: 'v' })), {
+    name: 'IllegalStateError',
+    message: CLOSED_MESSAGE,
+  });
+  assert.deepEqual(
+    calls.map((c) => c.data),
+    ['v'],
+  );
 });
 
 test("a serializer argument is a serializer object or null; a function gets Python's hint", () => {
@@ -1603,7 +1693,10 @@ test('close() closes both serializers, a failure being a process warning, never 
     });
     await producer.close();
   });
-  assert.deepEqual(rejected.map((w) => w.message), ['Failed to close producer valueSerializer: Error: later']);
+  assert.deepEqual(
+    rejected.map((w) => w.message),
+    ['Failed to close producer valueSerializer: Error: later'],
+  );
 });
 
 test("a producer whose construction fails closes the serializers; a ConfigError of the configuration's check, which Java throws before that catch, does not", async () => {
@@ -1623,7 +1716,12 @@ test("a producer whose construction fails closes the serializers; a ConfigError 
   // Java's new ProducerConfig(...) validates before that catch: the serializers stay open.
   closed.length = 0;
   assert.throws(
-    () => new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', acks: 'sometimes' }, keySerializer: serializer('key'), valueSerializer: serializer('value') }),
+    () =>
+      new KafkaProducer({
+        configs: { 'bootstrap.servers': '127.0.0.1:1', acks: 'sometimes' },
+        keySerializer: serializer('key'),
+        valueSerializer: serializer('value'),
+      }),
     { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
   );
   assert.deepEqual(closed, []);
@@ -1643,14 +1741,20 @@ test('key.serializer and value.serializer take a function the producer calls onc
   const configs = { ...UNREACHABLE, 'key.serializer': factory('k:'), 'value.serializer': factory('v:'), 'some.key': 5 };
   const producer = new KafkaProducer(configs);
   try {
-    assert.deepEqual(made.map((m) => m.isKey), [true, false]);
+    assert.deepEqual(
+      made.map((m) => m.isKey),
+      [true, false],
+    );
     // The whole configuration, each value as it was given, read-only.
     assert.equal(made[0].configs['some.key'], 5);
     assert.equal(made[0].configs['key.serializer'], configs['key.serializer']);
     assert.deepEqual(Object.keys(made[0].configs), Object.keys(configs));
     assert.ok(Object.isFrozen(made[0].configs));
     await producer.send(new ProducerRecord({ topic: 'unit-serde-c', key: 1, value: 2 }));
-    assert.deepEqual(calls.map((c) => c.data), [1, 2]);
+    assert.deepEqual(
+      calls.map((c) => c.data),
+      [1, 2],
+    );
   } finally {
     await producer.close();
   }
@@ -1658,7 +1762,7 @@ test('key.serializer and value.serializer take a function the producer calls onc
   assert.equal(made.length, 2);
 });
 
-test('a serializer argument wins over its config key, which is then ignored; a null one is the config key\'s', async () => {
+test("a serializer argument wins over its config key, which is then ignored; a null one is the config key's", async () => {
   let called = 0;
   const make = () => {
     called++;
@@ -1676,7 +1780,7 @@ test('a serializer argument wins over its config key, which is then ignored; a n
   assert.equal(called, 1);
 });
 
-test("a serde config key that is no synchronous function throws ConfigError, saying what to pass", async () => {
+test('a serde config key that is no synchronous function throws ConfigError, saying what to pass', async () => {
   const pass = (argument) =>
     `pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, or the serializer itself as the ${argument} argument of the constructor`;
   class StringSerializer {
@@ -1693,7 +1797,10 @@ test("a serde config key that is no synchronous function throws ConfigError, say
         'org.apache.kafka.common.serialization.StringSerializer',
         `Invalid value org.apache.kafka.common.serialization.StringSerializer for configuration ${key}: a class name cannot be loaded in JavaScript; ${pass(argument)}`,
       ],
-      [{ serialize: () => null }, `Invalid value an object for configuration ${key}: a serializer object is not a configuration value; ${pass(argument)}`],
+      [
+        { serialize: () => null },
+        `Invalid value an object for configuration ${key}: a serializer object is not a configuration value; ${pass(argument)}`,
+      ],
       [5, `Invalid value a number for configuration ${key}: ${pass(argument)}`],
       [StringSerializer, `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`],
       [
@@ -1705,11 +1812,14 @@ test("a serde config key that is no synchronous function throws ConfigError, say
         `Invalid value a function for configuration ${key}: the function returned a string, not a serializer: an object with a serialize({ topic, headers, data }) method`,
       ],
     ]) {
-      assert.throws(() => new KafkaProducer({ ...UNREACHABLE, [key]: value }), (e) => {
-        assert.equal(e.constructor.name, 'ConfigError', key);
-        assert.equal(e.message, message);
-        return true;
-      });
+      assert.throws(
+        () => new KafkaProducer({ ...UNREACHABLE, [key]: value }),
+        (e) => {
+          assert.equal(e.constructor.name, 'ConfigError', key);
+          assert.equal(e.message, message);
+          return true;
+        },
+      );
     }
     // null and undefined leave the key unset: no serializer.
     for (const value of [null, undefined]) {
@@ -1788,22 +1898,35 @@ test('a serde config function that throws is a construction failure, and the ser
   assert.deepEqual(closed, ['key']);
   // close() closes a configured serializer as it closes a given one.
   closed.length = 0;
-  const producer = new KafkaProducer({ ...UNREACHABLE, 'value.serializer': () => ({ serialize: () => null, close: () => closed.push('value') }) });
+  const producer = new KafkaProducer({
+    ...UNREACHABLE,
+    'value.serializer': () => ({ serialize: () => null, close: () => closed.push('value') }),
+  });
   await producer.close();
   assert.deepEqual(closed, ['value']);
 });
 
 test('stringSerializer goes in a serde config key without (), configured by its encoding keys', async () => {
-  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-32' }), (e) => {
-    assert.equal(e.constructor, KafkaError);
-    assert.equal(e.message, 'Failed to construct kafka producer');
-    assert.equal(e.cause.name, 'SerializationError');
-    assert.equal(e.cause.message, 'Unsupported encoding UTF-32');
-    return true;
-  });
+  assert.throws(
+    () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-32' }),
+    (e) => {
+      assert.equal(e.constructor, KafkaError);
+      assert.equal(e.message, 'Failed to construct kafka producer');
+      assert.equal(e.cause.name, 'SerializationError');
+      assert.equal(e.cause.message, 'Unsupported encoding UTF-32');
+      return true;
+    },
+  );
   // The key serializer reads key.serializer.encoding, the value one falls back to serializer.encoding.
   assert.throws(
-    () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-8', 'serializer.encoding': 'windows-1252' }),
+    () =>
+      new KafkaProducer({
+        ...UNREACHABLE,
+        'key.serializer': stringSerializer,
+        'value.serializer': stringSerializer,
+        'key.serializer.encoding': 'UTF-8',
+        'serializer.encoding': 'windows-1252',
+      }),
     (e) => e.cause.message === 'Unsupported encoding windows-1252',
   );
   const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
@@ -1865,7 +1988,10 @@ test("the keys a serde config function reads don't reach the core, nor do the se
   assert.equal(r.stdout, 'closed\n');
   // serializer.encoding is not read: value.serializer.encoding is set, so
   // Java's StringSerializer does not fall back to it.
-  assert.ok(r.stderr.includes("These configurations '[key.deserializer, serializer.encoding]' were supplied but are not used yet."), r.stderr);
+  assert.ok(
+    r.stderr.includes("These configurations '[key.deserializer, serializer.encoding]' were supplied but are not used yet."),
+    r.stderr,
+  );
 });
 
 // partitionsFor (Java's partitionsFor(String topic)): a Promise through the
@@ -1884,7 +2010,10 @@ test("partitionsFor rejects with the core's errors: a metadata timeout, Java's n
       name: 'IllegalArgumentError',
       message: 'partitionsFor() takes one of (topic); got a number',
     });
-    await assert.rejects(producer.partitionsFor(), { name: 'IllegalArgumentError', message: 'partitionsFor() takes one of (topic); got ()' });
+    await assert.rejects(producer.partitionsFor(), {
+      name: 'IllegalArgumentError',
+      message: 'partitionsFor() takes one of (topic); got ()',
+    });
     await assert.rejects(producer.partitionsFor('a', 'b'), {
       name: 'IllegalArgumentError',
       message: 'partitionsFor() takes one of (topic); got 2 arguments, not one object of named parameters',
@@ -1911,7 +2040,12 @@ test("metrics() is a MetricNameMap of KafkaMetric, read when it runs, keyed by J
       assert.ok(['number', 'bigint', 'string'].includes(typeof value), `${name}: ${typeof value}`);
     }
     // Looked up by an equal MetricName, Java's equals: group, name and tags.
-    const key = new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', 'unit-metrics']]) });
+    const key = new MetricName({
+      name: 'record-send-total',
+      group: 'producer-metrics',
+      description: '',
+      tags: new Map([['client-id', 'unit-metrics']]),
+    });
     assert.equal(metrics.has(key), true);
     const total = metrics.get(key);
     assert.equal(total.isMeasurable(), true);

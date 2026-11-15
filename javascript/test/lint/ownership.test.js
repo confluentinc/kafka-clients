@@ -80,6 +80,10 @@ test('cannot run without the header', () => {
 });
 
 test('nothing owned and no completion fails: 0 items checked', () => {
-  const r = runN(RULE, { 'native/producer.c': 'void f(void) {}\n', 'native/callback_queue.c': 'void g(void) {}\n', 'native/record.c': 'void h(void) {}\n' });
+  const r = runN(RULE, {
+    'native/producer.c': 'void f(void) {}\n',
+    'native/callback_queue.c': 'void g(void) {}\n',
+    'native/record.c': 'void h(void) {}\n',
+  });
   assert.ok(r.err.includes('❌ check-ownership: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

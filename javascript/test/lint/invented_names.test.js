@@ -108,8 +108,11 @@ test('each finding kind, with its exact text', () => {
   assert.ok(r.err.includes('❌ check-invented-names: 14 finding(s).'), r.text);
 });
 
-test('without lint-mapping.json both lists are empty: an invented export is then check-java-name\'s finding, not this rule\'s', () => {
-  const r = lint(fixture({ 'lint-mapping.json': undefined, 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  extraJs(): void {}\n', '') }), [RULE]);
+test("without lint-mapping.json both lists are empty: an invented export is then check-java-name's finding, not this rule's", () => {
+  const r = lint(
+    fixture({ 'lint-mapping.json': undefined, 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  extraJs(): void {}\n', '') }),
+    [RULE],
+  );
   assert.equal(r.status, 0, r.text);
 });
 
@@ -119,6 +122,8 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing exported fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [
+    RULE,
+  ]);
   assert.ok(r.err.includes('❌ check-invented-names: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

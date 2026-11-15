@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // Java's RecordMetadataTest, on Java's public constructor; then the
@@ -38,7 +37,14 @@ test('testConstructionWithMissingBatchIndex', () => {
   const keySize = 3;
   const valueSize = 5;
 
-  const metadata = new RecordMetadata({ topicPartition: tp, baseOffset: -1n, batchIndex: -1, timestamp, serializedKeySize: keySize, serializedValueSize: valueSize });
+  const metadata = new RecordMetadata({
+    topicPartition: tp,
+    baseOffset: -1n,
+    batchIndex: -1,
+    timestamp,
+    serializedKeySize: keySize,
+    serializedValueSize: valueSize,
+  });
   assert.equal(metadata.topic, tp.topic);
   assert.equal(metadata.partition, tp.partition);
   assert.equal(metadata.timestamp, timestamp);
@@ -56,7 +62,14 @@ test('testConstructionWithBatchIndexOffset', () => {
   const baseOffset = 15n;
   const batchIndex = 3;
 
-  const metadata = new RecordMetadata({ topicPartition: tp, baseOffset, batchIndex, timestamp, serializedKeySize: keySize, serializedValueSize: valueSize });
+  const metadata = new RecordMetadata({
+    topicPartition: tp,
+    baseOffset,
+    batchIndex,
+    timestamp,
+    serializedKeySize: keySize,
+    serializedValueSize: valueSize,
+  });
   assert.equal(metadata.topic, tp.topic);
   assert.equal(metadata.partition, tp.partition);
   assert.equal(metadata.timestamp, timestamp);
@@ -87,24 +100,40 @@ test("the public constructor: a long is a bigint or a whole number, and the fiel
     constructor: RangeError,
     message: 'timestamp must be from -9223372036854775808 to 9223372036854775807',
   });
-  assert.throws(() => new RecordMetadata({ ...args, timestamp: 1.5 }), { constructor: TypeError, message: 'timestamp must be a bigint or an integer' });
+  assert.throws(() => new RecordMetadata({ ...args, timestamp: 1.5 }), {
+    constructor: TypeError,
+    message: 'timestamp must be a bigint or an integer',
+  });
   assert.throws(() => new RecordMetadata({ ...args, batchIndex: 2 ** 31 }), {
     constructor: RangeError,
     message: 'batchIndex must be from -2147483648 to 2147483647',
   });
-  assert.throws(() => new RecordMetadata({ ...args, topicPartition: null }), { constructor: TypeError, message: 'topicPartition must not be null' });
+  assert.throws(() => new RecordMetadata({ ...args, topicPartition: null }), {
+    constructor: TypeError,
+    message: 'topicPartition must not be null',
+  });
   assert.throws(() => new RecordMetadata({ ...args, topicPartition: { topic: 'foo', partition: 0 } }), {
     constructor: TypeError,
     message: 'topicPartition must be a TopicPartition',
   });
   assert.throws(() => new RecordMetadata({ topicPartition: tp }), {
     constructor: IllegalArgumentError,
-    message: 'RecordMetadata() takes one of (topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize, serializedValueSize); got (topicPartition)',
+    message:
+      'RecordMetadata() takes one of (topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize, serializedValueSize); got (topicPartition)',
   });
 });
 
 test('no timestamp reads -1, as Java returns it', () => {
-  const metadata = metadataOf({ topic: 'foo', partition: 0, hasOffset: true, offset: 1n, hasTimestamp: false, timestamp: 7n, serializedKeySize: -1, serializedValueSize: -1 });
+  const metadata = metadataOf({
+    topic: 'foo',
+    partition: 0,
+    hasOffset: true,
+    offset: 1n,
+    hasTimestamp: false,
+    timestamp: 7n,
+    serializedKeySize: -1,
+    serializedValueSize: -1,
+  });
   assert.equal(metadata.hasTimestamp, false);
   assert.equal(metadata.timestamp, -1n);
 });
@@ -112,14 +141,31 @@ test('no timestamp reads -1, as Java returns it', () => {
 // A data object: Java's getters are own enumerable fields set once, so
 // spread, JSON.stringify and structuredClone keep them.
 test('the fields are own data properties, in Java order, kept by spread, JSON and structuredClone', () => {
-  const metadata = metadataOf({ topic: 'foo', partition: 2, hasOffset: true, offset: 9n, timestamp: 4n, serializedKeySize: -1, serializedValueSize: 5 });
+  const metadata = metadataOf({
+    topic: 'foo',
+    partition: 2,
+    hasOffset: true,
+    offset: 9n,
+    timestamp: 4n,
+    serializedKeySize: -1,
+    serializedValueSize: 5,
+  });
   assert.deepEqual(Object.keys(metadata), FIELDS);
   for (const name of FIELDS) {
     const d = Object.getOwnPropertyDescriptor(metadata, name);
     assert.ok('value' in d && d.enumerable, `${name} is an own enumerable data property`);
     assert.equal(Object.getOwnPropertyDescriptor(RecordMetadata.prototype, name), undefined);
   }
-  const expected = { topic: 'foo', partition: 2, offset: 9n, hasOffset: true, timestamp: 4n, hasTimestamp: true, serializedKeySize: -1, serializedValueSize: 5 };
+  const expected = {
+    topic: 'foo',
+    partition: 2,
+    offset: 9n,
+    hasOffset: true,
+    timestamp: 4n,
+    hasTimestamp: true,
+    serializedKeySize: -1,
+    serializedValueSize: 5,
+  };
   assert.deepEqual({ ...metadata }, expected);
   // toJSON writes Java's longs as decimal strings, which BigInt() reads back.
   assert.deepEqual(JSON.parse(JSON.stringify(metadata)), { ...expected, offset: '9', timestamp: '4' });
@@ -127,7 +173,15 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
   assert.equal(Object.isFrozen(metadata), true);
   assert.equal(metadata.toString(), 'foo-2@9');
   // A long beyond 2^53 is exact, in the field and in JSON.
-  const big = metadataOf({ topic: 'foo', partition: 0, hasOffset: true, offset: 2n ** 62n + 1n, timestamp: 1n, serializedKeySize: -1, serializedValueSize: -1 });
+  const big = metadataOf({
+    topic: 'foo',
+    partition: 0,
+    hasOffset: true,
+    offset: 2n ** 62n + 1n,
+    timestamp: 1n,
+    serializedKeySize: -1,
+    serializedValueSize: -1,
+  });
   assert.equal(big.offset, 4611686018427387905n);
   assert.equal(JSON.parse(JSON.stringify(big)).offset, '4611686018427387905');
   assert.equal(RecordMetadata.UNKNOWN_PARTITION, -1);

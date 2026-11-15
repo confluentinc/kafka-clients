@@ -177,9 +177,34 @@ function splitArgs(code, source, from, to) {
 // Words followed by `(` that call nothing: keywords, and the type names of a
 // cast or a function-pointer declaration.
 const NOT_CALLS = new Set([
-  'if', 'while', 'for', 'switch', 'return', 'sizeof', 'defined', '_Alignof', 'alignof', 'case', 'else', 'do',
-  'void', 'int', 'char', 'long', 'short', 'unsigned', 'signed', 'double', 'float', 'const', 'static', 'struct',
-  'enum', 'union', 'bool', 'size_t',
+  'if',
+  'while',
+  'for',
+  'switch',
+  'return',
+  'sizeof',
+  'defined',
+  '_Alignof',
+  'alignof',
+  'case',
+  'else',
+  'do',
+  'void',
+  'int',
+  'char',
+  'long',
+  'short',
+  'unsigned',
+  'signed',
+  'double',
+  'float',
+  'const',
+  'static',
+  'struct',
+  'enum',
+  'union',
+  'bool',
+  'size_t',
 ]);
 
 /**

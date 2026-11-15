@@ -68,10 +68,7 @@ test('parseProperties joins continued lines', () => {
     'org.apache.kafka.common.security.plain.PlainLoginModule required\n' +
     '    username="client"\n' +
     '    password="client-secret";\n';
-  const contents =
-    'security.protocol=SASL_PLAINTEXT\n' +
-    `sasl.jaas.config=${jaas.replace(/\n/g, ' \\\n')}\n` +
-    'sasl.mechanism=PLAIN\n';
+  const contents = 'security.protocol=SASL_PLAINTEXT\n' + `sasl.jaas.config=${jaas.replace(/\n/g, ' \\\n')}\n` + 'sasl.mechanism=PLAIN\n';
   assert.deepEqual(parseProperties(contents), {
     'security.protocol': 'SASL_PLAINTEXT',
     'sasl.jaas.config':

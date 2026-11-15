@@ -56,7 +56,11 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
   // their array (Headers' toJSON), each a {key, value} data object;
   // structuredClone keeps the fields, and the headers' own (none: Headers
   // holds its list in a private field).
-  assert.deepEqual(JSON.parse(JSON.stringify(r)), { ...fields, timestamp: '5', headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(r)), {
+    ...fields,
+    timestamp: '5',
+    headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }],
+  });
   assert.deepEqual(structuredClone(r), { ...fields, headers: {} });
   // Frozen; the headers are the record's own Headers, holding the given
   // Header objects, as Java's new RecordHeaders(headers), and stay writable.
@@ -140,11 +144,25 @@ test("hashCode is Java's, and equals compares as Java's does", () => {
   // A timestamp given as a number is the same Long.
   assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: 4294967296, key: null, value: 'v' }).hashCode(), -973952330);
   // Equal headers make equal records; other headers do not.
-  const same = new ProducerRecord({ topic: 'orders', partition: 3, timestamp: 1700000000000n, key: 'key-\u00e9', value: 'value', headers: new Headers(headers) });
+  const same = new ProducerRecord({
+    topic: 'orders',
+    partition: 3,
+    timestamp: 1700000000000n,
+    key: 'key-\u00e9',
+    value: 'value',
+    headers: new Headers(headers),
+  });
   assert.ok(r1.equals(same));
   assert.ok(r1.equals({ o: same }));
   assert.equal(r1.hashCode(), same.hashCode());
-  const other = new ProducerRecord({ topic: 'orders', partition: 3, timestamp: 1700000000000n, key: 'key-\u00e9', value: 'value', headers: [] });
+  const other = new ProducerRecord({
+    topic: 'orders',
+    partition: 3,
+    timestamp: 1700000000000n,
+    key: 'key-\u00e9',
+    value: 'value',
+    headers: [],
+  });
   assert.ok(!r1.equals(other));
   // A byte key or value is Java's byte[]: equal only to itself.
   const key = bytes('k');
@@ -171,14 +189,17 @@ test("hashCode is Java's, and equals compares as Java's does", () => {
 
 // Java's ProducerRecordTest.testInvalidRecords, with Java's messages.
 test("Java's constructor checks keep Java's messages", () => {
-  assert.throws(() => new ProducerRecord({ topic: null, partition: 0, key: 'key', value: 'v' }), (e) => {
-    assert.ok(e instanceof IllegalArgumentError);
-    assert.ok(!(e instanceof KafkaError));
-    assert.equal(e.name, 'IllegalArgumentError');
-    assert.ok(e instanceof RangeError);
-    assert.equal(e.message, 'Topic cannot be null.');
-    return true;
-  });
+  assert.throws(
+    () => new ProducerRecord({ topic: null, partition: 0, key: 'key', value: 'v' }),
+    (e) => {
+      assert.ok(e instanceof IllegalArgumentError);
+      assert.ok(!(e instanceof KafkaError));
+      assert.equal(e.name, 'IllegalArgumentError');
+      assert.ok(e instanceof RangeError);
+      assert.equal(e.message, 'Topic cannot be null.');
+      return true;
+    },
+  );
   // An undefined topic is refused: leave the key out, or pass null.
   assert.throws(() => new ProducerRecord({ topic: undefined, partition: 0, key: 'key', value: 'v' }), {
     name: 'TypeError',
@@ -197,10 +218,14 @@ test("Java's constructor checks keep Java's messages", () => {
     name: 'IllegalArgumentError',
     message: 'Invalid partition: -1. Partition number should always be non-negative or null.',
   });
-  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [new Header({ key: null, value: bytes('x') })] }), {
-    name: 'TypeError',
-    message: 'Null header keys are not permitted',
-  });
+  assert.throws(
+    () =>
+      new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [new Header({ key: null, value: bytes('x') })] }),
+    {
+      name: 'TypeError',
+      message: 'Null header keys are not permitted',
+    },
+  );
   // A null header: Java's RecordHeaders requireNonNull(header, "Header cannot be null.").
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [null] }), {
     name: 'TypeError',
@@ -245,12 +270,18 @@ test("a parameter given as undefined is a TypeError; value's message says null s
   }
 });
 
-test('undefined inside the headers is a TypeError; a null header value is Java\'s null', () => {
+test("undefined inside the headers is a TypeError; a null header value is Java's null", () => {
   const record = (headers) => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers });
   const [header] = record([new Header({ key: 'h', value: null })]).headers.toArray();
   assert.deepEqual([header.key(), header.value()], ['h', null]);
-  assert.throws(() => record([undefined]), { name: 'TypeError', message: 'a header must not be undefined. Pass a Header, or leave it out' });
-  assert.throws(() => new Header({ key: 'h', value: undefined }), { name: 'TypeError', message: "value must not be undefined. Pass null for Java's null" });
+  assert.throws(() => record([undefined]), {
+    name: 'TypeError',
+    message: 'a header must not be undefined. Pass a Header, or leave it out',
+  });
+  assert.throws(() => new Header({ key: 'h', value: undefined }), {
+    name: 'TypeError',
+    message: "value must not be undefined. Pass null for Java's null",
+  });
 });
 
 test('a call with no argument, undefined or more than one argument is refused', () => {
@@ -307,11 +338,14 @@ test('every set of parameters that is not a Java constructor is an IllegalArgume
       continue;
     }
     rejected += 1;
-    assert.throws(() => new ProducerRecord(options), (e) => {
-      assert.ok(e instanceof IllegalArgumentError);
-      assert.equal(e.message, `${FORMS}; got (${given.join(', ')})`);
-      return true;
-    });
+    assert.throws(
+      () => new ProducerRecord(options),
+      (e) => {
+        assert.ok(e instanceof IllegalArgumentError);
+        assert.equal(e.message, `${FORMS}; got (${given.join(', ')})`);
+        return true;
+      },
+    );
   }
   assert.equal(rejected, 64 - 6);
   // A name no constructor has.
@@ -360,8 +394,14 @@ test('values of the wrong type are TypeErrors', () => {
     name: 'RangeError',
     message: 'timestamp must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly',
   });
-  assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: 2n ** 63n - 1n, key: null, value: 'v' }).timestamp, 2n ** 63n - 1n);
-  assert.equal(new ProducerRecord({ topic: 't', partition: null, timestamp: Number.MAX_SAFE_INTEGER, key: null, value: 'v' }).timestamp, 9007199254740991n);
+  assert.equal(
+    new ProducerRecord({ topic: 't', partition: null, timestamp: 2n ** 63n - 1n, key: null, value: 'v' }).timestamp,
+    2n ** 63n - 1n,
+  );
+  assert.equal(
+    new ProducerRecord({ topic: 't', partition: null, timestamp: Number.MAX_SAFE_INTEGER, key: null, value: 'v' }).timestamp,
+    9007199254740991n,
+  );
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, timestamp: 2n ** 63n, key: null, value: 'v' }), {
     name: 'RangeError',
     message: 'timestamp must be from -9223372036854775808 to 9223372036854775807',
@@ -407,7 +447,10 @@ test('a string key or value points to stringSerializer(); null stays null', () =
   assert.equal(timestamp, -1n);
   assert.equal(k, null);
   assert.equal(v, null);
-  assert.deepEqual(keysAsText(headers), [['h', bytes('é')], ['n', null]]);
+  assert.deepEqual(keysAsText(headers), [
+    ['h', bytes('é')],
+    ['n', null],
+  ]);
   // A string can't reach the FFI as bytes without a serializer (root Q24, Q27);
   // the headers stay writable.
   const s = new ProducerRecord({ topic: 't', key: 'clé', value: null });
@@ -422,7 +465,7 @@ test('a string key or value points to stringSerializer(); null stays null', () =
   assert.deepEqual(s.internalToNative(Buffer.from('k'), null).slice(3, 5), [Buffer.from('k'), null]);
 });
 
-test('send seals the headers once the fields are checked, as Java\'s doSend calls setReadOnly', () => {
+test("send seals the headers once the fields are checked, as Java's doSend calls setReadOnly", () => {
   const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: Buffer.from('v'), headers: [H('a', null)] });
   r.headers.add({ key: 'b', value: null });
   r.internalToNative();
@@ -432,20 +475,41 @@ test('send seals the headers once the fields are checked, as Java\'s doSend call
   assert.match(String(r), /isReadOnly = true/);
   // Reading is unaffected, and so is a second send of the same record.
   assert.equal(r.headers.lastHeader('b').key(), 'b');
-  assert.deepEqual(keysAsText(r.internalToNative()[5]), [['a', null], ['b', null]]);
+  assert.deepEqual(keysAsText(r.internalToNative()[5]), [
+    ['a', null],
+    ['b', null],
+  ]);
 });
 
 // The record is frozen: plain JavaScript cannot reassign a field after the
 // constructor checked it, so send() checks nothing again (root conventions,
 // Q35: the binding repeats no precondition).
 test('the record is frozen: a field cannot be reassigned, so send reads what the constructor checked', () => {
-  const r = new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: Buffer.from('k'), value: Buffer.from('v'), headers: [H('h', bytes('x'))] });
+  const r = new ProducerRecord({
+    topic: 't',
+    partition: 0,
+    timestamp: 1,
+    key: Buffer.from('k'),
+    value: Buffer.from('v'),
+    headers: [H('h', bytes('x'))],
+  });
   assert.equal(Object.isFrozen(r), true);
-  for (const [field, value] of [['value', undefined], ['key', 42], ['partition', -5], ['timestamp', NaN], ['topic', null], ['headers', null]]) {
+  for (const [field, value] of [
+    ['value', undefined],
+    ['key', 42],
+    ['partition', -5],
+    ['timestamp', NaN],
+    ['topic', null],
+    ['headers', null],
+  ]) {
     // Test files are strict mode: the assignment throws.
-    assert.throws(() => {
-      r[field] = value;
-    }, TypeError, field);
+    assert.throws(
+      () => {
+        r[field] = value;
+      },
+      TypeError,
+      field,
+    );
   }
   assert.throws(() => {
     r.extra = 1;
@@ -475,10 +539,7 @@ test('toString follows Java', () => {
     timestamp: 5,
     key: 'k',
     value: 'v',
-    headers: [
-      H('a', bytes('vé')),
-      new Header({ key: 'b', value: new Uint8Array([118]) }),
-    ],
+    headers: [H('a', bytes('vé')), new Header({ key: 'b', value: new Uint8Array([118]) })],
   });
   assert.equal(
     s.toString(),

@@ -96,7 +96,11 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
   const half = (list, name) => list.find((r) => r.name === name).PART;
   assert.deepEqual(
     ['check-no-todo', 'check-exception-word', 'check-java-line'].map((n) => [half(ESLINT_CHECKS, n), half(RULES, n)]),
-    [['code', 'other'], ['ts', 'c'], ['ts', 'c']],
+    [
+      ['code', 'other'],
+      ['ts', 'c'],
+      ['ts', 'c'],
+    ],
   );
   // Only the rules that read TypeScript are ESLint's; the runner keeps the addon's (and no TypeScript-only rule).
   const tsOnly = ESLINT_CHECKS.filter((c) => !Object.prototype.hasOwnProperty.call(c, 'PART')).map((c) => c.name);
@@ -115,16 +119,22 @@ test('the ESLint plugin: one `kafka/` rule per ESLint check, named after it, plu
 test('a usage error exits 2', () => {
   let r = lint(project({}), ['--bogus']);
   assert.equal(r.status, 2);
-  assert.deepEqual(r.err, [
-    'unknown lint_rules argument `--bogus`; usage: node scripts/lint_rules.js [check-<name>] [--no-baseline]',
-  ]);
+  assert.deepEqual(r.err, ['unknown lint_rules argument `--bogus`; usage: node scripts/lint_rules.js [check-<name>] [--no-baseline]']);
   r = lint(project({}), ['check-nothing']);
   assert.equal(r.status, 2);
   assert.deepEqual(r.err, ['no rule named `check-nothing`']);
 });
 
 test('a rule that throws fails with the reason, and the others still run', () => {
-  const boom = { name: 'check-boom', kinds: ['boom'], needs: [], hint: '', check: () => { throw new Error('bad input'); } };
+  const boom = {
+    name: 'check-boom',
+    kinds: ['boom'],
+    needs: [],
+    hint: '',
+    check: () => {
+      throw new Error('bad input');
+    },
+  };
   const ok = { name: 'check-ok', kinds: ['ok'], needs: [], hint: '', check: () => ({ findings: [], checked: 3 }) };
   const r = lintRunner(project({}), [], { rules: [boom, ok] });
   assert.equal(r.status, 1);
@@ -223,7 +233,7 @@ test('the real tree passes with the checked-in baselines: the runner, and ESLint
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
 });
 
-test('the real tree without baselines: exactly the findings the baselines list, all ESLint\'s', () => {
+test("the real tree without baselines: exactly the findings the baselines list, all ESLint's", () => {
   const r = spawnSync(process.execPath, [path.join(ROOT, 'node_modules', '.bin', 'eslint'), '.', '-f', 'json'], {
     cwd: ROOT,
     encoding: 'utf8',
@@ -243,6 +253,9 @@ test('the real tree without baselines: exactly the findings the baselines list, 
       .filter((l) => l !== '' && !l.startsWith('#'));
   assert.deepEqual(keys, listed('eslint-baseline.txt').sort());
   assert.deepEqual(listed('lint-baseline.txt'), []);
-  const runner = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lint_rules.js'), '--no-baseline'], { cwd: ROOT, encoding: 'utf8' });
+  const runner = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lint_rules.js'), '--no-baseline'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
   assert.equal(runner.status, 0, `${runner.stdout}${runner.stderr}`);
 });

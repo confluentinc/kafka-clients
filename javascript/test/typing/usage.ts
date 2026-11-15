@@ -60,7 +60,12 @@ import {
   ThrottlingQuotaExceededError,
   TopicAuthorizationError,
 } from '@confluentinc/kafka-javascript/common/errors';
-import { LogTruncationError, NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError } from '@confluentinc/kafka-javascript/consumer';
+import {
+  LogTruncationError,
+  NoOffsetForPartitionError,
+  OffsetAndMetadata,
+  OffsetOutOfRangeError,
+} from '@confluentinc/kafka-javascript/consumer';
 import { TimestampType } from '@confluentinc/kafka-javascript/common/record';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
@@ -124,7 +129,9 @@ const recordHeaders = record.headers;
 expectTypeOf(recordHeaders).toEqualTypeOf<Headers>();
 void [topic, partition, recordHeaders];
 // Headers: Java's members, the headers given in any of the three forms.
-const built = new Headers([new Header({ key: 'a', value: Buffer.from('1') })]).add(new Header({ key: 'b', value: null })).add({ key: 'c', value: null });
+const built = new Headers([new Header({ key: 'a', value: Buffer.from('1') })])
+  .add(new Header({ key: 'b', value: null }))
+  .add({ key: 'c', value: null });
 expectTypeOf(built).toEqualTypeOf<Headers>();
 new Headers({ headers: built });
 new Headers({ headers: null });
@@ -165,7 +172,11 @@ new Headers([['k', null]]);
 // @ts-expect-error a {key, value} object is not a Header
 built.add({ header: { key: 'k', value: null } });
 // A data object: its fields spread into a plain object of the same types.
-const { timestamp: recordTimestamp, key: recordKey, value: recordValue }: { timestamp: bigint | null; key: Buffer | null; value: Uint8Array | null } = { ...record };
+const {
+  timestamp: recordTimestamp,
+  key: recordKey,
+  value: recordValue,
+}: { timestamp: bigint | null; key: Buffer | null; value: Uint8Array | null } = { ...record };
 void [recordTimestamp, recordKey, recordValue];
 
 const callback: Callback = ({ metadata, exception: error }: { metadata: RecordMetadata; exception: Error | null }) => {
@@ -397,7 +408,13 @@ async function produce(): Promise<void> {
   const maybeEntries: Array<[MetricName, number]> | undefined = undefined as Array<[MetricName, number]> | undefined;
   // @ts-expect-error undefined is no entries: leave the argument out
   void new MetricNameMap<number>(maybeEntries);
-  const kafkaMetric = new KafkaMetric({ lock: null, metricName, valueProvider: { value: () => 1 }, config: null, time: { milliseconds: () => 0 } });
+  const kafkaMetric = new KafkaMetric({
+    lock: null,
+    metricName,
+    valueProvider: { value: () => 1 },
+    config: null,
+    time: { milliseconds: () => 0 },
+  });
   const asMetric: Metric = kafkaMetric;
   void asMetric;
   // @ts-expect-error metrics() takes no argument
@@ -500,7 +517,9 @@ new RecordTooLargeError({ message: 'm', recordTooLargePartitions: new Map<TopicP
 const outOfRange = new OffsetOutOfRangeError({ offsetOutOfRangePartitions: new TopicPartitionMap<bigint>() });
 expectTypeOf(outOfRange.offsetOutOfRangePartitions()).toEqualTypeOf<TopicPartitionMap<bigint>>();
 expectTypeOf(outOfRange.partitions()).toEqualTypeOf<TopicPartitionSet>();
-expectTypeOf(new NoOffsetForPartitionError({ partition: new TopicPartition({ topic: 't', partition: 0 }) }).partitions()).toEqualTypeOf<TopicPartitionSet>();
+expectTypeOf(
+  new NoOffsetForPartitionError({ partition: new TopicPartition({ topic: 't', partition: 0 }) }).partitions(),
+).toEqualTypeOf<TopicPartitionSet>();
 expectTypeOf(GroupAuthorizationError.forGroupId('g').groupId()).toEqualTypeOf<string | null>();
 expectTypeOf(GroupAuthorizationError.forGroupId({ groupId: 'g' })).toEqualTypeOf<GroupAuthorizationError>();
 expectTypeOf(new ThrottlingQuotaExceededError({ throttleTimeMs: 5, message: 'm' }).throttleTimeMs()).toEqualTypeOf<number>();
@@ -610,7 +629,16 @@ new ProducerConfig();
 
 // Made by the client only: the constructors are private, and the library's
 // own factories and methods are left out of the declarations (stripInternal).
-const fields = { topic: 't', partition: 0, hasOffset: true, offset: 0n, hasTimestamp: true, timestamp: 0n, serializedKeySize: -1, serializedValueSize: -1 };
+const fields = {
+  topic: 't',
+  partition: 0,
+  hasOffset: true,
+  offset: 0n,
+  hasTimestamp: true,
+  timestamp: 0n,
+  serializedKeySize: -1,
+  serializedValueSize: -1,
+};
 // @ts-expect-error RecordMetadata's public constructor is Java's, not the fields the client reads
 new RecordMetadata(fields);
 // @ts-expect-error KafkaFuture's constructor is private
@@ -663,9 +691,15 @@ expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: null })).toEqual
 expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
 expectTypeOf(new ProducerRecord({ topic: 't', key: 1, value: null })).toEqualTypeOf<ProducerRecord<number, never>>();
 expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: null, value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
-expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
-expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: 1, value: null, headers: null })).toEqualTypeOf<ProducerRecord<number, never>>();
-expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: null, headers: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: 'v' })).toEqualTypeOf<
+  ProducerRecord<never, string>
+>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: 1, value: null, headers: null })).toEqualTypeOf<
+  ProducerRecord<number, never>
+>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: null, headers: null })).toEqualTypeOf<
+  ProducerRecord<never, never>
+>();
 // A key or value that may be null binds its type without null.
 declare const maybeKey: string | null;
 expectTypeOf(new ProducerRecord({ topic: 't', key: maybeKey, value: maybeKey })).toEqualTypeOf<ProducerRecord<string, string>>();
@@ -756,7 +790,14 @@ expectTypeOf(builtInfo.hashCode()).toEqualTypeOf<number>();
 expectTypeOf(tp.equals({ obj: tp })).toEqualTypeOf<boolean>();
 expectTypeOf(node.hashCode()).toEqualTypeOf<number>();
 // RecordMetadata's public constructor is Java's: a long takes a bigint or a number.
-const builtMetadata = new RecordMetadata({ topicPartition: tp, baseOffset: 15n, batchIndex: 3, timestamp: 1, serializedKeySize: -1, serializedValueSize: 5 });
+const builtMetadata = new RecordMetadata({
+  topicPartition: tp,
+  baseOffset: 15n,
+  batchIndex: 3,
+  timestamp: 1,
+  serializedKeySize: -1,
+  serializedValueSize: 5,
+});
 expectTypeOf(builtMetadata.offset).toEqualTypeOf<bigint>();
 expectTypeOf(KafkaProducer.NETWORK_THREAD_PREFIX).toEqualTypeOf<string>();
 expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
@@ -779,9 +820,9 @@ void viaFactory;
 expectTypeOf(new KafkaProducer(viaFactory)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
 // The config keys bind the type their functions return, as arguments do
 // (Q27): the README's "the same through the configuration".
-expectTypeOf(
-  new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer }),
-).toEqualTypeOf<KafkaProducer<string, string>>();
+expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer })).toEqualTypeOf<
+  KafkaProducer<string, string>
+>();
 expectTypeOf(new KafkaProducer({ configs: { ...configs, 'value.serializer': stringSerializer } })).toEqualTypeOf<
   KafkaProducer<Uint8Array, string>
 >();
@@ -837,7 +878,12 @@ void serializers;
 // inferred from its serializers; a mock built without them is the one place
 // a type argument is written (Q27).
 async function mocks(): Promise<void> {
-  const typed = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: stringSerializer(), valueSerializer: orderSerializer });
+  const typed = new MockProducer({
+    autoComplete: true,
+    partitioner: null,
+    keySerializer: stringSerializer(),
+    valueSerializer: orderSerializer,
+  });
   expectTypeOf(typed).toEqualTypeOf<MockProducer<string, Order>>();
   const asInterface: Producer<string, Order> = typed;
   expectTypeOf(asInterface.send).returns.toEqualTypeOf<Promise<KafkaFuture<RecordMetadata>>>();

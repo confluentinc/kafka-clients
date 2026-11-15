@@ -97,7 +97,7 @@ function checkKey(key: unknown): string {
 function headerOf(item: unknown): Header {
   if (item instanceof Header) return item;
   if (item === null) throw new TypeError('Header cannot be null.');
-  if (item === undefined) throw new TypeError("a header must not be undefined. Pass a Header, or leave it out");
+  if (item === undefined) throw new TypeError('a header must not be undefined. Pass a Header, or leave it out');
   throw new TypeError('a header must be a Header');
 }
 
@@ -110,10 +110,7 @@ function headerOf(item: unknown): Header {
 function taken(headers: unknown): readonly Header[] {
   if (headers === null) return EMPTY;
   if (headers instanceof Headers) return headers.internalHeaders().length === 0 ? EMPTY : headers.internalHeaders().slice();
-  if (
-    typeof headers !== 'object' ||
-    typeof (headers as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function'
-  ) {
+  if (typeof headers !== 'object' || typeof (headers as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
     throw new TypeError('headers must be a Headers, or an iterable of Header');
   }
   const out: Header[] = [];
@@ -261,7 +258,10 @@ export class Headers implements Iterable<Header> {
     } else {
       // Java's add(key, value) is add(new RecordHeader(key, value)): the
       // header's checks come first.
-      header = new Header({ key: ADD_FORMS.value(options, 'key') as string, value: ADD_FORMS.value(options, 'value') as Uint8Array | null });
+      header = new Header({
+        key: ADD_FORMS.value(options, 'key') as string,
+        value: ADD_FORMS.value(options, 'value') as Uint8Array | null,
+      });
     }
     this.#canWrite();
     if (this.#headers === EMPTY) this.#headers = [header as Header];

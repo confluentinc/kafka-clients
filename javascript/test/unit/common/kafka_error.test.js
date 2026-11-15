@@ -22,21 +22,24 @@ const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 const { errorFfiId } = require('../../../dist/internal/errors');
 
 test('an invalid config is a KafkaError with the core message', () => {
-  assert.throws(() => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:9092', acks: 'bogus' } }), (e) => {
-    assert.ok(e instanceof ConfigError);
-    assert.ok(e instanceof KafkaError);
-    assert.ok(e instanceof Error);
-    assert.equal(e.name, 'ConfigError');
-    assert.equal(e.message, 'Invalid value bogus for configuration acks: String must be one of: all, -1, 0, 1');
-    assert.equal(e.cause, undefined);
-    // The FFI id is private (`_ffiId`, left out of the declarations): only
-    // `name`, `message` and `cause` are public.
-    assert.equal(errorFfiId(e), -10);
-    assert.equal(ConfigError._ffiId, -10);
-    assert.ok(!Object.keys(e).includes('_ffiId'));
-    assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
-    return true;
-  });
+  assert.throws(
+    () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:9092', acks: 'bogus' } }),
+    (e) => {
+      assert.ok(e instanceof ConfigError);
+      assert.ok(e instanceof KafkaError);
+      assert.ok(e instanceof Error);
+      assert.equal(e.name, 'ConfigError');
+      assert.equal(e.message, 'Invalid value bogus for configuration acks: String must be one of: all, -1, 0, 1');
+      assert.equal(e.cause, undefined);
+      // The FFI id is private (`_ffiId`, left out of the declarations): only
+      // `name`, `message` and `cause` are public.
+      assert.equal(errorFfiId(e), -10);
+      assert.equal(ConfigError._ffiId, -10);
+      assert.ok(!Object.keys(e).includes('_ffiId'));
+      assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
+      return true;
+    },
+  );
   assert.throws(() => new KafkaProducer({ configs: {} }), {
     name: 'ConfigError',
     message: 'Missing required configuration "bootstrap.servers" which has no default value.',

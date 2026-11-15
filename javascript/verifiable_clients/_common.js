@@ -204,7 +204,9 @@ class ArgumentParser {
       if (shown.has(option)) continue;
       if (option.group !== null) {
         const members = option.group.options.map((o) => `${o.flag} ${o.metavar}`).join(' | ');
-        parts.push(option.group.required && option.group.options.length > 1 ? `(${members})` : option.group.required ? members : `[${members}]`);
+        parts.push(
+          option.group.required && option.group.options.length > 1 ? `(${members})` : option.group.required ? members : `[${members}]`,
+        );
         for (const member of option.group.options) shown.add(member);
         continue;
       }

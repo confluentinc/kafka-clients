@@ -66,7 +66,11 @@ export class SslClientAuth {
   /**
    * The constants in Java's order, Java's `VALUES`.
    */
-  static readonly VALUES: ReadonlyArray<SslClientAuth> = Object.freeze([SslClientAuth.REQUIRED, SslClientAuth.REQUESTED, SslClientAuth.NONE]);
+  static readonly VALUES: ReadonlyArray<SslClientAuth> = Object.freeze([
+    SslClientAuth.REQUIRED,
+    SslClientAuth.REQUESTED,
+    SslClientAuth.NONE,
+  ]);
 
   /**
    * The constants in declaration order, Java's `values()`.

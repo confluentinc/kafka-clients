@@ -86,18 +86,31 @@ const ALLOWED = [
   },
   {
     key: 'src/internal/java_number.ts:INT32_MAX',
-    reason: "the largest Java int: a range check of one argument, not a cap of records",
+    reason: 'the largest Java int: a range check of one argument, not a cap of records',
   },
   {
     key: 'src/internal/java_number.ts:INT64_MAX',
-    reason: "the largest Java long: a range check of one argument, not a cap of records",
+    reason: 'the largest Java long: a range check of one argument, not a cap of records',
   },
   { key: 'MetricName.#tags', reason: "one metric name's tags, Java's Map<String, String> field, not a store of records" },
-  { key: 'MetricNameMap.#entries', reason: "one metrics() snapshot's entries (Java's Map<MetricName, ? extends Metric>), not a store of records" },
-  { key: 'TopicPartitionMap.#entries', reason: "the entries of Java's Map<TopicPartition, V> the caller builds or a call returns, not a store of records" },
+  {
+    key: 'MetricNameMap.#entries',
+    reason: "one metrics() snapshot's entries (Java's Map<MetricName, ? extends Metric>), not a store of records",
+  },
+  {
+    key: 'TopicPartitionMap.#entries',
+    reason: "the entries of Java's Map<TopicPartition, V> the caller builds or a call returns, not a store of records",
+  },
   { key: 'TopicPartitionSet.#members', reason: "the members of Java's Set<TopicPartition> a call returns, not a store of records" },
-  { key: 'MockProducer.#pending', reason: "the delivery functions of the mock's waiting sends, which the addon holds only weakly so a closed mock is collected (Java's mock holds its completions), not a store of records" },
-  { key: 'src/internal/throwable.ts:fieldsOf', reason: "each error's payload fields, between its root's constructor and its own class's (Q39), not a store of records" },
+  {
+    key: 'MockProducer.#pending',
+    reason:
+      "the delivery functions of the mock's waiting sends, which the addon holds only weakly so a closed mock is collected (Java's mock holds its completions), not a store of records",
+  },
+  {
+    key: 'src/internal/throwable.ts:fieldsOf',
+    reason: "each error's payload fields, between its root's constructor and its own class's (Q39), not a store of records",
+  },
   { key: 'Headers.#headers', reason: "one record's headers (Java's RecordHeaders' list), not a store of records" },
   {
     key: 'src/common/header/headers.ts:EMPTY',
@@ -107,7 +120,7 @@ const ALLOWED = [
   { key: 'src/internal/errors.ts:byId', reason: 'the error classes by FFI id, built once from the generated registry' },
   { key: 'src/internal/errors.ts:roots', reason: 'the generated error classes at the top of a chain, found once' },
   { key: 'src/internal/native_loader.ts:SUPPORTED_PLATFORMS', reason: 'the platform packages the loader knows, a constant list' },
-  { key: 'src/internal/throwable.ts:registered', reason: "the Java constructor forms of each error class, keyed weakly by the class" },
+  { key: 'src/internal/throwable.ts:registered', reason: 'the Java constructor forms of each error class, keyed weakly by the class' },
   {
     key: 'JavaForms.#bare',
     reason: "a method's one-parameter Java forms, fixed when its module loads: a table of forms, not records",
@@ -124,19 +137,21 @@ const ALLOWED = [
   },
   {
     key: 'src/common/kafka_future.ts:STAGES',
-    reason: "the Promise toCompletionStage() returned, keyed weakly by its future: one per future, made on first use, not a store of records",
+    reason:
+      'the Promise toCompletionStage() returned, keyed weakly by its future: one per future, made on first use, not a store of records',
   },
   {
     key: 'src/common/kafka_future.ts:COMPLETIONS',
-    reason: "the futures completed in one call whose waiters have not run yet, emptied before the call returns: Java's postComplete loop, not a store of records",
+    reason:
+      "the futures completed in one call whose waiters have not run yet, emptied before the call returns: Java's postComplete loop, not a store of records",
   },
   {
     key: 'KafkaFutureImpl.#waiters',
-    reason: "the get() Promises and dependants waiting on one future, run once at its completion: not a store of records",
+    reason: 'the get() Promises and dependants waiting on one future, run once at its completion: not a store of records',
   },
   {
     key: 'KafkaProducer.#deferred',
-    reason: "the settlements waiting for the event-loop turn (javascript/CLAUDE.md rule 3); the records are handed over at once",
+    reason: 'the settlements waiting for the event-loop turn (javascript/CLAUDE.md rule 3); the records are handed over at once',
   },
   {
     key: 'MockProducer.#deferred',
@@ -186,7 +201,12 @@ module.exports = {
             allow: `${file}:${fn}:${t.value}#${n}`,
           });
         } else {
-          raw.push({ kind: 'lock', subject: `${file}:${t.line}`, message: `names ${t.value}: no lock outside native/callback_queue.c`, allow: `${file}:${t.value}` });
+          raw.push({
+            kind: 'lock',
+            subject: `${file}:${t.line}`,
+            message: `names ${t.value}: no lock outside native/callback_queue.c`,
+            allow: `${file}:${t.value}`,
+          });
         }
       });
     }
@@ -209,7 +229,12 @@ module.exports = {
             if (!ts.isIdentifier(d.name)) continue;
             checked += 1;
             if (CAP.test(d.name.text)) {
-              raw.push({ kind: 'cap', subject: `${rel}:${d.name.text}`, message: 'names a cap: the binding caps no records', allow: `${rel}:${d.name.text}` });
+              raw.push({
+                kind: 'cap',
+                subject: `${rel}:${d.name.text}`,
+                message: 'names a cap: the binding caps no records',
+                allow: `${rel}:${d.name.text}`,
+              });
             }
             const held = stores(d);
             if (held) {

@@ -43,9 +43,10 @@ test('each closed field, in a class or in C, and each closed message is a findin
       ...CLEAN,
       'src/client.ts':
         'export class Client {\n  #closed = false;\n  private _closing = false;\n  isClosed = false;\n}\n' +
-        "export class Mock {\n  closed = false;\n  fail(): never { throw new Error(`MockProducer is already closed.`); }\n}\n" +
+        'export class Mock {\n  closed = false;\n  fail(): never { throw new Error(`MockProducer is already closed.`); }\n}\n' +
         "export const M = 'Cannot perform operation after producer has been closed';\n",
-      'native/queue.c': 'typedef struct { int closed; } Q;\nvoid f(Q* q) {\n  if (q->closed) return;\n  throw_error("This consumer has already been closed.");\n}\n',
+      'native/queue.c':
+        'typedef struct { int closed; } Q;\nvoid f(Q* q) {\n  if (q->closed) return;\n  throw_error("This consumer has already been closed.");\n}\n',
     }),
     [RULE],
   );
@@ -75,5 +76,8 @@ test('a closed message split across a + chain, adjacent C literals or a template
     [RULE],
   );
   assert.equal(r.status, 1);
-  assert.deepEqual(findings(r).map((f) => f.split(':').slice(0, 2).join(':')), ['src/client.ts:1', 'src/client.ts:2', 'native/queue.c:1']);
+  assert.deepEqual(
+    findings(r).map((f) => f.split(':').slice(0, 2).join(':')),
+    ['src/client.ts:1', 'src/client.ts:2', 'native/queue.c:1'],
+  );
 });

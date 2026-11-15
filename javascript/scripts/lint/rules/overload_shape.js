@@ -201,7 +201,7 @@ module.exports = {
   ],
   needs: ['program', 'java'],
   hint:
-    'Translate a Java overload set as one function taking one options object named after the overloads\' ' +
+    "Translate a Java overload set as one function taking one options object named after the overloads' " +
     'parameters, with one TypeScript overload signature per Java form (root CLAUDE.md, JavaScript Binding ' +
     'Conventions, Signatures).',
   LEFT_OUT,
@@ -236,7 +236,10 @@ module.exports = {
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
       const allNames = formOptionNames(forms);
-      const written = (sig) => formParameters(ts, sig).map((p) => p.getText().replace(/\s+/g, ' ')).join(', ');
+      const written = (sig) =>
+        formParameters(ts, sig)
+          .map((p) => p.getText().replace(/\s+/g, ' '))
+          .join(', ');
       const missingForm = (f) => ({
         at,
         kind: 'overload-missing',
@@ -267,7 +270,8 @@ module.exports = {
       for (const sig of signaturesOf(ts, m.node)) {
         const ps = formParameters(ts, sig);
         if (ps.length === 0) zeroSig = true;
-        else if (ps.length === 1 && !ps[0].dotDotDotToken && ts.isIdentifier(ps[0].name) && bareNames.has(ps[0].name.text)) bareSigs.push(sig);
+        else if (ps.length === 1 && !ps[0].dotDotDotToken && ts.isIdentifier(ps[0].name) && bareNames.has(ps[0].name.text))
+          bareSigs.push(sig);
         else if (ps.length === 1 && isOptionsParam(ps[0])) optionSigs.push(sig);
         else if (positional === null) positional = sig;
       }
@@ -330,13 +334,23 @@ module.exports = {
           for (const prop of checker.getPropertiesOfType(type)) {
             const decl = prop.declarations && prop.declarations.length > 0 ? atNode(ctx, prop.declarations[0]) : sigAt;
             if (!union.includes(prop.name)) {
-              findings.push({ at: decl, kind: 'option-extra', subject: `${typeName}.${prop.name}`, message: `no Java form of ${javaName} names it (${union.join(', ')})` });
+              findings.push({
+                at: decl,
+                kind: 'option-extra',
+                subject: `${typeName}.${prop.name}`,
+                message: `no Java form of ${javaName} names it (${union.join(', ')})`,
+              });
             } else if (neverProp(prop, sig)) {
               closed.push(prop.name);
             } else if ((prop.flags & ts.SymbolFlags.Optional) !== 0) {
               // Reported as optional; not again as unclosed below.
               closed.push(prop.name);
-              findings.push({ at: decl, kind: 'option-optional', subject: `${typeName}.${prop.name}`, message: `is optional, but a signature of one Java form of ${javaName} takes its form's parameters` });
+              findings.push({
+                at: decl,
+                kind: 'option-optional',
+                subject: `${typeName}.${prop.name}`,
+                message: `is optional, but a signature of one Java form of ${javaName} takes its form's parameters`,
+              });
             } else {
               required.push(prop.name);
             }
@@ -355,7 +369,12 @@ module.exports = {
             });
           }
           if (k < 0) {
-            findings.push({ at: sigAt, kind: 'signature-form', subject: `${subject}/(${required.join(',')})`, message: `takes (${required.join(', ')}), which is no Java form of ${javaName}` });
+            findings.push({
+              at: sigAt,
+              kind: 'signature-form',
+              subject: `${subject}/(${required.join(',')})`,
+              message: `takes (${required.join(', ')}), which is no Java form of ${javaName}`,
+            });
           } else {
             covered.add(k);
           }
@@ -390,27 +409,53 @@ module.exports = {
       }
       // Each option, and whether every translated form takes it.
       const expected = new Map();
-      for (const n of names) for (const name of n) if (!expected.has(name)) expected.set(name, names.every((x) => x.includes(name)));
+      for (const n of names)
+        for (const name of n)
+          if (!expected.has(name))
+            expected.set(
+              name,
+              names.every((x) => x.includes(name)),
+            );
       const union = [...expected.keys()].join(', ');
       for (const [name, inAll] of expected) {
         const prop = props.get(name);
         if (!prop) {
-          findings.push({ at, kind: 'option-missing', subject: `${typeName}.${name}`, message: `is missing, though ${javaName} names it (${union})` });
+          findings.push({
+            at,
+            kind: 'option-missing',
+            subject: `${typeName}.${name}`,
+            message: `is missing, though ${javaName} names it (${union})`,
+          });
           continue;
         }
         const optional = (prop.flags & ts.SymbolFlags.Optional) !== 0;
         const propAt = prop.declarations && prop.declarations.length > 0 ? atNode(ctx, prop.declarations[0]) : at;
         if (inAll && optional) {
-          findings.push({ at: propAt, kind: 'option-optional', subject: `${typeName}.${name}`, message: `is optional but every Java form of ${javaName} takes ${name}` });
+          findings.push({
+            at: propAt,
+            kind: 'option-optional',
+            subject: `${typeName}.${name}`,
+            message: `is optional but every Java form of ${javaName} takes ${name}`,
+          });
         } else if (!inAll && !optional) {
           const without = translated.find((g, k) => !names[k].includes(name));
-          findings.push({ at: propAt, kind: 'option-required', subject: `${typeName}.${name}`, message: `is required but ${formText(without)} does not take it` });
+          findings.push({
+            at: propAt,
+            kind: 'option-required',
+            subject: `${typeName}.${name}`,
+            message: `is required but ${formText(without)} does not take it`,
+          });
         }
       }
       for (const name of props.keys()) {
         if (!expected.has(name)) {
           const decl = props.get(name).declarations;
-          findings.push({ at: decl && decl.length > 0 ? atNode(ctx, decl[0]) : at, kind: 'option-extra', subject: `${typeName}.${name}`, message: `no Java form of ${javaName} names it (${union})` });
+          findings.push({
+            at: decl && decl.length > 0 ? atNode(ctx, decl[0]) : at,
+            kind: 'option-extra',
+            subject: `${typeName}.${name}`,
+            message: `no Java form of ${javaName} names it (${union})`,
+          });
         }
       }
       const optionalParam = !!(sig.parameters[0].questionToken || sig.parameters[0].initializer);
@@ -418,7 +463,12 @@ module.exports = {
       if (someEmpty && !optionalParam && !zeroSig) {
         findings.push({ at, kind: 'options-required', subject, message: `requires its options, but ${javaName}() takes none` });
       } else if (!someEmpty && optionalParam) {
-        findings.push({ at, kind: 'options-optional', subject, message: `takes its options as optional, but every Java form of ${javaName} takes a parameter` });
+        findings.push({
+          at,
+          kind: 'options-optional',
+          subject,
+          message: `takes its options as optional, but every Java form of ${javaName} takes a parameter`,
+        });
       }
     }
     return { findings, checked };

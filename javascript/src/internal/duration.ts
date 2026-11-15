@@ -47,9 +47,7 @@ interface TemporalDurationLike {
 
 export function isTemporalDuration(value: unknown): value is TemporalDurationLike {
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { [Symbol.toStringTag]?: unknown })[Symbol.toStringTag] === 'Temporal.Duration'
+    typeof value === 'object' && value !== null && (value as { [Symbol.toStringTag]?: unknown })[Symbol.toStringTag] === 'Temporal.Duration'
   );
 }
 

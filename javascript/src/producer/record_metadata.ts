@@ -179,7 +179,10 @@ export class RecordMetadata {
    * @internal
    */
   static internalCreate(fields: RecordMetadataFields): RecordMetadata {
-    return new (RecordMetadata as unknown as new (fields: RecordMetadataFields, internal: typeof INTERNAL) => RecordMetadata)(fields, INTERNAL);
+    return new (RecordMetadata as unknown as new (fields: RecordMetadataFields, internal: typeof INTERNAL) => RecordMetadata)(
+      fields,
+      INTERNAL,
+    );
   }
 
   toString(): string {

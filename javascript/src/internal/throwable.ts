@@ -58,11 +58,7 @@ interface WithFfiId {
  * fixed text.
  */
 export type FormMessage =
-  | 'message'
-  | 'cause.toString()'
-  | null
-  | { readonly text: string }
-  | ((values: Readonly<Record<string, unknown>>) => string | null);
+  'message' | 'cause.toString()' | null | { readonly text: string } | ((values: Readonly<Record<string, unknown>>) => string | null);
 
 /** The fields a form sets, by Java field name, from the form's values. */
 export type FormFields = (values: Readonly<Record<string, unknown>>) => Record<string, unknown>;

@@ -45,9 +45,18 @@ test('the platform key is <platform>-<arch>, with the C library on Linux', () =>
   assert.equal(platformKey({ platform: 'darwin', arch: 'arm64' }), 'darwin-arm64');
   assert.equal(platformKey({ platform: 'darwin', arch: 'x64' }), 'darwin-x64');
   assert.equal(platformKey({ platform: 'win32', arch: 'x64' }), 'win32-x64');
-  assert.equal(platformKey({ platform: 'linux', arch: 'x64' }, () => 'gnu'), 'linux-x64-gnu');
-  assert.equal(platformKey({ platform: 'linux', arch: 'arm64' }, () => 'gnu'), 'linux-arm64-gnu');
-  assert.equal(platformKey({ platform: 'linux', arch: 'x64' }, () => 'musl'), 'linux-x64-musl');
+  assert.equal(
+    platformKey({ platform: 'linux', arch: 'x64' }, () => 'gnu'),
+    'linux-x64-gnu',
+  );
+  assert.equal(
+    platformKey({ platform: 'linux', arch: 'arm64' }, () => 'gnu'),
+    'linux-arm64-gnu',
+  );
+  assert.equal(
+    platformKey({ platform: 'linux', arch: 'x64' }, () => 'musl'),
+    'linux-x64-musl',
+  );
   let asked = false;
   platformKey({ platform: 'darwin', arch: 'arm64' }, () => {
     asked = true;
@@ -56,10 +65,13 @@ test('the platform key is <platform>-<arch>, with the C library on Linux', () =>
   assert.equal(asked, false, 'the C library is read on Linux only');
 });
 
-test('the supported platforms are the preview\'s, one folder each in npm/', () => {
+test("the supported platforms are the preview's, one folder each in npm/", () => {
   assert.deepEqual([...SUPPORTED_PLATFORMS], ['linux-x64-gnu', 'darwin-arm64']);
   const npmDir = require('node:path').join(__dirname, '..', '..', '..', 'npm');
-  const folders = require('node:fs').readdirSync(npmDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  const folders = require('node:fs')
+    .readdirSync(npmDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
   assert.deepEqual(folders.sort(), [...SUPPORTED_PLATFORMS].sort());
 });
 
@@ -80,10 +92,19 @@ test('without a report, musl is a /lib/ld-musl-* loader, and anything else glibc
       throw new Error('no report');
     },
   };
-  assert.equal(linuxLibc({ platform: 'linux', arch: 'x64', report: failing }, () => ['ld-musl-x86_64.so.1']), 'musl');
+  assert.equal(
+    linuxLibc({ platform: 'linux', arch: 'x64', report: failing }, () => ['ld-musl-x86_64.so.1']),
+    'musl',
+  );
   assert.equal(failing.excludeNetwork, true, 'excludeNetwork is restored after a failing report');
-  assert.equal(linuxLibc({ platform: 'linux', arch: 'x64', report: failing }, () => ['ld-linux-x86-64.so.2']), 'gnu');
-  assert.equal(linuxLibc({ platform: 'linux', arch: 'x64' }, () => []), 'gnu');
+  assert.equal(
+    linuxLibc({ platform: 'linux', arch: 'x64', report: failing }, () => ['ld-linux-x86-64.so.2']),
+    'gnu',
+  );
+  assert.equal(
+    linuxLibc({ platform: 'linux', arch: 'x64' }, () => []),
+    'gnu',
+  );
   const unreadable = () => {
     throw new Error('EACCES');
   };

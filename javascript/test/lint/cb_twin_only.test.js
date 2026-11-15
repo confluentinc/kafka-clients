@@ -38,13 +38,16 @@ test('only _cb twins are called', () => {
 test('the blocking form of a _cb twin is a finding', () => {
   const r = runN(RULE, { 'native/producer.c': BLOCKING });
   assert.equal(r.status, 1);
-  assert.deepEqual(findings(r), ['native/producer.c:36: js_send calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
+  assert.deepEqual(findings(r), [
+    'native/producer.c:36: js_send calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin',
+  ]);
 });
 
 test("a record's future is read through its _cb twins, never the blocking get", () => {
   const { HEADER } = require('./_c_fixture');
   const header = `${HEADER}\nvoid *kafka_common_KafkaFuture_get(const kafka_common_KafkaFuture_t *self_, kafka_common_Error_t **out_err);\n\nvoid kafka_common_KafkaFuture_get_cb(const kafka_common_KafkaFuture_t *self_, kafka_common_KafkaFuture_get_cb_t cb, void *opaque);\n\nvoid *kafka_common_KafkaFuture_get_with_timeout(const kafka_common_KafkaFuture_t *self_, int64_t timeout_ms, kafka_common_Error_t **out_err);\n\nvoid kafka_common_KafkaFuture_get_with_timeout_cb(const kafka_common_KafkaFuture_t *self_, int64_t timeout_ms, kafka_common_KafkaFuture_get_with_timeout_cb_t cb, void *opaque);\n`;
-  const twins = '    kafka_common_KafkaFuture_get_cb(value, on_handover, opaque);\n    kafka_common_KafkaFuture_get_with_timeout_cb(value, 0, on_handover, opaque);\n';
+  const twins =
+    '    kafka_common_KafkaFuture_get_cb(value, on_handover, opaque);\n    kafka_common_KafkaFuture_get_with_timeout_cb(value, 0, on_handover, opaque);\n';
   const destroy = '    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));';
   let r = runN(RULE, { 'confluent_kafka_bindings.h': header, 'native/producer.c': PRODUCER_C.replace(destroy, `${twins}${destroy}`) });
   assert.equal(r.status, 0, r.text);
@@ -67,14 +70,22 @@ test("a macro's body is checked at its definition", () => {
     'native/util.h': `${UTIL_H}#define FLUSH_VIEW(view) \\\n    FFI_DISCARD(kafka_x_P_flush((view), &ffi_err))\n`,
     'native/producer.c': PRODUCER_C.replace('    kafka_x_P_flush_cb(p, on_handover, ctx);', '    FLUSH_VIEW(p);'),
   });
-  assert.deepEqual(findings(r), ['native/util.h:14: the macro FLUSH_VIEW calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
+  assert.deepEqual(findings(r), [
+    'native/util.h:14: the macro FLUSH_VIEW calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin',
+  ]);
 });
 
 test('an allowlist entry allows exactly its call; one that allows nothing is a finding', () => {
-  let r = runN(RULE, { 'native/producer.c': BLOCKING }, { ALLOWED: [{ key: 'native/producer.c:js_send:kafka_x_P_flush(p, &ffi_err)', reason: 'the test' }] });
+  let r = runN(
+    RULE,
+    { 'native/producer.c': BLOCKING },
+    { ALLOWED: [{ key: 'native/producer.c:js_send:kafka_x_P_flush(p, &ffi_err)', reason: 'the test' }] },
+  );
   assert.equal(r.status, 0, r.text);
   r = runN(RULE, {}, { ALLOWED: [{ key: 'native/producer.c:js_send:kafka_x_P_flush(p, 0, &ffi_err)', reason: 'the test' }] });
-  assert.deepEqual(findings(r), ['native/producer.c:js_send:kafka_x_P_flush(p, 0, &ffi_err): is allowed as the test, but nothing matches it any more: delete the entry']);
+  assert.deepEqual(findings(r), [
+    'native/producer.c:js_send:kafka_x_P_flush(p, 0, &ffi_err): is allowed as the test, but nothing matches it any more: delete the entry',
+  ]);
 });
 
 test('the real tree allows no blocking call: no finalizer force-closes a client', () => {
@@ -88,6 +99,10 @@ test('cannot run without the header', () => {
 });
 
 test('no header call fails: 0 items checked', () => {
-  const r = runN(RULE, { 'native/producer.c': 'void f(void) {}\n', 'native/callback_queue.c': 'void g(void) {}\n', 'native/record.c': 'void h(void) {}\n' });
+  const r = runN(RULE, {
+    'native/producer.c': 'void f(void) {}\n',
+    'native/callback_queue.c': 'void g(void) {}\n',
+    'native/record.c': 'void h(void) {}\n',
+  });
   assert.ok(r.err.includes('❌ check-cb-twin-only: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
