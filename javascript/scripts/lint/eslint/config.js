@@ -38,10 +38,20 @@ const FUNCTION_CONTEXTS = ['ArrowFunctionExpression', 'FunctionDeclaration', 'Fu
 const BODYLESS_CONTEXTS = ['TSEmptyBodyFunctionExpression', 'TSMethodSignature'];
 const PARAM_CONTEXTS = [...FUNCTION_CONTEXTS, ...BODYLESS_CONTEXTS];
 // A body-less declaration has no body to read a return from, so its
-// `@returns` is required by its return type: any but `void` and
-// `Promise<void>` (`forceRequireReturn`, which would flag a `void` one too).
-const RETURNS_VALUE =
-  ":not([returnType.typeAnnotation.type='TSVoidKeyword']):not([returnType.typeAnnotation.typeName.name='Promise'][returnType.typeAnnotation.typeArguments.params.0.type='TSVoidKeyword'])";
+// `@returns` is required by its return type: any but one that returns no
+// value, `void`, `undefined` and `never`, alone or in a `Promise`
+// (`forceRequireReturn`, which would flag a `void` one too), and not on an
+// interface's setter, which returns nothing. Not exempted yet: a union of
+// them (`void | Promise<void>`), which no declaration of src/ has; the
+// consumer's listener methods will.
+const NO_VALUE = ['TSVoidKeyword', 'TSUndefinedKeyword', 'TSNeverKeyword'];
+const RETURNS_VALUE = [
+  ...NO_VALUE.map((type) => `:not([returnType.typeAnnotation.type='${type}'])`),
+  ...NO_VALUE.map(
+    (type) => `:not([returnType.typeAnnotation.typeName.name='Promise'][returnType.typeAnnotation.typeArguments.params.0.type='${type}'])`,
+  ),
+  ":not([kind='set'])",
+].join('');
 const RETURNS_CONTEXTS = [
   ...FUNCTION_CONTEXTS.filter((c) => c !== 'TSDeclareFunction'),
   ...['TSDeclareFunction', ...BODYLESS_CONTEXTS].map((c) => ({ context: `${c}${RETURNS_VALUE}`, forceRequireReturn: true })),
