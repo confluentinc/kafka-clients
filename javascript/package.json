@@ -153,9 +153,16 @@
     "@grpc/proto-loader": "0.8.1",
     "@js-temporal/polyfill": "0.5.1",
     "@microsoft/api-extractor": "7.60.1",
+    "@types/jest": "30.0.0",
     "@types/node": "20.19.41",
     "eslint": "10.14.0",
+    "eslint-plugin-jsdoc": "65.4.7",
     "expect-type": "1.4.0",
+    "jest": "30.5.2",
+    "prettier": "3.10.1",
+    "publint": "0.3.25",
+    "ts-jest": "29.4.15",
+    "typedoc": "0.28.20",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1"
   }
