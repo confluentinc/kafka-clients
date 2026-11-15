@@ -22,9 +22,7 @@ const { Header, Headers } = require('@confluentinc/kafka-javascript/common/heade
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 const native = require('../../../dist/internal/native');
-
-/** @typedef {[string, number, bigint, Uint8Array | null, Uint8Array | null, object | null]} NativeRecord */
-/** @typedef {{ internalToNative(key?: Uint8Array | null, value?: Uint8Array | null): NativeRecord }} NativeSend */
+const { internalHeaders, internalRecord } = require('../../_internal');
 
 /** @param {string} s */
 const bytes = (s) => Buffer.from(s, 'utf8');
@@ -47,15 +45,13 @@ const keysAsText = (handle) =>
  * @param {Header[]} b
  */
 const sameHeaders = (a, b) => a.length === b.length && a.every((h, i) => h.equals(b[i]));
-/**
- * The record as the producer sends it, through the library's own method,
- * which the published types leave out.
- *
- * @template K, V
- * @param {ProducerRecord<K, V>} record
- * @returns {NativeSend}
- */
-const sending = (record) => /** @type {ProducerRecord<K, V> & NativeSend} */ (record);
+// ProducerRecord's constructor as its implementation takes its parameter: for
+// a table of Java's forms, valid each, whose union tsc cannot pick one
+// overload for (each form is typed where it is written on its own).
+const AnyForm = /** @type {new (options: unknown) => ProducerRecord<unknown, unknown>} */ (/** @type {unknown} */ (ProducerRecord));
+// The record as the producer sends it, through the library's own method
+// (test/_internal.js).
+const sending = internalRecord;
 
 test('the fields Java leaves out default to null and no headers', () => {
   const r = new ProducerRecord({ topic: 't', value: 'v' });
@@ -109,7 +105,7 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
 
 test('headers are taken as Java takes an Iterable<Header>: a Headers is copied, each header copied by the core', () => {
   const given = new Headers([new Header({ key: 'a', value: bytes('1') })]);
-  /** @type {Headers & { internalSetReadOnly(): void }} */ (given).internalSetReadOnly();
+  internalHeaders(given).internalSetReadOnly();
   const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: given });
   // A copy, writable, holding equal headers.
   assert.notEqual(r.headers, given);
@@ -288,8 +284,9 @@ test("Java's six constructors each build the record they name", () => {
     [{ topic: 't', partition: null, timestamp: null, key: null, value: null, headers: null }, [null, null, null, null, 0]],
   ]);
   for (const [options, [partition, timestamp, key, value, headers]] of cases) {
-    // @ts-expect-error published type narrower than the run time: a row is one of the six forms, and no single overload takes their union
-    const r = new ProducerRecord(options);
+    // A row of the union of the six forms, valid each, for which tsc picks no
+    // single overload: the call goes through the implementation's parameter.
+    const r = new AnyForm(options);
     assert.equal(r.topic, 't');
     assert.equal(r.partition, partition);
     assert.equal(r.timestamp, timestamp);
@@ -383,8 +380,9 @@ test('every set of parameters that is not a Java constructor is an IllegalArgume
     const given = names.filter((n, i) => mask & (1 << i));
     const options = Object.fromEntries(given.map((n) => [n, values[n]]));
     if (java.has(given.join(','))) {
-      // @ts-expect-error published type narrower than the run time: an options object built at run time, whose keys the types cannot see
-      assert.ok(new ProducerRecord(options) instanceof ProducerRecord, given.join(', '));
+      // An options object built at run time, one of Java's forms, whose keys
+      // tsc cannot see: the call goes through the implementation's parameter.
+      assert.ok(new AnyForm(options) instanceof ProducerRecord, given.join(', '));
       continue;
     }
     rejected += 1;

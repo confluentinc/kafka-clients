@@ -28,10 +28,14 @@
 // --strict) and the rule linter's tests, so their findings are counted here,
 // not failed on.
 //
-// A test marks a deliberate misuse (a wrong type, a null the types forbid)
-// with `// @ts-expect-error <the run-time check it covers>`, which also proves
-// that tsc catches it for a TypeScript caller. `@ts-ignore` and `@ts-nocheck`
-// are refused, and so is an `@ts-expect-error` that gives no reason.
+// `// @ts-expect-error <why>` marks only a misuse that tsc catches: a
+// deliberate wrong argument (a wrong type, a null the types forbid by the
+// nullability rule, an unknown key) by which a test reaches a run-time check,
+// so the directive proves tsc catches it for a TypeScript caller. A valid
+// call is never marked: one the published types should take is a type to fix,
+// and one reaching a library-only member goes through test/_internal.js.
+// `@ts-ignore` and `@ts-nocheck` are refused, and so is an `@ts-expect-error`
+// that gives no reason.
 //
 // Usage: node scripts/typecheck_tests.js
 

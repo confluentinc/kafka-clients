@@ -20,6 +20,7 @@ const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 const { errorFfiId } = require('../../../dist/internal/errors');
+const { ffiId } = require('../../_internal');
 
 test('an invalid config is a KafkaError with the core message', () => {
   assert.throws(
@@ -34,8 +35,7 @@ test('an invalid config is a KafkaError with the core message', () => {
       // The FFI id is private (`_ffiId`, left out of the declarations): only
       // `name`, `message` and `cause` are public.
       assert.equal(errorFfiId(e), -10);
-      // @ts-expect-error the private FFI id, left out of the declarations: the test checks the class still carries it
-      assert.equal(ConfigError._ffiId, -10);
+      assert.equal(ffiId(ConfigError), -10);
       assert.ok(!Object.keys(e).includes('_ffiId'));
       assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
       return true;
