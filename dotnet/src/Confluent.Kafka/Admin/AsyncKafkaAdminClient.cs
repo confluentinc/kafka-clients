@@ -469,7 +469,8 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     public AsyncUpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions options) =>
-        AsyncUpdateFeaturesResult.OfClient(_native.UpdateFeatures(featureUpdates, options));
+        AsyncUpdateFeaturesResult.OfClient(
+            _native.UpdateFeatures(featureUpdates, AdminEarlyReturns.UpdateFeatures(featureUpdates, options)));
 
     /// <inheritdoc/>
     public AsyncUnregisterControllerResult UnregisterController(int controllerId) =>

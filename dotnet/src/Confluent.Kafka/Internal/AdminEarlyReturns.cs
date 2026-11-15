@@ -92,6 +92,44 @@ internal static class AdminEarlyReturns
             ? new ListPartitionReassignmentsOptions()
             : null);
 
+    internal static UpdateFeaturesOptions? UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates, UpdateFeaturesOptions? options) =>
+        options ?? (featureUpdates is not null && (featureUpdates.Count == 0 || AnyBlankFeature(featureUpdates.Keys))
+            ? new UpdateFeaturesOptions()
+            : null);
+
+    private static bool AnyBlankFeature(IEnumerable<string> features)
+    {
+        foreach (string? feature in features)
+        {
+            if (IsBlank(feature))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Java's Utils.isBlank: String.trim() strips every char up to U+0020, not .NET's white space.
+    private static bool IsBlank(string? value)
+    {
+        if (value is null)
+        {
+            return true;
+        }
+
+        foreach (char c in value)
+        {
+            if (c > ' ')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool AnyTopicName(IEnumerable<string>? names)
     {
         if (names is null)

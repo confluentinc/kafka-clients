@@ -461,7 +461,8 @@ public sealed class KafkaAdminClient : IAdmin
     public UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions options) =>
-        UpdateFeaturesResult.OfClient(_native.UpdateFeatures(featureUpdates, options));
+        UpdateFeaturesResult.OfClient(
+            _native.UpdateFeatures(featureUpdates, AdminEarlyReturns.UpdateFeatures(featureUpdates, options)));
 
     /// <inheritdoc/>
     public UnregisterControllerResult UnregisterController(int controllerId) =>

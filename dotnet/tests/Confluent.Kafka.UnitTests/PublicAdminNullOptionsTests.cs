@@ -202,6 +202,50 @@ public sealed class PublicAdminNullOptionsTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RealClient_NullOptions_AnEmptyFeatureMap_ThrowsTheCoresIllegalArgumentException(bool async)
+    {
+        IDisposable admin = async ? IAsyncAdmin.Create(Unreachable()) : IAdmin.Create(Unreachable());
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        IllegalArgumentException thrown = Assert.IsType<IllegalArgumentException>(
+            Record.Exception(() => UpdateFeatures(admin, new Dictionary<string, FeatureUpdate>())));
+        Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
+    }
+
+    [Theory]
+    [InlineData(false, "")]
+    [InlineData(false, " \t")]
+    [InlineData(false, "\u0001")]
+    [InlineData(true, "")]
+    [InlineData(true, " \t")]
+    [InlineData(true, "\u0001")]
+    public void RealClient_NullOptions_ABlankFeatureName_ThrowsTheCoresIllegalArgumentException(bool async, string name)
+    {
+        IDisposable admin = async ? IAsyncAdmin.Create(Unreachable()) : IAdmin.Create(Unreachable());
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        IllegalArgumentException thrown = Assert.IsType<IllegalArgumentException>(
+            Record.Exception(() => UpdateFeatures(admin, FeatureUpdates("metadata.version", name))));
+        Assert.Equal("Provided feature can not be empty.", thrown.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RealClient_NullOptions_ANameBlankOnlyToDotNet_ThrowsTheCoresArgumentNullException(bool async)
+    {
+        IDisposable admin = async ? IAsyncAdmin.Create(Unreachable()) : IAdmin.Create(Unreachable());
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        // U+00A0 is white space to .NET but above U+0020, so Java's trim() keeps it: the name is not blank.
+        AssertNullFromTheCore(
+            OptionsMustNotBeNull,
+            Record.Exception(() => UpdateFeatures(admin, FeatureUpdates("metadata.version", " "))));
+    }
+
+    [Theory]
     [MemberData(nameof(EveryClient))]
     public void NullConfigResourceTypes_ThrowsTheCoresArgumentNullException_BeforeANullOptions(bool async, bool mock)
     {
@@ -772,4 +816,20 @@ public sealed class PublicAdminNullOptionsTests
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" };
+
+    private static object UpdateFeatures(IDisposable admin, IReadOnlyDictionary<string, FeatureUpdate> updates) =>
+        admin is IAsyncAdmin asyncAdmin
+            ? asyncAdmin.UpdateFeatures(updates, null!)
+            : ((IAdmin)admin).UpdateFeatures(updates, null!);
+
+    private static Dictionary<string, FeatureUpdate> FeatureUpdates(params string[] names)
+    {
+        Dictionary<string, FeatureUpdate> updates = new Dictionary<string, FeatureUpdate>();
+        foreach (string name in names)
+        {
+            updates[name] = new FeatureUpdate(1, UpgradeType.UPGRADE);
+        }
+
+        return updates;
+    }
 }

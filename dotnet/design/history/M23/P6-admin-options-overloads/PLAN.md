@@ -8,8 +8,8 @@ and let the C layer decide". D5: not answered; the narrow scope applies as the d
 it. D7: "apply R1" (R2 stays a proposal; not applied). Manager N=128 (N=127 is in use: `dotnet/COMMENTS.127.md`,
 dotnet-critic 127 on the security-review fixes, branch `prashah_dev_dotnet_security_review_fixes`). Branch
 `prashah_dev_dotnet_admin_options_overloads`, from `master` `93d068b97` (#337). Mode A: .NET only. No Rust, C ABI,
-header, Python or proto change. Decision page: "Admin's no-options default methods in .NET" (Confluence 6364168257,
-v4): **option 1 now**; a default Java adds to `Admin` later follows option 2 (`dotnet/CLAUDE.md` §3, Java names rule 10).
+header, Python or proto change. Decision: **option 1 now**; a default Java adds to `Admin` later follows option 2
+(`dotnet/CLAUDE.md` §3, Java names rule 10).
 
 Path prefixes: `J/` = `kafka/clients/src/main/java/org/apache/kafka/clients/admin/`, `JM/` =
 `kafka/clients/src/testFixtures/java/org/apache/kafka/clients/admin/MockAdminClient.java`, `P/` =
@@ -171,6 +171,7 @@ Facts that led to the ruling:
      | `DescribeReplicaLogDirs` | `replicas` is empty | `bool(args[0])` |
      | `CreatePartitions` | `newPartitions` is empty | `bool(args[0])` |
      | `ListPartitionReassignments(partitions, options)` | `partitions` is not null and some partition has a null or empty topic or a negative partition (Java fails the future and returns) | `all_partitions_valid` |
+     | `UpdateFeatures` (PR #340 review) | `featureUpdates` is empty, or a feature name is blank by Java's `Utils.isBlank` (every char up to U+0020): Java throws `IllegalArgumentException` first | none: Python passes the null through |
 
    - **Mocks** (`MockAdminClient`, `AsyncMockAdminClient`): .NET's mock runs on the C layer
      (`NativeAdminClient.StartMock`), so every long form except the 5 Java's mock reads gets an unconditional
