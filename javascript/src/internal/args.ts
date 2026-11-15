@@ -58,7 +58,7 @@ export type Form = readonly string[];
  * `a string`, `a number`, `an array`, `null`, `a Map` (an object, by its
  * class).
  *
- * @param value the value to name
+ * @param value - the value to name
  * @returns the name of its type
  */
 export function kind(value: unknown): string {
@@ -127,7 +127,7 @@ export interface JavaFormsOptions {
 /**
  * Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null.
  *
- * @param value the value to test
+ * @param value - the value to test
  * @returns whether it is a plain object
  */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -139,8 +139,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Whether `name` is an own enumerable property of `args`, what counts as given.
  *
- * @param args the options object
- * @param name the parameter's name
+ * @param args - the options object
+ * @param name - the parameter's name
  * @returns whether the parameter is given
  */
 function given(args: object, name: string): boolean {

@@ -135,7 +135,7 @@ const KEPT_SLOTS = 1024;
 /**
  * `String(value)` that never throws (`Object.create(null)`, a throwing `toString`).
  *
- * @param value the value to print
+ * @param value - the value to print
  * @returns its text
  */
 function text(value: unknown): string {
@@ -154,7 +154,7 @@ function text(value: unknown): string {
  * Whether a thrown value is a `CancellationError`: false when its class
  * cannot be read (a revoked Proxy, a `getPrototypeOf` trap that throws).
  *
- * @param value the thrown value
+ * @param value - the thrown value
  * @returns whether it is a `CancellationError`
  */
 function isCancellation(value: unknown): boolean {
@@ -170,7 +170,7 @@ function isCancellation(value: unknown): boolean {
  * gives it: `''` for `null` (Java's null cause) and `undefined`, else its
  * `String()`, which here never throws.
  *
- * @param cause the cause given
+ * @param cause - the cause given
  * @returns its text
  */
 function causeText(cause: unknown): string {
@@ -180,7 +180,7 @@ function causeText(cause: unknown): string {
 /**
  * Whether `state` is a cancellation, of either kind.
  *
- * @param state the future's state
+ * @param state - the future's state
  * @returns whether it is a cancellation
  */
 function cancelled(state: number): boolean {
@@ -214,7 +214,7 @@ const IS_DONE_FORMS = new JavaForms('isDone', [[]], { reader: true });
 /**
  * The JavaScript type of a value, as an argument error names it.
  *
- * @param value the value to name
+ * @param value - the value to name
  * @returns the name of its type
  */
 function kind(value: unknown): string {
@@ -227,9 +227,9 @@ function kind(value: unknown): string {
  * A function parameter: Java dereferences it when the source completes, so a
  * `null` is refused at the call (`TypeError`), as is a non-function.
  *
- * @param value the value given
- * @param name the parameter's name, for the error
- * @param shape the function's signature, for the error
+ * @param value - the value given
+ * @param name - the parameter's name, for the error
+ * @param shape - the function's signature, for the error
  * @returns the function
  */
 function checkFunction(value: unknown, name: string, shape: string): (...args: never[]) => unknown {
@@ -620,6 +620,8 @@ export abstract class KafkaFuture<T> {
    * by `KafkaProducer` (and the tests, as Java's `complete` /
    * `completeExceptionally`).
    *
+   * @param value - the value, when `error` is null
+   * @param error - the failure, or null for success
    * @returns whether this call completed the future
    * @internal
    */
@@ -631,6 +633,8 @@ export abstract class KafkaFuture<T> {
    * delivery reads. Called by
    * `KafkaProducer` at the hand-over, before the future is handed out.
    *
+   * @param producer - the producer's native handle
+   * @param slot - the slot of the record's native future in the producer's table
    * @internal
    */
   abstract internalSetNative(producer: ProducerHandle, slot: number): void;
@@ -642,6 +646,8 @@ export abstract class KafkaFuture<T> {
    * answer from it, and the native future is read no more. Called by
    * `KafkaProducer`.
    *
+   * @param value - the delivery's metadata, when `error` is null
+   * @param error - the delivery's error, or null for none
    * @internal
    */
   abstract internalSetDelivery(value: T, error: unknown): void;
@@ -651,7 +657,7 @@ export abstract class KafkaFuture<T> {
    * cancelled) when `record` is true, else Java's `KafkaFutureImpl`. Called
    * by `KafkaProducer` and the tests.
    *
-   * @param record whether the future is a record's, completed by its delivery
+   * @param record - whether the future is a record's, completed by its delivery
    * @returns a new pending future
    *
    * @internal
@@ -825,7 +831,7 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
    * source of another class (a caller's own subclass) is read through its
    * `whenComplete`.
    *
-   * @param futures the futures to wait for
+   * @param futures - the futures to wait for
    * @returns a future completed once all of them are
    *
    * @internal
@@ -1079,8 +1085,8 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   // Java's complete / completeExceptionally.
   /**
-   * @param value the value to complete with
-   * @param error the error to complete with, or undefined for none
+   * @param value - the value to complete with
+   * @param error - the error to complete with, or null for none
    * @returns whether this call completed the future
    *
    * @internal
@@ -1092,8 +1098,8 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   // The record's native future.
   /**
-   * @param producer the native producer that owns the record's future
-   * @param slot the record's slot in that producer's table
+   * @param producer - the native producer that owns the record's future
+   * @param slot - the record's slot in that producer's table
    *
    * @internal
    */
@@ -1106,8 +1112,8 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
   // The record's delivery, as its callback saw it.
   /**
-   * @param value the record's metadata
-   * @param error the delivery's error, or undefined for none
+   * @param value - the record's metadata
+   * @param error - the delivery's error, or null for none
    *
    * @internal
    */

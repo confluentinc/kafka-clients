@@ -173,7 +173,7 @@ export class RecordMetadata {
    * The metadata of a delivered record, from the fields the native layer read.
    * Called by `src/internal/native.ts`.
    *
-   * @param fields the native layer's fields
+   * @param fields - the native layer's fields
    * @returns the metadata
    *
    * @internal
@@ -185,6 +185,11 @@ export class RecordMetadata {
     );
   }
 
+  /**
+   * The metadata as Java's `RecordMetadata.toString()` writes it.
+   *
+   * @returns `<topic>-<partition>@<offset>`
+   */
   toString(): string {
     return `${this.topic}-${this.partition}@${this.offset}`;
   }
