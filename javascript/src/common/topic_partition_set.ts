@@ -149,8 +149,8 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
     value: TopicPartition | null;
   }): this;
   /**
-   * Adds `value`, unless a member equals it (that member is kept, as Java's: the value on its own, the same as
-   * `add({value})`.
+   * Adds `value`, unless a member equals it (that member is kept, as Java's `HashSet.add` keeps it): the value on its
+   * own, the same as `add({value})`.
    *
    * @param value - the topic partition, or null
    * @returns this set
