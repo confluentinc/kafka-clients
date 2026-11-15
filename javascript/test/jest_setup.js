@@ -16,15 +16,18 @@
 
 // Jest's `timeout` argument, of `test(name, fn, timeout)`, `it`, `test.each`,
 // `test.only` and the hooks (`beforeAll`, `beforeEach`, `afterAll`,
-// `afterEach`): jest-light-runner (jest.config.cjs) registers a timeout but
-// does not apply it, so a function given one fails once it has run that
-// long, as under Jest's own runner. A function given none has no limit. A
-// function taking more arguments than it is given, Jest's `done` form, ends
-// when it calls `done` (failing with the error `done` is given), whether it
-// is given a timeout or not, as the light runner runs one, and one that
-// takes `done` and returns a value fails, with Jest's message. The members
-// the light runner gives a timeout no meaning (`test.concurrent`,
-// `test.failing`) refuse one.
+// `afterEach`), and of `fit`, the light runner's alias of `test.only`:
+// jest-light-runner (jest.config.cjs) registers a timeout but does not apply
+// it, so a function given one fails once it has run that long, as under
+// Jest's own runner. A function given none has no limit. A function taking
+// more arguments than it is given, Jest's `done` form, ends when it calls
+// `done` (failing with the error `done` is given), and one that takes `done`
+// and returns a value fails, with Jest's message, whether it is given a
+// timeout or not. `test.concurrent` refuses a timeout, which the light
+// runner does not apply to it. `test.failing` is refused whatever it is
+// given: the light runner runs it as a plain test, which would pass a test
+// Jest fails and fail one Jest passes. test/static/jest_setup.test.js runs
+// each of these through Jest and checks its outcome.
 
 /**
  * A test or hook function, or a `test.each` row's: it takes the row's values,
@@ -56,7 +59,7 @@
 // The globals this file replaces, read as the shapes above: Jest's own types
 // (`jest.It`, `jest.Lifecycle`) take only Jest's own function forms, while
 // this file passes any of them through as it is given.
-const globals = /** @type {{ test: Test, it: Test } & Record<string, Hook | undefined>} */ (/** @type {unknown} */ (globalThis));
+const globals = /** @type {{ test: Test, it: Test, fit: Form } & Record<string, Hook | undefined>} */ (/** @type {unknown} */ (globalThis));
 const register = globals.test;
 const hooks = Object.fromEntries(['beforeAll', 'beforeEach', 'afterAll', 'afterEach'].map((name) => [name, globals[name]]));
 
@@ -129,8 +132,23 @@ function withTimeout(fn, timeout, rows) {
   };
 }
 
-/** @type {(fn: TestFn | undefined, timeout: number | undefined, rows?: boolean) => TestFn | undefined} */
-const timed = (fn, timeout, rows = false) => (timeout === undefined || typeof fn !== 'function' ? fn : withTimeout(fn, timeout, rows));
+/**
+ * `fn` as the runner should call it: with the timeout applied when it is
+ * given one, otherwise through `call` when it may take `done` (a `test.each`
+ * row's function always goes there: its row's length is known only when it
+ * runs), otherwise as it is.
+ *
+ * @param {TestFn | undefined} fn the test function
+ * @param {number | undefined} timeout its timeout, in ms, if any
+ * @param {boolean} [rows] whether it is `test.each`'s
+ * @returns {TestFn | undefined} the function the runner calls
+ */
+function timed(fn, timeout, rows = false) {
+  if (typeof fn !== 'function') return fn;
+  if (timeout !== undefined) return withTimeout(fn, timeout, rows);
+  if (!rows && fn.length === 0) return fn;
+  return (...given) => call(fn, rows ? given : []);
+}
 
 /**
  * `registerFn`'s form with the timeout applied, and its `each`.
@@ -166,10 +184,16 @@ function refusingTimeout(member, label) {
 /** @type {Test} */
 const test = Object.assign(timedForm(register), { only: timedForm(register.only), skip: register.skip, todo: register.todo });
 if (register.concurrent !== undefined) test.concurrent = refusingTimeout(register.concurrent, 'test.concurrent');
-if (register.failing !== undefined) test.failing = refusingTimeout(register.failing, 'test.failing');
+if (register.failing !== undefined) {
+  const refused = () => {
+    throw new Error('test.failing: jest-light-runner runs it as a plain test; test/jest_setup.js refuses it');
+  };
+  test.failing = Object.assign(refused, { each: refused });
+}
 
 globals.test = test;
 globals.it = test;
+globals.fit = test.only;
 for (const [name, hook] of Object.entries(hooks)) {
   if (typeof hook === 'function') globals[name] = (fn, timeout) => hook(timed(fn, timeout));
 }
