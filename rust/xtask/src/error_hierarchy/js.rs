@@ -705,7 +705,7 @@ fn js_translate(e: &Expr, env: &JsEnv) -> Res<JsVal> {
             match (n.as_slice(), vals.as_slice()) {
                 (["Collections", "emptySet"] | ["Set", "of"], []) => JsVal::konst("new Set<string>()", Some("Set")),
                 (["Collections", "singleton"], [x]) => JsVal {
-                    expr: format!("P.singleton({}, {})", x.expr, js_str(&param_of(x))),
+                    expr: format!("P.singleton({})", x.expr),
                     ty: Some("Set".into()),
                     text: None,
                     konst: false,
