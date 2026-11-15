@@ -346,6 +346,6 @@ newer.
 - Installing runs no build (`"gypfile": false`, no install scripts).
 - Every package declares `"type": "commonjs"`, and publint checks each
   tarball.
-- The tests run on Jest, and `make docs` builds the HTML reference with
-  TypeDoc. Doc comments name every parameter and return value
+- The tests run on Jest, the sources are formatted with Prettier, and
+  `make docs` builds the HTML reference with TypeDoc. Doc comments name every parameter and return value
   (`eslint-plugin-jsdoc`).

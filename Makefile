@@ -90,7 +90,7 @@ build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
 # The Node.js client (javascript/). `verify` runs its build, its rule linter,
-# its type check and its unit tests (test-javascript-unit, through `test`, and
+# its format check, its type check and its unit tests (test-javascript-unit, through `test`, and
 # lint-javascript), so it needs Node.js 22.14 or newer and `npm ci` in
 # javascript/ first (typescript and eslint are devDependencies); its
 # broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
@@ -447,7 +447,7 @@ test-javascript-macos-docker: build-javascript
 # the bindings header the Rust build writes and the committed Java index
 # (javascript/java-index.json, `cargo xtask java-api`), not the kafka submodule.
 lint-javascript: build-rust-all-features
-	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint
+	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint format-check
 
 verify-javascript: test-javascript lint-javascript
 
