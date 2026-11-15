@@ -1290,15 +1290,25 @@ constants (`ProducerConfig`, the client config class, its constants only;
 `SslConfigs`, `SaslConfigs`, `SecurityConfig`, the key-name classes,
 translated in full, Java's public default constructor included, but the
 `addClient...Support(ConfigDef)` methods: root conventions, Scope, Q55)
-and the `ProducerConfigs` type's key list (`src/producer/producer_configs.ts`),
-all TypeScript (typed: a config constant's type is written out, `static
+and the producer's configuration keys (the `ProducerConfigs` type,
+`src/producer/producer_configs.ts`, and the key list
+`src/internal/producer_config_keys.ts`), all TypeScript but
+`native/error_payload.c` (typed: a config constant's type is written out, `static
 readonly X: string = '...'`, a `long` one a `bigint`), which
-`make build` compiles with the rest. The root conventions (Build, packaging
-and release) add the form tables, now hand-written in the modules that call
-`src/internal/args.ts`. A generated file carries the license and `GENERATED,
+`make build` compiles with the rest. *(deviation: the root conventions
+(Implementation over the FFI, Build, packaging and release, Class family)
+generate more, which is hand-written today: the addon's C wrappers
+(`native/`) and their TypeScript types (`src/internal/native.ts`, the root's
+generated `native_types.ts`), the class modules and their form tables (in the
+modules that call `src/internal/args.ts`), and the data-class list, kept in
+the linter (`DATA_CLASSES`, `scripts/lint/java_ts.js`). Why: their generators
+are Phase C, not built yet
+(`design/current/javascript-producer/PLAN-producer-completion.md` §4). Goes
+when: Phase C lands.)* A generated file carries the license and `GENERATED,
 DO NOT EDIT` naming its generator, and is never edited by hand;
 `cargo xtask check-generated` fails on a stale, missing or orphaned one (a
-`.ts`, or a generated `.js` left in `src/`). A folder holding only generated
+`.ts`, or a generated `.js` left in `src/`, or a generated `.c` or `.h` left
+in `native/`). A folder holding only generated
 modules has a generated `index.ts`, whose `@packageDocumentation` lists what
 its classes leave out (their header comments' notes); in a hand-written one
 (`src/`, `common/`, `common/config/`, `common/metrics/`, `producer/`) the
