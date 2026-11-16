@@ -53,7 +53,7 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 
 .PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
 	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	test-examples-dotnet test-dotnet-macos verify verify-macos pack-dotnet package-check-dotnet coverage-dotnet
+	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-macos pack-dotnet package-check-dotnet coverage-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -315,6 +315,18 @@ coverage-dotnet: build-dotnet
 	cat $(COVERAGE_DIR)/report/Summary.txt
 	@echo 'Without Confluent.Kafka.Common.Errors (the generated exception classes):'
 	@sed -n '2,/^$$/p' $(COVERAGE_DIR)/report-without-errors/Summary.txt
+
+# ---------------------------------------------------------------------------
+# The verifiable clients (dotnet/tools/VerifiableClients), the producer and consumer
+# tools Kafka's system tests drive. Their tests alone, on net8.0 and net10.0. The
+# projects are in the solution, so test-dotnet runs these tests too; this target
+# does not need calling from it.
+# ---------------------------------------------------------------------------
+VERIFIABLE_CLIENTS_TESTS := $(REPO_ROOT)/dotnet/tools/VerifiableClients/VerifiableClients.Tests/VerifiableClients.Tests.csproj
+
+test-verifiable-clients-dotnet: build-dotnet
+	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(VERIFIABLE_CLIENTS_TESTS)
+	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(VERIFIABLE_CLIENTS_TESTS)
 
 # ---------------------------------------------------------------------------
 # The Confluent.Kafka NuGet package.
