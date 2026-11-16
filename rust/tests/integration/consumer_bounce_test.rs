@@ -568,29 +568,80 @@ fn current_time_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Hang guard on [`send_records`]' send loop, where Java's loop has no bound
+/// beyond `max.block.ms` (60 s, the producer default) per send: for a topic that
+/// never appears, 1000 sends would wait about 16.7 h. A passing run waits for
+/// the topic's metadata about once (the first send, at most `max.block.ms`) and
+/// the other sends only append, so 2 x `max.block.ms` covers the loop.
+const SEND_RECORDS_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Hang guard on [`send_records`]' `flush()`, where Java's `flush()` has no
+/// bound. Every record completes or expires within `delivery.timeout.ms`
+/// (120 s, the producer default), so a flush still pending 60 s after that is
+/// wedged.
+const SEND_RECORDS_FLUSH_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Hang guard on [`send_records`]' `close()`, where Java's `close()` waits
+/// without a bound. After the flush nothing is pending, so the close only stops
+/// the sender task; 60 s is the bound [`close_consumer`] uses.
+const SEND_RECORDS_CLOSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// `ClientsTestUtils#sendRecords(ClusterInstance,TopicPartition,int)`: a fresh producer
 /// sends `numRecords` records (`key i` / `value i`, 1 ms timestamp increments), then
 /// flushes and closes.
+///
+/// The producer is the native one on every arm. The send loop (each `send`
+/// bounded only by `max.block.ms`), the flush and the close have no overall
+/// bound in Java; here they are bounded by [`SEND_RECORDS_SEND_TIMEOUT`],
+/// [`SEND_RECORDS_FLUSH_TIMEOUT`] and [`SEND_RECORDS_CLOSE_TIMEOUT`], so a wedged
+/// producer fails the test, naming the step, instead of hanging it.
 async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize) {
     let producer = create_producer(ctx);
     let starting_timestamp = current_time_ms();
-    for i in 0..num_records {
-        let record = ProducerRecord::with_partition_timestamp_key(
-            tp.topic().to_string(),
-            Some(tp.partition()),
-            Some(starting_timestamp + i as i64),
-            Some(format!("key {i}").into_bytes()),
-            Some(format!("value {i}").into_bytes()),
-        )
-        .expect("valid producer record");
-        <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
-            .await
-            .expect("send should not fail");
-    }
-    producer.flush().await.expect("producer flush");
-    <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::close(&producer)
+    let sends = async {
+        for i in 0..num_records {
+            let record = ProducerRecord::with_partition_timestamp_key(
+                tp.topic().to_string(),
+                Some(tp.partition()),
+                Some(starting_timestamp + i as i64),
+                Some(format!("key {i}").into_bytes()),
+                Some(format!("value {i}").into_bytes()),
+            )
+            .expect("valid producer record");
+            <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
+                .await
+                .expect("send should not fail");
+        }
+    };
+    tokio::time::timeout(SEND_RECORDS_SEND_TIMEOUT, sends)
         .await
-        .expect("producer close");
+        .unwrap_or_else(|_| {
+            panic!(
+                "native producer: send_records sends did not finish within {} s",
+                SEND_RECORDS_SEND_TIMEOUT.as_secs()
+            )
+        });
+    tokio::time::timeout(SEND_RECORDS_FLUSH_TIMEOUT, producer.flush())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "native producer: send_records flush did not finish within {} s",
+                SEND_RECORDS_FLUSH_TIMEOUT.as_secs()
+            )
+        })
+        .expect("producer flush");
+    tokio::time::timeout(
+        SEND_RECORDS_CLOSE_TIMEOUT,
+        <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::close(&producer),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "native producer: send_records close did not finish within {} s",
+            SEND_RECORDS_CLOSE_TIMEOUT.as_secs()
+        )
+    })
+    .expect("producer close");
 }
 
 /// Java's `BounceBrokerScheduler`, a `ShutdownableThread` that
