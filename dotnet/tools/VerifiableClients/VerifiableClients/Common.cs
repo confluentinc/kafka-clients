@@ -363,19 +363,23 @@ internal sealed class Namespace
     internal int? GetInt(string dest) => (int?)_values[dest];
 
     internal long? GetLong(string dest) => (long?)_values[dest];
+
+    internal bool GetBoolean(string dest) => (bool)_values[dest]!;
 }
 
 /// <summary>
 /// The argparse parser the Python tools use (argparse4j, which the Java tools use, is its port), for the forms the
-/// tools take: options with a value, required options, a required mutually exclusive group, <c>--opt=value</c>, a
-/// value that looks like a negative number, the last repeated option winning, no abbreviations, and
-/// <c>-h</c> / <c>--help</c>. Errors throw <see cref="ArgumentParserException"/> with argparse's Python 3.10 texts.
+/// tools take: options with a value, <c>store_true</c> flags, required options, a required mutually exclusive group,
+/// <c>--opt=value</c>, a value that looks like a negative number, the last repeated option winning, no
+/// abbreviations, and <c>-h</c> / <c>--help</c>. Errors throw <see cref="ArgumentParserException"/> with argparse's
+/// Python 3.10 texts.
 /// </summary>
 internal sealed class ArgumentParser
 {
     private const int MaxHelpPosition = 24;
 
-    private static readonly Argument s_help = new Argument("-h", "help", null, "show this help message and exit", null, null, null, false, null);
+    private static readonly Argument s_help =
+        new Argument("-h", "help", null, "show this help message and exit", null, null, null, false, false, null);
 
     private readonly string _prog;
 
@@ -407,10 +411,20 @@ internal sealed class ArgumentParser
         object? defaultValue = null,
         IReadOnlyList<object>? choices = null,
         bool required = false,
+        bool storeTrue = false,
         MutuallyExclusiveGroup? group = null)
     {
         var argument = new Argument(
-            flag, dest ?? flag.TrimStart('-').Replace('-', '_'), metavar, help, type, defaultValue, choices, required, group);
+            flag,
+            dest ?? flag.TrimStart('-').Replace('-', '_'),
+            metavar,
+            help,
+            type,
+            storeTrue ? false : defaultValue,
+            choices,
+            required,
+            storeTrue,
+            group);
         _arguments.Add(argument);
         group?.Arguments.Add(argument);
     }
@@ -455,6 +469,18 @@ internal sealed class ArgumentParser
                 CheckHelpArgument(explicitArg, singleDash);
                 PrintHelp();
                 throw new HelpScreenException();
+            }
+
+            if (argument.StoreTrue)
+            {
+                if (explicitArg is not null)
+                {
+                    throw Error(argument, "ignored explicit argument " + Repr(explicitArg));
+                }
+
+                values[argument.Dest] = true;
+                seen.Add(argument);
+                continue;
             }
 
             string value;
@@ -752,9 +778,9 @@ internal sealed class ArgumentParser
         var parts = new List<string> { _prog };
         foreach (Argument argument in _arguments)
         {
-            if (argument == s_help)
+            if (argument == s_help || argument.StoreTrue)
             {
-                parts.Add("[-h]");
+                parts.Add("[" + argument.Flag + "]");
             }
             else if (argument.Required || argument.Group is not null)
             {
@@ -911,6 +937,7 @@ internal sealed class ArgumentParser
             object? defaultValue,
             IReadOnlyList<object>? choices,
             bool required,
+            bool storeTrue,
             MutuallyExclusiveGroup? group)
         {
             Flag = flag;
@@ -921,6 +948,7 @@ internal sealed class ArgumentParser
             DefaultValue = defaultValue;
             Choices = choices;
             Required = required;
+            StoreTrue = storeTrue;
             Group = group;
         }
 
@@ -940,11 +968,13 @@ internal sealed class ArgumentParser
 
         internal bool Required { get; }
 
+        internal bool StoreTrue { get; }
+
         internal MutuallyExclusiveGroup? Group { get; }
 
         internal string Name => ReferenceEquals(this, s_help) ? "-h/--help" : Flag;
 
-        internal string Invocation => ReferenceEquals(this, s_help) ? "-h, --help" : Flag + " " + Metavar;
+        internal string Invocation => ReferenceEquals(this, s_help) ? "-h, --help" : StoreTrue ? Flag : Flag + " " + Metavar;
 
         internal string HelpText()
         {
@@ -965,6 +995,7 @@ internal sealed class ArgumentParser
         private static string PythonStr(object? value) => value switch
         {
             null => "None",
+            bool b => b ? "True" : "False",
             _ => System.Convert.ToString(value, CultureInfo.InvariantCulture)!,
         };
     }
@@ -990,14 +1021,25 @@ internal sealed class ShutdownHook
     private bool _finished;
 
     internal ShutdownHook(Action hook, string name)
+        : this(hook, name, PosixSignalRegistration.Create)
+    {
+    }
+
+    internal ShutdownHook(
+        Action hook, string name, Func<PosixSignal, Action<PosixSignalContext>, PosixSignalRegistration?> register)
     {
         _name = name;
         _thread = new Thread(() => Run(hook)) { Name = name, IsBackground = true };
         _thread.Start();
-        lock (s_registrations)
+        foreach (PosixSignal signal in new[] { PosixSignal.SIGINT, PosixSignal.SIGTERM })
         {
-            s_registrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGINT, OnSignal));
-            s_registrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnSignal));
+            if (register(signal, OnSignal) is { } registration)
+            {
+                lock (s_registrations)
+                {
+                    s_registrations.Add(registration);
+                }
+            }
         }
     }
 
