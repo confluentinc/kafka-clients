@@ -42,7 +42,9 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
 2. **The binding includes only `confluent_kafka_bindings.h`**, and only from
    `include/confluent/kafka/detail/ffi.hpp`, inside `extern "C"` (the header declares none).
    It adds no FFI entry point. An overload whose entry point (§8) is missing is not generated,
-   and the module header's documentation block lists it with the name looked for.
+   and the module header's documentation block lists it under `@par Not generated`, one item
+   per overload in `design/current/java-deprecated.txt`'s form followed by the C name looked
+   for (`org.apache.kafka.clients.consumer.KafkaConsumer#clientInstanceId(Duration)`).
 3. **Every fallible call throws.** A C call passes one `out_err` slot and converts a stored error
    into the C++ exception of its id (§6); a `_cb` function is never called, so no `*Async*` peer,
    no completion queue and no sentinel exists. A method waits iff its entry point has a `_cb`
@@ -52,8 +54,9 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
    `internals` and "not a supported API" packages, their public members only; errors and config
    classes as §6 and §7 say. Nothing Java lacks is added except by C++ convention: `begin()` /
    `end()`, `size()`, `operator==`, `std::hash`, `operator<<`, `to_string()`, `of()` factories.
-5. **Generated from fixed inputs**: these rules, the Java source, the C header and the previous
-   release's API inventory give the same result on every run. Hand-written and not generated:
+5. **Generated from fixed inputs**: these rules, the Java source, the C header,
+   `tools/lint/data/decisions.txt` (§4.6) and the previous release give the same result on
+   every run. Hand-written and not generated:
    `detail/` (error conversion, RAII handles, trampolines, the completion thread) and the tests
    under `test/`. The error classes come from the C++ emitter of
    `cargo xtask generate-error-codes`; `check-generated` fails on stale output.
@@ -69,14 +72,25 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
 2. `Exception` → `Error`, nothing else (`TopicAuthorizationException` →
    `TopicAuthorizationError`; `InvalidRegularExpression` keeps its name). No `Local` prefix: C++
    namespaces separate the Java built-ins from Kafka's. The word "exception" appears only in
-   `std::exception` and in comments about Java.
-3. Methods and parameters snake_case; a leading `get` is dropped when it is followed by what the
-   method returns (`getMostSignificantBits` → `most_significant_bits`), kept when it is the
-   whole name or qualified (`get`, `get_now`); `is` and `has` stay. Types PascalCase. Java's
-   `xSync` / `xAsync` keep their names (`commit_sync`, `commit_async`).
+   `std::exception` and in comments about Java: in a method or parameter name it becomes
+   `error` (`injectTimeoutException` → `inject_timeout_error`).
+3. Methods and parameters snake_case; a leading `get` is dropped iff the method takes no
+   parameter, returns a value and what remains is a name that is not a C++ keyword
+   (`getMostSignificantBits()` → `most_significant_bits()`, `getName()` → `name()`), and stays
+   otherwise (`get()`, `get_now(value_if_absent)`, `get_int(key)`); `is` and `has` stay. Types
+   PascalCase. Java's `xSync` / `xAsync` keep their names (`commit_sync`, `commit_async`). A
+   parameter takes its name from the interface's declaration when the method is declared on one
+   (`Consumer.subscribe(topics, callback)` → `callback` on `KafkaConsumer` too, which names it
+   `listener`), else from its class's.
 4. `public static final` constants → `static constexpr` members of the same name
-   (`std::string_view`, `int32_t`, `std::array`); a constant `Set` or `List` → `std::array`.
-   Static methods → `static` member functions. Nested Java types → nested C++ types
+   (`std::string_view`, `int32_t`, `std::array`); a constant `Set` or `List` → `std::array`. A
+   constant of a class type, or a collection of one, → a static member function of the same
+   name returning a `const&` to a function-local static (`Uuid::ZERO_UUID()`,
+   `Uuid::RESERVED()` → `const std::array<Uuid, 2>&`), so no global object is built before
+   `main`. A public mutable field → a setter overload named after the field (§4.3):
+   `MockProducer.sendException` → `send_error(std::exception_ptr)`; an enum's public final
+   field → a free function (§3.3). No Java field stays a data member. Static methods → `static`
+   member functions. Nested Java types → nested C++ types
    (`CloseOptions::GroupMembershipOperation`).
 5. A name C++ gives by convention (§1.4, `Duration`, `detail`) is frozen once released; if Java
    later adds a public item of that name, the Java item gets the different name, chosen with
@@ -94,8 +108,12 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
    underlying type and Java's values (`TimestampType : int32_t { CREATE_TIME = 0 }`); a Java
    `enum` with none → `enum class` whose enumerators take the values of the C header's `_e` enum
    in Java order; a class hierarchy the C API flattens into a data-carrying enum (`OffsetSpec`,
-   `TopicCollection`) stays a class hierarchy, never `std::variant`. Java's methods on an enum
-   are free functions beside it: `to_string(E)` found by ADL, `E_for_name(...)` for a static.
+   `TopicCollection`) stays a class hierarchy, never `std::variant`. Java's methods and public
+   fields on an enum are free functions beside it, named after the enum (the enclosing classes
+   first for a nested one) and the member: `timestamp_type_for_name("CreateTime")`,
+   `timestamp_type_id(TimestampType::CREATE_TIME)`, `config_resource_type_for_id(2)`,
+   `acl_permission_type_is_unknown(p)`; `toString` stays `to_string(E)` and `operator<<`, found
+   by ADL (§1.4).
    An enum's kind, underlying type and values are frozen once released; new enumerators are
    appended.
 
@@ -125,7 +143,12 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
 6. Nullability: a parameter or return Java gives null a meaning for (its body, the field it is
    stored in, Java client code, or its Javadoc; "Non-null" wins), and a record key or value, is
    `std::optional<T>` for a value and a possibly empty `std::shared_ptr<T>` for an interface.
-   Everything else is `T`, `const T&` or `std::string_view`, so a null cannot be written.
+   Everything else is `T`, `const T&` or `std::string_view`, so a null cannot be written. Each
+   such reading, and each choice §5 makes from Java's body (`std::set`, `std::map`, a
+   `Collection` returned as `std::unordered_set`), is a line of `tools/lint/data/decisions.txt`,
+   `<Java member> <param|return> nullable|ordered|set <source> <why>`, written before the
+   header; only a Java `Optional`, a record key or value and an `Integer timeoutMs` need none.
+   The lint fails on a shape without its line and on a line nothing uses.
 7. Parameters: the most general borrowed form in (`std::string_view`, `std::span<const T>`,
    `const std::map<K, V>&`, `const T&`); an interface the client keeps is a `std::shared_ptr`
    the client holds until it releases the registration. Out: a value type by value, a getter on a
@@ -149,7 +172,7 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
 | a type parameter; `? extends T` | a template parameter with Java's letter (`KafkaProducer<K, V>`); `T` |
 | `Object` | does not appear: Java's config `Map<String, Object>` merges into the config class's string constructor (§7); no `std::any` on the surface |
 | `Collection<T>`, `List<T>`, `Iterable<T>`, `T[]`, `Set<T>` in | `std::span<const T>` (a `Set` with duplicates removed as `Set.copyOf` would) |
-| `Map<K, V>` in | `const std::unordered_map<K, V>&`, plus an overload on `std::map` |
+| `Map<K, V>` in | `const std::unordered_map<K, V>&`, one overload per Java overload (§4.1); the config constructors take `std::map` (§7.1) |
 | `List<T>`, `T[]` out; `Set<T>` out; `Map<K, V>` out | `std::vector<T>`; `std::unordered_set<T>` (`std::set` where Java builds a `TreeSet`); `std::unordered_map<K, V>` (`std::map` where Java builds a `TreeMap`) |
 | `Collection<T>`, `Iterable<T>` out | `std::unordered_set<T>` iff the Java implementation builds a `Set`, else `std::vector<T>` |
 | `java.time.Duration` | `Duration` (§4.8) |
@@ -417,19 +440,23 @@ Interfaces Java declares:
 
 1. Doxygen comments from the same translator as the rustdoc (`cargo xtask javadoc`): Java's
    contract first, then `@param`, `@return`, `@throws XError` per Javadoc `@throws`, then one
-   `Translation notes` paragraph for anything about C++ (the completion thread, a span's
+   `@par Translation notes` paragraph for anything about C++ (the completion thread, a span's
    lifetime, that a method waits and what runs meanwhile). At most 150% of the Javadoc's words;
    no Java file:line references, members by fully qualified name.
 2. A contract change has a `WARNING:` line in the notes, which fails the lint unless the item
    has an accepted entry in `cpp/design/current/doc-contract-changes.md`, in the root
-   `documentation.md` §6 format; only the user fills `Accepted`.
+   `documentation.md` §6 format; only the user fills `Accepted`. An entry's title is the C++
+   qualified name followed by the Java overload's parameter list in
+   `design/current/java-deprecated.txt`'s form
+   (`confluent::kafka::common::Node::Node(int,String,int)`), unique across overloads.
 3. Source compatibility always; ABI stability from the first major version: no public data
-   members; a stateful class holds one pointer (its C handle or a private implementation);
-   enumerators are appended and users keep a `default:`; an abstract class's vtable is frozen
-   at release, a later Java method appended as a virtual with a default body, and the base's
-   inline constructor records the header version the subclass was compiled against, so the
-   binding calls a new slot only on an object that has it; interfaces cross as
-   `std::shared_ptr`, so an added method needs no new constructor.
+   members; every class with data, value types included, holds one pointer (its C handle or a
+   private implementation), so a field Java adds later keeps the layout; enumerators are
+   appended and users keep a `default:`; an abstract class's vtable is frozen at release, a
+   later Java method appended as a virtual with a default body, and the base's inline
+   constructor records the header version the subclass was compiled against, so the binding
+   calls a new slot only on an object that has it; interfaces cross as `std::shared_ptr`, so an
+   added method needs no new constructor.
 4. The interface check: an API inventory (every public declaration, through libclang) compared
    with the previous release's; the previous release's unit tests compiled against the new
    headers (catches an ambiguous new overload); and the ABI probe (`test/probe`, a shared
@@ -437,8 +464,9 @@ Interfaces Java declares:
    `abidiff`. In development a rule change may alter interfaces per PR; in preview a change
    warns; after GA a change fails in a minor and warns in a major, where the ABI report is the
    release notes' list of breaks.
-5. A Java deprecation becomes `[[deprecated("<Java's note>")]]`; a removed method stays,
-   deprecated, until the next major. A renamed parameter changes nothing. A return type becomes
+5. A member Java deprecates (`design/current/java-deprecated.txt`) is not generated, as the root
+   `CLAUDE.md` §3 says, unless the previous C++ release has it: then it stays with
+   `[[deprecated("<Java's note>")]]` until the next major, as does a method Java removes. A renamed parameter changes nothing. A return type becomes
    `std::optional` only in a major *(deviation from Python's `| None` in a minor: it changes every
    caller)*.
 

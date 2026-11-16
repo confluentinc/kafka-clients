@@ -48,6 +48,10 @@ CheckOptions:
     value: lower_case
   - key: readability-identifier-naming.MethodCase
     value: lower_case
+  # A Java constant of a class type is a static function of Java's UPPER_CASE
+  # name (CLAUDE.md §2.4): `Uuid::ZERO_UUID()`.
+  - key: readability-identifier-naming.MethodIgnoredRegexp
+    value: '^[A-Z][A-Z0-9_]*$'
   - key: readability-identifier-naming.VariableCase
     value: lower_case
   - key: readability-identifier-naming.ParameterCase
