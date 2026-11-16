@@ -51,6 +51,17 @@ internal sealed class ThroughputThrottler
 
     internal long SleepDeficitNs { get; private set; }
 
+    internal bool WakeupPending
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _wakeup;
+            }
+        }
+    }
+
     internal bool ShouldThrottle(long amountSoFar, long sendStartMs)
     {
         if (_targetThroughput < 0)
