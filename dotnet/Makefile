@@ -29,7 +29,7 @@ DOTNET_CONFIG ?= Release
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
 .PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	pack-dotnet package-check-dotnet
+	test-examples-dotnet pack-dotnet package-check-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -159,6 +159,7 @@ test-dotnet: build-dotnet
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
 	$(MAKE) test-soak-dotnet
+	$(MAKE) test-examples-dotnet
 
 # ---------------------------------------------------------------------------
 # Soak client (M16/P1). Kept OUT of the solution (like grpc-server and the perf
@@ -191,6 +192,19 @@ test-soak-dotnet: build-dotnet
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS)
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS)
+
+# ---------------------------------------------------------------------------
+# The examples (dotnet/examples/README.md). Kept out of the solution, like the soak
+# client: they target net8.0 only, as a user's program would, while test-dotnet runs
+# the solution on net10.0 too. Their own solution holds them; this target builds it
+# and checks its format, so the examples cannot rot. They are run by hand, against a
+# broker, as the README shows.
+# ---------------------------------------------------------------------------
+EXAMPLES_SOLUTION := $(REPO_ROOT)/dotnet/examples/Confluent.Kafka.Examples.sln
+
+test-examples-dotnet: build-dotnet
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(EXAMPLES_SOLUTION)
+	$(DOTNET) format $(EXAMPLES_SOLUTION) --verify-no-changes
 
 # ---------------------------------------------------------------------------
 # The Confluent.Kafka NuGet package.
