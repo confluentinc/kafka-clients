@@ -61,10 +61,10 @@ std::string method_name(const java::Method& method);
 /// from `method` itself; snake_cased as members (§2.2).
 std::vector<std::string> parameter_names(const java::Model& model, const java::Type& owner, const java::Method& method);
 
-/// §3.3: the free function a Java enum member becomes, prefixed with the
-/// enum's name and its enclosing classes': `timestamp_type_for_name`,
-/// `config_resource_type_for_id`; `toString` is `to_string`.
-std::string enum_function_name(const java::Model& model, const java::Type& enum_type, std::string_view member_cpp_name);
+/// §3.3: the namespace beside an enum that holds its static methods and static
+/// constants, the enum's name in snake_case with its enclosing classes' first:
+/// `timestamp_type`, `config_resource_type` for `ConfigResource.Type`.
+std::string enum_statics_namespace(const java::Model& model, const java::Type& enum_type);
 
 /// Whether `word` is a C++ keyword or alternative token.
 bool is_cpp_keyword(std::string_view word);

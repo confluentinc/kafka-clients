@@ -317,7 +317,7 @@ private:
             if (is_static && is_final) {
                 if (constexpr_type(model_, f.type)) {
                     e_.constants.push_back(
-                        ExpectedConstant{f.name, mapped(f.type, Position::CONSTANT, id), id, f.initializer});
+                        ExpectedConstant{f.name, {}, mapped(f.type, Position::CONSTANT, id), id, f.initializer});
                     continue;
                 }
                 // §2.4: a class-typed constant is a static function returning a const&.
@@ -405,9 +405,13 @@ private:
             e_.enumerators.push_back(std::move(en));
         }
 
-        // §3.3: the enum's methods and fields are free functions beside it.
+        // §3.3: the enum's members are free functions beside it. A field or an
+        // instance method takes the enum first and keeps its name (found by
+        // ADL); a static method or constant goes in the namespace named after
+        // the enum.
         const auto self = value(e_.cpp_name);
         const auto self_name = snake_case(last_segment(e_.cpp_name));
+        const auto statics = enum_statics_namespace(model_, type_);
         for (const auto& m : type_.methods) {
             if (m.visibility != java::Visibility::PUBLIC || m.implicit || deprecated(m.annotations)) {
                 continue;
@@ -419,8 +423,10 @@ private:
             }
             ExpectedFunction f;
             f.kind = FunctionKind::FREE_FUNCTION;
-            f.name = enum_function_name(model_, type_, method_name(m));
-            if (!m.has(java::MOD_STATIC)) {
+            f.name = method_name(m);
+            if (m.has(java::MOD_STATIC)) {
+                f.qualifier = statics;
+            } else {
                 f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}});
             }
             for (auto& p : parameters(m)) {
@@ -431,29 +437,35 @@ private:
             e_.functions.push_back(std::move(f));
         }
         for (const auto& field : type_.fields) {
-            if (field.visibility != java::Visibility::PUBLIC || field.has(java::MOD_STATIC) ||
-                deprecated(field.annotations)) {
+            if (field.visibility != java::Visibility::PUBLIC || deprecated(field.annotations)) {
                 continue;
             }
-            ExpectedFunction f;
-            f.kind = FunctionKind::FREE_FUNCTION;
-            f.name = enum_function_name(model_, type_, member_name(field.name));
-            f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}});
-            f.returns = mapped(field.type, Position::RETURN, type_.binary_name + "#" + field.name);
-            f.java_member = type_.binary_name + "#" + field.name;
-            f.note = "§2.4 an enum's public field";
-            e_.functions.push_back(std::move(f));
-        }
-        for (const auto& field : type_.fields) {
-            if (field.visibility == java::Visibility::PUBLIC && field.has(java::MOD_STATIC) &&
-                !deprecated(field.annotations)) {
-                const auto id = type_.binary_name + "#" + field.name;
+            const auto id = type_.binary_name + "#" + field.name;
+            if (!field.has(java::MOD_STATIC)) {
+                ExpectedFunction f;
+                f.kind = FunctionKind::FREE_FUNCTION;
+                f.name = member_name(field.name);
+                f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}});
+                f.returns = mapped(field.type, Position::RETURN, id);
+                f.java_member = id;
+                f.note = "§2.4 an enum's public field";
+                e_.functions.push_back(std::move(f));
+            } else if (constexpr_type(model_, field.type)) {
+                ExpectedConstant c{field.name, statics, mapped(field.type, Position::CONSTANT, id), id,
+                                   field.initializer};
+                e_.constants.push_back(std::move(c));
+            } else {
+                // §2.4: a class-typed constant is a function returning a const&.
                 ExpectedFunction fn;
-                fn.kind = FunctionKind::FREE_FUNCTION;
-                fn.name = enum_function_name(model_, type_, field.name);
+                fn.kind = FunctionKind::CONSTANT_FUNCTION;
+                fn.name = field.name;
+                fn.qualifier = statics;
                 fn.returns = mapped(field.type, Position::CONSTANT, id);
+                for (auto& sh : fn.returns.shapes) {
+                    sh.type = const_ref(sh.type);
+                }
                 fn.java_member = id;
-                fn.note = "§2.4, §3.3 an enum's constant";
+                fn.note = "§2.4, §3.3 an enum's class-typed constant";
                 e_.functions.push_back(std::move(fn));
             }
         }
@@ -548,6 +560,10 @@ std::string render(const ExpectedType& e) {
             out << (en.value.empty() ? " = /* the C header's _e value */" : " = " + en.value) << ",\n";
         }
         out << "};\n";
+        for (const auto& c : e.constants) {
+            out << "inline constexpr " << shape_text(c.mapping) << ' ' << c.qualifier << "::" << c.name << " = "
+                << c.initializer << ";  // " << c.java_member << '\n';
+        }
     } else {
         out << "class " << simple;
         for (std::size_t i = 0; i < e.bases.size(); ++i) {
@@ -575,7 +591,7 @@ std::string render(const ExpectedType& e) {
         if (f.kind != FunctionKind::CONSTRUCTOR && !f.returns.shapes.empty()) {
             out << shape_text(f.returns) << ' ';
         }
-        out << f.name << '(';
+        out << (f.qualifier.empty() ? "" : f.qualifier + "::") << f.name << '(';
         for (std::size_t i = 0; i < f.parameters.size(); ++i) {
             out << (i > 0 ? ", " : "") << shape_text(f.parameters[i].mapping) << ' ' << f.parameters[i].name;
         }
@@ -598,7 +614,7 @@ std::string render(const ExpectedType& e) {
         }
     };
     for (const auto& f : e.functions) {
-        if (f.kind != FunctionKind::FREE_FUNCTION && e.shape != TypeShape::ENUM_CLASS) {
+        if (f.kind != FunctionKind::FREE_FUNCTION && f.qualifier.empty() && e.shape != TypeShape::ENUM_CLASS) {
             line(f, true);
         }
     }
@@ -606,7 +622,7 @@ std::string render(const ExpectedType& e) {
         out << "};\n";
     }
     for (const auto& f : e.functions) {
-        if (f.kind == FunctionKind::FREE_FUNCTION) {
+        if (f.kind == FunctionKind::FREE_FUNCTION || !f.qualifier.empty()) {
             line(f, false);
         }
     }

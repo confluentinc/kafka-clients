@@ -315,9 +315,15 @@ TEST(ExpectedTest, AnEnumWithOneIntegerFieldTakesItsValues) {
     ASSERT_EQ(e.enumerators.size(), 2U);
     EXPECT_EQ(e.enumerators[0].value, "-1");
     EXPECT_EQ(e.enumerators[1].value, "0");
+    // §3.3: a field or instance method keeps its name and takes the enum; a
+    // static goes in the namespace named after the enum.
     EXPECT_EQ(names_of(e, FunctionKind::FREE_FUNCTION),
-              (std::vector<std::string>{"timestamp_type_for_name", "to_string", "operator<<", "timestamp_type_id",
-                                        "timestamp_type_name"}));
+              (std::vector<std::string>{"for_name", "to_string", "operator<<", "id", "name"}));
+    EXPECT_EQ(function(e, "for_name").qualifier, "timestamp_type");
+    EXPECT_TRUE(function(e, "for_name").parameters.size() == 1);
+    EXPECT_EQ(function(e, "id").qualifier, "");
+    ASSERT_EQ(function(e, "id").parameters.size(), 1U);
+    EXPECT_EQ(default_type(function(e, "id").parameters[0].mapping), "confluent::kafka::common::record::TimestampType");
 
     // §3.3: an enum with no integer field takes the C header's values.
     const auto op = cklint::rules::expected(model, *model.find("org.apache.kafka.common.record.Op"));
@@ -326,8 +332,44 @@ TEST(ExpectedTest, AnEnumWithOneIntegerFieldTakesItsValues) {
 
     // Java's casts are dropped from the values.
     const auto type = cklint::rules::expected(model, *model.find("org.apache.kafka.common.record.Type"));
+    EXPECT_EQ(cklint::rules::enum_statics_namespace(model, *model.find("org.apache.kafka.common.record.Type")), "type");
     EXPECT_EQ(type.underlying->to_string(), "int8_t");
     EXPECT_EQ(type.enumerators.at(0).value, "32");
+}
+
+TEST(ExpectedTest, PutsAnEnumsStaticsInANamespaceNamedAfterIt) {
+    // §3.3: ConfigResource.Type.forId -> config_resource_type::for_id;
+    // SslClientAuth.VALUES -> ssl_client_auth::VALUES, an inline constexpr.
+    const auto model = public_model_of({{"org/apache/kafka/common/config/ConfigResource.java", R"(
+        package org.apache.kafka.common.config;
+        public final class ConfigResource {
+            public enum Type {
+                TOPIC((byte) 2);
+                private final byte id;
+                Type(byte id) { this.id = id; }
+                public byte id() { return id; }
+                public static Type forId(byte id) { return TOPIC; }
+            }
+        }
+    )"},
+                                        {"org/apache/kafka/common/config/SslClientAuth.java", R"(
+        package org.apache.kafka.common.config;
+        import java.util.List;
+        public enum SslClientAuth {
+            REQUIRED;
+            public static final List<SslClientAuth> VALUES = List.of(SslClientAuth.values());
+        }
+    )"}});
+    const auto& type = *model.find("org.apache.kafka.common.config.ConfigResource$Type");
+    EXPECT_EQ(cklint::rules::enum_statics_namespace(model, type), "config_resource_type");
+    const auto e = cklint::rules::expected(model, type);
+    EXPECT_EQ(function(e, "for_id").qualifier, "config_resource_type");
+    EXPECT_EQ(function(e, "id").qualifier, "");
+
+    const auto ssl = cklint::rules::expected(model, *model.find("org.apache.kafka.common.config.SslClientAuth"));
+    ASSERT_EQ(ssl.constants.size(), 1U);
+    EXPECT_EQ(ssl.constants[0].qualifier, "ssl_client_auth");
+    EXPECT_EQ(default_type(ssl.constants[0].mapping), "std::array<confluent::kafka::common::config::SslClientAuth>");
 }
 
 TEST(ExpectedTest, TranslatesConstantsAndFields) {

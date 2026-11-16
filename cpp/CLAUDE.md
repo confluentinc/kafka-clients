@@ -104,18 +104,19 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
    C header. One umbrella header per module (`<confluent/kafka/consumer.hpp>`) includes them
    all; users include the umbrella, a class header's name may change.
 2. Header-only: every function is `inline`, a template or `constexpr`; no `.cpp` ships.
-3. Enums: a Java `enum` whose constructor sets exactly one integer field → `enum class` with that
-   underlying type and Java's values (`TimestampType : int32_t { CREATE_TIME = 0 }`); a Java
-   `enum` with none → `enum class` whose enumerators take the values of the C header's `_e` enum
-   in Java order; a class hierarchy the C API flattens into a data-carrying enum (`OffsetSpec`,
-   `TopicCollection`) stays a class hierarchy, never `std::variant`. Java's methods and public
-   fields on an enum are free functions beside it, named after the enum (the enclosing classes
-   first for a nested one) and the member: `timestamp_type_for_name("CreateTime")`,
-   `timestamp_type_id(TimestampType::CREATE_TIME)`, `config_resource_type_for_id(2)`,
-   `acl_permission_type_is_unknown(p)`; `toString` stays `to_string(E)` and `operator<<`, found
-   by ADL (§1.4).
-   An enum's kind, underlying type and values are frozen once released; new enumerators are
-   appended.
+3. Enums: a Java `enum` whose constructor sets exactly one integer field → `enum class` with
+   that underlying type and Java's values (`TimestampType : int32_t { CREATE_TIME = 0 }`); a
+   Java `enum` with none → `enum class` whose enumerators take the values of the C header's `_e`
+   enum in Java order; a class hierarchy the C API flattens into a data-carrying enum
+   (`OffsetSpec`, `TopicCollection`) stays a class hierarchy, never `std::variant`. Java's
+   members of an enum are free functions beside it. A field or an instance method takes the enum
+   first and keeps its own name, found by ADL: `id(TimestampType::CREATE_TIME)`,
+   `is_unknown(p)`, `toString` → `to_string(e)` and `operator<<` (§1.4). A static method or
+   static constant goes in a namespace beside the enum named after it in snake_case, the
+   enclosing classes first for a nested one: `timestamp_type::for_name("CreateTime")`,
+   `config_resource_type::for_id(2)`, `ssl_client_auth::VALUES` (an `inline constexpr` variable,
+   or a function as §2.4 says for a class type). An enum's kind, underlying type and values are
+   frozen once released; new enumerators are appended.
 
 ## 4. Overloads and signatures
 

@@ -55,6 +55,9 @@ struct ExpectedFunction {
     Mapping returns;  ///< empty for a constructor
     bool is_virtual = false;
     bool is_pure = false;
+    /// The namespace beside an enum that holds it (§3.3): `timestamp_type`;
+    /// empty when it is not an enum's static.
+    std::string qualifier;
     /// `<binary name>#<signature>` or `#<FIELD>`; empty for a C++ convention.
     std::string java_member;
     /// Why it exists when it is not a plain translation: `§5 Comparable`.
@@ -63,6 +66,9 @@ struct ExpectedFunction {
 
 struct ExpectedConstant {
     std::string name;
+    /// As ExpectedFunction::qualifier: an enum's static constant is an
+    /// `inline constexpr` variable in the namespace beside it.
+    std::string qualifier;
     Mapping mapping;
     std::string java_member;
     std::string initializer;

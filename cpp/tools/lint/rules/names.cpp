@@ -245,16 +245,12 @@ std::vector<std::string> parameter_names(const java::Model& model, const java::T
     return names;
 }
 
-std::string enum_function_name(const java::Model& model, const java::Type& enum_type,
-                               std::string_view member_cpp_name) {
-    if (member_cpp_name == "to_string") {
-        return "to_string";
-    }
+std::string enum_statics_namespace(const java::Model& model, const java::Type& enum_type) {
     std::string out;
     for (const auto& name : type_chain(model, enum_type)) {
-        out += snake_case(name) + "_";
+        out += (out.empty() ? "" : "_") + snake_case(name);
     }
-    return out + std::string(member_cpp_name);
+    return out;
 }
 
 }  // namespace cklint::rules
