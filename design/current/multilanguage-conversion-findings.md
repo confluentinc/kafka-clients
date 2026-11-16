@@ -342,3 +342,64 @@ state:
   periodic or other-triggered metadata refresh, where Java requests a refresh at once.
 - **State**: needs owner. The owner will take it with findings #2 and #3 in a separate core-fix
   PR; no core change on this branch.
+
+## Load-only flakes in the final gate (2026-11-16)
+
+These are not findings: each failure appeared only under load, and each test passed twice when
+run alone. They are recorded here because the gate saw them. The gate ran `make verify` (C arm),
+`make test-python check-bindings` (Python arms) and `make test-integration-dotnet` with
+`MULTILANG_IMAGE_TAG=mlconv-abd62fea`, at a load average of about 25 on 12 cores. "Setup" is the
+`[multilanguage] ... setup=` time of the arm (cluster and backend container); alone it is about 4-10 s.
+
+1. `consumer_bounce_test::test_async_subscribe_when_topic_unavailable__grpc_c`
+   - Message: `Assertion failed after 60000ms: Condition not met within timeout 60000. c backend:
+     Consumer did not receive expected 1000. It received 0`, then, from the detached poller task
+     once the teardown had removed the container, `c gRPC backend transport error (Unknown):
+     transport error`.
+   - Setup 42.93 s, elapsed 74.61 s. Alone: passed in 24.21 s and 26.66 s.
+2. `consumer_bounce_test::test_async_subscribe_when_topic_unavailable__grpc_python_async`
+   - Message: not in the log. The Python integration run was killed (SIGTERM) for the hang of
+     item 3 before libtest printed the failure summary, so only the arm's line remains:
+     `result=panicked`. The failing step is not known.
+   - Setup 92.54 s, elapsed 86.36 s. Alone: passed in 22.37 s and 22.37 s.
+3. `consumer_bounce_test::test_async_subscribe_when_topic_unavailable__grpc_python`
+   - Message: none. No output for 16 minutes, killed after 35 minutes; libtest printed no panic,
+     and the arm printed no `[multilanguage]` line, so it never ended and its setup time is not
+     known.
+   - Cause: the logs cannot place the hang. Its captured output was lost with the kill, and its
+     containers were gone. Reading the scenario and the harness, every wait on its path has a
+     bound except three steps of `send_records`' native producer, which had none, as in Java:
+     - the send loop, each send bounded only by `max.block.ms` (60 s), so 1000 sends to a topic
+       that never appears (the scheduled creation failed; the bounce cluster does not auto-create
+       topics) wait about 16.7 h, with no output;
+     - the `flush()`;
+     - the `close()`.
+
+     Each is a candidate cause; the logs cannot confirm any of them. The other waits are bounded:
+     each gRPC consumer call has the 30 s channel timeout, the poller join 30 s, the final close
+     60 s, the topic-creation join 60 s, the broker restart `BROKER_READY_TIMEOUT`, and the Docker
+     API calls testcontainers' 120 s. (The synchronous `docker rm -f` of the dedicated cluster's
+     teardown in `TestContext`'s `Drop` has no bound either; it is Docker, not the test.)
+   - Bounds added (6c728a746): the send loop 120 s (2 x `max.block.ms`), the flush 180 s
+     (`delivery.timeout.ms`, 120 s, plus a margin) and the close 60 s, failing with `native
+     producer: send_records <step> did not finish within <N> s`. A hang in any of the three now
+     fails the arm instead.
+   - Alone: passed in 20.99 s and 22.44 s.
+4. `consumer_bounce_test::test_async_subscribe_when_topic_unavailable__grpc_dotnet`
+   - Message: `Assertion failed after 60000ms: Condition not met within timeout 60000. dotnet
+     backend: Consumer did not receive expected 1000. It received 2000`, then, from the detached
+     poller task once the teardown had removed the container, `dotnet gRPC backend transport error
+     (Unknown): transport error`. The second phase re-read the first 1000 records: under load the
+     consumer lost its assignment before any commit and restarted from offset 0. It was not the
+     poll-timeout path the test's comment at `max.poll.interval.ms` names (at most about 100 s
+     passed between two polls, under 120000 ms); the log does not show why the assignment was
+     lost. Java's `receiveExactRecords` asserts `receivedMessages() == numRecords`, so Java fails
+     on 2000 too.
+   - Setup 47.06 s, elapsed 160.40 s. Alone: passed in 19.56 s and 20.32 s.
+5. `consumer_bounce_test::test_async_consumer_seek_and_commit_with_broker_failures__grpc_python_async`
+   - Message: not in the log, for the reason given in item 2; only `result=panicked` remains.
+   - Setup 50.72 s, elapsed 138.45 s. Alone: passed in 31.20 s and 30.81 s.
+
+With the flush and close bounds, `test_async_subscribe_when_topic_unavailable` passed on its six
+arms in one run (idle host); with all three bounds (6c728a746), the `__rust` arms of the five
+scenarios that call `send_records` passed. The send-loop bound acts only after 120 s.
