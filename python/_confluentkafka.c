@@ -2715,8 +2715,8 @@ static Py_ssize_t offsets_to_arrays(PyObject* list, offset_arrays_t* out) {
                              Py_TYPE(meta)->tp_name);
                 ok = 0;
             } else {
-                out->metas[i] = PyUnicode_AsUTF8(meta);
-                if (out->metas[i] == NULL) ok = 0;  // e.g. unencodable surrogates
+                out->metas[i] = str_utf8_borrowed(meta);
+                if (out->metas[i] == NULL) ok = 0;  // unencodable surrogates, an embedded NUL
             }
         }
         Py_XDECREF(item);
@@ -4141,7 +4141,7 @@ static int str_list_build(PyObject* seq, str_list_t* l) {
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject* item = PySequence_Fast_GET_ITEM(fast, i);  // borrowed
-        const char* s = PyUnicode_Check(item) ? PyUnicode_AsUTF8(item) : NULL;
+        const char* s = PyUnicode_Check(item) ? str_utf8_borrowed(item) : NULL;
         if (s == NULL) {
             if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "topics must be str");
             str_list_free(l);
@@ -6943,8 +6943,8 @@ static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
     PyObject *key, *value;
     Py_ssize_t pos = 0;
     while (PyDict_Next(config_dict, &pos, &key, &value)) {
-        const char* k = PyUnicode_Check(key) ? PyUnicode_AsUTF8(key) : NULL;
-        const char* v = PyUnicode_Check(value) ? PyUnicode_AsUTF8(value) : NULL;
+        const char* k = PyUnicode_Check(key) ? str_utf8_borrowed(key) : NULL;
+        const char* v = (k != NULL && PyUnicode_Check(value)) ? str_utf8_borrowed(value) : NULL;
         if (k == NULL || v == NULL || ffi_raise((kafka_Map_put_err(props, (void*)k, (void*)v, &ffi_err), ffi_take(&ffi_err)))) {
             ffi_unraisable((kafka_Map_destroy_err(props, &ffi_err), ffi_take(&ffi_err)));
             if (!PyErr_Occurred())
@@ -7458,7 +7458,7 @@ static int str_list_build_msg(PyObject* seq, str_list_t* l, const char* what) {
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject* item = PySequence_Fast_GET_ITEM(fast, i);  // borrowed
-        const char* s = PyUnicode_Check(item) ? PyUnicode_AsUTF8(item) : NULL;
+        const char* s = PyUnicode_Check(item) ? str_utf8_borrowed(item) : NULL;
         if (s == NULL) {
             if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, what);
             str_list_free(l);
@@ -7620,7 +7620,7 @@ static int uuid_list_build(PyObject* seq, uuid_list_t* l, kafka_common_Error_t**
     l->n = n;
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject* item = PySequence_Fast_GET_ITEM(fast, i);
-        const char* s = PyUnicode_Check(item) ? PyUnicode_AsUTF8(item) : NULL;
+        const char* s = PyUnicode_Check(item) ? str_utf8_borrowed(item) : NULL;
         if (s == NULL) {
             if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "topic ids must be str");
             Py_DECREF(fast); uuid_list_free(l); return -1;
@@ -9039,7 +9039,7 @@ static PyObject* AdminResult_future(AdminResultObject* self, PyObject* args) {
     if (a->one != NULL) {
         err = (f = a->one(self->result, &ffi_err), ffi_take(&ffi_err));
     } else if (a->by_str != NULL) {
-        const char* k = PyUnicode_Check(key) ? PyUnicode_AsUTF8(key) : NULL;
+        const char* k = PyUnicode_Check(key) ? str_utf8_borrowed(key) : NULL;
         if (k == NULL) {
             if (!PyErr_Occurred()) PyErr_Format(PyExc_TypeError, "%s.%s takes a str", self->desc->name, name);
             return NULL;
@@ -9197,7 +9197,7 @@ static int admin_option_i32(PyObject* value, int32_t* out) {
 #define ADMIN_OPT_STR(Rpc, field) \
     static int Rpc##Options__##field(void* o, PyObject* v, kafka_common_Error_t** e) { \
         const char* s = NULL; \
-        if (v != Py_None && (s = PyUnicode_AsUTF8(v)) == NULL) return -1; \
+        if (v != Py_None && (s = str_utf8_borrowed(v)) == NULL) return -1; \
         kafka_admin_##Rpc##Options_set_##field##_err((kafka_admin_##Rpc##Options_t*)o, s, e); \
         return 0; \
     }
@@ -10351,7 +10351,7 @@ static int enum_name_list(PyObject* names, enum_parse_fn parse, kafka_List_t** o
     if (*e != NULL) { Py_DECREF(fast); return -1; }
     for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(fast); i++) {
         PyObject* item = PySequence_Fast_GET_ITEM(fast, i);
-        const char* name = PyUnicode_Check(item) ? PyUnicode_AsUTF8(item) : NULL;
+        const char* name = PyUnicode_Check(item) ? str_utf8_borrowed(item) : NULL;
         if (name == NULL) {
             if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "enum names must be str");
             break;
@@ -11729,7 +11729,7 @@ static int ListTransactionsOptions__filter_on_duration(void* o, PyObject* v, kaf
 static int ListTransactionsOptions__filter_on_transactional_id_pattern(void* o, PyObject* v,
                                                                         kafka_common_Error_t** e) {
     const char* pattern = NULL;
-    if (v != Py_None && (pattern = PyUnicode_AsUTF8(v)) == NULL) return -1;
+    if (v != Py_None && (pattern = str_utf8_borrowed(v)) == NULL) return -1;
     kafka_admin_ListTransactionsOptions_filter_on_transactional_id_pattern_err(
         (kafka_admin_ListTransactionsOptions_t*)o, pattern, e);
     return 0;
