@@ -129,10 +129,12 @@ A selector must name every parameter of the case, with JSON booleans (`true`,
 not `True`). `ducktape --collect-only <file>` lists a file's cases with their
 parameters.
 
-The results go to `<kafka>/results/`. A service that restarts a tool first
-removes the tool's directory on the node, so a failed test's capture file (see
-Logging) holds only the tool's last run: a failure in an earlier run, such as
-the fenced first run of the fencing test's conflict consumers, is not in it.
+The results go to `<kafka>/results/`. A service's `start()` first removes the
+tool's directory on each of its nodes, so a failed test's capture file (see
+Logging) holds only the runs since the service last started: when a test starts
+a service again, as the fencing test does its conflict consumers, the earlier
+runs (the fenced first run) are not in it. A node bounced with `stop_node` and
+`start_node`, as in `test_consumer_bounce`, appends to the same file.
 
 ### What cannot pass yet
 
@@ -150,9 +152,9 @@ the fenced first run of the fencing test's conflict consumers, is not in it.
   (`-Djava.security.auth.login.config`), which only a JVM reads.
 - Tests that copy records with Java's transactional message copier use a Java
   tool these globals do not replace. Tests that run an older release's clients
-  get these tools with that release's arguments: no `--group-protocol` before
-  3.7, so the consumer runs `classic`, and `--broker-list` (the consumer's before
-  4.0, the producer's before 2.5), which the tools do not take.
+  get these tools with that release's arguments, which name the brokers with
+  `--broker-list` (the consumer's before 4.0, the producer's before 2.5); the
+  tools take only `--bootstrap-server`, so they exit at argument parsing.
 
 ## Logging
 
