@@ -759,12 +759,14 @@ public sealed class ConsoleErrorCollection
 }
 
 /// <summary>
-/// The two tests of Python's <c>test_verifiable_consumer.py</c> that read the tool's error log, which goes to
-/// <see cref="Console.Error"/>, captured with no other test running.
+/// The two tests of Python's <c>test_verifiable_consumer.py</c> that read the tool's log, which goes to
+/// <see cref="Console.Error"/>, captured, and its level set, with no other test running.
 /// </summary>
 [Collection(ConsoleErrorCollection.Name)]
 public sealed class VerifiableConsumerLogTests
 {
+    private const string LogLevelVariable = "VERIFIABLE_CLIENT_LOG_LEVEL";
+
     [Fact]
     public void RunEndsQuietlyOnWakeup()
     {
@@ -774,7 +776,18 @@ public sealed class VerifiableConsumerLogTests
         string stderr = CapturingStderr(() => Verifiable(mock, stdout).Run());
         Assert.Equal(new[] { "startup_complete", "shutdown_complete" }, Names(stdout));
         Assert.DoesNotContain("] ERROR ", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("] DEBUG ", stderr, StringComparison.Ordinal);
         Assert.True(mock.Mock.Closed());
+
+        using var debugMock = new ScriptedConsumer();
+        debugMock.SchedulePollTask(debugMock.Wakeup);
+        string debugStderr = AtLogLevel(
+            "DEBUG", () => CapturingStderr(() => Verifiable(debugMock, new StringWriter()).Run()));
+        Assert.Matches(
+            new Regex(
+                "^\\[[^\\]]+\\] DEBUG Caught WakeupException because consumer is shutdown, ignore and terminate\\. "
+                + "\\(verifiable_consumer\\)\n\\z"),
+            debugStderr);
     }
 
     [Fact]
@@ -800,6 +813,23 @@ public sealed class VerifiableConsumerLogTests
 
     private static IEnumerable<string> Names(StringWriter stdout) =>
         VerifiableConsumerTests.Lines(stdout.ToString()).Select(VerifiableConsumerTests.Name);
+
+    private static string AtLogLevel(string level, Func<string> action)
+    {
+        string? original = Environment.GetEnvironmentVariable(LogLevelVariable);
+        Environment.SetEnvironmentVariable(LogLevelVariable, level);
+        Log.Configure();
+        try
+        {
+            return action();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(LogLevelVariable, null);
+            Log.Configure();
+            Environment.SetEnvironmentVariable(LogLevelVariable, original);
+        }
+    }
 
     private static string CapturingStderr(Action action)
     {
