@@ -19,7 +19,7 @@
 // before any open transaction.
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 ListOffsets read_uncommitted \
-//         orders 0 earliest orders 0 timestamp:1700000000000
+//         orders 0 earliest orders 1 timestamp:1700000000000
 
 using System;
 using System.Collections.Generic;

@@ -14,8 +14,9 @@
 
 // Lists a group's committed offsets with IAdmin.ListConsumerGroupOffsets. Without partitions it lists every
 // partition the group has committed an offset for; with partitions it lists those, reporting the ones
-// without a committed offset. With --require-stable the broker waits for pending transactional offsets to be
-// committed or aborted instead of leaving them out.
+// without a committed offset. With --require-stable a partition with an offset commit in a transaction that
+// is still open is left out of the listing, also when it was asked for by name; without it, that partition
+// is listed with its last committed offset. The call does not wait for the transaction either way.
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 ListConsumerGroupOffsets orders-app \
 //         orders 0 orders 1

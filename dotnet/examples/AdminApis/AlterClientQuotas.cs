@@ -24,6 +24,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
@@ -34,6 +35,10 @@ internal static class AlterClientQuotas
 {
     public const string Arguments =
         "[--validate-only] <entity_type>=<name|DEFAULT>[,<entity_type>=<name|DEFAULT>]... <key>=<value|REMOVE>...";
+
+    // A quota value is a decimal number, with an optional sign and exponent.
+    private const NumberStyles QuotaValue =
+        NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent;
 
     public static void Run(IAdmin admin, Args args)
     {
@@ -77,7 +82,7 @@ internal static class AlterClientQuotas
             string value = spec[(separator + 1)..];
             ops.Add(new ClientQuotaAlteration.Op(
                 spec[..separator],
-                value == "REMOVE" ? null : Cli.Parse<double>("quota value", value)));
+                value == "REMOVE" ? null : Cli.Parse<double>("quota value", value, QuotaValue)));
         }
 
         List<ClientQuotaAlteration> alterations = [new(entity, ops)];

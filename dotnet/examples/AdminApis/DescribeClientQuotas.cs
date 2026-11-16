@@ -15,8 +15,8 @@
 // Describes client quotas with IAdmin.DescribeClientQuotas.
 //
 // The filter is a sequence of <entity_type> <name> pairs, the entity type being user, client-id or ip; the
-// name DEFAULT matches the default entity of that type and ANY any named entity of it. Without pairs every
-// configured entity is described. With --strict only entities made of exactly the given types match;
+// name DEFAULT matches the default entity of that type and ANY every entity of it, the default one
+// included. Without pairs every configured entity is described. With --strict only entities made of exactly the given types match;
 // otherwise entities with further types do too.
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 DescribeClientQuotas user alice client-id ANY

@@ -57,7 +57,9 @@ dotnet run -c Release --project AdminApis -- --help                             
 
 The example's name is matched without regard to case or separators: `CreateTopics`, `create_topics`
 and `create-topics` are the same. `-X key=value`, after the name, sets a client configuration
-property and can be repeated, for example `-X security.protocol=SASL_SSL`.
+property and can be repeated, for example `-X security.protocol=SASL_SSL`. With
+`-X bootstrap.controllers=..` the client connects to the KRaft controllers instead of the brokers, and
+the first argument is not used.
 
 | Area | Examples |
 |---|---|
@@ -78,17 +80,46 @@ stderr.
 Exit codes: `0` success, `1` the client was not created or an operation failed, `2` a mistake on the
 command line (the message and the example's usage are printed).
 
-Some examples need more than the single broker started above:
+Some examples need more than the broker started above. The `apache/kafka` image uses its default
+configuration only while no `KAFKA_*` variable is set; once one is set, every setting has to be given.
+This command starts one broker with what the single-broker examples need:
 
-- **ACLs** need an authorizer: start the broker with
-  `KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer` and the
-  client's principal in `KAFKA_SUPER_USERS` (`User:ANONYMOUS` over PLAINTEXT).
+```bash
+docker run -d --rm --name kafka -p 9092:9092 -p 9094:9094 \
+  -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,SASL_PLAINTEXT://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093 \
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092,SASL_PLAINTEXT://localhost:9094 \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+  -e KAFKA_LOG_DIRS=/tmp/kafka-logs-0,/tmp/kafka-logs-1 \
+  -e KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer \
+  -e KAFKA_SUPER_USERS='User:ANONYMOUS;User:admin' \
+  -e KAFKA_DELEGATION_TOKEN_SECRET_KEY=examples-secret \
+  -e KAFKA_SASL_ENABLED_MECHANISMS=PLAIN -e KAFKA_OPTS=-Dexamples.unused=1 \
+  -e KAFKA_LISTENER_NAME_SASL__PLAINTEXT_PLAIN_SASL_JAAS_CONFIG='org.apache.kafka.common.security.plain.PlainLoginModule required user_admin="admin-secret";' \
+  apache/kafka:4.4.0
+```
+
+- **ACLs** need an authorizer (`KAFKA_AUTHORIZER_CLASS_NAME`) and the client's principal among the
+  super users (`User:ANONYMOUS` over PLAINTEXT).
 - **Delegation tokens** need `KAFKA_DELEGATION_TOKEN_SECRET_KEY` on the broker and a client that
-  connects with SASL or two-way TLS.
-- **Reassignments and preferred leader elections** need several brokers, and **replica moves** a
-  broker with several `log.dirs`.
-- **Transactions** need a transactional producer running; on a single broker also
-  `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1` and `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`.
+  connects with SASL or two-way TLS: here the SASL listener on port 9094, which the image only
+  accepts with `KAFKA_OPTS` set. The client supports the PLAIN mechanism:
+
+  ```bash
+  dotnet run -c Release --project AdminApis -- localhost:9094 CreateDelegationToken \
+    -X security.protocol=SASL_PLAINTEXT -X sasl.mechanism=PLAIN \
+    -X 'sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";'
+  ```
+
+- **Replica moves** need a broker with several `log.dirs` (`KAFKA_LOG_DIRS`).
+- **Transactions** need a transactional producer running, and on a single broker the two
+  `KAFKA_TRANSACTION_STATE_LOG_*` settings.
+- **Reassignments and preferred leader elections** need several brokers, which this command does not
+  start.
 
 ## Notes
 

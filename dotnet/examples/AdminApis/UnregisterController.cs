@@ -17,10 +17,12 @@
 // quorum (KIP-853) and shut down for good. The controller refuses an id that is not registered
 // (ControllerIdNotRegisteredException) and the id of the active controller itself (InvalidRequestException).
 //
-// A broker forwards the request to the active controller; with -X bootstrap.controllers=... the client sends
-// it to the controllers directly.
+// A broker forwards the request to the active controller. With -X bootstrap.controllers=... the client sends
+// it to the controllers directly; the first argument is then not used:
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 UnregisterController 3001
+//     dotnet run -c Release --project AdminApis -- - UnregisterController \
+//         -X bootstrap.controllers=localhost:9093 3001
 
 using System;
 using Confluent.Kafka.Admin;

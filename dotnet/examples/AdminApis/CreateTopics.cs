@@ -51,7 +51,15 @@ internal static class CreateTopics
                 throw new UsageException($"invalid topic spec \"{spec}\"");
             }
 
-            newTopics.Add(new NewTopic(parts[0], numPartitions, replicationFactor));
+            try
+            {
+                newTopics.Add(new NewTopic(parts[0], numPartitions, replicationFactor));
+            }
+            catch (ArgumentOutOfRangeException e)
+            {
+                // NewTopic refuses a count below -1 itself; the other topics are still created.
+                Cli.Fail($"Failed to create topic {parts[0]}", e);
+            }
         }
 
         // The call returns at once; each topic's outcome arrives on its own future.

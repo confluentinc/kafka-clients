@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Numerics;
 using System.Text;
 using Confluent.Kafka;
 using Confluent.Kafka.Common;
@@ -57,11 +58,14 @@ internal static class Cli
         }
     }
 
-    /// <summary>Parses <paramref name="text"/> as a <typeparamref name="T"/>, naming it in the usage error.</summary>
-    public static T Parse<T>(string what, string text)
-        where T : IParsable<T>
+    /// <summary>
+    /// Parses <paramref name="text"/> as a <typeparamref name="T"/>, naming it in the usage error. Only a sign
+    /// and digits are a number: no white space around it and no thousands separator, whatever the culture.
+    /// </summary>
+    public static T Parse<T>(string what, string text, NumberStyles styles = NumberStyles.AllowLeadingSign)
+        where T : INumberBase<T>
     {
-        return T.TryParse(text, CultureInfo.InvariantCulture, out T? value)
+        return T.TryParse(text, styles, CultureInfo.InvariantCulture, out T? value)
             ? value
             : throw new UsageException($"invalid {what}: \"{text}\"");
     }

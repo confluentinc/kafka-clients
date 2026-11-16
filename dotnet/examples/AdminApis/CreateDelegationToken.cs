@@ -23,8 +23,8 @@
 // authenticated with SASL (not with a delegation token) or two-way TLS.
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 CreateDelegationToken \
-//         -X security.protocol=SASL_PLAINTEXT -X sasl.mechanism=SCRAM-SHA-256 \
-//         -X 'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="secret";' \
+//         -X security.protocol=SASL_PLAINTEXT -X sasl.mechanism=PLAIN \
+//         -X 'sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="secret";' \
 //         --renewer=User:bob
 
 using System;

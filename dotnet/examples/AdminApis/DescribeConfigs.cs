@@ -19,7 +19,7 @@
 // precedence, and with --documentation the description of each entry.
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 DescribeConfigs --synonyms \
-//         topic orders broker 0
+//         topic orders broker 1
 
 using System;
 using System.Collections.Generic;

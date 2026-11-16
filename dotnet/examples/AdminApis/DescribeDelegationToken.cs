@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Describes delegation tokens with IAdmin.DescribeDelegationToken. With owner principals (<type>:<name>,
-// for example User:alice) only their tokens are returned, otherwise every token the caller may describe:
-// its own, those it renews and those it has DESCRIBE permission on.
+// Describes delegation tokens with IAdmin.DescribeDelegationToken, which returns the tokens the caller may
+// describe: its own, those it requested or renews and those it has DESCRIBE permission on. With owner
+// principals (<type>:<name>, for example User:alice) only the tokens of those owners are among them.
 //
 // A token's HMAC is its password: with the token id it authenticates as the owner. It is printed only
 // with --show-hmac.

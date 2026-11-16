@@ -26,8 +26,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Confluent.Kafka.Admin;
+
+// Numbers are printed the same way on every machine, so that a printed value can be passed back as an
+// argument: some cultures print a negative number with a minus sign the examples do not parse.
+CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
 
 Example[] examples =
 [
@@ -100,14 +106,15 @@ string general =
     "       AdminApis <bootstrap-brokers> <example> --help\n\n" +
     $"Examples:\n  {string.Join("\n  ", examples.Select(e => e.Name))}";
 
+// --help in place of the brokers or of the example's name asks for the list of examples.
+if (args.Take(2).Contains("--help"))
+{
+    Console.WriteLine(general);
+    return 0;
+}
+
 if (args.Length < 2)
 {
-    if (args.Contains("--help"))
-    {
-        Console.WriteLine(general);
-        return 0;
-    }
-
     Console.Error.WriteLine(general);
     return 2;
 }
@@ -131,12 +138,19 @@ try
         return 0;
     }
 
-    // Admin configuration: the brokers, then each -X property.
+    // Admin configuration: each -X property, and the first argument as bootstrap.servers. The client takes
+    // either bootstrap.servers or bootstrap.controllers, so with -X bootstrap.controllers=... the first
+    // argument is not used.
     // The keys are the Java client's: https://kafka.apache.org/documentation/#adminclientconfigs
-    Dictionary<string, object?> conf = new() { ["bootstrap.servers"] = args[0] };
+    Dictionary<string, object?> conf = [];
     foreach ((string key, string value) in parsed.Config)
     {
         conf[key] = value;
+    }
+
+    if (!conf.ContainsKey("bootstrap.controllers"))
+    {
+        conf.TryAdd("bootstrap.servers", args[0]);
     }
 
     // Leaving the using block closes the client.

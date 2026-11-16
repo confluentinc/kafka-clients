@@ -135,7 +135,7 @@ internal static class AlterUserScramCredentials
 
     private static int ParseIterations(string text)
     {
-        return int.TryParse(text, CultureInfo.InvariantCulture, out int iterations)
+        return int.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int iterations)
             ? iterations
             : throw new UsageException("invalid iterations, expected a number");
     }

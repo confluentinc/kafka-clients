@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Removes members from a classic consumer group with IAdmin.RemoveMembersFromConsumerGroup. Given group
-// instance ids, it removes those static members; given none, it removes every member of the group, failing
-// when the group has none. --reason is sent to the broker with the request.
+// Removes members from a consumer group with IAdmin.RemoveMembersFromConsumerGroup. Given group instance
+// ids, it removes those static members; given none, it removes every member of the group, failing when the
+// group has none. --reason is sent to the broker with the request.
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 RemoveMembersFromConsumerGroup \
 //         --reason=maintenance orders-app instance-1

@@ -15,7 +15,7 @@
 // Aborts a hanging transaction on one partition with IAdmin.AbortTransaction. The partition leader writes an
 // abort marker for the producer, so consumers reading committed records can move past the transaction and
 // the last stable offset advances. It is a recovery tool for a transaction its coordinator no longer tracks,
-// and needs CLUSTER_ACTION permission.
+// and needs ALTER or CLUSTER_ACTION permission on the cluster.
 //
 // Take the producer id, producer epoch and coordinator epoch from the partition's producer with a current
 // transaction start offset in the DescribeProducers example; a negative coordinator epoch is sent as 0, as
