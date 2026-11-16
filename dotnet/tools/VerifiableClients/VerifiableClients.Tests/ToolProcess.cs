@@ -157,3 +157,15 @@ internal sealed class UnixFactAttribute : FactAttribute
         }
     }
 }
+
+/// <summary>A theory sending a signal with <c>kill</c>, which Windows does not have: skipped there.</summary>
+internal sealed class UnixTheoryAttribute : TheoryAttribute
+{
+    public UnixTheoryAttribute()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Skip = "Sends a POSIX signal with kill, which Windows does not have.";
+        }
+    }
+}

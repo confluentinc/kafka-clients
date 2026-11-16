@@ -35,6 +35,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VerifiableProducer", "tools
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VerifiableClients.Tests", "tools\VerifiableClients\VerifiableClients.Tests\VerifiableClients.Tests.csproj", "{9D8C3B40-1F44-4C91-B956-B196A2E0B172}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VerifiableConsumer", "tools\VerifiableClients\VerifiableConsumer\VerifiableConsumer.csproj", "{6A707308-89A2-44F5-884B-C58E269C753C}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -141,6 +143,18 @@ Global
 		{9D8C3B40-1F44-4C91-B956-B196A2E0B172}.Release|x64.Build.0 = Release|Any CPU
 		{9D8C3B40-1F44-4C91-B956-B196A2E0B172}.Release|x86.ActiveCfg = Release|Any CPU
 		{9D8C3B40-1F44-4C91-B956-B196A2E0B172}.Release|x86.Build.0 = Release|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Debug|x64.Build.0 = Debug|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Debug|x86.Build.0 = Debug|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Release|x64.ActiveCfg = Release|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Release|x64.Build.0 = Release|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Release|x86.ActiveCfg = Release|Any CPU
+		{6A707308-89A2-44F5-884B-C58E269C753C}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -155,5 +169,6 @@ Global
 		{1F7A02B5-39BD-45B6-ABD2-BBA087F7EDBF} = {B6E22E0C-AEF9-8A51-D08D-D04F702BDECD}
 		{2D8D84D9-CFD5-4DCA-A5D8-7567BF758AA2} = {B6E22E0C-AEF9-8A51-D08D-D04F702BDECD}
 		{9D8C3B40-1F44-4C91-B956-B196A2E0B172} = {B6E22E0C-AEF9-8A51-D08D-D04F702BDECD}
+		{6A707308-89A2-44F5-884B-C58E269C753C} = {B6E22E0C-AEF9-8A51-D08D-D04F702BDECD}
 	EndGlobalSection
 EndGlobal
