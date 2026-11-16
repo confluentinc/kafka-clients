@@ -57,11 +57,13 @@ To build an example against the `Confluent.Kafka` NuGet package instead, replace
   `OnPartitionsLost` itself implements `IConsumerRebalanceListenerWithPartitionsLost`
   (`IAsyncConsumerRebalanceListenerWithPartitionsLost` for the async consumer); without it, a lost
   partition is reported to `OnPartitionsRevoked`, as in Java.
-- **Ctrl+C.** The examples handle `Console.CancelKeyPress` and set `e.Cancel = true`, which keeps
-  the process running so the consumer is closed. `Consumer` and `ConsumerUsing` call `Wakeup()`,
-  which makes the `Poll()` in progress throw `WakeupException`; `AsyncConsumer` cancels the token it
-  passes to `Poll()`, whose task then throws `OperationCanceledException`. End the producers' input
-  with Ctrl+D (Ctrl+Z, then Enter, on Windows).
+- **Ctrl+C.** The consumer examples handle `Console.CancelKeyPress` and set `e.Cancel = true`, which
+  keeps the process running so the consumer is closed. `Consumer` and `ConsumerUsing` call
+  `Wakeup()`, which makes the `Poll()` in progress throw `WakeupException`; `AsyncConsumer` cancels
+  the token it passes to `Poll()`, whose task then throws `OperationCanceledException`. The producer
+  and admin examples do not handle it: Ctrl+C ends the process at once, without closing the client,
+  so messages not yet delivered are lost. End the producers' input with Ctrl+D (Ctrl+Z, then Enter,
+  on Windows).
 - **Offsets.** With auto-commit (the default), the consumer commits the offsets of the records
   `Poll()` returned every `auto.commit.interval.ms` (5 seconds), before a rebalance takes partitions
   away, and on `Close()`.

@@ -57,8 +57,9 @@ await using (IAsyncAdmin admin = AsyncAdmin.Create(conf))
         }
     }
 
-    IReadOnlyCollection<string> names = await admin.ListTopics().Names().Get();
-    Console.WriteLine($"Topics: [{string.Join(", ", names.OrderBy(n => n, StringComparer.Ordinal))}]");
+    // ListTopics() returns one future with every topic's name.
+    IEnumerable<string> names = (await admin.ListTopics().Names().Get()).OrderBy(n => n, StringComparer.Ordinal);
+    Console.WriteLine($"Topics: [{string.Join(", ", names)}]");
 }
 
 return 0;
