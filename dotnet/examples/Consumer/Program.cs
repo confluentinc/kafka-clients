@@ -58,12 +58,12 @@ Console.CancelKeyPress += (_, e) =>
     consumer.Wakeup();
 };
 
-// Subscribe to the topics.
-consumer.Subscribe(topics, new PrintRebalance(consumer));
-
 // Read messages from Kafka, print to stdout.
 try
 {
+    // Subscribe to the topics. Inside the try, so that a failed Subscribe() still closes the consumer.
+    consumer.Subscribe(topics, new PrintRebalance(consumer));
+
     while (true)
     {
         // Poll() returns a batch of records, possibly empty. A failed Poll() throws a KafkaException.
