@@ -14,6 +14,10 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <IsPackable>false</IsPackable>
+    <!-- The client project is not in the examples' solution. A solution build gives such a reference
+         its default configuration, Debug, whatever -c says, and a Debug client loads the debug native
+         library. This passes the example's own configuration on to it. -->
+    <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
   </PropertyGroup>
 
 </Project>
