@@ -157,6 +157,18 @@ public sealed class CommonTests : IDisposable
             new Dictionary<string, string> { ["a"] = "x\uD83Dy" }, Utils.ParseProperties("a=x\\uD83Dy\n"));
     }
 
+    [Fact]
+    public void LoadPropsReadsEveryByteAsIso88591()
+    {
+        string utf8 = Path.Combine(_tmpPath, "utf8.properties");
+        File.WriteAllBytes(utf8, new byte[] { 0xEF, 0xBB, 0xBF, (byte)'a', (byte)'=', 0xC3, 0xA9, (byte)'\n' });
+        AssertProperties(new Dictionary<string, string> { ["ï»¿a"] = "Ã©" }, Utils.LoadProps(utf8));
+
+        string utf16 = Path.Combine(_tmpPath, "utf16.properties");
+        File.WriteAllBytes(utf16, new byte[] { 0xFF, 0xFE, (byte)'a', 0, (byte)'=', 0, (byte)'b', 0 });
+        AssertProperties(new Dictionary<string, string> { ["ÿþa\0"] = "\0b\0" }, Utils.LoadProps(utf16));
+    }
+
     [UnixFact]
     public async Task ShutdownHookSurvivesASecondSignalDuringTheFirst()
     {

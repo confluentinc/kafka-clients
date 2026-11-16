@@ -130,7 +130,7 @@ internal static class Utils
         string contents;
         try
         {
-            contents = File.ReadAllText(filename, Encoding.Latin1);
+            contents = Encoding.Latin1.GetString(File.ReadAllBytes(filename));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
         {
