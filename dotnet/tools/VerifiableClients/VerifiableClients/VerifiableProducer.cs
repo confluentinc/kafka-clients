@@ -383,7 +383,8 @@ internal sealed class VerifiableProducer
                 finished = true;
                 producer.Close();
                 long elapsedMs = Utils.NowMillis() - startMs;
-                // Java's division gives Infinity (NaN with nothing acked) when start and stop share a millisecond.
+                // Java's division gives Infinity (NaN with nothing acked) when start and stop share a millisecond;
+                // this tool writes 0.0 then, as Python's does.
                 double avgThroughput = elapsedMs != 0 ? 1000 * (producer.NumAcked / (double)elapsedMs) : 0.0;
                 ToolData(output, producer.NumSent, producer.NumAcked, producer.Throughput, avgThroughput);
             }
