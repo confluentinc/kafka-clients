@@ -896,7 +896,10 @@ out of date). The rule:
    optional `CancellationToken cancellationToken`.
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
    `Map` overload, and an overload taking a `java.util.regex.Pattern` is not translated. A Java abstract
-   class's constructors are `protected`; a struct or sealed class has none.
+   class's constructors are `protected`; a struct or sealed class has none. Each overload is a member of its own:
+   no public or protected method or constructor, on any public type, takes an optional parameter other than a last
+   `CancellationToken cancellationToken` (rule 7). A default is compiled into each caller, so a parameter added
+   later breaks every caller compiled before it, where a new overload breaks none.
 9. A Java enum's methods sit in a top-level static class named after the enum plus `Methods`, beside the enum
    (`ScramMechanismMethods`), as C# 14 extension members. Java's static methods go in an
    `extension(ScramMechanism)` block, so a C# 14 caller writes `ScramMechanism.FromMechanismName(…)` and an
