@@ -1,0 +1,23 @@
+<Project>
+
+  <!-- Settings shared by the examples. This file also stops MSBuild from importing
+       dotnet/Directory.Build.props, so the examples build as a user's project does: no strong name and
+       none of the binding's own analyzers. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Run on .NET 8 or any later runtime. -->
+    <RollForward>Major</RollForward>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <!-- The client project is not in the examples' solution. A solution build gives such a reference
+         its default configuration, Debug, whatever -c says, and a Debug client loads the debug native
+         library. This passes the example's own configuration on to it. -->
+    <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
+  </PropertyGroup>
+
+</Project>
