@@ -290,8 +290,15 @@ public sealed class VerifiableProducerTests : IDisposable
     public void ToolDataFieldsInJavaOrder()
     {
         VerifiableProducer.ToolData(_output, 10, 9, 100, 4.5);
+        VerifiableProducer.ToolData(_output, 10, 8, 100, 50.0);
+        VerifiableProducer.ToolData(_output, 0, 0, -1, 0.0);
         Assert.Equal(
-            new[] { """{"name":"tool_data","sent":10,"acked":9,"target_throughput":100,"avg_throughput":4.5}""" },
+            new[]
+            {
+                """{"name":"tool_data","sent":10,"acked":9,"target_throughput":100,"avg_throughput":4.5}""",
+                """{"name":"tool_data","sent":10,"acked":8,"target_throughput":100,"avg_throughput":50.0}""",
+                """{"name":"tool_data","sent":0,"acked":0,"target_throughput":-1,"avg_throughput":0.0}""",
+            },
             LinesWithoutTimestamp());
     }
 
