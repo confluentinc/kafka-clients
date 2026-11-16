@@ -25,8 +25,9 @@
 
   <ItemGroup>
     <ProjectReference Include="../VerifiableClients/VerifiableClients.csproj" />
-    <!-- Built with the tests, which run its .dll as a child process; not referenced. -->
+    <!-- Built with the tests, which run their .dll as a child process; not referenced. -->
     <ProjectReference Include="../VerifiableProducer/VerifiableProducer.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../VerifiableConsumer/VerifiableConsumer.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>
