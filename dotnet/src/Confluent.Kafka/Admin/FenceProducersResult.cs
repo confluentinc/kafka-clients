@@ -23,7 +23,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.FenceProducers"/> — Java's
+/// The result of <see cref="IAdmin.FenceProducers(IReadOnlyCollection{string}, FenceProducersOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.FenceProducersResult</c>.
 /// </summary>
 /// <remarks>

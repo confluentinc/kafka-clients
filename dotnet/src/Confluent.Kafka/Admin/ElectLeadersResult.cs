@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ElectLeaders"/> — Java's
+/// The result of <see cref="IAdmin.ElectLeaders(ElectionType, IReadOnlyCollection{TopicPartition}, ElectLeadersOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.ElectLeadersResult</c>: one future over a map of the
 /// per-partition outcomes.
 /// </summary>

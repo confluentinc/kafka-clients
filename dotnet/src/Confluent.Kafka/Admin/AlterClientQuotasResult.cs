@@ -23,7 +23,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.AlterClientQuotas"/> — Java's
+/// The result of <see cref="IAdmin.AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterClientQuotasResult</c>: one future per quota entity.
 /// </summary>
 /// <remarks>

@@ -128,9 +128,15 @@ public sealed class PublicAdminP2aShapeParityTests
             new[] { typeof(TopicCollection), typeof(DescribeTopicsOptions) },
             describe.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // `options` is optional, collapsing Java's one-argument `default` overload.
-        Assert.True(delete.GetParameters()[1].IsOptional);
-        Assert.True(describe.GetParameters()[1].IsOptional);
+        // `options` is required: the one-argument overload is its own member.
+        Assert.False(delete.GetParameters()[1].IsOptional);
+        Assert.False(describe.GetParameters()[1].IsOptional);
+        Assert.Equal(
+            typeof(DeleteTopicsResult),
+            typeof(IAdmin).GetMethod(nameof(IAdmin.DeleteTopics), new[] { typeof(TopicCollection) })!.ReturnType);
+        Assert.Equal(
+            typeof(DescribeTopicsResult),
+            typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeTopics), new[] { typeof(TopicCollection) })!.ReturnType);
 
         Assert.Empty(
             typeof(IAdmin).GetMethods()

@@ -18,7 +18,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/> —
+/// Options for <see cref="IAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions)"/> —
 /// the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DescribeTopicsOptions</c>.
 /// </summary>

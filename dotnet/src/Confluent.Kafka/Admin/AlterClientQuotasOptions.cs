@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.AlterClientQuotas"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.AlterClientQuotas(System.Collections.Generic.IEnumerable{Common.Quota.ClientQuotaAlteration}, AlterClientQuotasOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.AlterClientQuotasOptions</c>.
 /// </summary>
 /// <remarks>

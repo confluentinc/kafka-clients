@@ -22,7 +22,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeUserScramCredentials"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult</c>: three accessors over one response,
 /// each treating a per-user failure differently.
 /// </summary>

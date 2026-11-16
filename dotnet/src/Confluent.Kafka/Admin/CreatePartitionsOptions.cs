@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.CreatePartitions"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.CreatePartitions(System.Collections.Generic.IReadOnlyDictionary{string, NewPartitions}, CreatePartitionsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.CreatePartitionsOptions</c>.
 /// </summary>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks"/>

@@ -29,9 +29,21 @@ namespace Confluent.Kafka.Admin;
 /// A broker-less, in-memory admin client for tests, Java's <c>org.apache.kafka.clients.admin.MockAdminClient</c>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Every RPC runs through the same marshalling and teardown as the real client. Build one with <see cref="Create"/>
 /// and its <see cref="Builder"/>, or with Java's two constructors. <c>Close</c> does nothing, as Java's mock does;
 /// <c>Dispose</c> frees the mock.
+/// </para>
+/// <para>
+/// A null options is taken as the default options, except in
+/// <see cref="CreateDelegationToken(CreateDelegationTokenOptions)"/>,
+/// <see cref="RenewDelegationToken(byte[], RenewDelegationTokenOptions)"/>,
+/// <see cref="ExpireDelegationToken(byte[], ExpireDelegationTokenOptions)"/>,
+/// <see cref="DescribeDelegationToken(DescribeDelegationTokenOptions)"/>,
+/// <see cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions)"/> and
+/// <see cref="RemoveMembersFromConsumerGroup(string, RemoveMembersFromConsumerGroupOptions)"/>, which throw
+/// <see cref="ArgumentNullException"/>.
+/// </para>
 /// </remarks>
 public sealed class MockAdminClient : IAdmin
 {
@@ -85,163 +97,282 @@ public sealed class MockAdminClient : IAdmin
     public static Builder Create() => new Builder(MockAdminClientBuilderCore.Create());
 
     /// <inheritdoc/>
-    public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null) =>
-        CreateTopicsResult.OfClient(_native.CreateTopics(newTopics, options));
+    public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics) =>
+        CreateTopics(newTopics, new CreateTopicsOptions());
 
     /// <inheritdoc/>
-    public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null) =>
-        DeleteTopicsResult.OfClient(_native.DeleteTopics(topics, options));
+    public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions options) =>
+        CreateTopicsResult.OfClient(_native.CreateTopics(newTopics, options ?? new CreateTopicsOptions()));
+
+    /// <inheritdoc/>
+    public DeleteTopicsResult DeleteTopics(TopicCollection topics) =>
+        DeleteTopics(topics, new DeleteTopicsOptions());
+
+    /// <inheritdoc/>
+    public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions options) =>
+        DeleteTopicsResult.OfClient(_native.DeleteTopics(topics, options ?? new DeleteTopicsOptions()));
+
+    /// <inheritdoc/>
+    public DeleteTopicsResult DeleteTopics(IReadOnlyCollection<string> topics) =>
+        DeleteTopics(topics, new DeleteTopicsOptions());
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(
-        IReadOnlyCollection<string> topics, DeleteTopicsOptions? options = null) =>
+        IReadOnlyCollection<string> topics, DeleteTopicsOptions options) =>
         DeleteTopicsResult.OfClient(_native.DeleteTopics(
             topics ?? throw new ArgumentNullException(nameof(topics)),
-            options));
+            options ?? new DeleteTopicsOptions()));
 
     /// <inheritdoc/>
-    public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null) =>
-        DescribeTopicsResult.OfClient(_native.DescribeTopics(topics, options));
+    public DescribeTopicsResult DescribeTopics(TopicCollection topics) =>
+        DescribeTopics(topics, new DescribeTopicsOptions());
+
+    /// <inheritdoc/>
+    public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions options) =>
+        DescribeTopicsResult.OfClient(_native.DescribeTopics(topics, options ?? new DescribeTopicsOptions()));
+
+    /// <inheritdoc/>
+    public DescribeTopicsResult DescribeTopics(IReadOnlyCollection<string> topicNames) =>
+        DescribeTopics(topicNames, new DescribeTopicsOptions());
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(
-        IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null) =>
+        IReadOnlyCollection<string> topicNames, DescribeTopicsOptions options) =>
         DescribeTopicsResult.OfClient(_native.DescribeTopics(
             topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
-            options));
+            options ?? new DescribeTopicsOptions()));
 
     /// <inheritdoc/>
-    public ListTopicsResult ListTopics(ListTopicsOptions? options = null)
+    public ListTopicsResult ListTopics() =>
+        ListTopics(new ListTopicsOptions());
+
+    /// <inheritdoc/>
+    public ListTopicsResult ListTopics(ListTopicsOptions options)
     {
-        var (namesToListings, result) = _native.ListTopics(options);
+        var (namesToListings, result) = _native.ListTopics(options ?? new ListTopicsOptions());
         return new ListTopicsResult(new KafkaFuture<IReadOnlyDictionary<string, TopicListing>>(namesToListings), result);
     }
 
     /// <inheritdoc/>
+    public CreatePartitionsResult CreatePartitions(IReadOnlyDictionary<string, NewPartitions> newPartitions) =>
+        CreatePartitions(newPartitions, new CreatePartitionsOptions());
+
+    /// <inheritdoc/>
     public CreatePartitionsResult CreatePartitions(
-        IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null) =>
-        CreatePartitionsResult.OfClient(_native.CreatePartitions(newPartitions, options));
+        IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions options) =>
+        CreatePartitionsResult.OfClient(_native.CreatePartitions(newPartitions, options ?? new CreatePartitionsOptions()));
+
+    /// <inheritdoc/>
+    public DeleteRecordsResult DeleteRecords(IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete) =>
+        DeleteRecords(recordsToDelete, new DeleteRecordsOptions());
 
     /// <inheritdoc/>
     public DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
-        DeleteRecordsOptions? options = null) =>
-        DeleteRecordsResult.OfClient(_native.DeleteRecords(recordsToDelete, options));
+        DeleteRecordsOptions options) =>
+        DeleteRecordsResult.OfClient(_native.DeleteRecords(recordsToDelete, options ?? new DeleteRecordsOptions()));
 
     /// <inheritdoc/>
-    public DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null) =>
-        DescribeClusterResult.OfClient(_native.DescribeCluster(options));
+    public DescribeClusterResult DescribeCluster() =>
+        DescribeCluster(new DescribeClusterOptions());
+
+    /// <inheritdoc/>
+    public DescribeClusterResult DescribeCluster(DescribeClusterOptions options) =>
+        DescribeClusterResult.OfClient(_native.DescribeCluster(options ?? new DescribeClusterOptions()));
+
+    /// <inheritdoc/>
+    public ListConfigResourcesResult ListConfigResources() =>
+        ListConfigResources(Array.Empty<ConfigResourceType>(), new ListConfigResourcesOptions());
 
     /// <inheritdoc/>
     public ListConfigResourcesResult ListConfigResources(
-        IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
-        ListConfigResourcesOptions? options = null) =>
-        ListConfigResourcesResult.OfClient(_native.ListConfigResources(configResourceTypes, options));
+        IReadOnlyCollection<ConfigResourceType> configResourceTypes,
+        ListConfigResourcesOptions options) =>
+        ListConfigResourcesResult.OfClient(_native.ListConfigResources(configResourceTypes, options ?? new ListConfigResourcesOptions()));
+
+    /// <inheritdoc/>
+    public DescribeConfigsResult DescribeConfigs(IReadOnlyCollection<ConfigResource> resources) =>
+        DescribeConfigs(resources, new DescribeConfigsOptions());
 
     /// <inheritdoc/>
     public DescribeConfigsResult DescribeConfigs(
-        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null) =>
-        DescribeConfigsResult.OfClient(_native.DescribeConfigs(resources, options));
+        IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions options) =>
+        DescribeConfigsResult.OfClient(_native.DescribeConfigs(resources, options ?? new DescribeConfigsOptions()));
+
+    /// <inheritdoc/>
+    public AlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs) =>
+        IncrementalAlterConfigs(configs, new AlterConfigsOptions());
 
     /// <inheritdoc/>
     public AlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
-        AlterConfigsOptions? options = null) =>
-        AlterConfigsResult.OfClient(_native.IncrementalAlterConfigs(configs, options));
+        AlterConfigsOptions options) =>
+        AlterConfigsResult.OfClient(_native.IncrementalAlterConfigs(configs, options ?? new AlterConfigsOptions()));
 
 
     /// <inheritdoc/>
+    public DescribeLogDirsResult DescribeLogDirs(IReadOnlyCollection<int> brokers) =>
+        DescribeLogDirs(brokers, new DescribeLogDirsOptions());
+
+    /// <inheritdoc/>
     public DescribeLogDirsResult DescribeLogDirs(
-        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null) =>
-        DescribeLogDirsResult.OfClient(_native.DescribeLogDirs(brokers, options));
+        IReadOnlyCollection<int> brokers, DescribeLogDirsOptions options) =>
+        DescribeLogDirsResult.OfClient(_native.DescribeLogDirs(brokers, options ?? new DescribeLogDirsOptions()));
+
+    /// <inheritdoc/>
+    public AlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment) =>
+        AlterReplicaLogDirs(replicaAssignment, new AlterReplicaLogDirsOptions());
 
     /// <inheritdoc/>
     public AlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
-        AlterReplicaLogDirsOptions? options = null) =>
+        AlterReplicaLogDirsOptions options) =>
         AlterReplicaLogDirsResult.OfClient(
-            _native.AlterReplicaLogDirs(replicaAssignment, options));
+            _native.AlterReplicaLogDirs(replicaAssignment, options ?? new AlterReplicaLogDirsOptions()));
+
+    /// <inheritdoc/>
+    public DescribeReplicaLogDirsResult DescribeReplicaLogDirs(IReadOnlyCollection<TopicPartitionReplica> replicas) =>
+        DescribeReplicaLogDirs(replicas, new DescribeReplicaLogDirsOptions());
 
     /// <inheritdoc/>
     public DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
-        DescribeReplicaLogDirsOptions? options = null) =>
-        DescribeReplicaLogDirsResult.OfClient(_native.DescribeReplicaLogDirs(replicas, options));
+        DescribeReplicaLogDirsOptions options) =>
+        DescribeReplicaLogDirsResult.OfClient(_native.DescribeReplicaLogDirs(replicas, options ?? new DescribeReplicaLogDirsOptions()));
+
+    /// <inheritdoc/>
+    public ElectLeadersResult ElectLeaders(ElectionType electionType, IReadOnlyCollection<TopicPartition>? partitions) =>
+        ElectLeaders(electionType, partitions, new ElectLeadersOptions());
 
     /// <inheritdoc/>
     public ElectLeadersResult ElectLeaders(
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
-        ElectLeadersOptions? options = null) =>
-        ElectLeadersResult.OfClient(_native.ElectLeaders(electionType, partitions, options));
+        ElectLeadersOptions options) =>
+        ElectLeadersResult.OfClient(_native.ElectLeaders(electionType, partitions, options ?? new ElectLeadersOptions()));
+
+    /// <inheritdoc/>
+    public AlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments) =>
+        AlterPartitionReassignments(reassignments, new AlterPartitionReassignmentsOptions());
 
     /// <inheritdoc/>
     public AlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
-        AlterPartitionReassignmentsOptions? options = null) =>
+        AlterPartitionReassignmentsOptions options) =>
         AlterPartitionReassignmentsResult.OfClient(
-            _native.AlterPartitionReassignments(reassignments, options));
+            _native.AlterPartitionReassignments(reassignments, options ?? new AlterPartitionReassignmentsOptions()));
+
+    /// <inheritdoc/>
+    public AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        AlterConsumerGroupOffsets(groupId, offsets, new AlterConsumerGroupOffsetsOptions());
 
     /// <inheritdoc/>
     public AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        AlterConsumerGroupOffsetsOptions? options = null) =>
+        AlterConsumerGroupOffsetsOptions options) =>
         AlterConsumerGroupOffsetsResult.OfClient(
-            _native.AlterConsumerGroupOffsets(groupId, offsets, options));
+            _native.AlterConsumerGroupOffsets(groupId, offsets, options ?? new AlterConsumerGroupOffsetsOptions()));
+
+    /// <inheritdoc/>
+    public DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId, IReadOnlyCollection<TopicPartition> partitions) =>
+        DeleteConsumerGroupOffsets(groupId, partitions, new DeleteConsumerGroupOffsetsOptions());
 
     /// <inheritdoc/>
     public DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
         string groupId,
         IReadOnlyCollection<TopicPartition> partitions,
-        DeleteConsumerGroupOffsetsOptions? options = null) =>
+        DeleteConsumerGroupOffsetsOptions options) =>
         DeleteConsumerGroupOffsetsResult.OfClient(
-            _native.DeleteConsumerGroupOffsets(groupId, partitions, options));
+            _native.DeleteConsumerGroupOffsets(groupId, partitions, options ?? new DeleteConsumerGroupOffsetsOptions()));
+
+    /// <inheritdoc/>
+    public ListPartitionReassignmentsResult ListPartitionReassignments() =>
+        ListPartitionReassignments(new ListPartitionReassignmentsOptions());
+
+    /// <inheritdoc/>
+    public ListPartitionReassignmentsResult ListPartitionReassignments(IReadOnlyCollection<TopicPartition>? partitions) =>
+        ListPartitionReassignments(partitions, new ListPartitionReassignmentsOptions());
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
-        IReadOnlyCollection<TopicPartition>? partitions = null,
-        ListPartitionReassignmentsOptions? options = null) =>
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions options) =>
         ListPartitionReassignmentsResult.OfClient(
-            _native.ListPartitionReassignments(partitions, options));
+            _native.ListPartitionReassignments(partitions, options ?? new ListPartitionReassignmentsOptions()));
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options) =>
         ListPartitionReassignmentsResult.OfClient(
-            _native.ListPartitionReassignments(null, options));
+            _native.ListPartitionReassignments(null, options ?? new ListPartitionReassignmentsOptions()));
+
+    /// <inheritdoc/>
+    public ListOffsetsResult ListOffsets(IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets) =>
+        ListOffsets(topicPartitionOffsets, new ListOffsetsOptions());
 
     /// <inheritdoc/>
     public ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
-        ListOffsetsOptions? options = null) =>
-        ListOffsetsResult.OfClient(_native.ListOffsets(topicPartitionOffsets, options));
+        ListOffsetsOptions options) =>
+        ListOffsetsResult.OfClient(_native.ListOffsets(topicPartitionOffsets, options ?? new ListOffsetsOptions()));
 
     /// <inheritdoc/>
-    public ListGroupsResult ListGroups(ListGroupsOptions? options = null) =>
-        ListGroupsResult.OfClient(_native.ListGroups(options));
+    public ListGroupsResult ListGroups() =>
+        ListGroups(new ListGroupsOptions());
+
+    /// <inheritdoc/>
+    public ListGroupsResult ListGroups(ListGroupsOptions options) =>
+        ListGroupsResult.OfClient(_native.ListGroups(options ?? new ListGroupsOptions()));
+
+    /// <inheritdoc/>
+    public DescribeConsumerGroupsResult DescribeConsumerGroups(IReadOnlyCollection<string> groupIds) =>
+        DescribeConsumerGroups(groupIds, new DescribeConsumerGroupsOptions());
 
     /// <inheritdoc/>
     public DescribeConsumerGroupsResult DescribeConsumerGroups(
-        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null) =>
-        DescribeConsumerGroupsResult.OfClient(_native.DescribeConsumerGroups(groupIds, options));
+        IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions options) =>
+        DescribeConsumerGroupsResult.OfClient(_native.DescribeConsumerGroups(groupIds, options ?? new DescribeConsumerGroupsOptions()));
+
+    /// <inheritdoc/>
+    public DescribeClassicGroupsResult DescribeClassicGroups(IReadOnlyCollection<string> groupIds) =>
+        DescribeClassicGroups(groupIds, new DescribeClassicGroupsOptions());
 
     /// <inheritdoc/>
     public DescribeClassicGroupsResult DescribeClassicGroups(
-        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null) =>
-        DescribeClassicGroupsResult.OfClient(_native.DescribeClassicGroups(groupIds, options));
+        IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions options) =>
+        DescribeClassicGroupsResult.OfClient(_native.DescribeClassicGroups(groupIds, options ?? new DescribeClassicGroupsOptions()));
+
+    /// <inheritdoc/>
+    public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(string groupId) =>
+        ListConsumerGroupOffsets(groupId, new ListConsumerGroupOffsetsOptions());
 
     /// <inheritdoc/>
     public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
-        string groupId, ListConsumerGroupOffsetsOptions? options = null) =>
-        ListConsumerGroupOffsetsResult.OfClient(_native.ListConsumerGroupOffsets(groupId, options));
+        string groupId, ListConsumerGroupOffsetsOptions options) =>
+        ListConsumerGroupOffsetsResult.OfClient(_native.ListConsumerGroupOffsets(groupId, options ?? new ListConsumerGroupOffsetsOptions()));
+
+    /// <inheritdoc/>
+    public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs) =>
+        ListConsumerGroupOffsets(groupSpecs, new ListConsumerGroupOffsetsOptions());
 
     /// <inheritdoc/>
     public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
-        ListConsumerGroupOffsetsOptions? options = null) =>
+        ListConsumerGroupOffsetsOptions options) =>
         ListConsumerGroupOffsetsResult.OfClient(
-            _native.ListConsumerGroupOffsets(groupSpecs, options));
+            _native.ListConsumerGroupOffsets(groupSpecs, options ?? new ListConsumerGroupOffsetsOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="DeleteConsumerGroups(IReadOnlyCollection{string}, DeleteConsumerGroupsOptions)" path="/remarks"/>
+    public DeleteConsumerGroupsResult DeleteConsumerGroups(IReadOnlyCollection<string> groupIds) =>
+        DeleteConsumerGroups(groupIds, new DeleteConsumerGroupsOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -249,9 +380,9 @@ public sealed class MockAdminClient : IAdmin
     /// so every group id's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public DeleteConsumerGroupsResult DeleteConsumerGroups(
-        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
+        IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions options) =>
         DeleteConsumerGroupsResult.OfClient(
-            _native.DeleteConsumerGroups(groupIds, options));
+            _native.DeleteConsumerGroups(groupIds, options ?? new DeleteConsumerGroupsOptions()));
 
     /// <inheritdoc/>
     /// <remarks>
@@ -264,12 +395,22 @@ public sealed class MockAdminClient : IAdmin
             _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
+    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/remarks"/>
+    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls) =>
+        CreateAcls(acls, new CreateAclsOptions());
+
+    /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
     /// so every binding's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
-    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
-        CreateAclsResult.OfClient(_native.CreateAcls(acls, options));
+    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions options) =>
+        CreateAclsResult.OfClient(_native.CreateAcls(acls, options ?? new CreateAclsOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/remarks"/>
+    public DeleteAclsResult DeleteAcls(IEnumerable<AclBindingFilter> filters) =>
+        DeleteAcls(filters, new DeleteAclsOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -277,8 +418,13 @@ public sealed class MockAdminClient : IAdmin
     /// so every filter's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public DeleteAclsResult DeleteAcls(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
-        DeleteAclsResult.OfClient(_native.DeleteAcls(filters, options));
+        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions options) =>
+        DeleteAclsResult.OfClient(_native.DeleteAcls(filters, options ?? new DeleteAclsOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="DescribeAcls(AclBindingFilter, DescribeAclsOptions)" path="/remarks"/>
+    public DescribeAclsResult DescribeAcls(AclBindingFilter filter) =>
+        DescribeAcls(filter, new DescribeAclsOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -287,8 +433,13 @@ public sealed class MockAdminClient : IAdmin
     /// carrying that message.
     /// </remarks>
     public DescribeAclsResult DescribeAcls(
-        AclBindingFilter filter, DescribeAclsOptions? options = null) =>
-        DescribeAclsResult.OfClient(_native.DescribeAcls(filter, options));
+        AclBindingFilter filter, DescribeAclsOptions options) =>
+        DescribeAclsResult.OfClient(_native.DescribeAcls(filter, options ?? new DescribeAclsOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="DescribeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)" path="/remarks"/>
+    public DescribeClientQuotasResult DescribeClientQuotas(ClientQuotaFilter filter) =>
+        DescribeClientQuotas(filter, new DescribeClientQuotasOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -297,8 +448,13 @@ public sealed class MockAdminClient : IAdmin
     /// carrying that message.
     /// </remarks>
     public DescribeClientQuotasResult DescribeClientQuotas(
-        ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
-        DescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options));
+        ClientQuotaFilter filter, DescribeClientQuotasOptions options) =>
+        DescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options ?? new DescribeClientQuotasOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/remarks"/>
+    public AlterClientQuotasResult AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries) =>
+        AlterClientQuotas(entries, new AlterClientQuotasOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -306,8 +462,18 @@ public sealed class MockAdminClient : IAdmin
     /// so every entity's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AlterClientQuotasResult AlterClientQuotas(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
-        AlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options));
+        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
+        AlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options ?? new AlterClientQuotasOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/remarks"/>
+    public DescribeUserScramCredentialsResult DescribeUserScramCredentials() =>
+        DescribeUserScramCredentials(null, new DescribeUserScramCredentialsOptions());
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/remarks"/>
+    public DescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyCollection<string>? users) =>
+        DescribeUserScramCredentials(users, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -315,10 +481,15 @@ public sealed class MockAdminClient : IAdmin
     /// so every accessor fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public DescribeUserScramCredentialsResult DescribeUserScramCredentials(
-        IReadOnlyCollection<string>? users = null,
-        DescribeUserScramCredentialsOptions? options = null) =>
+        IReadOnlyCollection<string>? users,
+        DescribeUserScramCredentialsOptions options) =>
         DescribeUserScramCredentialsResult.OfClient(
-            _native.DescribeUserScramCredentials(users, options));
+            _native.DescribeUserScramCredentials(users, options ?? new DescribeUserScramCredentialsOptions()));
+
+    /// <inheritdoc/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/remarks"/>
+    public AlterUserScramCredentialsResult AlterUserScramCredentials(IEnumerable<UserScramCredentialAlteration> alterations) =>
+        AlterUserScramCredentials(alterations, new AlterUserScramCredentialsOptions());
 
     /// <inheritdoc/>
     /// <remarks>
@@ -327,19 +498,26 @@ public sealed class MockAdminClient : IAdmin
     /// </remarks>
     public AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
-        AlterUserScramCredentialsOptions? options = null) =>
+        AlterUserScramCredentialsOptions options) =>
         AlterUserScramCredentialsResult.OfClient(
-            _native.AlterUserScramCredentials(alterations, options));
+            _native.AlterUserScramCredentials(alterations, options ?? new AlterUserScramCredentialsOptions()));
+
+    /// <inheritdoc/>
+    /// <exception cref="IndexOutOfBoundsException">
+    /// Always: the default options name no renewer, and the mock makes the first renewer the token's owner.
+    /// </exception>
+    public CreateDelegationTokenResult CreateDelegationToken() =>
+        CreateDelegationToken(new CreateDelegationTokenOptions());
 
     /// <inheritdoc/>
     /// <exception cref="IndexOutOfBoundsException">
     /// No renewer is given: Java's mock makes the first renewer the token's owner.
     /// </exception>
     public CreateDelegationTokenResult CreateDelegationToken(
-        CreateDelegationTokenOptions? options = null)
+        CreateDelegationTokenOptions options)
     {
         // Java's mock reads renewers().get(0) as the token's owner, out of bounds for its default LinkedList.
-        if (options is null || options.Renewers() is { Count: 0 })
+        if (options?.Renewers() is { Count: 0 })
         {
             throw new IndexOutOfBoundsException("Index: 0, Size: 0");
         }
@@ -348,64 +526,112 @@ public sealed class MockAdminClient : IAdmin
     }
 
     /// <inheritdoc/>
+    public RenewDelegationTokenResult RenewDelegationToken(byte[] hmac) =>
+        RenewDelegationToken(hmac, new RenewDelegationTokenOptions());
+
+    /// <inheritdoc/>
     public RenewDelegationTokenResult RenewDelegationToken(
-        byte[] hmac, RenewDelegationTokenOptions? options = null) =>
+        byte[] hmac, RenewDelegationTokenOptions options) =>
         RenewDelegationTokenResult.OfClient(_native.RenewDelegationToken(hmac, options));
 
     /// <inheritdoc/>
+    public ExpireDelegationTokenResult ExpireDelegationToken(byte[] hmac) =>
+        ExpireDelegationToken(hmac, new ExpireDelegationTokenOptions());
+
+    /// <inheritdoc/>
     public ExpireDelegationTokenResult ExpireDelegationToken(
-        byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
+        byte[] hmac, ExpireDelegationTokenOptions options) =>
         ExpireDelegationTokenResult.OfClient(_native.ExpireDelegationToken(hmac, options));
 
     /// <inheritdoc/>
+    public DescribeDelegationTokenResult DescribeDelegationToken() =>
+        DescribeDelegationToken(new DescribeDelegationTokenOptions());
+
+    /// <inheritdoc/>
     public DescribeDelegationTokenResult DescribeDelegationToken(
-        DescribeDelegationTokenOptions? options = null) =>
+        DescribeDelegationTokenOptions options) =>
         DescribeDelegationTokenResult.OfClient(_native.DescribeDelegationToken(options));
 
     /// <inheritdoc/>
-    public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
-        DescribeFeaturesResult.OfClient(_native.DescribeFeatures(options));
+    public DescribeFeaturesResult DescribeFeatures() =>
+        DescribeFeatures(new DescribeFeaturesOptions());
+
+    /// <inheritdoc/>
+    public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions options) =>
+        DescribeFeaturesResult.OfClient(_native.DescribeFeatures(options ?? new DescribeFeaturesOptions()));
+
+    /// <inheritdoc/>
+    public UpdateFeaturesResult UpdateFeatures(IReadOnlyDictionary<string, FeatureUpdate> featureUpdates) =>
+        UpdateFeatures(featureUpdates, new UpdateFeaturesOptions());
 
     /// <inheritdoc/>
     public UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
-        UpdateFeaturesOptions? options = null) =>
+        UpdateFeaturesOptions options) =>
         UpdateFeaturesResult.OfClient(_native.UpdateFeatures(featureUpdates, options));
 
     /// <inheritdoc/>
-    public UnregisterControllerResult UnregisterController(int controllerId, UnregisterControllerOptions? options = null) =>
-        UnregisterControllerResult.OfClient(_native.UnregisterController(controllerId, options));
+    public UnregisterControllerResult UnregisterController(int controllerId) =>
+        UnregisterController(controllerId, new UnregisterControllerOptions());
+
+    /// <inheritdoc/>
+    public UnregisterControllerResult UnregisterController(int controllerId, UnregisterControllerOptions options) =>
+        UnregisterControllerResult.OfClient(_native.UnregisterController(controllerId, options ?? new UnregisterControllerOptions()));
+
+    /// <inheritdoc/>
+    public FenceProducersResult FenceProducers(IReadOnlyCollection<string> transactionalIds) =>
+        FenceProducers(transactionalIds, new FenceProducersOptions());
 
     /// <inheritdoc/>
     public FenceProducersResult FenceProducers(
-        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null) =>
-        FenceProducersResult.OfClient(_native.FenceProducers(transactionalIds, options));
+        IReadOnlyCollection<string> transactionalIds, FenceProducersOptions options) =>
+        FenceProducersResult.OfClient(_native.FenceProducers(transactionalIds, options ?? new FenceProducersOptions()));
+
+    /// <inheritdoc/>
+    public DescribeTransactionsResult DescribeTransactions(IReadOnlyCollection<string> transactionalIds) =>
+        DescribeTransactions(transactionalIds, new DescribeTransactionsOptions());
 
     /// <inheritdoc/>
     public DescribeTransactionsResult DescribeTransactions(
-        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null) =>
+        IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions options) =>
         DescribeTransactionsResult.OfClient(
-            _native.DescribeTransactions(transactionalIds, options));
+            _native.DescribeTransactions(transactionalIds, options ?? new DescribeTransactionsOptions()));
+
+    /// <inheritdoc/>
+    public DescribeProducersResult DescribeProducers(IReadOnlyCollection<TopicPartition> partitions) =>
+        DescribeProducers(partitions, new DescribeProducersOptions());
 
     /// <inheritdoc/>
     public DescribeProducersResult DescribeProducers(
-        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null) =>
-        DescribeProducersResult.OfClient(_native.DescribeProducers(partitions, options));
+        IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions options) =>
+        DescribeProducersResult.OfClient(_native.DescribeProducers(partitions, options ?? new DescribeProducersOptions()));
 
     /// <inheritdoc/>
-    public ListTransactionsResult ListTransactions(ListTransactionsOptions? options = null) =>
-        ListTransactionsResult.OfClient(_native.ListTransactions(options));
+    public ListTransactionsResult ListTransactions() =>
+        ListTransactions(new ListTransactionsOptions());
+
+    /// <inheritdoc/>
+    public ListTransactionsResult ListTransactions(ListTransactionsOptions options) =>
+        ListTransactionsResult.OfClient(_native.ListTransactions(options ?? new ListTransactionsOptions()));
+
+    /// <inheritdoc/>
+    public AbortTransactionResult AbortTransaction(AbortTransactionSpec spec) =>
+        AbortTransaction(spec, new AbortTransactionOptions());
 
     /// <inheritdoc/>
     public AbortTransactionResult AbortTransaction(
-        AbortTransactionSpec spec, AbortTransactionOptions? options = null) =>
-        AbortTransactionResult.OfClient(_native.AbortTransaction(spec, options));
+        AbortTransactionSpec spec, AbortTransactionOptions options) =>
+        AbortTransactionResult.OfClient(_native.AbortTransaction(spec, options ?? new AbortTransactionOptions()));
+
+    /// <inheritdoc/>
+    public TerminateTransactionResult ForceTerminateTransaction(string transactionalId) =>
+        ForceTerminateTransaction(transactionalId, new TerminateTransactionOptions());
 
     /// <inheritdoc/>
     public TerminateTransactionResult ForceTerminateTransaction(
-        string transactionalId, TerminateTransactionOptions? options = null) =>
+        string transactionalId, TerminateTransactionOptions options) =>
         TerminateTransactionResult.OfClient(
-            _native.ForceTerminateTransaction(transactionalId, options));
+            _native.ForceTerminateTransaction(transactionalId, options ?? new TerminateTransactionOptions()));
 
     /// <summary>Does nothing, as Java's mock; <see cref="Dispose"/> frees the mock.</summary>
     public void Close()
@@ -457,7 +683,7 @@ public sealed class MockAdminClient : IAdmin
         _native.TimeoutNextRequest(numberOfRequest);
 
     /// <summary>
-    /// Seeds the offsets <see cref="ListOffsets"/> reports for <c>OffsetSpec.Earliest</c> —
+    /// Seeds the offsets <see cref="ListOffsets(IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)"/> reports for <c>OffsetSpec.Earliest</c> —
     /// Java's <c>MockAdminClient.updateBeginningOffsets(Map)</c>. <b>Merges</b> into what
     /// was seeded before.
     /// </summary>
@@ -472,7 +698,7 @@ public sealed class MockAdminClient : IAdmin
         _native.UpdateBeginningOffsets(newOffsets);
 
     /// <summary>
-    /// Seeds the offsets <see cref="ListOffsets"/> reports for every <c>OffsetSpec</c> other
+    /// Seeds the offsets <see cref="ListOffsets(IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)"/> reports for every <c>OffsetSpec</c> other
     /// than earliest and for-timestamp — Java's
     /// <c>MockAdminClient.updateEndOffsets(Map)</c>. <b>Merges</b>.
     /// </summary>

@@ -56,7 +56,7 @@ public sealed class AdminP9PerKeyStage5Tests
 
         AclBinding[] bindings = { Binding("cp6-alpha"), Binding("cp6-beta"), Binding("cp6-gamma") };
 
-        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(bindings, options: null));
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(bindings, options: new CreateAclsOptions()));
 
         Assert.Equal(bindings.Length, result.Values().Count);
         foreach (AclBinding binding in bindings)
@@ -77,7 +77,7 @@ public sealed class AdminP9PerKeyStage5Tests
         ClientQuotaEntity beta = Entity("cp6-quota-beta");
 
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(admin.AlterClientQuotas(
-            new[] { Alteration(alpha), Alteration(beta) }, options: null));
+            new[] { Alteration(alpha), Alteration(beta) }, options: new AlterClientQuotasOptions()));
 
         Assert.Equal(2, result.Values().Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
@@ -101,7 +101,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.NotEqual(first, second);
 
         AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.OfClient(admin.DeleteTopics(
-            TopicCollection.OfTopicIds(new[] { first, second }), options: null));
+            TopicCollection.OfTopicIds(new[] { first, second }), options: new DeleteTopicsOptions()));
 
         IReadOnlyDictionary<Uuid, AsyncKafkaFuture> values = result.TopicIdValues()!;
         Assert.Equal(2, values.Count);
@@ -122,7 +122,7 @@ public sealed class AdminP9PerKeyStage5Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, null)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
         TopicPartitionReplica zero = new TopicPartitionReplica("cp6-logdirs", 0, 0);
@@ -134,7 +134,7 @@ public sealed class AdminP9PerKeyStage5Tests
                 [zero] = "/cp6-offline-zero",
                 [one] = "/cp6-offline-one",
             },
-            options: null));
+            options: new AlterReplicaLogDirsOptions()));
 
         Assert.Equal(2, result.Values().Count);
 
@@ -155,7 +155,7 @@ public sealed class AdminP9PerKeyStage5Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, null)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
         TopicPartition inRange = new TopicPartition("cp6-reassign", 0);
@@ -167,7 +167,7 @@ public sealed class AdminP9PerKeyStage5Tests
                 [inRange] = new NewPartitionReassignment(new[] { 0 }),
                 [outOfRange] = new NewPartitionReassignment(new[] { 0 }),
             },
-            options: null));
+            options: new AlterPartitionReassignmentsOptions()));
 
         await TestTimeout.Run(() => result.Values()[inRange].Get(), s_deadline);
 
@@ -183,7 +183,7 @@ public sealed class AdminP9PerKeyStage5Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteConsumerGroupsResult groups =
-            AsyncDeleteConsumerGroupsResult.OfClient(admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: null));
+            AsyncDeleteConsumerGroupsResult.OfClient(admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: new DeleteConsumerGroupsOptions()));
 
         Assert.Equal(2, groups.DeletedGroups().Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
@@ -207,7 +207,7 @@ public sealed class AdminP9PerKeyStage5Tests
                 new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.SCRAM_SHA_512),
                 new UserScramCredentialDeletion("cp6-user-b", ScramMechanism.SCRAM_SHA_256),
             },
-            options: null));
+            options: new AlterUserScramCredentialsOptions()));
 
         Assert.Equal(2, result.Values().Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })

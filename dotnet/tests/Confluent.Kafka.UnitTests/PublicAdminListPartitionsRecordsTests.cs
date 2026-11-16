@@ -219,11 +219,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack((CreatePartitionsOptions?)null));
         Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions()));
         Assert.Empty(new CreatePartitionsOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((DeleteRecordsOptions?)null));
         Assert.Equal(-1, ReadBack(new DeleteRecordsOptions()));
         Assert.Empty(new DeleteRecordsOptions().Setters.InOrder);
     }
@@ -403,7 +401,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
     }
 
     private static (int TimeoutMs, sbyte ValidateOnly, sbyte RetryOnQuotaViolation) ReadBack(
-        CreatePartitionsOptions? options)
+        CreatePartitionsOptions options)
     {
         IntPtr native = NativeAdminClient.NewCreatePartitionsOptions(options);
         try
@@ -423,7 +421,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         }
     }
 
-    private static int ReadBack(DeleteRecordsOptions? options)
+    private static int ReadBack(DeleteRecordsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDeleteRecordsOptions(options);
         try
