@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AdminClient", "AdminClient\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AsyncAdminClient", "AsyncAdminClient\AsyncAdminClient.csproj", "{B07B568D-B1F3-4669-AB26-E244229265FE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AdminApis", "AdminApis\AdminApis.csproj", "{42525A0F-086E-4957-8A33-C47AE1ECCB7B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -125,6 +127,18 @@ Global
 		{B07B568D-B1F3-4669-AB26-E244229265FE}.Release|x64.Build.0 = Release|Any CPU
 		{B07B568D-B1F3-4669-AB26-E244229265FE}.Release|x86.ActiveCfg = Release|Any CPU
 		{B07B568D-B1F3-4669-AB26-E244229265FE}.Release|x86.Build.0 = Release|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Debug|x64.Build.0 = Debug|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Debug|x86.Build.0 = Debug|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Release|x64.ActiveCfg = Release|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Release|x64.Build.0 = Release|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Release|x86.ActiveCfg = Release|Any CPU
+		{42525A0F-086E-4957-8A33-C47AE1ECCB7B}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
