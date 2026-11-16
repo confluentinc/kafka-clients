@@ -77,6 +77,11 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 The consumer supports the consumer group protocol of KIP-848 only, so `group.protocol` must be
 `consumer`.
 
+## Examples
+
+Runnable producer, consumer and admin examples, blocking and async, are in
+[dotnet/examples](https://github.com/confluentinc/kafka-clients/tree/master/dotnet/examples).
+
 ## License
 
 Apache License 2.0. The source is at https://github.com/confluentinc/kafka-clients.
