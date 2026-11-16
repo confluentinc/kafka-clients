@@ -284,6 +284,8 @@ internal static class Log
 {
     private const int ErrorLevel = 40;
 
+    private const int DebugLevel = 10;
+
     private static readonly Dictionary<string, int> s_levels = new Dictionary<string, int>
     {
         ["CRITICAL"] = 50,
@@ -292,7 +294,7 @@ internal static class Log
         ["WARN"] = 30,
         ["WARNING"] = 30,
         ["INFO"] = 20,
-        ["DEBUG"] = 10,
+        ["DEBUG"] = DebugLevel,
         ["NOTSET"] = 0,
     };
 
@@ -317,9 +319,21 @@ internal static class Log
             return;
         }
 
-        string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss,fff", CultureInfo.InvariantCulture);
-        Console.Error.Write($"[{timestamp}] ERROR {message} ({logger})\n{exception}\n");
+        Console.Error.Write($"[{Timestamp()}] ERROR {message} ({logger})\n{exception}\n");
     }
+
+    internal static void Debug(string logger, string message)
+    {
+        if (DebugLevel < s_level)
+        {
+            return;
+        }
+
+        Console.Error.Write($"[{Timestamp()}] DEBUG {message} ({logger})\n");
+    }
+
+    private static string Timestamp() =>
+        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss,fff", CultureInfo.InvariantCulture);
 }
 
 /// <summary>

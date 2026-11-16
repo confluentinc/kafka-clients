@@ -485,6 +485,7 @@ internal sealed class VerifiableConsumer : IOffsetCommitCallback, IConsumerRebal
         }
         catch (WakeupException)
         {
+            Log.Debug(LoggerName, "Caught WakeupException because consumer is shutdown, ignore and terminate.");
         }
         catch (Exception e)
         {
