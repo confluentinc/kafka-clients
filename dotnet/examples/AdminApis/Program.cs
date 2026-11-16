@@ -15,7 +15,7 @@
 // One example per Admin API. The first argument is the brokers, the second names the example to run, and
 // the rest are that example's own:
 //
-//     dotnet run -c Release --project AdminApis -- <bootstrap-brokers> <example> [-X key=value]... [options] <args>
+//     dotnet run -c Release --project AdminApis -- <bootstrap-brokers> <example> [-X key=value]... [options] [--] <args>
 //     dotnet run -c Release --project AdminApis -- <bootstrap-brokers> <example> --help
 //
 // Each example is one file, named after the IAdmin method it calls. Every admin call returns its Result at
@@ -102,8 +102,9 @@ Example[] examples =
 ];
 
 string general =
-    "Usage: AdminApis <bootstrap-brokers> <example> [-X key=value]... [options] <args>\n" +
+    "Usage: AdminApis <bootstrap-brokers> <example> [-X key=value]... [options] [--] <args>\n" +
     "       AdminApis <bootstrap-brokers> <example> --help\n\n" +
+    "A bare -- ends the options: put it before an argument that starts with --.\n\n" +
     $"Examples:\n  {string.Join("\n  ", examples.Select(e => e.Name))}";
 
 // --help in place of the brokers or of the example's name asks for the list of examples.

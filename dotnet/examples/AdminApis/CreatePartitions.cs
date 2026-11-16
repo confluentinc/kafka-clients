@@ -30,22 +30,30 @@ internal static class CreatePartitions
 
     public static void Run(IAdmin admin, Args args)
     {
-        List<(string Topic, int Total)> topics = [];
+        List<string> topics = [];
+        Dictionary<string, int> totals = [];
         Dictionary<string, NewPartitions> newPartitions = [];
         foreach (string[] group in Cli.Groups(args.Positional(), 2, required: true))
         {
             int total = Cli.Parse<int>("partition count", group[1]);
-            topics.Add((group[0], total));
+
+            // One count per topic: a later one for the same topic wins.
+            if (!totals.ContainsKey(group[0]))
+            {
+                topics.Add(group[0]);
+            }
+
+            totals[group[0]] = total;
             newPartitions[group[0]] = NewPartitions.IncreaseTo(total);
         }
 
         CreatePartitionsResult result = admin.CreatePartitions(newPartitions);
-        foreach ((string topic, int total) in topics)
+        foreach (string topic in topics)
         {
             try
             {
                 result.Values()[topic].Get();
-                Console.WriteLine($"Topic {topic} now has {total} partitions");
+                Console.WriteLine($"Topic {topic} now has {totals[topic]} partitions");
             }
             catch (ExecutionException e)
             {

@@ -18,6 +18,8 @@ using System.Linq;
 
 /// <summary>
 /// The command line of one example: <c>[-X key=value]... [--flag | --name=value]... &lt;positional&gt;...</c>.
+/// A bare <c>--</c> ends the options: every argument after it is positional, so a value that starts with
+/// <c>--</c>, such as a password, can be given.
 /// </summary>
 internal sealed class Args
 {
@@ -37,7 +39,12 @@ internal sealed class Args
         for (int i = 0; i < raw.Count; i++)
         {
             string arg = raw[i];
-            if (arg == "--help")
+            if (arg == "--")
+            {
+                args._positional.AddRange(raw.Skip(i + 1));
+                break;
+            }
+            else if (arg == "--help")
             {
                 args.Help = true;
                 return args;
@@ -104,7 +111,9 @@ internal sealed class Args
     {
         if (_options.Count > 0)
         {
-            throw new UsageException($"unknown option --{_options[0].Name}");
+            // The argument is not repeated in the error: it may be a secret, such as a password that starts
+            // with --.
+            throw new UsageException("unknown option; an argument that starts with -- goes after a bare --");
         }
 
         return [.. _positional];

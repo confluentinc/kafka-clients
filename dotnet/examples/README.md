@@ -59,7 +59,8 @@ The example's name is matched without regard to case or separators: `CreateTopic
 and `create-topics` are the same. `-X key=value`, after the name, sets a client configuration
 property and can be repeated, for example `-X security.protocol=SASL_SSL`. With
 `-X bootstrap.controllers=..` the client connects to the KRaft controllers instead of the brokers, and
-the first argument is not used.
+the first argument is not used. A bare `--` ends the options, so an argument that starts with `--`,
+such as a password, goes after it: `AlterUserScramCredentials -- UPSERT alice SCRAM-SHA-256 8192 --secret`.
 
 | Area | Examples |
 |---|---|

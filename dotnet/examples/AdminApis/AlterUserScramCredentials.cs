@@ -23,6 +23,12 @@
 //
 //     dotnet run -c Release --project AdminApis -- localhost:9092 AlterUserScramCredentials \
 //         UPSERT alice SCRAM-SHA-256 8192 secret DELETE bob SCRAM-SHA-512
+//
+// A password that starts with -- would be read as an option: put a bare -- before the alterations, which
+// ends the options.
+//
+//     dotnet run -c Release --project AdminApis -- localhost:9092 AlterUserScramCredentials \
+//         -- UPSERT alice SCRAM-SHA-256 8192 --secret
 
 using System;
 using System.Collections.Generic;
