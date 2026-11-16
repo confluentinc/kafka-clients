@@ -1326,7 +1326,19 @@ private:
         if (java_lang_types().count(simple) != 0) {
             return "java.lang." + simple;
         }
-        return std::nullopt;
+        // A JDK package imported on demand (`import java.util.*;`): the model
+        // cannot see which JDK package declares the name, so it resolves only
+        // when exactly one is imported.
+        std::optional<std::string> jdk;
+        for (const auto& on_demand : unit.on_demand_imports) {
+            if (on_demand.rfind("java.", 0) == 0 || on_demand.rfind("javax.", 0) == 0) {
+                if (jdk) {
+                    return std::nullopt;
+                }
+                jdk = on_demand + "." + simple;
+            }
+        }
+        return jdk;
     }
 
     std::optional<std::string> resolve_segments(const std::vector<std::string>& segments, const Type& ctx,

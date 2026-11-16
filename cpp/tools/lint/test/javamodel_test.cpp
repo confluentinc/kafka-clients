@@ -109,6 +109,16 @@ TEST(JavaModelTest, ResolvesNamesFromEveryScope) {
     EXPECT_EQ(m.parameters.at(0).type.kind, TypeRef::Kind::TYPE_VARIABLE);
 }
 
+TEST(JavaModelTest, ResolvesAJdkPackageImportedOnDemand) {
+    const auto one = model_of({{"a/A.java", "package a; import java.util.*; class A { List<String> l; }"}});
+    EXPECT_EQ(type(one, "a.A").fields.at(0).type.to_string(), "java.util.List<java.lang.String>");
+    // Two JDK packages on demand: which one declares the name is unknown.
+    const auto two = cklint::java::build_model(
+        {{"a/A.java", "package a; import java.util.*; import java.io.*; class A { List<String> l; }"}});
+    ASSERT_EQ(two.diagnostics.size(), 1U);
+    EXPECT_EQ(two.diagnostics[0].message, "cannot resolve type List in a.A");
+}
+
 TEST(JavaModelTest, ReportsANameItCannotResolve) {
     const auto model = cklint::java::build_model({{"a/A.java", "package a; class A { Missing m; }"}});
     ASSERT_EQ(model.diagnostics.size(), 1U);

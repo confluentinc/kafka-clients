@@ -44,9 +44,20 @@ target_link_libraries(ck_java_model PRIVATE ck_java_grammar)
 target_compile_options(ck_java_model PRIVATE ${CK_LINT_WARNINGS})
 set_target_properties(ck_java_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# cpp/CLAUDE.md as code: names, the §5 type table, the scope, the expected
+# shape of a Java class, the data files. Plain C++, no ANTLR, no LLVM.
+add_library(ck_rules STATIC
+    rules/cpp_type.cpp rules/names.cpp rules/types.cpp rules/data_files.cpp rules/scope.cpp rules/expected.cpp)
+target_include_directories(ck_rules PUBLIC rules)
+target_link_libraries(ck_rules PUBLIC ck_java_model)
+target_compile_options(ck_rules PRIVATE ${CK_LINT_WARNINGS})
+set_target_properties(ck_rules PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 add_executable(ck_java_model_cli cli/ck_java_model.cpp)
 set_target_properties(ck_java_model_cli PROPERTIES OUTPUT_NAME ck_java_model)
-target_link_libraries(ck_java_model_cli PRIVATE ck_java_model)
+target_link_libraries(ck_java_model_cli PRIVATE ck_rules)
+target_compile_definitions(ck_java_model_cli PRIVATE
+    CK_LINT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 target_compile_options(ck_java_model_cli PRIVATE ${CK_LINT_WARNINGS})
 
 set(CK_LINT_DESIGN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../design/current" CACHE PATH
@@ -68,16 +79,20 @@ if(BUILD_TESTING)
 
     function(ck_lint_test name)
         add_executable(${name} test/${name}.cpp)
-        target_link_libraries(${name} PRIVATE ck_java_model GTest::gtest_main)
+        target_link_libraries(${name} PRIVATE ck_rules GTest::gtest_main)
         target_compile_options(${name} PRIVATE ${CK_LINT_WARNINGS})
         target_compile_definitions(${name} PRIVATE
             CK_LINT_KAFKA_JAVA_ROOT="${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java"
-            CK_LINT_DESIGN_DIR="${CK_LINT_DESIGN_DIR}")
+            CK_LINT_DESIGN_DIR="${CK_LINT_DESIGN_DIR}"
+            CK_LINT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
     endfunction()
 
     # The model on small sources.
     ck_lint_test(javamodel_test)
     gtest_discover_tests(javamodel_test TEST_PREFIX "javamodel_test." DISCOVERY_MODE PRE_TEST)
+    # The rules on cpp/CLAUDE.md's examples.
+    ck_lint_test(rules_test)
+    gtest_discover_tests(rules_test TEST_PREFIX "rules_test." DISCOVERY_MODE PRE_TEST)
     # The model of kafka/clients: every source parses and resolves, and it
     # agrees with design/current's public-audience and deprecated-API lists.
     # One process, so the tree is parsed once.

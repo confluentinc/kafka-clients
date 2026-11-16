@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // The Java model of the kafka/ submodule's clients sources, checked against
-// the two lists the Rust lints read: the @InterfaceAudience.Public types and
-// the deprecated API.
+// the two lists the Rust lints read (the @InterfaceAudience.Public types and
+// the deprecated API), and the rules on it: the scope of cpp/CLAUDE.md §1.4
+// and the expected shapes of the eleven verification classes.
 
 #include <gtest/gtest.h>
 
@@ -25,7 +26,10 @@
 #include <string>
 #include <thread>
 
+#include "data_files.hpp"
+#include "expected.hpp"
 #include "java_model.hpp"
+#include "scope.hpp"
 
 namespace {
 
@@ -151,6 +155,88 @@ TEST_F(JavaModelKafkaTest, ReadsTheVerificationClasses) {
     const auto* consumer = model_->find("org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer");
     ASSERT_NE(consumer, nullptr);
     EXPECT_FALSE(consumer->audience_public);
+}
+
+TEST_F(JavaModelKafkaTest, ScopesTheClientFamilies) {
+    const auto excluded = cklint::rules::read_scope_excluded(std::string(CK_LINT_DATA_DIR) + "/scope-excluded.txt");
+    EXPECT_TRUE(excluded.errors.empty());
+    const auto scope = cklint::rules::compute_scope(*model_, excluded);
+    EXPECT_TRUE(scope.missing_seeds.empty());
+    // Every line of scope-excluded.txt excludes something.
+    EXPECT_EQ(scope.used_exclusions.size(), excluded.lines.size());
+    for (const char* name : {
+             "org.apache.kafka.common.TopicPartition",
+             "org.apache.kafka.common.record.TimestampType",
+             "org.apache.kafka.common.ElectionType",
+             "org.apache.kafka.common.acl.AclPermissionType",
+             "org.apache.kafka.clients.consumer.OffsetAndTimestamp",
+             "org.apache.kafka.common.Node",
+             "org.apache.kafka.common.Uuid",
+             "org.apache.kafka.common.config.ConfigResource",
+             "org.apache.kafka.common.config.ConfigResource$Type",
+             "org.apache.kafka.common.security.auth.KafkaPrincipal",
+             "org.apache.kafka.common.MetricName",
+             "org.apache.kafka.common.Configurable",
+             "org.apache.kafka.common.serialization.StringSerializer",
+             "org.apache.kafka.common.utils.Bytes",
+         }) {
+        EXPECT_EQ(scope.types.count(name), 1U) << name;
+    }
+    for (const char* name : {
+             "org.apache.kafka.common.config.ConfigDef",
+             "org.apache.kafka.common.config.AbstractConfig",
+             "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer",
+             "org.apache.kafka.clients.CommonClientConfigs",
+             "org.apache.kafka.common.errors.TopicAuthorizationException",
+             "org.apache.kafka.clients.consumer.OffsetResetStrategy",
+         }) {
+        EXPECT_EQ(scope.types.count(name), 0U) << name;
+    }
+}
+
+TEST_F(JavaModelKafkaTest, DerivesTheVerificationClasses) {
+    auto shape = [&](const std::string& name) { return cklint::rules::expected(*model_, *model_->find(name)); };
+    for (const char* name : {
+             "org.apache.kafka.common.TopicPartition",
+             "org.apache.kafka.common.record.TimestampType",
+             "org.apache.kafka.common.ElectionType",
+             "org.apache.kafka.common.acl.AclPermissionType",
+             "org.apache.kafka.clients.consumer.OffsetAndTimestamp",
+             "org.apache.kafka.common.Node",
+             "org.apache.kafka.common.Uuid",
+             "org.apache.kafka.common.config.ConfigResource",
+             "org.apache.kafka.common.config.ConfigResource$Type",
+             "org.apache.kafka.common.security.auth.KafkaPrincipal",
+             "org.apache.kafka.common.MetricName",
+         }) {
+        const auto e = shape(name);
+        EXPECT_TRUE(e.problems.empty()) << name << ": " << (e.problems.empty() ? "" : e.problems.front());
+    }
+    // The plan expects Configurable to stop on its Map<String, ?> until a row is decided.
+    const auto configurable = shape("org.apache.kafka.common.Configurable");
+    ASSERT_EQ(configurable.problems.size(), 1U);
+    EXPECT_NE(configurable.problems[0].find("an unbounded wildcard has no §5 row"), std::string::npos);
+
+    const auto timestamp = shape("org.apache.kafka.common.record.TimestampType");
+    EXPECT_EQ(timestamp.header, "confluent/kafka/common/record/timestamp_type.hpp");
+    EXPECT_EQ(timestamp.underlying->to_string(), "int32_t");
+    EXPECT_EQ(timestamp.enumerators.at(1).name, "CREATE_TIME");
+    EXPECT_EQ(timestamp.enumerators.at(1).value, "0");
+
+    const auto node = shape("org.apache.kafka.common.Node");
+    EXPECT_EQ(std::count_if(node.functions.begin(), node.functions.end(),
+                            [](const auto& f) { return f.kind == cklint::rules::FunctionKind::CONSTRUCTOR; }),
+              3);  // the protected six-argument constructor is not public
+
+    const auto uuid = shape("org.apache.kafka.common.Uuid");
+    const auto zero =
+        std::find_if(uuid.functions.begin(), uuid.functions.end(), [](const auto& f) { return f.name == "ZERO_UUID"; });
+    ASSERT_NE(zero, uuid.functions.end());
+    EXPECT_EQ(zero->kind, cklint::rules::FunctionKind::CONSTANT_FUNCTION);
+    EXPECT_EQ(zero->returns.shapes.front().type.to_string(), "const confluent::kafka::common::Uuid&");
+
+    const auto offsets = shape("org.apache.kafka.clients.consumer.OffsetAndTimestamp");
+    EXPECT_EQ(offsets.cpp_name, "confluent::kafka::consumer::OffsetAndTimestamp");
 }
 
 }  // namespace

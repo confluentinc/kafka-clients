@@ -33,6 +33,13 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   of the 1340 files resolves, the `@InterfaceAudience.Public` types equal
   `design/current/interface-audience-public-4.4.txt`, and every `@Deprecated` item is in
   `design/current/java-deprecated.txt` (`javamodel_kafka_test`).
+- Step 2 done: the rules (`tools/lint/rules/`): names (§2, §3.1), the §5 type table as shape sets
+  with the `decisions.txt` tag each alternative needs, the §1.4 scope (310 types from the client
+  families, the config classes and the serdes, minus `data/scope-excluded.txt`), the expected
+  shape of a class, and the data-file parsers; `ck_java_model scope` and `ck_java_model
+  expected <FQN>`. The eleven verification classes derive with no problem except `Configurable`,
+  whose `Map<String, ?>` has no §5 row, as planned. The word budget joins `expected` with the
+  doc check (step 7).
 - (a) the plugin loading into `clang-tidy-21` and reading comments on template members, and
   (b) `clang-tidy-21` parsing libstdc++ 15's `<chrono> <span> <compare> <functional>`: open,
   waiting for LLVM 21 (`clang-21 clang-tidy-21 libclang-21-dev libclang-cpp21-dev llvm-21-dev`).

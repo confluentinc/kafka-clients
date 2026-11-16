@@ -20,6 +20,11 @@
 //   ck_java_model dump [-j <threads>] <source-root>
 //       print the Java model of a source root (kafka/clients/src/main/java),
 //       one declaration per line; exits 1 if the model has diagnostics
+//   ck_java_model scope [-j <threads>] <source-root>
+//       print the types cpp/CLAUDE.md §1.4 puts in scope, each with what
+//       reached it; scope-excluded.txt is read from the linter's data/
+//   ck_java_model expected [-j <threads>] <source-root> <binary name>...
+//       print the C++ shape cpp/CLAUDE.md derives from each Java type
 //
 // -j defaults to the number of hardware threads.
 
@@ -30,14 +35,17 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include "expected.hpp"
 #include "java_model.hpp"
 #include "java_syntax.hpp"
+#include "scope.hpp"
 
 namespace {
 
@@ -131,9 +139,54 @@ int run_dump(const std::string& root, unsigned jobs) {
     return model.diagnostics.empty() ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+int run_scope(const std::string& root, unsigned jobs) {
+    const auto model = cklint::java::load_model(root, jobs);
+    const auto excluded = cklint::rules::read_scope_excluded(std::string(CK_LINT_DATA_DIR) + "/scope-excluded.txt");
+    for (const auto& e : excluded.errors) {
+        std::cerr << e << '\n';
+    }
+    const auto scope = cklint::rules::compute_scope(model, excluded);
+    for (const auto& [name, reason] : scope.types) {
+        std::cout << name << '\t' << reason << '\n';
+    }
+    for (const auto& seed : scope.missing_seeds) {
+        std::cerr << "seed not in the model: " << seed << '\n';
+    }
+    for (const auto& line : excluded.lines) {
+        if (scope.used_exclusions.count(line.line) == 0) {
+            std::cerr << excluded.path << ':' << line.line << ": excludes nothing in scope: " << line.fields[0] << '\n';
+        }
+    }
+    std::cerr << scope.types.size() << " types in scope\n";
+    const bool clean =
+        excluded.errors.empty() && scope.missing_seeds.empty() && scope.used_exclusions.size() == excluded.lines.size();
+    return clean ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+int run_expected(const std::string& root, const std::vector<std::string>& names, unsigned jobs) {
+    const auto model = cklint::java::load_model(root, jobs);
+    int status = EXIT_SUCCESS;
+    for (const auto& name : names) {
+        const auto* type = model.find(name);
+        if (type == nullptr) {
+            std::cerr << "no type " << name << " in the model\n";
+            status = EXIT_FAILURE;
+            continue;
+        }
+        const auto e = cklint::rules::expected(model, *type);
+        std::cout << cklint::rules::render(e) << '\n';
+        if (!e.problems.empty()) {
+            status = EXIT_FAILURE;
+        }
+    }
+    return status;
+}
+
 int usage() {
     std::cerr << "usage: ck_java_model parse [-j <threads>] <dir>...\n"
-                 "       ck_java_model dump [-j <threads>] <source-root>\n";
+                 "       ck_java_model dump [-j <threads>] <source-root>\n"
+                 "       ck_java_model scope [-j <threads>] <source-root>\n"
+                 "       ck_java_model expected [-j <threads>] <source-root> <binary name>...\n";
     return 2;
 }
 
@@ -156,6 +209,12 @@ int main(int argc, char** argv) {
     }
     if (command == "dump" && args.size() == 1) {
         return run_dump(args.front(), jobs);
+    }
+    if (command == "scope" && args.size() == 1) {
+        return run_scope(args.front(), jobs);
+    }
+    if (command == "expected" && args.size() >= 2) {
+        return run_expected(args.front(), {std::next(args.begin()), args.end()}, jobs);
     }
     return usage();
 }
