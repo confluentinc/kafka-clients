@@ -175,14 +175,20 @@ public sealed class CommonTests : IDisposable
         string config = Path.Combine(_tmpPath, "p.properties");
         File.WriteAllText(config, "max.block.ms=1\n");
         using ToolProcess process = ToolProcess.Start(
-            "VerifiableProducer", "--topic", "t", "--bootstrap-server", "localhost:1", "--command-config", config);
+            "VerifiableProducer",
+            "--topic", new string('t', 2000), "--bootstrap-server", "localhost:1", "--command-config", config);
         Assert.Equal("startup_complete", Name(await process.ReadLineAsync()));
         // Python's re-entrant signal cannot happen here, so this checks that a second SIGTERM while the hook runs is
-        // ignored: with stdout left unread, the failed sends fill the pipe, the delivery callback blocks printing,
-        // and the hook's Close waits for it until the output is read.
-        await Task.Delay(TimeSpan.FromSeconds(2));
+        // ignored. The hook is held by the unread stdout: each failed send prints about 4 KB (the long topic twice),
+        // so 3 s of them, about 5 MB, overfill even a 1 MiB pipe; the delivery callback then blocks printing, and
+        // the hook's Close waits for it until the output is read.
+        await Task.Delay(TimeSpan.FromSeconds(3));
         process.Signal("TERM");
-        await Task.Delay(TimeSpan.FromMilliseconds(500));
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        Assert.False(
+            process.HasExited,
+            "The tool ended at the first SIGTERM: its stdout pipe was not full, so the hook's Close was not held and "
+            + "the second signal could not arrive while the hook runs.");
         process.Signal("TERM");
         (int exitCode, string stdout, string stderr) = await process.WaitForExitAsync();
 

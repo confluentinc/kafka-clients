@@ -67,6 +67,8 @@ internal sealed class ToolProcess : IDisposable
         return await process.WaitForExitAsync().ConfigureAwait(false);
     }
 
+    internal bool HasExited => _process.HasExited;
+
     internal async Task<string> ReadLineAsync()
     {
         string? line = await _process.StandardOutput.ReadLineAsync().WaitAsync(s_timeout).ConfigureAwait(false);
