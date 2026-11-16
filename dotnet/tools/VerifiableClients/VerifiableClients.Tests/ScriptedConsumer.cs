@@ -22,9 +22,9 @@ using Confluent.Kafka.Consumer;
 namespace Confluent.Kafka.Tools.Tests;
 
 /// <summary>
-/// A <see cref="MockConsumer{TKey, TValue}"/> with what Java's and Python's tests use and the .NET mock lacks: poll
-/// tasks (Java's <c>MockConsumer.schedulePollTask</c>, one run at the start of each poll), commits that throw the
-/// errors given, one per call, the committed offsets, subscription and options at close, and a count of wakeups.
+/// A <see cref="MockConsumer{TKey, TValue}"/> with what Python's tests use and the .NET mock lacks: poll tasks
+/// (Java's <c>MockConsumer.schedulePollTask</c>, one run at the start of each poll), commits that throw the errors
+/// given, one per call, the committed offsets, subscription and options at close, and a count of wakeups.
 /// </summary>
 internal sealed class ScriptedConsumer : IConsumer<string, string>
 {

@@ -166,9 +166,9 @@ the nodes, set both in `exec_cmd`, as in
 `"env VERIFIABLE_CLIENT_LOG_LEVEL=DEBUG RUST_LOG=debug /opt/kafka-dev/tests/dotnet-clients/VerifiableConsumer"`.
 
 The ducktape services append stderr to the stdout capture file
-(`verifiable_consumer.stdout`, `verifiable_producer.stdout`), after the JSON
-stream they parse. Those files are collected into the test's results only when
-the test fails.
+(`verifiable_consumer.stdout`, `verifiable_producer.stdout`), interleaved with
+the JSON stream they parse. Those files are collected into the test's results
+only when the test fails.
 
 ## Signals
 
