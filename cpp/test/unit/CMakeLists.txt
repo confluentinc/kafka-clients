@@ -23,6 +23,7 @@ endfunction()
 confluent_kafka_cpp_unit_test(ffi_handle_test)
 confluent_kafka_cpp_unit_test(topic_partition_test)
 confluent_kafka_cpp_unit_test(subscription_pattern_test)
+confluent_kafka_cpp_unit_test(acl_permission_type_test)
 
 # The sync-only, header-only contract (cpp/CLAUDE.md §11): every `kafka_`
 # name the headers use is declared in the C header, and none is a `_cb`

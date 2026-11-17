@@ -15,6 +15,7 @@
 // confluent-kafka-header: the textual rules of a public header (cpp/CLAUDE.md
 // §1.2, §3.1, §13.4), read from every header the translation unit includes.
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -121,9 +122,14 @@ void HeaderCheck::check(const clang::ast_matchers::MatchFinder::MatchResult& res
             }
         }
         // §3.1: one umbrella header per module includes every header of it.
+        // A module header of a nested module (common/record.hpp beside common/record/) is not
+        // required in its parent's: users include the module they use.
         const auto dir_end = rel.rfind('/');
         const auto dir = rel.substr(0, dir_end);
-        if (dir != "confluent/kafka" && dir.rfind("confluent/kafka/detail", 0) != 0) {
+        std::error_code ec;
+        const bool is_module_header =
+            std::filesystem::is_directory(settings().include_root + "/" + rel.substr(0, rel.size() - 4), ec);
+        if (!is_module_header && dir != "confluent/kafka" && dir.rfind("confluent/kafka/detail", 0) != 0) {
             const auto umbrella = dir + ".hpp";
             const auto umbrella_text = read_file(settings().include_root + "/" + umbrella);
             if (umbrella_text.empty()) {
