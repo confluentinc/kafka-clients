@@ -156,6 +156,17 @@ if(BUILD_TESTING)
         endif()
     endforeach()
     if(EXISTS "${CK_LINT_FFI_INCLUDE_DIR}/confluent_kafka_bindings.h")
+        # Each mutation edits one line of a real header in a copy of the include
+        # tree; the checks must report it.
+        file(GLOB _ck_mutations "${CMAKE_CURRENT_SOURCE_DIR}/test/mutations/*.mutation")
+        foreach(_mutation IN LISTS _ck_mutations)
+            get_filename_component(_name "${_mutation}" NAME_WE)
+            add_test(NAME lint_mutation_${_name}
+                COMMAND fixture_runner mutate ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
+                        "${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java" "${CK_LINT_INCLUDE_ROOT}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/data" "${CMAKE_CURRENT_BINARY_DIR}/mutations/${_name}"
+                        "${_mutation}" -isystem "${CK_LINT_FFI_INCLUDE_DIR}")
+        endforeach()
         add_test(NAME lint_binding_headers
             COMMAND fixture_runner run ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
                     "${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java" "${CK_LINT_INCLUDE_ROOT}"

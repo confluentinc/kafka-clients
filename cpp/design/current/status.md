@@ -59,6 +59,15 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   headers report nothing). The baseline of untranslated classes comes with the surface check
   (step 5), which is the first check to report a missing class.
 
+- Step 4 done with replacement classes (the owner's call: no class may throw while §6's error
+  emitter does not exist): `TopicPartition`, `SubscriptionPattern`, `AclPermissionType` and
+  `ConfigResource` with its nested `Type`, each with its module header and its tests (Java's,
+  or the Rust core's where Java has none). Value types hold one `std::shared_ptr<const Impl>`
+  (decided rule 8): Java's fields are final, so copies share the value. The plugin reports
+  nothing on the 10 headers; four mutations of real headers (`tools/lint/test/mutations`, run by
+  `fixture_runner mutate`) are each reported. A module header of a nested module
+  (`common/acl.hpp`) need not be in its parent's.
+
 ## Next
 
 1. `detail::check(out_err)` and the error hierarchy: the C++ emitter of
