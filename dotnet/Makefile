@@ -122,7 +122,7 @@ grpc-native: rust-lib
 test-integration: rust-lib
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 		printf '\n========================================================================\n'; \
-		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
+		printf 'SKIP .NET test-integration: host is %s, not Linux.\n' "$$(uname -s)"; \
 		printf '\n'; \
 		printf 'The .NET gRPC-server images COPY the host-built\n'; \
 		printf '  rust/target/$(RUST_PROFILE)/libconfluent_kafka.so\n'; \

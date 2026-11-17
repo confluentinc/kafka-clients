@@ -918,9 +918,10 @@ fn test_multilanguage() -> anyhow::Result<()> {
     println!("Running multilanguage integration tests (requires Docker)...");
     println!("This builds the python + c gRPC server images, then runs");
     println!("`cargo test --features integration-tests,multilanguage-tests`.");
-    // Delegated to the repository root's Makefile so the image-build steps
-    // stay in one place; it shells out to python/Makefile and c/Makefile.
-    run_command("make", &["-C", "..", "test-integration-python", "test-integration-c"])
+    // Delegated to python/Makefile and c/Makefile, which keep the image-build
+    // steps and build what the images copy first.
+    run_command("make", &["-C", "../python", "test-integration"])?;
+    run_command("make", &["-C", "../c", "test-integration"])
 }
 
 /// Run the producer performance test as an env-driven benchmark binary.

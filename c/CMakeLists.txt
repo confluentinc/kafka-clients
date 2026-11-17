@@ -38,8 +38,8 @@ endif()
 if(NOT CONFLUENT_KAFKA_RUST)
     message(FATAL_ERROR
         "Could not find libconfluent_kafka in ${RUST_PROJECT_ROOT}/target/${RUST_PROFILE}. "
-        "Run 'make devel-build-rust-all-features' (debug) or 'make build-rust-all-features' "
-        "(release) from the repository root first.")
+        "Run 'make -C rust devel-build-all-features' (debug) or 'make -C rust build-all-features' "
+        "(release) from the repository root first; c/Makefile's build does it.")
 endif()
 
 message(STATUS "Using Rust library: ${CONFLUENT_KAFKA_RUST}")
