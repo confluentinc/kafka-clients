@@ -25,7 +25,7 @@ VENV = . venv/bin/activate
 	build-grpc-native-python build-grpc-native-c build-grpc-native-dotnet \
 	test-integration-python-native test-integration-c-native test-integration-dotnet-native \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
-	test-c test-cpp test-python test-dotnet test-rust-all-features \
+	test-c test-cpp lint-cpp verify-cpp test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
 	pack-dotnet package-check-dotnet \
@@ -70,6 +70,14 @@ build-cpp: build-rust-all-features
 
 test-cpp: build-cpp
 	$(MAKE) -C cpp $(ROOTS) test
+
+# clang-tidy and the translation linter (cpp/tools/lint), which needs LLVM 21.
+lint-cpp: build-rust-all-features
+	$(MAKE) -C cpp $(ROOTS) lint
+
+# Everything the C++ binding checks (cpp/Makefile `verify`).
+verify-cpp: build-rust-all-features
+	$(MAKE) -C cpp $(ROOTS) verify
 
 init-venv:
 	[ -d venv ] || python3 -m venv venv
