@@ -195,3 +195,9 @@ working on the rules sooner, with the hand-written modules recorded as a deviati
 - Commit with `--no-verify`. Run the full gate once at the end of each PR, at that PR's head.
 - Check #327's head before each phase.
 - Update the tables here in the same commit as the work.
+
+## 9. Future improvements
+
+- Property-based tests with `fast-check` (the test plan's TOOL-02): not integrated now, by the owner's decision of
+  2026-11-18.
+- The performance tests: built later, and kept local only.
