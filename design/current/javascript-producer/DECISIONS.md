@@ -292,8 +292,8 @@ rules and readings. Newest entries are at the end; dates are in IST.
     which Java's `doSend` records for an `ApiException` or a `KafkaException` (a deviation with two causes: the core's
     `send()` records no error in that sensor, which goes when the core records them, entry 31; and a serializer's
     failure is answered in JavaScript, before the core, so the binding would have to count it, which it cannot today:
-    the FFI hands out only a snapshot of the producer's metrics, never its `errors` sensor, and the binding gives the
-    core no serializer. That part goes when the FFI can record a send failure on the producer, or the core runs the
+    the FFI hands out only an unmodifiable live view of the producer's metrics, never its `errors` sensor, and the
+    binding gives the core no serializer. That part goes when the FFI can record a send failure on the producer, or the core runs the
     serializers). `MockProducer` keeps passing every serializer error out raw, as Java's
     `MockProducer#send` serializes with no `try`. `PlaintextProducerSendTest.testWrongSerializer` is ported. The .NET
     binding answers a synchronous callback the same way (`PublicProducerSerializerFailureTests`); for an async
