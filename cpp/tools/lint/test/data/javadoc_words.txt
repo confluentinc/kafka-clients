@@ -1,0 +1,2633 @@
+# The Javadoc word counts of every in-scope marker, as `cargo xtask javadoc --words`
+# prints them: <marker>\t<count>[,<count>...], empty when the marker has no Javadoc.
+# javadoc_words_parity checks the C++ count against it. Regenerate after a Kafka bump
+# or a change to either counter with `cmake --build <build> --target javadoc_words_vector`.
+org.apache.kafka.clients.admin.AbortTransactionOptions	
+org.apache.kafka.clients.admin.AbortTransactionOptions#toString()	
+org.apache.kafka.clients.admin.AbortTransactionResult	4
+org.apache.kafka.clients.admin.AbortTransactionResult#all()	29
+org.apache.kafka.clients.admin.AbortTransactionSpec	
+org.apache.kafka.clients.admin.AbortTransactionSpec#AbortTransactionSpec(TopicPartition,long,short,int)	
+org.apache.kafka.clients.admin.AbortTransactionSpec#coordinatorEpoch()	
+org.apache.kafka.clients.admin.AbortTransactionSpec#equals(Object)	
+org.apache.kafka.clients.admin.AbortTransactionSpec#hashCode()	
+org.apache.kafka.clients.admin.AbortTransactionSpec#producerEpoch()	
+org.apache.kafka.clients.admin.AbortTransactionSpec#producerId()	
+org.apache.kafka.clients.admin.AbortTransactionSpec#toString()	
+org.apache.kafka.clients.admin.AbortTransactionSpec#topicPartition()	
+org.apache.kafka.clients.admin.AbstractOptions	
+org.apache.kafka.clients.admin.AbstractOptions#timeoutMs()	20
+org.apache.kafka.clients.admin.AbstractOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.AddRaftVoterOptions	47
+org.apache.kafka.clients.admin.AddRaftVoterOptions#clusterId()	
+org.apache.kafka.clients.admin.AddRaftVoterOptions#setClusterId(Optional)	
+org.apache.kafka.clients.admin.AddRaftVoterResult	15
+org.apache.kafka.clients.admin.AddRaftVoterResult#all()	11
+org.apache.kafka.clients.admin.Admin	491
+org.apache.kafka.clients.admin.Admin#abortTransaction(AbortTransactionSpec)	28
+org.apache.kafka.clients.admin.Admin#abortTransaction(AbortTransactionSpec,AbortTransactionOptions)	52
+org.apache.kafka.clients.admin.Admin#addRaftVoter(int,Uuid,Set)	32
+org.apache.kafka.clients.admin.Admin#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)	88
+org.apache.kafka.clients.admin.Admin#alterClientQuotas(Collection)	47
+org.apache.kafka.clients.admin.Admin#alterClientQuotas(Collection,AlterClientQuotasOptions)	133
+org.apache.kafka.clients.admin.Admin#alterConsumerGroupOffsets(String,Map)	51
+org.apache.kafka.clients.admin.Admin#alterConsumerGroupOffsets(String,Map,AlterConsumerGroupOffsetsOptions)	68
+org.apache.kafka.clients.admin.Admin#alterPartitionReassignments(Map)	40
+org.apache.kafka.clients.admin.Admin#alterPartitionReassignments(Map,AlterPartitionReassignmentsOptions)	176
+org.apache.kafka.clients.admin.Admin#alterReplicaLogDirs(Map)	132
+org.apache.kafka.clients.admin.Admin#alterReplicaLogDirs(Map,AlterReplicaLogDirsOptions)	125
+org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets(String,Map)	48
+org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)	65
+org.apache.kafka.clients.admin.Admin#alterStreamsGroupOffsets(String,Map)	51
+org.apache.kafka.clients.admin.Admin#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)	83
+org.apache.kafka.clients.admin.Admin#alterUserScramCredentials(List)	23
+org.apache.kafka.clients.admin.Admin#alterUserScramCredentials(List,AlterUserScramCredentialsOptions)	124
+org.apache.kafka.clients.admin.Admin#clientInstanceId(Duration)	197
+org.apache.kafka.clients.admin.Admin#close()	10
+org.apache.kafka.clients.admin.Admin#close(Duration)	69
+org.apache.kafka.clients.admin.Admin#create(Map)	14
+org.apache.kafka.clients.admin.Admin#create(Properties)	14
+org.apache.kafka.clients.admin.Admin#createAcls(Collection)	37
+org.apache.kafka.clients.admin.Admin#createAcls(Collection,CreateAclsOptions)	80
+org.apache.kafka.clients.admin.Admin#createDelegationToken()	22
+org.apache.kafka.clients.admin.Admin#createDelegationToken(CreateDelegationTokenOptions)	94
+org.apache.kafka.clients.admin.Admin#createPartitions(Map)	75
+org.apache.kafka.clients.admin.Admin#createPartitions(Map,CreatePartitionsOptions)	247
+org.apache.kafka.clients.admin.Admin#createTopics(Collection)	48
+org.apache.kafka.clients.admin.Admin#createTopics(Collection,CreateTopicsOptions)	101
+org.apache.kafka.clients.admin.Admin#deleteAcls(Collection)	37
+org.apache.kafka.clients.admin.Admin#deleteAcls(Collection,DeleteAclsOptions)	56
+org.apache.kafka.clients.admin.Admin#deleteConsumerGroupOffsets(String,Set)	37
+org.apache.kafka.clients.admin.Admin#deleteConsumerGroupOffsets(String,Set,DeleteConsumerGroupOffsetsOptions)	45
+org.apache.kafka.clients.admin.Admin#deleteConsumerGroups(Collection)	12
+org.apache.kafka.clients.admin.Admin#deleteConsumerGroups(Collection,DeleteConsumerGroupsOptions)	18
+org.apache.kafka.clients.admin.Admin#deleteRecords(Map)	58
+org.apache.kafka.clients.admin.Admin#deleteRecords(Map,DeleteRecordsOptions)	50
+org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets(String,Set)	49
+org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)	41
+org.apache.kafka.clients.admin.Admin#deleteShareGroups(Collection)	23
+org.apache.kafka.clients.admin.Admin#deleteShareGroups(Collection,DeleteShareGroupsOptions)	29
+org.apache.kafka.clients.admin.Admin#deleteStreamsGroupOffsets(String,Set)	37
+org.apache.kafka.clients.admin.Admin#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)	60
+org.apache.kafka.clients.admin.Admin#deleteStreamsGroups(Collection)	12
+org.apache.kafka.clients.admin.Admin#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)	33
+org.apache.kafka.clients.admin.Admin#deleteTopics(Collection)	38
+org.apache.kafka.clients.admin.Admin#deleteTopics(Collection,DeleteTopicsOptions)	47
+org.apache.kafka.clients.admin.Admin#deleteTopics(TopicCollection)	59
+org.apache.kafka.clients.admin.Admin#deleteTopics(TopicCollection,DeleteTopicsOptions)	135
+org.apache.kafka.clients.admin.Admin#describeAcls(AclBindingFilter)	37
+org.apache.kafka.clients.admin.Admin#describeAcls(AclBindingFilter,DescribeAclsOptions)	61
+org.apache.kafka.clients.admin.Admin#describeClassicGroups(Collection)	37
+org.apache.kafka.clients.admin.Admin#describeClassicGroups(Collection,DescribeClassicGroupsOptions)	26
+org.apache.kafka.clients.admin.Admin#describeClientQuotas(ClientQuotaFilter)	59
+org.apache.kafka.clients.admin.Admin#describeClientQuotas(ClientQuotaFilter,DescribeClientQuotasOptions)	103
+org.apache.kafka.clients.admin.Admin#describeCluster()	30
+org.apache.kafka.clients.admin.Admin#describeCluster(DescribeClusterOptions)	39
+org.apache.kafka.clients.admin.Admin#describeConfigs(Collection)	48
+org.apache.kafka.clients.admin.Admin#describeConfigs(Collection,DescribeConfigsOptions)	148
+org.apache.kafka.clients.admin.Admin#describeConsumerGroups(Collection)	37
+org.apache.kafka.clients.admin.Admin#describeConsumerGroups(Collection,DescribeConsumerGroupsOptions)	26
+org.apache.kafka.clients.admin.Admin#describeDelegationToken()	37
+org.apache.kafka.clients.admin.Admin#describeDelegationToken(DescribeDelegationTokenOptions)	85
+org.apache.kafka.clients.admin.Admin#describeFeatures()	28
+org.apache.kafka.clients.admin.Admin#describeFeatures(DescribeFeaturesOptions)	53
+org.apache.kafka.clients.admin.Admin#describeLogDirs(Collection)	49
+org.apache.kafka.clients.admin.Admin#describeLogDirs(Collection,DescribeLogDirsOptions)	43
+org.apache.kafka.clients.admin.Admin#describeMetadataQuorum()	28
+org.apache.kafka.clients.admin.Admin#describeMetadataQuorum(DescribeMetadataQuorumOptions)	65
+org.apache.kafka.clients.admin.Admin#describeProducers(Collection)	23
+org.apache.kafka.clients.admin.Admin#describeProducers(Collection,DescribeProducersOptions)	45
+org.apache.kafka.clients.admin.Admin#describeReplicaLogDirs(Collection)	46
+org.apache.kafka.clients.admin.Admin#describeReplicaLogDirs(Collection,DescribeReplicaLogDirsOptions)	41
+org.apache.kafka.clients.admin.Admin#describeShareGroups(Collection)	37
+org.apache.kafka.clients.admin.Admin#describeShareGroups(Collection,DescribeShareGroupsOptions)	26
+org.apache.kafka.clients.admin.Admin#describeStreamsGroups(Collection)	36
+org.apache.kafka.clients.admin.Admin#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)	25
+org.apache.kafka.clients.admin.Admin#describeTopics(Collection)	36
+org.apache.kafka.clients.admin.Admin#describeTopics(Collection,DescribeTopicsOptions)	25
+org.apache.kafka.clients.admin.Admin#describeTopics(TopicCollection)	40
+org.apache.kafka.clients.admin.Admin#describeTopics(TopicCollection,DescribeTopicsOptions)	39
+org.apache.kafka.clients.admin.Admin#describeTransactions(Collection)	24
+org.apache.kafka.clients.admin.Admin#describeTransactions(Collection,DescribeTransactionsOptions)	35
+org.apache.kafka.clients.admin.Admin#describeUserScramCredentials()	14
+org.apache.kafka.clients.admin.Admin#describeUserScramCredentials(List)	36
+org.apache.kafka.clients.admin.Admin#describeUserScramCredentials(List,DescribeUserScramCredentialsOptions)	115
+org.apache.kafka.clients.admin.Admin#electLeaders(ElectionType,Set)	37
+org.apache.kafka.clients.admin.Admin#electLeaders(ElectionType,Set,ElectLeadersOptions)	223
+org.apache.kafka.clients.admin.Admin#expireDelegationToken(byte[])	34
+org.apache.kafka.clients.admin.Admin#expireDelegationToken(byte[],ExpireDelegationTokenOptions)	121
+org.apache.kafka.clients.admin.Admin#fenceProducers(Collection)	43
+org.apache.kafka.clients.admin.Admin#fenceProducers(Collection,FenceProducersOptions)	32
+org.apache.kafka.clients.admin.Admin#forceTerminateTransaction(String)	33
+org.apache.kafka.clients.admin.Admin#forceTerminateTransaction(String,TerminateTransactionOptions)	60
+org.apache.kafka.clients.admin.Admin#incrementalAlterConfigs(Map)	48
+org.apache.kafka.clients.admin.Admin#incrementalAlterConfigs(Map,AlterConfigsOptions)	131
+org.apache.kafka.clients.admin.Admin#listClientMetricsResources()	32
+org.apache.kafka.clients.admin.Admin#listClientMetricsResources(ListClientMetricsResourcesOptions)	23
+org.apache.kafka.clients.admin.Admin#listConfigResources()	30
+org.apache.kafka.clients.admin.Admin#listConfigResources(Set,ListConfigResourcesOptions)	47
+org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets(Map)	50
+org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets(Map,ListConsumerGroupOffsetsOptions)	48
+org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets(String)	34
+org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets(String,ListConsumerGroupOffsetsOptions)	22
+org.apache.kafka.clients.admin.Admin#listConsumerGroups()	30
+org.apache.kafka.clients.admin.Admin#listConsumerGroups(ListConsumerGroupsOptions)	20
+org.apache.kafka.clients.admin.Admin#listGroups()	29
+org.apache.kafka.clients.admin.Admin#listGroups(ListGroupsOptions)	18
+org.apache.kafka.clients.admin.Admin#listOffsets(Map)	48
+org.apache.kafka.clients.admin.Admin#listOffsets(Map,ListOffsetsOptions)	48
+org.apache.kafka.clients.admin.Admin#listPartitionReassignments()	23
+org.apache.kafka.clients.admin.Admin#listPartitionReassignments(ListPartitionReassignmentsOptions)	68
+org.apache.kafka.clients.admin.Admin#listPartitionReassignments(Optional,ListPartitionReassignmentsOptions)	33
+org.apache.kafka.clients.admin.Admin#listPartitionReassignments(Set)	24
+org.apache.kafka.clients.admin.Admin#listPartitionReassignments(Set,ListPartitionReassignmentsOptions)	77
+org.apache.kafka.clients.admin.Admin#listShareGroupOffsets(Map)	62
+org.apache.kafka.clients.admin.Admin#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)	48
+org.apache.kafka.clients.admin.Admin#listStreamsGroupOffsets(Map)	50
+org.apache.kafka.clients.admin.Admin#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)	63
+org.apache.kafka.clients.admin.Admin#listTopics()	29
+org.apache.kafka.clients.admin.Admin#listTopics(ListTopicsOptions)	18
+org.apache.kafka.clients.admin.Admin#listTransactions()	13
+org.apache.kafka.clients.admin.Admin#listTransactions(ListTransactionsOptions)	52
+org.apache.kafka.clients.admin.Admin#metrics()	7
+org.apache.kafka.clients.admin.Admin#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.admin.Admin#removeMembersFromConsumerGroup(String,RemoveMembersFromConsumerGroupOptions)	37
+org.apache.kafka.clients.admin.Admin#removeRaftVoter(int,Uuid)	23
+org.apache.kafka.clients.admin.Admin#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)	112
+org.apache.kafka.clients.admin.Admin#renewDelegationToken(byte[])	28
+org.apache.kafka.clients.admin.Admin#renewDelegationToken(byte[],RenewDelegationTokenOptions)	120
+org.apache.kafka.clients.admin.Admin#unregisterBroker(int)	31
+org.apache.kafka.clients.admin.Admin#unregisterBroker(int,UnregisterBrokerOptions)	69
+org.apache.kafka.clients.admin.Admin#unregisterController(int)	21
+org.apache.kafka.clients.admin.Admin#unregisterController(int,UnregisterControllerOptions)	92
+org.apache.kafka.clients.admin.Admin#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.admin.Admin#updateFeatures(Map)	36
+org.apache.kafka.clients.admin.Admin#updateFeatures(Map,UpdateFeaturesOptions)	370
+org.apache.kafka.clients.admin.AdminClient	41
+org.apache.kafka.clients.admin.AdminClient#create(Map)	14
+org.apache.kafka.clients.admin.AdminClient#create(Properties)	14
+org.apache.kafka.clients.admin.AdminClientConfig	12
+org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)	
+org.apache.kafka.clients.admin.AdminClientConfig#BOOTSTRAP_CONTROLLERS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#BOOTSTRAP_CONTROLLERS_DOC	
+org.apache.kafka.clients.admin.AdminClientConfig#BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#BOOTSTRAP_SERVERS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#CLIENT_DNS_LOOKUP_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#CLIENT_ID_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#CONNECTIONS_MAX_IDLE_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#DEFAULT_API_TIMEOUT_MS_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS	
+org.apache.kafka.clients.admin.AdminClientConfig#DEFAULT_METADATA_RECOVERY_STRATEGY	
+org.apache.kafka.clients.admin.AdminClientConfig#DEFAULT_SECURITY_PROTOCOL	
+org.apache.kafka.clients.admin.AdminClientConfig#ENABLE_METRICS_PUSH_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#ENABLE_METRICS_PUSH_DOC	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_CLUSTER_CHECK_ENABLE_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_CLUSTER_CHECK_ENABLE_DOC	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_MAX_AGE_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_RECOVERY_STRATEGY_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METADATA_RECOVERY_STRATEGY_DOC	
+org.apache.kafka.clients.admin.AdminClientConfig#METRICS_NUM_SAMPLES_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METRICS_RECORDING_LEVEL_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METRICS_SAMPLE_WINDOW_MS_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#METRIC_REPORTER_CLASSES_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#RECEIVE_BUFFER_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#RECONNECT_BACKOFF_MAX_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#RECONNECT_BACKOFF_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#REQUEST_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#RETRIES_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#RETRY_BACKOFF_MAX_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#RETRY_BACKOFF_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#SECURITY_PROTOCOL_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#SECURITY_PROVIDERS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#SEND_BUFFER_CONFIG	
+org.apache.kafka.clients.admin.AdminClientConfig#SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.admin.AdminClientConfig#configDef()	
+org.apache.kafka.clients.admin.AdminClientConfig#configNames()	
+org.apache.kafka.clients.admin.AdminClientConfig#main(String[])	
+org.apache.kafka.clients.admin.AlterClientQuotasOptions	3
+org.apache.kafka.clients.admin.AlterClientQuotasOptions#validateOnly()	11
+org.apache.kafka.clients.admin.AlterClientQuotasOptions#validateOnly(boolean)	11
+org.apache.kafka.clients.admin.AlterClientQuotasResult	6
+org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult(Map)	14
+org.apache.kafka.clients.admin.AlterClientQuotasResult#all()	11
+org.apache.kafka.clients.admin.AlterClientQuotasResult#values()	20
+org.apache.kafka.clients.admin.AlterConfigOp	76
+org.apache.kafka.clients.admin.AlterConfigOp#AlterConfigOp(ConfigEntry,OpType)	
+org.apache.kafka.clients.admin.AlterConfigOp#configEntry()	
+org.apache.kafka.clients.admin.AlterConfigOp#equals(Object)	
+org.apache.kafka.clients.admin.AlterConfigOp#hashCode()	
+org.apache.kafka.clients.admin.AlterConfigOp#opType()	
+org.apache.kafka.clients.admin.AlterConfigOp#toString()	
+org.apache.kafka.clients.admin.AlterConfigOp$OpType	
+org.apache.kafka.clients.admin.AlterConfigOp$OpType#APPEND	31
+org.apache.kafka.clients.admin.AlterConfigOp$OpType#DELETE	10
+org.apache.kafka.clients.admin.AlterConfigOp$OpType#SET	7
+org.apache.kafka.clients.admin.AlterConfigOp$OpType#SUBTRACT	55
+org.apache.kafka.clients.admin.AlterConfigOp$OpType#forId(byte)	
+org.apache.kafka.clients.admin.AlterConfigOp$OpType#id()	
+org.apache.kafka.clients.admin.AlterConfigsOptions	3
+org.apache.kafka.clients.admin.AlterConfigsOptions#shouldValidateOnly()	12
+org.apache.kafka.clients.admin.AlterConfigsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.AlterConfigsOptions#validateOnly(boolean)	13
+org.apache.kafka.clients.admin.AlterConfigsResult	6
+org.apache.kafka.clients.admin.AlterConfigsResult#all()	13
+org.apache.kafka.clients.admin.AlterConfigsResult#values()	21
+org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions	5
+org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult	6
+org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#all()	11
+org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#partitionResult(TopicPartition)	15
+org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions	3
+org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions#allowReplicationFactorChange()	39
+org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions#allowReplicationFactorChange(boolean)	41
+org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult	4
+org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#all()	13
+org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#values()	66
+org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions	3
+org.apache.kafka.clients.admin.AlterReplicaLogDirsResult	22
+org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#all()	24
+org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#values()	120
+org.apache.kafka.clients.admin.AlterShareGroupOffsetsOptions	3
+org.apache.kafka.clients.admin.AlterShareGroupOffsetsResult	6
+org.apache.kafka.clients.admin.AlterShareGroupOffsetsResult#all()	20
+org.apache.kafka.clients.admin.AlterShareGroupOffsetsResult#partitionResult(TopicPartition)	15
+org.apache.kafka.clients.admin.AlterStreamsGroupOffsetsOptions	16
+org.apache.kafka.clients.admin.AlterStreamsGroupOffsetsResult	17
+org.apache.kafka.clients.admin.AlterStreamsGroupOffsetsResult#all()	11
+org.apache.kafka.clients.admin.AlterStreamsGroupOffsetsResult#partitionResult(TopicPartition)	15
+org.apache.kafka.clients.admin.AlterUserScramCredentialsOptions	3
+org.apache.kafka.clients.admin.AlterUserScramCredentialsResult	6
+org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult(Map)	19
+org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#all()	14
+org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#values()	23
+org.apache.kafka.clients.admin.ClassicGroupDescription	11
+org.apache.kafka.clients.admin.ClassicGroupDescription#ClassicGroupDescription(String,String,String,Collection,ClassicGroupState,Node)	
+org.apache.kafka.clients.admin.ClassicGroupDescription#ClassicGroupDescription(String,String,String,Collection,ClassicGroupState,Node,Set)	
+org.apache.kafka.clients.admin.ClassicGroupDescription#authorizedOperations()	12
+org.apache.kafka.clients.admin.ClassicGroupDescription#coordinator()	12
+org.apache.kafka.clients.admin.ClassicGroupDescription#equals(Object)	
+org.apache.kafka.clients.admin.ClassicGroupDescription#groupId()	6
+org.apache.kafka.clients.admin.ClassicGroupDescription#hashCode()	
+org.apache.kafka.clients.admin.ClassicGroupDescription#isSimpleConsumerGroup()	10
+org.apache.kafka.clients.admin.ClassicGroupDescription#members()	9
+org.apache.kafka.clients.admin.ClassicGroupDescription#protocol()	4
+org.apache.kafka.clients.admin.ClassicGroupDescription#protocolData()	35
+org.apache.kafka.clients.admin.ClassicGroupDescription#state()	16
+org.apache.kafka.clients.admin.ClassicGroupDescription#toString()	
+org.apache.kafka.clients.admin.Config	10
+org.apache.kafka.clients.admin.Config#Config(Collection)	8
+org.apache.kafka.clients.admin.Config#entries()	5
+org.apache.kafka.clients.admin.Config#equals(Object)	
+org.apache.kafka.clients.admin.Config#get(String)	15
+org.apache.kafka.clients.admin.Config#hashCode()	
+org.apache.kafka.clients.admin.Config#toString()	
+org.apache.kafka.clients.admin.ConfigEntry	12
+org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry(String,String)	20
+org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry(String,String,ConfigSource,boolean,boolean,List,ConfigType,String)	61
+org.apache.kafka.clients.admin.ConfigEntry#documentation()	4
+org.apache.kafka.clients.admin.ConfigEntry#equals(Object)	
+org.apache.kafka.clients.admin.ConfigEntry#hashCode()	
+org.apache.kafka.clients.admin.ConfigEntry#isDefault()	15
+org.apache.kafka.clients.admin.ConfigEntry#isReadOnly()	11
+org.apache.kafka.clients.admin.ConfigEntry#isSensitive()	23
+org.apache.kafka.clients.admin.ConfigEntry#name()	4
+org.apache.kafka.clients.admin.ConfigEntry#source()	7
+org.apache.kafka.clients.admin.ConfigEntry#synonyms()	44
+org.apache.kafka.clients.admin.ConfigEntry#toString()	21
+org.apache.kafka.clients.admin.ConfigEntry#type()	5
+org.apache.kafka.clients.admin.ConfigEntry#value()	18
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource	4
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DEFAULT_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DYNAMIC_BROKER_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DYNAMIC_BROKER_LOGGER_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DYNAMIC_CLIENT_METRICS_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DYNAMIC_DEFAULT_BROKER_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DYNAMIC_GROUP_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#DYNAMIC_TOPIC_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#STATIC_BROKER_CONFIG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSource#UNKNOWN	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym	8
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#equals(Object)	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#hashCode()	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#name()	6
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#source()	6
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#toString()	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#value()	15
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType	5
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#BOOLEAN	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#CLASS	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#DOUBLE	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#INT	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#LIST	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#LONG	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#PASSWORD	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#SHORT	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#STRING	
+org.apache.kafka.clients.admin.ConfigEntry$ConfigType#UNKNOWN	
+org.apache.kafka.clients.admin.ConsumerGroupDescription	11
+org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,ConsumerGroupState,Node)	0
+org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,ConsumerGroupState,Node,Set)	0
+org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,GroupType,ConsumerGroupState,Node,Set)	0
+org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,GroupType,GroupState,Node,Set,Optional,Optional)	
+org.apache.kafka.clients.admin.ConsumerGroupDescription#authorizedOperations()	12
+org.apache.kafka.clients.admin.ConsumerGroupDescription#coordinator()	12
+org.apache.kafka.clients.admin.ConsumerGroupDescription#equals(Object)	
+org.apache.kafka.clients.admin.ConsumerGroupDescription#groupEpoch()	28
+org.apache.kafka.clients.admin.ConsumerGroupDescription#groupId()	6
+org.apache.kafka.clients.admin.ConsumerGroupDescription#groupState()	15
+org.apache.kafka.clients.admin.ConsumerGroupDescription#hashCode()	
+org.apache.kafka.clients.admin.ConsumerGroupDescription#isSimpleConsumerGroup()	7
+org.apache.kafka.clients.admin.ConsumerGroupDescription#members()	9
+org.apache.kafka.clients.admin.ConsumerGroupDescription#partitionAssignor()	5
+org.apache.kafka.clients.admin.ConsumerGroupDescription#state()	16
+org.apache.kafka.clients.admin.ConsumerGroupDescription#targetAssignmentEpoch()	28
+org.apache.kafka.clients.admin.ConsumerGroupDescription#toString()	
+org.apache.kafka.clients.admin.ConsumerGroupDescription#type()	20
+org.apache.kafka.clients.admin.CreateAclsOptions	3
+org.apache.kafka.clients.admin.CreateAclsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.CreateAclsResult	6
+org.apache.kafka.clients.admin.CreateAclsResult#all()	12
+org.apache.kafka.clients.admin.CreateAclsResult#values()	23
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions	3
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxLifetimeMs()	
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxLifetimeMs(long)	
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxlifeTimeMs()	0
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxlifeTimeMs(long)	0
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#owner()	
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#owner(KafkaPrincipal)	
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers()	
+org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers(List)	
+org.apache.kafka.clients.admin.CreateDelegationTokenResult	6
+org.apache.kafka.clients.admin.CreateDelegationTokenResult#delegationToken()	8
+org.apache.kafka.clients.admin.CreatePartitionsOptions	3
+org.apache.kafka.clients.admin.CreatePartitionsOptions#CreatePartitionsOptions()	
+org.apache.kafka.clients.admin.CreatePartitionsOptions#retryOnQuotaViolation(boolean)	10
+org.apache.kafka.clients.admin.CreatePartitionsOptions#shouldRetryOnQuotaViolation()	9
+org.apache.kafka.clients.admin.CreatePartitionsOptions#validateOnly()	12
+org.apache.kafka.clients.admin.CreatePartitionsOptions#validateOnly(boolean)	13
+org.apache.kafka.clients.admin.CreatePartitionsResult	6
+org.apache.kafka.clients.admin.CreatePartitionsResult#all()	11
+org.apache.kafka.clients.admin.CreatePartitionsResult#values()	20
+org.apache.kafka.clients.admin.CreateTopicsOptions	3
+org.apache.kafka.clients.admin.CreateTopicsOptions#retryOnQuotaViolation(boolean)	10
+org.apache.kafka.clients.admin.CreateTopicsOptions#shouldRetryOnQuotaViolation()	9
+org.apache.kafka.clients.admin.CreateTopicsOptions#shouldValidateOnly()	12
+org.apache.kafka.clients.admin.CreateTopicsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.CreateTopicsOptions#validateOnly(boolean)	13
+org.apache.kafka.clients.admin.CreateTopicsResult	4
+org.apache.kafka.clients.admin.CreateTopicsResult#all()	11
+org.apache.kafka.clients.admin.CreateTopicsResult#config(String)	66
+org.apache.kafka.clients.admin.CreateTopicsResult#numPartitions(String)	54
+org.apache.kafka.clients.admin.CreateTopicsResult#replicationFactor(String)	53
+org.apache.kafka.clients.admin.CreateTopicsResult#topicId(String)	53
+org.apache.kafka.clients.admin.CreateTopicsResult#values()	20
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig	
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#TopicMetadataAndConfig(ApiException)	
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#TopicMetadataAndConfig(Uuid,int,int,Config)	
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#config()	
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#numPartitions()	
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#replicationFactor()	
+org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#topicId()	
+org.apache.kafka.clients.admin.DeleteAclsOptions	5
+org.apache.kafka.clients.admin.DeleteAclsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.DeleteAclsResult	6
+org.apache.kafka.clients.admin.DeleteAclsResult#all()	36
+org.apache.kafka.clients.admin.DeleteAclsResult#values()	22
+org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult	15
+org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult#binding()	12
+org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult#exception()	15
+org.apache.kafka.clients.admin.DeleteAclsResult$FilterResults	10
+org.apache.kafka.clients.admin.DeleteAclsResult$FilterResults#values()	11
+org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsOptions	5
+org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult	6
+org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult#all()	20
+org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult#partitionResult(TopicPartition)	15
+org.apache.kafka.clients.admin.DeleteConsumerGroupsOptions	5
+org.apache.kafka.clients.admin.DeleteConsumerGroupsResult	9
+org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#all()	13
+org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#deletedGroups()	19
+org.apache.kafka.clients.admin.DeleteRecordsOptions	3
+org.apache.kafka.clients.admin.DeleteRecordsResult	6
+org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult(Map)	
+org.apache.kafka.clients.admin.DeleteRecordsResult#all()	12
+org.apache.kafka.clients.admin.DeleteRecordsResult#lowWatermarks()	19
+org.apache.kafka.clients.admin.DeleteShareGroupOffsetsOptions	3
+org.apache.kafka.clients.admin.DeleteShareGroupOffsetsResult	6
+org.apache.kafka.clients.admin.DeleteShareGroupOffsetsResult#all()	20
+org.apache.kafka.clients.admin.DeleteShareGroupOffsetsResult#topicResult(String)	15
+org.apache.kafka.clients.admin.DeleteShareGroupsOptions	3
+org.apache.kafka.clients.admin.DeleteShareGroupsResult	6
+org.apache.kafka.clients.admin.DeleteShareGroupsResult#all()	13
+org.apache.kafka.clients.admin.DeleteShareGroupsResult#deletedGroups()	19
+org.apache.kafka.clients.admin.DeleteStreamsGroupOffsetsOptions	16
+org.apache.kafka.clients.admin.DeleteStreamsGroupOffsetsResult	17
+org.apache.kafka.clients.admin.DeleteStreamsGroupOffsetsResult#all()	11
+org.apache.kafka.clients.admin.DeleteStreamsGroupOffsetsResult#partitionResult(TopicPartition)	15
+org.apache.kafka.clients.admin.DeleteStreamsGroupsOptions	16
+org.apache.kafka.clients.admin.DeleteStreamsGroupsResult	17
+org.apache.kafka.clients.admin.DeleteStreamsGroupsResult#all()	11
+org.apache.kafka.clients.admin.DeleteStreamsGroupsResult#deletedGroups()	19
+org.apache.kafka.clients.admin.DeleteTopicsOptions	3
+org.apache.kafka.clients.admin.DeleteTopicsOptions#retryOnQuotaViolation(boolean)	10
+org.apache.kafka.clients.admin.DeleteTopicsOptions#shouldRetryOnQuotaViolation()	9
+org.apache.kafka.clients.admin.DeleteTopicsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.DeleteTopicsResult	6
+org.apache.kafka.clients.admin.DeleteTopicsResult#all()	11
+org.apache.kafka.clients.admin.DeleteTopicsResult#topicIdValues()	34
+org.apache.kafka.clients.admin.DeleteTopicsResult#topicNameValues()	34
+org.apache.kafka.clients.admin.DeletedRecords	5
+org.apache.kafka.clients.admin.DeletedRecords#DeletedRecords(long)	23
+org.apache.kafka.clients.admin.DeletedRecords#lowWatermark()	14
+org.apache.kafka.clients.admin.DescribeAclsOptions	3
+org.apache.kafka.clients.admin.DescribeAclsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.DescribeAclsResult	6
+org.apache.kafka.clients.admin.DescribeAclsResult#values()	7
+org.apache.kafka.clients.admin.DescribeClassicGroupsOptions	3
+org.apache.kafka.clients.admin.DescribeClassicGroupsOptions#includeAuthorizedOperations()	
+org.apache.kafka.clients.admin.DescribeClassicGroupsOptions#includeAuthorizedOperations(boolean)	
+org.apache.kafka.clients.admin.DescribeClassicGroupsResult	6
+org.apache.kafka.clients.admin.DescribeClassicGroupsResult#DescribeClassicGroupsResult(Map)	
+org.apache.kafka.clients.admin.DescribeClassicGroupsResult#all()	13
+org.apache.kafka.clients.admin.DescribeClassicGroupsResult#describedGroups()	12
+org.apache.kafka.clients.admin.DescribeClientQuotasOptions	3
+org.apache.kafka.clients.admin.DescribeClientQuotasResult	6
+org.apache.kafka.clients.admin.DescribeClientQuotasResult#DescribeClientQuotasResult(KafkaFuture)	45
+org.apache.kafka.clients.admin.DescribeClientQuotasResult#entities()	20
+org.apache.kafka.clients.admin.DescribeClusterOptions	3
+org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations()	24
+org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations(boolean)	
+org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers()	24
+org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers(boolean)	
+org.apache.kafka.clients.admin.DescribeClusterOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.DescribeClusterResult	6
+org.apache.kafka.clients.admin.DescribeClusterResult#authorizedOperations()	23
+org.apache.kafka.clients.admin.DescribeClusterResult#clusterId()	9
+org.apache.kafka.clients.admin.DescribeClusterResult#controller()	29
+org.apache.kafka.clients.admin.DescribeClusterResult#nodes()	9
+org.apache.kafka.clients.admin.DescribeConfigsOptions	3
+org.apache.kafka.clients.admin.DescribeConfigsOptions#includeDocumentation()	11
+org.apache.kafka.clients.admin.DescribeConfigsOptions#includeDocumentation(boolean)	12
+org.apache.kafka.clients.admin.DescribeConfigsOptions#includeSynonyms()	11
+org.apache.kafka.clients.admin.DescribeConfigsOptions#includeSynonyms(boolean)	12
+org.apache.kafka.clients.admin.DescribeConfigsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.DescribeConfigsResult	6
+org.apache.kafka.clients.admin.DescribeConfigsResult#all()	12
+org.apache.kafka.clients.admin.DescribeConfigsResult#values()	21
+org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions	3
+org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions#includeAuthorizedOperations()	
+org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions#includeAuthorizedOperations(boolean)	
+org.apache.kafka.clients.admin.DescribeConsumerGroupsResult	6
+org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#DescribeConsumerGroupsResult(Map)	
+org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#all()	13
+org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#describedGroups()	12
+org.apache.kafka.clients.admin.DescribeDelegationTokenOptions	3
+org.apache.kafka.clients.admin.DescribeDelegationTokenOptions#owners()	
+org.apache.kafka.clients.admin.DescribeDelegationTokenOptions#owners(List)	32
+org.apache.kafka.clients.admin.DescribeDelegationTokenResult	6
+org.apache.kafka.clients.admin.DescribeDelegationTokenResult#delegationTokens()	9
+org.apache.kafka.clients.admin.DescribeFeaturesOptions	3
+org.apache.kafka.clients.admin.DescribeFeaturesOptions#nodeId()	26
+org.apache.kafka.clients.admin.DescribeFeaturesOptions#nodeId(int)	11
+org.apache.kafka.clients.admin.DescribeFeaturesResult	17
+org.apache.kafka.clients.admin.DescribeFeaturesResult#featureMetadata()	
+org.apache.kafka.clients.admin.DescribeLogDirsOptions	3
+org.apache.kafka.clients.admin.DescribeLogDirsResult	6
+org.apache.kafka.clients.admin.DescribeLogDirsResult#allDescriptions()	39
+org.apache.kafka.clients.admin.DescribeLogDirsResult#descriptions()	41
+org.apache.kafka.clients.admin.DescribeMetadataQuorumOptions	3
+org.apache.kafka.clients.admin.DescribeMetadataQuorumResult	4
+org.apache.kafka.clients.admin.DescribeMetadataQuorumResult#quorumInfo()	6
+org.apache.kafka.clients.admin.DescribeProducersOptions	3
+org.apache.kafka.clients.admin.DescribeProducersOptions#brokerId()	
+org.apache.kafka.clients.admin.DescribeProducersOptions#brokerId(int)	
+org.apache.kafka.clients.admin.DescribeProducersOptions#equals(Object)	
+org.apache.kafka.clients.admin.DescribeProducersOptions#hashCode()	
+org.apache.kafka.clients.admin.DescribeProducersOptions#toString()	
+org.apache.kafka.clients.admin.DescribeProducersResult	
+org.apache.kafka.clients.admin.DescribeProducersResult#all()	
+org.apache.kafka.clients.admin.DescribeProducersResult#partitionResult(TopicPartition)	
+org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState	
+org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#PartitionProducerState(List)	
+org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#activeProducers()	
+org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#toString()	
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions	3
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult	4
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult#all()	14
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult#values()	20
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo	
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaLogDir()	28
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaOffsetLag()	11
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getFutureReplicaLogDir()	33
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getFutureReplicaOffsetLag()	46
+org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#toString()	
+org.apache.kafka.clients.admin.DescribeShareGroupsOptions	3
+org.apache.kafka.clients.admin.DescribeShareGroupsOptions#includeAuthorizedOperations()	
+org.apache.kafka.clients.admin.DescribeShareGroupsOptions#includeAuthorizedOperations(boolean)	
+org.apache.kafka.clients.admin.DescribeShareGroupsResult	6
+org.apache.kafka.clients.admin.DescribeShareGroupsResult#DescribeShareGroupsResult(Map)	
+org.apache.kafka.clients.admin.DescribeShareGroupsResult#all()	13
+org.apache.kafka.clients.admin.DescribeShareGroupsResult#describedGroups()	13
+org.apache.kafka.clients.admin.DescribeStreamsGroupsOptions	14
+org.apache.kafka.clients.admin.DescribeStreamsGroupsOptions#includeAuthorizedOperations()	
+org.apache.kafka.clients.admin.DescribeStreamsGroupsOptions#includeAuthorizedOperations(boolean)	
+org.apache.kafka.clients.admin.DescribeStreamsGroupsOptions#includeTopologyDescription()	
+org.apache.kafka.clients.admin.DescribeStreamsGroupsOptions#includeTopologyDescription(boolean)	34
+org.apache.kafka.clients.admin.DescribeStreamsGroupsResult	17
+org.apache.kafka.clients.admin.DescribeStreamsGroupsResult#DescribeStreamsGroupsResult(Map)	
+org.apache.kafka.clients.admin.DescribeStreamsGroupsResult#all()	13
+org.apache.kafka.clients.admin.DescribeStreamsGroupsResult#describedGroups()	13
+org.apache.kafka.clients.admin.DescribeTopicsOptions	3
+org.apache.kafka.clients.admin.DescribeTopicsOptions#includeAuthorizedOperations()	
+org.apache.kafka.clients.admin.DescribeTopicsOptions#includeAuthorizedOperations(boolean)	
+org.apache.kafka.clients.admin.DescribeTopicsOptions#partitionSizeLimitPerResponse()	
+org.apache.kafka.clients.admin.DescribeTopicsOptions#partitionSizeLimitPerResponse(int)	47
+org.apache.kafka.clients.admin.DescribeTopicsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.DescribeTopicsResult	6
+org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicIds()	40
+org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicNames()	40
+org.apache.kafka.clients.admin.DescribeTopicsResult#topicIdValues()	33
+org.apache.kafka.clients.admin.DescribeTopicsResult#topicNameValues()	33
+org.apache.kafka.clients.admin.DescribeTransactionsOptions	3
+org.apache.kafka.clients.admin.DescribeTransactionsOptions#toString()	
+org.apache.kafka.clients.admin.DescribeTransactionsResult	
+org.apache.kafka.clients.admin.DescribeTransactionsResult#all()	57
+org.apache.kafka.clients.admin.DescribeTransactionsResult#description(String)	42
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsOptions	3
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult	6
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#all()	39
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#description(String)	56
+org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#users()	120
+org.apache.kafka.clients.admin.ElectLeadersOptions	14
+org.apache.kafka.clients.admin.ElectLeadersResult	15
+org.apache.kafka.clients.admin.ElectLeadersResult#all()	11
+org.apache.kafka.clients.admin.ElectLeadersResult#partitions()	43
+org.apache.kafka.clients.admin.ExpireDelegationTokenOptions	3
+org.apache.kafka.clients.admin.ExpireDelegationTokenOptions#expiryTimePeriodMs()	
+org.apache.kafka.clients.admin.ExpireDelegationTokenOptions#expiryTimePeriodMs(long)	31
+org.apache.kafka.clients.admin.ExpireDelegationTokenResult	6
+org.apache.kafka.clients.admin.ExpireDelegationTokenResult#expiryTimestamp()	7
+org.apache.kafka.clients.admin.FeatureMetadata	22
+org.apache.kafka.clients.admin.FeatureMetadata#equals(Object)	
+org.apache.kafka.clients.admin.FeatureMetadata#finalizedFeatures()	35
+org.apache.kafka.clients.admin.FeatureMetadata#finalizedFeaturesEpoch()	20
+org.apache.kafka.clients.admin.FeatureMetadata#hashCode()	
+org.apache.kafka.clients.admin.FeatureMetadata#supportedFeatures()	35
+org.apache.kafka.clients.admin.FeatureMetadata#toString()	
+org.apache.kafka.clients.admin.FeatureUpdate	9
+org.apache.kafka.clients.admin.FeatureUpdate#FeatureUpdate(short,UpgradeType)	82
+org.apache.kafka.clients.admin.FeatureUpdate#equals(Object)	
+org.apache.kafka.clients.admin.FeatureUpdate#hashCode()	
+org.apache.kafka.clients.admin.FeatureUpdate#maxVersionLevel()	
+org.apache.kafka.clients.admin.FeatureUpdate#toString()	
+org.apache.kafka.clients.admin.FeatureUpdate#upgradeType()	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#SAFE_DOWNGRADE	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#UNKNOWN	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#UNSAFE_DOWNGRADE	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#UPGRADE	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#code()	
+org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#fromCode(int)	
+org.apache.kafka.clients.admin.FenceProducersOptions	3
+org.apache.kafka.clients.admin.FenceProducersOptions#toString()	
+org.apache.kafka.clients.admin.FenceProducersResult	6
+org.apache.kafka.clients.admin.FenceProducersResult#all()	12
+org.apache.kafka.clients.admin.FenceProducersResult#epochId(String)	18
+org.apache.kafka.clients.admin.FenceProducersResult#fencedProducers()	19
+org.apache.kafka.clients.admin.FenceProducersResult#producerId(String)	18
+org.apache.kafka.clients.admin.FinalizedVersionRange	16
+org.apache.kafka.clients.admin.FinalizedVersionRange#FinalizedVersionRange(short,short)	36
+org.apache.kafka.clients.admin.FinalizedVersionRange#equals(Object)	
+org.apache.kafka.clients.admin.FinalizedVersionRange#hashCode()	
+org.apache.kafka.clients.admin.FinalizedVersionRange#maxVersionLevel()	
+org.apache.kafka.clients.admin.FinalizedVersionRange#minVersionLevel()	
+org.apache.kafka.clients.admin.FinalizedVersionRange#toString()	
+org.apache.kafka.clients.admin.GroupListing	8
+org.apache.kafka.clients.admin.GroupListing#GroupListing(String,Optional,String,Optional)	18
+org.apache.kafka.clients.admin.GroupListing#equals(Object)	
+org.apache.kafka.clients.admin.GroupListing#groupId()	5
+org.apache.kafka.clients.admin.GroupListing#groupState()	38
+org.apache.kafka.clients.admin.GroupListing#hashCode()	
+org.apache.kafka.clients.admin.GroupListing#isSimpleConsumerGroup()	10
+org.apache.kafka.clients.admin.GroupListing#protocol()	7
+org.apache.kafka.clients.admin.GroupListing#toString()	
+org.apache.kafka.clients.admin.GroupListing#type()	63
+org.apache.kafka.clients.admin.KafkaAdminClient	34
+org.apache.kafka.clients.admin.KafkaAdminClient#abortTransaction(AbortTransactionSpec,AbortTransactionOptions)	52
+org.apache.kafka.clients.admin.KafkaAdminClient#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)	88
+org.apache.kafka.clients.admin.KafkaAdminClient#alterClientQuotas(Collection,AlterClientQuotasOptions)	133
+org.apache.kafka.clients.admin.KafkaAdminClient#alterConsumerGroupOffsets(String,Map,AlterConsumerGroupOffsetsOptions)	68
+org.apache.kafka.clients.admin.KafkaAdminClient#alterPartitionReassignments(Map,AlterPartitionReassignmentsOptions)	176
+org.apache.kafka.clients.admin.KafkaAdminClient#alterReplicaLogDirs(Map,AlterReplicaLogDirsOptions)	125
+org.apache.kafka.clients.admin.KafkaAdminClient#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)	65
+org.apache.kafka.clients.admin.KafkaAdminClient#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)	83
+org.apache.kafka.clients.admin.KafkaAdminClient#alterUserScramCredentials(List,AlterUserScramCredentialsOptions)	124
+org.apache.kafka.clients.admin.KafkaAdminClient#clientInstanceId(Duration)	197
+org.apache.kafka.clients.admin.KafkaAdminClient#close(Duration)	69
+org.apache.kafka.clients.admin.KafkaAdminClient#createAcls(Collection,CreateAclsOptions)	80
+org.apache.kafka.clients.admin.KafkaAdminClient#createDelegationToken(CreateDelegationTokenOptions)	94
+org.apache.kafka.clients.admin.KafkaAdminClient#createPartitions(Map,CreatePartitionsOptions)	247
+org.apache.kafka.clients.admin.KafkaAdminClient#createTopics(Collection,CreateTopicsOptions)	101
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteAcls(Collection,DeleteAclsOptions)	56
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteConsumerGroupOffsets(String,Set,DeleteConsumerGroupOffsetsOptions)	45
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteConsumerGroups(Collection,DeleteConsumerGroupsOptions)	18
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteRecords(Map,DeleteRecordsOptions)	50
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)	41
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteShareGroups(Collection,DeleteShareGroupsOptions)	29
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)	60
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)	33
+org.apache.kafka.clients.admin.KafkaAdminClient#deleteTopics(TopicCollection,DeleteTopicsOptions)	135
+org.apache.kafka.clients.admin.KafkaAdminClient#describeAcls(AclBindingFilter,DescribeAclsOptions)	61
+org.apache.kafka.clients.admin.KafkaAdminClient#describeClassicGroups(Collection,DescribeClassicGroupsOptions)	26
+org.apache.kafka.clients.admin.KafkaAdminClient#describeClientQuotas(ClientQuotaFilter,DescribeClientQuotasOptions)	103
+org.apache.kafka.clients.admin.KafkaAdminClient#describeCluster(DescribeClusterOptions)	39
+org.apache.kafka.clients.admin.KafkaAdminClient#describeConfigs(Collection,DescribeConfigsOptions)	148
+org.apache.kafka.clients.admin.KafkaAdminClient#describeConsumerGroups(Collection,DescribeConsumerGroupsOptions)	26
+org.apache.kafka.clients.admin.KafkaAdminClient#describeDelegationToken(DescribeDelegationTokenOptions)	85
+org.apache.kafka.clients.admin.KafkaAdminClient#describeFeatures(DescribeFeaturesOptions)	53
+org.apache.kafka.clients.admin.KafkaAdminClient#describeLogDirs(Collection,DescribeLogDirsOptions)	43
+org.apache.kafka.clients.admin.KafkaAdminClient#describeMetadataQuorum(DescribeMetadataQuorumOptions)	65
+org.apache.kafka.clients.admin.KafkaAdminClient#describeProducers(Collection,DescribeProducersOptions)	45
+org.apache.kafka.clients.admin.KafkaAdminClient#describeReplicaLogDirs(Collection,DescribeReplicaLogDirsOptions)	41
+org.apache.kafka.clients.admin.KafkaAdminClient#describeShareGroups(Collection,DescribeShareGroupsOptions)	26
+org.apache.kafka.clients.admin.KafkaAdminClient#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)	25
+org.apache.kafka.clients.admin.KafkaAdminClient#describeTopics(TopicCollection,DescribeTopicsOptions)	39
+org.apache.kafka.clients.admin.KafkaAdminClient#describeTransactions(Collection,DescribeTransactionsOptions)	35
+org.apache.kafka.clients.admin.KafkaAdminClient#describeUserScramCredentials(List,DescribeUserScramCredentialsOptions)	115
+org.apache.kafka.clients.admin.KafkaAdminClient#electLeaders(ElectionType,Set,ElectLeadersOptions)	223
+org.apache.kafka.clients.admin.KafkaAdminClient#expireDelegationToken(byte[],ExpireDelegationTokenOptions)	121
+org.apache.kafka.clients.admin.KafkaAdminClient#fenceProducers(Collection,FenceProducersOptions)	32
+org.apache.kafka.clients.admin.KafkaAdminClient#forceTerminateTransaction(String,TerminateTransactionOptions)	76
+org.apache.kafka.clients.admin.KafkaAdminClient#incrementalAlterConfigs(Map,AlterConfigsOptions)	131
+org.apache.kafka.clients.admin.KafkaAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)	23
+org.apache.kafka.clients.admin.KafkaAdminClient#listConfigResources(Set,ListConfigResourcesOptions)	47
+org.apache.kafka.clients.admin.KafkaAdminClient#listConsumerGroupOffsets(Map,ListConsumerGroupOffsetsOptions)	48
+org.apache.kafka.clients.admin.KafkaAdminClient#listConsumerGroups(ListConsumerGroupsOptions)	20
+org.apache.kafka.clients.admin.KafkaAdminClient#listGroups(ListGroupsOptions)	18
+org.apache.kafka.clients.admin.KafkaAdminClient#listOffsets(Map,ListOffsetsOptions)	48
+org.apache.kafka.clients.admin.KafkaAdminClient#listPartitionReassignments(Optional,ListPartitionReassignmentsOptions)	33
+org.apache.kafka.clients.admin.KafkaAdminClient#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)	48
+org.apache.kafka.clients.admin.KafkaAdminClient#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)	63
+org.apache.kafka.clients.admin.KafkaAdminClient#listTopics(ListTopicsOptions)	18
+org.apache.kafka.clients.admin.KafkaAdminClient#listTransactions(ListTransactionsOptions)	52
+org.apache.kafka.clients.admin.KafkaAdminClient#metrics()	46
+org.apache.kafka.clients.admin.KafkaAdminClient#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.admin.KafkaAdminClient#removeMembersFromConsumerGroup(String,RemoveMembersFromConsumerGroupOptions)	37
+org.apache.kafka.clients.admin.KafkaAdminClient#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)	112
+org.apache.kafka.clients.admin.KafkaAdminClient#renewDelegationToken(byte[],RenewDelegationTokenOptions)	120
+org.apache.kafka.clients.admin.KafkaAdminClient#unregisterBroker(int,UnregisterBrokerOptions)	69
+org.apache.kafka.clients.admin.KafkaAdminClient#unregisterController(int,UnregisterControllerOptions)	92
+org.apache.kafka.clients.admin.KafkaAdminClient#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.admin.KafkaAdminClient#updateFeatures(Map,UpdateFeaturesOptions)	370
+org.apache.kafka.clients.admin.ListConfigResourcesOptions	3
+org.apache.kafka.clients.admin.ListConfigResourcesResult	6
+org.apache.kafka.clients.admin.ListConfigResourcesResult#all()	31
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions	5
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#requireStable()	
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#requireStable(boolean)	5
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult	8
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#all()	15
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata()	35
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata(String)	40
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec	9
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#equals(Object)	
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#hashCode()	
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#toString()	
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#topicPartitions()	28
+org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#topicPartitions(Collection)	28
+org.apache.kafka.clients.admin.ListGroupsOptions	3
+org.apache.kafka.clients.admin.ListGroupsOptions#forConsumerGroups()	22
+org.apache.kafka.clients.admin.ListGroupsOptions#forShareGroups()	20
+org.apache.kafka.clients.admin.ListGroupsOptions#forStreamsGroups()	20
+org.apache.kafka.clients.admin.ListGroupsOptions#groupStates()	17
+org.apache.kafka.clients.admin.ListGroupsOptions#inGroupStates(Set)	32
+org.apache.kafka.clients.admin.ListGroupsOptions#protocolTypes()	18
+org.apache.kafka.clients.admin.ListGroupsOptions#types()	17
+org.apache.kafka.clients.admin.ListGroupsOptions#withProtocolTypes(Set)	21
+org.apache.kafka.clients.admin.ListGroupsOptions#withTypes(Set)	19
+org.apache.kafka.clients.admin.ListGroupsResult	6
+org.apache.kafka.clients.admin.ListGroupsResult#all()	31
+org.apache.kafka.clients.admin.ListGroupsResult#errors()	56
+org.apache.kafka.clients.admin.ListGroupsResult#valid()	75
+org.apache.kafka.clients.admin.ListOffsetsOptions	3
+org.apache.kafka.clients.admin.ListOffsetsOptions#ListOffsetsOptions()	
+org.apache.kafka.clients.admin.ListOffsetsOptions#ListOffsetsOptions(IsolationLevel)	
+org.apache.kafka.clients.admin.ListOffsetsOptions#isolationLevel()	
+org.apache.kafka.clients.admin.ListOffsetsResult	6
+org.apache.kafka.clients.admin.ListOffsetsResult#ListOffsetsResult(Map)	
+org.apache.kafka.clients.admin.ListOffsetsResult#all()	16
+org.apache.kafka.clients.admin.ListOffsetsResult#partitionResult(TopicPartition)	15
+org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo	
+org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#ListOffsetsResultInfo(long,long,Optional)	
+org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#leaderEpoch()	
+org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#offset()	
+org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#timestamp()	
+org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#toString()	
+org.apache.kafka.clients.admin.ListPartitionReassignmentsOptions	3
+org.apache.kafka.clients.admin.ListPartitionReassignmentsResult	15
+org.apache.kafka.clients.admin.ListPartitionReassignmentsResult#reassignments()	12
+org.apache.kafka.clients.admin.ListShareGroupOffsetsOptions	3
+org.apache.kafka.clients.admin.ListShareGroupOffsetsResult	6
+org.apache.kafka.clients.admin.ListShareGroupOffsetsResult#all()	23
+org.apache.kafka.clients.admin.ListShareGroupOffsetsResult#partitionsToOffsetInfo(String)	38
+org.apache.kafka.clients.admin.ListShareGroupOffsetsSpec	9
+org.apache.kafka.clients.admin.ListShareGroupOffsetsSpec#equals(Object)	
+org.apache.kafka.clients.admin.ListShareGroupOffsetsSpec#hashCode()	
+org.apache.kafka.clients.admin.ListShareGroupOffsetsSpec#toString()	
+org.apache.kafka.clients.admin.ListShareGroupOffsetsSpec#topicPartitions()	28
+org.apache.kafka.clients.admin.ListShareGroupOffsetsSpec#topicPartitions(Collection)	28
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsOptions	14
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsOptions#requireStable()	
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsOptions#requireStable(boolean)	5
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsResult	17
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsResult#all()	15
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsResult#partitionsToOffsetAndMetadata(String)	39
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsSpec	20
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsSpec#topicPartitions()	14
+org.apache.kafka.clients.admin.ListStreamsGroupOffsetsSpec#topicPartitions(Collection)	14
+org.apache.kafka.clients.admin.ListTopicsOptions	3
+org.apache.kafka.clients.admin.ListTopicsOptions#equals(Object)	
+org.apache.kafka.clients.admin.ListTopicsOptions#hashCode()	
+org.apache.kafka.clients.admin.ListTopicsOptions#listInternal(boolean)	23
+org.apache.kafka.clients.admin.ListTopicsOptions#shouldListInternal()	8
+org.apache.kafka.clients.admin.ListTopicsOptions#timeoutMs(Integer)	21
+org.apache.kafka.clients.admin.ListTopicsOptions#toString()	
+org.apache.kafka.clients.admin.ListTopicsResult	6
+org.apache.kafka.clients.admin.ListTopicsResult#listings()	10
+org.apache.kafka.clients.admin.ListTopicsResult#names()	10
+org.apache.kafka.clients.admin.ListTopicsResult#namesToListings()	13
+org.apache.kafka.clients.admin.ListTransactionsOptions	3
+org.apache.kafka.clients.admin.ListTransactionsOptions#equals(Object)	
+org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnDuration(long)	44
+org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnTransactionalIdPattern(String)	43
+org.apache.kafka.clients.admin.ListTransactionsOptions#filterProducerIds(Collection)	45
+org.apache.kafka.clients.admin.ListTransactionsOptions#filterStates(Collection)	44
+org.apache.kafka.clients.admin.ListTransactionsOptions#filteredDuration()	23
+org.apache.kafka.clients.admin.ListTransactionsOptions#filteredProducerIds()	35
+org.apache.kafka.clients.admin.ListTransactionsOptions#filteredStates()	35
+org.apache.kafka.clients.admin.ListTransactionsOptions#filteredTransactionalIdPattern()	24
+org.apache.kafka.clients.admin.ListTransactionsOptions#hashCode()	
+org.apache.kafka.clients.admin.ListTransactionsOptions#toString()	
+org.apache.kafka.clients.admin.ListTransactionsResult	6
+org.apache.kafka.clients.admin.ListTransactionsResult#all()	50
+org.apache.kafka.clients.admin.ListTransactionsResult#allByBrokerId()	76
+org.apache.kafka.clients.admin.ListTransactionsResult#byBrokerId()	82
+org.apache.kafka.clients.admin.LogDirDescription	10
+org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription(ApiException,Map)	
+org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription(ApiException,Map,long,long)	
+org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription(ApiException,Map,long,long,boolean)	
+org.apache.kafka.clients.admin.LogDirDescription#error()	32
+org.apache.kafka.clients.admin.LogDirDescription#isCordoned()	8
+org.apache.kafka.clients.admin.LogDirDescription#replicaInfos()	15
+org.apache.kafka.clients.admin.LogDirDescription#toString()	
+org.apache.kafka.clients.admin.LogDirDescription#totalBytes()	44
+org.apache.kafka.clients.admin.LogDirDescription#usableBytes()	45
+org.apache.kafka.clients.admin.MemberAssignment	10
+org.apache.kafka.clients.admin.MemberAssignment#MemberAssignment(Set)	12
+org.apache.kafka.clients.admin.MemberAssignment#equals(Object)	
+org.apache.kafka.clients.admin.MemberAssignment#hashCode()	
+org.apache.kafka.clients.admin.MemberAssignment#toString()	
+org.apache.kafka.clients.admin.MemberAssignment#topicPartitions()	8
+org.apache.kafka.clients.admin.MemberDescription	11
+org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,Optional,String,String,MemberAssignment,Optional,Optional,Optional)	
+org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,String,String,MemberAssignment)	0
+org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,String,String,MemberAssignment,Optional)	0
+org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,String,String,MemberAssignment,Optional,Optional,Optional)	0
+org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,String,String,MemberAssignment)	0
+org.apache.kafka.clients.admin.MemberDescription#assignment()	14
+org.apache.kafka.clients.admin.MemberDescription#clientId()	7
+org.apache.kafka.clients.admin.MemberDescription#consumerId()	7
+org.apache.kafka.clients.admin.MemberDescription#equals(Object)	
+org.apache.kafka.clients.admin.MemberDescription#groupInstanceId()	7
+org.apache.kafka.clients.admin.MemberDescription#hashCode()	
+org.apache.kafka.clients.admin.MemberDescription#host()	8
+org.apache.kafka.clients.admin.MemberDescription#memberEpoch()	31
+org.apache.kafka.clients.admin.MemberDescription#rackId()	21
+org.apache.kafka.clients.admin.MemberDescription#targetAssignment()	11
+org.apache.kafka.clients.admin.MemberDescription#toString()	
+org.apache.kafka.clients.admin.MemberDescription#upgraded()	44
+org.apache.kafka.clients.admin.MemberToRemove	10
+org.apache.kafka.clients.admin.MemberToRemove#MemberToRemove(String)	
+org.apache.kafka.clients.admin.MemberToRemove#equals(Object)	
+org.apache.kafka.clients.admin.MemberToRemove#groupInstanceId()	
+org.apache.kafka.clients.admin.MemberToRemove#hashCode()	
+org.apache.kafka.clients.admin.NewPartitionReassignment	10
+org.apache.kafka.clients.admin.NewPartitionReassignment#NewPartitionReassignment(List)	6
+org.apache.kafka.clients.admin.NewPartitionReassignment#targetReplicas()	
+org.apache.kafka.clients.admin.NewPartitions	12
+org.apache.kafka.clients.admin.NewPartitions#assignments()	18
+org.apache.kafka.clients.admin.NewPartitions#increaseTo(int)	34
+org.apache.kafka.clients.admin.NewPartitions#increaseTo(int,List)	161
+org.apache.kafka.clients.admin.NewPartitions#toString()	
+org.apache.kafka.clients.admin.NewPartitions#totalCount()	9
+org.apache.kafka.clients.admin.NewTopic	8
+org.apache.kafka.clients.admin.NewTopic#NewTopic(String,Map)	55
+org.apache.kafka.clients.admin.NewTopic#NewTopic(String,Optional,Optional)	18
+org.apache.kafka.clients.admin.NewTopic#NewTopic(String,int,short)	12
+org.apache.kafka.clients.admin.NewTopic#configs()	13
+org.apache.kafka.clients.admin.NewTopic#configs(Map)	16
+org.apache.kafka.clients.admin.NewTopic#equals(Object)	
+org.apache.kafka.clients.admin.NewTopic#hashCode()	
+org.apache.kafka.clients.admin.NewTopic#name()	8
+org.apache.kafka.clients.admin.NewTopic#numPartitions()	17
+org.apache.kafka.clients.admin.NewTopic#replicasAssignments()	26
+org.apache.kafka.clients.admin.NewTopic#replicationFactor()	16
+org.apache.kafka.clients.admin.NewTopic#toString()	
+org.apache.kafka.clients.admin.OffsetSpec	11
+org.apache.kafka.clients.admin.OffsetSpec#earliest()	9
+org.apache.kafka.clients.admin.OffsetSpec#earliestLocal()	50
+org.apache.kafka.clients.admin.OffsetSpec#earliestPendingUpload()	27
+org.apache.kafka.clients.admin.OffsetSpec#forTimestamp(long)	24
+org.apache.kafka.clients.admin.OffsetSpec#latest()	9
+org.apache.kafka.clients.admin.OffsetSpec#latestTiered()	24
+org.apache.kafka.clients.admin.OffsetSpec#maxTimestamp()	31
+org.apache.kafka.clients.admin.OffsetSpec$EarliestLocalSpec	
+org.apache.kafka.clients.admin.OffsetSpec$EarliestPendingUploadSpec	
+org.apache.kafka.clients.admin.OffsetSpec$EarliestSpec	
+org.apache.kafka.clients.admin.OffsetSpec$LatestSpec	
+org.apache.kafka.clients.admin.OffsetSpec$LatestTieredSpec	
+org.apache.kafka.clients.admin.OffsetSpec$MaxTimestampSpec	
+org.apache.kafka.clients.admin.OffsetSpec$TimestampSpec	
+org.apache.kafka.clients.admin.PartitionReassignment	9
+org.apache.kafka.clients.admin.PartitionReassignment#PartitionReassignment(List,List,List)	
+org.apache.kafka.clients.admin.PartitionReassignment#addingReplicas()	18
+org.apache.kafka.clients.admin.PartitionReassignment#removingReplicas()	18
+org.apache.kafka.clients.admin.PartitionReassignment#replicas()	8
+org.apache.kafka.clients.admin.PartitionReassignment#toString()	
+org.apache.kafka.clients.admin.ProducerState	
+org.apache.kafka.clients.admin.ProducerState#ProducerState(long,int,int,long,OptionalInt,OptionalLong)	
+org.apache.kafka.clients.admin.ProducerState#coordinatorEpoch()	
+org.apache.kafka.clients.admin.ProducerState#currentTransactionStartOffset()	
+org.apache.kafka.clients.admin.ProducerState#equals(Object)	
+org.apache.kafka.clients.admin.ProducerState#hashCode()	
+org.apache.kafka.clients.admin.ProducerState#lastSequence()	
+org.apache.kafka.clients.admin.ProducerState#lastTimestamp()	
+org.apache.kafka.clients.admin.ProducerState#producerEpoch()	
+org.apache.kafka.clients.admin.ProducerState#producerId()	
+org.apache.kafka.clients.admin.ProducerState#toString()	
+org.apache.kafka.clients.admin.QuorumInfo	14
+org.apache.kafka.clients.admin.QuorumInfo#equals(Object)	
+org.apache.kafka.clients.admin.QuorumInfo#hashCode()	
+org.apache.kafka.clients.admin.QuorumInfo#highWatermark()	
+org.apache.kafka.clients.admin.QuorumInfo#leaderEpoch()	
+org.apache.kafka.clients.admin.QuorumInfo#leaderId()	
+org.apache.kafka.clients.admin.QuorumInfo#nodes()	17
+org.apache.kafka.clients.admin.QuorumInfo#observers()	
+org.apache.kafka.clients.admin.QuorumInfo#toString()	
+org.apache.kafka.clients.admin.QuorumInfo#voters()	
+org.apache.kafka.clients.admin.QuorumInfo$Node	
+org.apache.kafka.clients.admin.QuorumInfo$Node#endpoints()	
+org.apache.kafka.clients.admin.QuorumInfo$Node#equals(Object)	
+org.apache.kafka.clients.admin.QuorumInfo$Node#hashCode()	
+org.apache.kafka.clients.admin.QuorumInfo$Node#nodeId()	
+org.apache.kafka.clients.admin.QuorumInfo$Node#toString()	
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState	
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#equals(Object)	
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#hashCode()	
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#lastCaughtUpTimestamp()	27
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#lastFetchTimestamp()	23
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#logEndOffset()	15
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#replicaDirectoryId()	14
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#replicaId()	11
+org.apache.kafka.clients.admin.QuorumInfo$ReplicaState#toString()	
+org.apache.kafka.clients.admin.RaftVoterEndpoint	7
+org.apache.kafka.clients.admin.RaftVoterEndpoint#RaftVoterEndpoint(String,String,int)	33
+org.apache.kafka.clients.admin.RaftVoterEndpoint#equals(Object)	
+org.apache.kafka.clients.admin.RaftVoterEndpoint#hashCode()	
+org.apache.kafka.clients.admin.RaftVoterEndpoint#host()	
+org.apache.kafka.clients.admin.RaftVoterEndpoint#listener()	6
+org.apache.kafka.clients.admin.RaftVoterEndpoint#name()	0
+org.apache.kafka.clients.admin.RaftVoterEndpoint#port()	
+org.apache.kafka.clients.admin.RaftVoterEndpoint#toString()	
+org.apache.kafka.clients.admin.RecordsToDelete	9
+org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset()	17
+org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset(long)	26
+org.apache.kafka.clients.admin.RecordsToDelete#equals(Object)	
+org.apache.kafka.clients.admin.RecordsToDelete#hashCode()	
+org.apache.kafka.clients.admin.RecordsToDelete#toString()	
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions	14
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions()	
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions(Collection)	
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#members()	
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason()	
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason(String)	4
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#removeAll()	
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult	17
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#all()	30
+org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#memberResult(MemberToRemove)	5
+org.apache.kafka.clients.admin.RemoveRaftVoterOptions	47
+org.apache.kafka.clients.admin.RemoveRaftVoterOptions#clusterId()	
+org.apache.kafka.clients.admin.RemoveRaftVoterOptions#setClusterId(Optional)	
+org.apache.kafka.clients.admin.RemoveRaftVoterResult	15
+org.apache.kafka.clients.admin.RemoveRaftVoterResult#all()	11
+org.apache.kafka.clients.admin.RenewDelegationTokenOptions	3
+org.apache.kafka.clients.admin.RenewDelegationTokenOptions#renewTimePeriodMs()	
+org.apache.kafka.clients.admin.RenewDelegationTokenOptions#renewTimePeriodMs(long)	
+org.apache.kafka.clients.admin.RenewDelegationTokenResult	6
+org.apache.kafka.clients.admin.RenewDelegationTokenResult#expiryTimestamp()	7
+org.apache.kafka.clients.admin.ReplicaInfo	9
+org.apache.kafka.clients.admin.ReplicaInfo#ReplicaInfo(long,long,boolean)	
+org.apache.kafka.clients.admin.ReplicaInfo#isFuture()	42
+org.apache.kafka.clients.admin.ReplicaInfo#offsetLag()	39
+org.apache.kafka.clients.admin.ReplicaInfo#size()	25
+org.apache.kafka.clients.admin.ReplicaInfo#toString()	
+org.apache.kafka.clients.admin.ScramCredentialInfo	20
+org.apache.kafka.clients.admin.ScramCredentialInfo#ScramCredentialInfo(ScramMechanism,int)	14
+org.apache.kafka.clients.admin.ScramCredentialInfo#equals(Object)	
+org.apache.kafka.clients.admin.ScramCredentialInfo#hashCode()	
+org.apache.kafka.clients.admin.ScramCredentialInfo#iterations()	9
+org.apache.kafka.clients.admin.ScramCredentialInfo#mechanism()	2
+org.apache.kafka.clients.admin.ScramCredentialInfo#toString()	
+org.apache.kafka.clients.admin.ScramMechanism	59
+org.apache.kafka.clients.admin.ScramMechanism#SCRAM_SHA_256	
+org.apache.kafka.clients.admin.ScramMechanism#SCRAM_SHA_512	
+org.apache.kafka.clients.admin.ScramMechanism#UNKNOWN	
+org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)	27
+org.apache.kafka.clients.admin.ScramMechanism#fromType(byte)	14
+org.apache.kafka.clients.admin.ScramMechanism#mechanismName()	19
+org.apache.kafka.clients.admin.ScramMechanism#type()	8
+org.apache.kafka.clients.admin.ShareGroupDescription	11
+org.apache.kafka.clients.admin.ShareGroupDescription#ShareGroupDescription(String,Collection,GroupState,Node,int,int)	
+org.apache.kafka.clients.admin.ShareGroupDescription#ShareGroupDescription(String,Collection,GroupState,Node,int,int,Set)	
+org.apache.kafka.clients.admin.ShareGroupDescription#authorizedOperations()	12
+org.apache.kafka.clients.admin.ShareGroupDescription#coordinator()	12
+org.apache.kafka.clients.admin.ShareGroupDescription#equals(Object)	
+org.apache.kafka.clients.admin.ShareGroupDescription#groupEpoch()	6
+org.apache.kafka.clients.admin.ShareGroupDescription#groupId()	6
+org.apache.kafka.clients.admin.ShareGroupDescription#groupState()	15
+org.apache.kafka.clients.admin.ShareGroupDescription#hashCode()	
+org.apache.kafka.clients.admin.ShareGroupDescription#members()	9
+org.apache.kafka.clients.admin.ShareGroupDescription#targetAssignmentEpoch()	6
+org.apache.kafka.clients.admin.ShareGroupDescription#toString()	
+org.apache.kafka.clients.admin.ShareMemberAssignment	11
+org.apache.kafka.clients.admin.ShareMemberAssignment#ShareMemberAssignment(Set)	12
+org.apache.kafka.clients.admin.ShareMemberAssignment#equals(Object)	
+org.apache.kafka.clients.admin.ShareMemberAssignment#hashCode()	
+org.apache.kafka.clients.admin.ShareMemberAssignment#toString()	
+org.apache.kafka.clients.admin.ShareMemberAssignment#topicPartitions()	8
+org.apache.kafka.clients.admin.ShareMemberDescription	12
+org.apache.kafka.clients.admin.ShareMemberDescription#ShareMemberDescription(String,Optional,String,String,ShareMemberAssignment,int)	
+org.apache.kafka.clients.admin.ShareMemberDescription#assignment()	6
+org.apache.kafka.clients.admin.ShareMemberDescription#clientId()	7
+org.apache.kafka.clients.admin.ShareMemberDescription#consumerId()	7
+org.apache.kafka.clients.admin.ShareMemberDescription#equals(Object)	
+org.apache.kafka.clients.admin.ShareMemberDescription#hashCode()	
+org.apache.kafka.clients.admin.ShareMemberDescription#host()	8
+org.apache.kafka.clients.admin.ShareMemberDescription#memberEpoch()	6
+org.apache.kafka.clients.admin.ShareMemberDescription#rackId()	7
+org.apache.kafka.clients.admin.ShareMemberDescription#toString()	
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo	15
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#SharePartitionOffsetInfo(long,Optional,Optional)	56
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#equals(Object)	
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#hashCode()	
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#lag()	11
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#leaderEpoch()	13
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#startOffset()	48
+org.apache.kafka.clients.admin.SharePartitionOffsetInfo#toString()	
+org.apache.kafka.clients.admin.StreamsGroupDescription	11
+org.apache.kafka.clients.admin.StreamsGroupDescription#StreamsGroupDescription(String,int,int,int,Collection,Collection,GroupState,Node,Set)	0
+org.apache.kafka.clients.admin.StreamsGroupDescription#StreamsGroupDescription(String,int,int,int,Collection,Collection,GroupState,Node,Set,Optional,StreamsGroupTopologyDescriptionStatus,Optional)	
+org.apache.kafka.clients.admin.StreamsGroupDescription#assignorName()	32
+org.apache.kafka.clients.admin.StreamsGroupDescription#authorizedOperations()	12
+org.apache.kafka.clients.admin.StreamsGroupDescription#coordinator()	11
+org.apache.kafka.clients.admin.StreamsGroupDescription#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupDescription#groupEpoch()	6
+org.apache.kafka.clients.admin.StreamsGroupDescription#groupId()	6
+org.apache.kafka.clients.admin.StreamsGroupDescription#groupState()	18
+org.apache.kafka.clients.admin.StreamsGroupDescription#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupDescription#members()	9
+org.apache.kafka.clients.admin.StreamsGroupDescription#subtopologies()	9
+org.apache.kafka.clients.admin.StreamsGroupDescription#targetAssignmentEpoch()	6
+org.apache.kafka.clients.admin.StreamsGroupDescription#toString()	
+org.apache.kafka.clients.admin.StreamsGroupDescription#topologyDescription()	24
+org.apache.kafka.clients.admin.StreamsGroupDescription#topologyDescriptionStatus()	12
+org.apache.kafka.clients.admin.StreamsGroupDescription#topologyEpoch()	7
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment	10
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#StreamsGroupMemberAssignment(List,List,List)	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#activeTasks()	5
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#standbyTasks()	5
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#toString()	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment#warmupTasks()	5
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds	8
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds#TaskIds(String,List)	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds#partitions()	9
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds#subtopologyId()	3
+org.apache.kafka.clients.admin.StreamsGroupMemberAssignment$TaskIds#toString()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription	12
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#StreamsGroupMemberDescription(String,int,Optional,Optional,String,String,int,String,Optional,Map,List,List,StreamsGroupMemberAssignment,StreamsGroupMemberAssignment,boolean)	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#assignment()	3
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#clientHost()	6
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#clientId()	7
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#clientTags()	6
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#instanceId()	11
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#isClassic()	8
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#memberEpoch()	6
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#memberId()	6
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#processId()	10
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#rackId()	7
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#targetAssignment()	3
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#taskEndOffsets()	7
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#taskOffsets()	4
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#toString()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#topologyEpoch()	9
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription#userEndpoint()	6
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint	7
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint#Endpoint(String,int)	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint#host()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint#port()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$Endpoint#toString()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset	6
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#TaskOffset(String,int,long)	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#offset()	10
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#partition()	5
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#subtopologyId()	3
+org.apache.kafka.clients.admin.StreamsGroupMemberDescription$TaskOffset#toString()	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription	10
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#StreamsGroupSubtopologyDescription(String,List,List,Map,Map)	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#repartitionSinkTopics()	7
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#repartitionSourceTopics()	11
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#sourceTopics()	6
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#stateChangelogTopics()	10
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#subtopologyId()	6
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription#toString()	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo	23
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#TopicInfo(int,int,Map)	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#partitions()	18
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#replicationFactor()	16
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#toString()	
+org.apache.kafka.clients.admin.StreamsGroupSubtopologyDescription$TopicInfo#topicConfigs()	12
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription	62
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription#StreamsGroupTopologyDescription(Collection,Collection)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription#globalStores()	8
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription#subtopologies()	7
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription#toString()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore	18
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore#GlobalStore(Source,Processor)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore#processor()	8
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore#source()	9
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$GlobalStore#toString()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node	13
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node#name()	5
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node#predecessors()	14
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node#successors()	9
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	6
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#Processor(String,Set,Set,Set)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#name()	5
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#predecessors()	14
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#stores()	11
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#successors()	9
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor#toString()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	6
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#Sink(String,Optional,Set,Set)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#name()	5
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#predecessors()	14
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#successors()	9
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#toString()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink#topic()	14
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source	6
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#Source(String,Set,Set,Set)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#name()	5
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#predecessors()	14
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#successors()	9
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#toString()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source#topics()	17
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology	7
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology#Subtopology(String,Collection)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology#equals(Object)	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology#hashCode()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology#id()	7
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology#nodes()	6
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Subtopology#toString()	
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus	44
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus#AVAILABLE	9
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus#ERROR	14
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus#NOT_REQUESTED	12
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus#NOT_STORED	29
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus#forId(byte)	22
+org.apache.kafka.clients.admin.StreamsGroupTopologyDescriptionStatus#id()	6
+org.apache.kafka.clients.admin.SupportedVersionRange	13
+org.apache.kafka.clients.admin.SupportedVersionRange#SupportedVersionRange(short,short)	32
+org.apache.kafka.clients.admin.SupportedVersionRange#equals(Object)	
+org.apache.kafka.clients.admin.SupportedVersionRange#hashCode()	
+org.apache.kafka.clients.admin.SupportedVersionRange#maxVersion()	
+org.apache.kafka.clients.admin.SupportedVersionRange#minVersion()	
+org.apache.kafka.clients.admin.SupportedVersionRange#toString()	
+org.apache.kafka.clients.admin.TerminateTransactionOptions	3
+org.apache.kafka.clients.admin.TerminateTransactionOptions#toString()	
+org.apache.kafka.clients.admin.TerminateTransactionResult	6
+org.apache.kafka.clients.admin.TerminateTransactionResult#result()	11
+org.apache.kafka.clients.admin.TopicDescription	10
+org.apache.kafka.clients.admin.TopicDescription#TopicDescription(String,boolean,List)	42
+org.apache.kafka.clients.admin.TopicDescription#TopicDescription(String,boolean,List,Set)	56
+org.apache.kafka.clients.admin.TopicDescription#TopicDescription(String,boolean,List,Set,Uuid)	60
+org.apache.kafka.clients.admin.TopicDescription#authorizedOperations()	12
+org.apache.kafka.clients.admin.TopicDescription#equals(Object)	
+org.apache.kafka.clients.admin.TopicDescription#hashCode()	
+org.apache.kafka.clients.admin.TopicDescription#isInternal()	21
+org.apache.kafka.clients.admin.TopicDescription#name()	5
+org.apache.kafka.clients.admin.TopicDescription#partitions()	22
+org.apache.kafka.clients.admin.TopicDescription#toString()	
+org.apache.kafka.clients.admin.TopicDescription#topicId()	
+org.apache.kafka.clients.admin.TopicListing	8
+org.apache.kafka.clients.admin.TopicListing#TopicListing(String,Uuid,boolean)	23
+org.apache.kafka.clients.admin.TopicListing#isInternal()	21
+org.apache.kafka.clients.admin.TopicListing#name()	5
+org.apache.kafka.clients.admin.TopicListing#toString()	
+org.apache.kafka.clients.admin.TopicListing#topicId()	5
+org.apache.kafka.clients.admin.TransactionDescription	
+org.apache.kafka.clients.admin.TransactionDescription#TransactionDescription(int,TransactionState,long,int,long,OptionalLong,Set)	
+org.apache.kafka.clients.admin.TransactionDescription#coordinatorId()	
+org.apache.kafka.clients.admin.TransactionDescription#equals(Object)	
+org.apache.kafka.clients.admin.TransactionDescription#hashCode()	
+org.apache.kafka.clients.admin.TransactionDescription#producerEpoch()	
+org.apache.kafka.clients.admin.TransactionDescription#producerId()	
+org.apache.kafka.clients.admin.TransactionDescription#state()	
+org.apache.kafka.clients.admin.TransactionDescription#toString()	
+org.apache.kafka.clients.admin.TransactionDescription#topicPartitions()	
+org.apache.kafka.clients.admin.TransactionDescription#transactionStartTimeMs()	
+org.apache.kafka.clients.admin.TransactionDescription#transactionTimeoutMs()	
+org.apache.kafka.clients.admin.TransactionListing	
+org.apache.kafka.clients.admin.TransactionListing#TransactionListing(String,long,TransactionState)	
+org.apache.kafka.clients.admin.TransactionListing#equals(Object)	
+org.apache.kafka.clients.admin.TransactionListing#hashCode()	
+org.apache.kafka.clients.admin.TransactionListing#producerId()	
+org.apache.kafka.clients.admin.TransactionListing#state()	
+org.apache.kafka.clients.admin.TransactionListing#toString()	
+org.apache.kafka.clients.admin.TransactionListing#transactionalId()	
+org.apache.kafka.clients.admin.TransactionState	
+org.apache.kafka.clients.admin.TransactionState#COMPLETE_ABORT	
+org.apache.kafka.clients.admin.TransactionState#COMPLETE_COMMIT	
+org.apache.kafka.clients.admin.TransactionState#EMPTY	
+org.apache.kafka.clients.admin.TransactionState#ONGOING	
+org.apache.kafka.clients.admin.TransactionState#PREPARE_ABORT	
+org.apache.kafka.clients.admin.TransactionState#PREPARE_COMMIT	
+org.apache.kafka.clients.admin.TransactionState#PREPARE_EPOCH_FENCE	
+org.apache.kafka.clients.admin.TransactionState#UNKNOWN	
+org.apache.kafka.clients.admin.TransactionState#parse(String)	
+org.apache.kafka.clients.admin.TransactionState#toString()	
+org.apache.kafka.clients.admin.UnregisterBrokerOptions	3
+org.apache.kafka.clients.admin.UnregisterBrokerResult	17
+org.apache.kafka.clients.admin.UnregisterBrokerResult#all()	10
+org.apache.kafka.clients.admin.UnregisterControllerOptions	3
+org.apache.kafka.clients.admin.UnregisterControllerResult	17
+org.apache.kafka.clients.admin.UnregisterControllerResult#all()	10
+org.apache.kafka.clients.admin.UpdateFeaturesOptions	3
+org.apache.kafka.clients.admin.UpdateFeaturesOptions#validateOnly()	
+org.apache.kafka.clients.admin.UpdateFeaturesOptions#validateOnly(boolean)	
+org.apache.kafka.clients.admin.UpdateFeaturesResult	17
+org.apache.kafka.clients.admin.UpdateFeaturesResult#all()	11
+org.apache.kafka.clients.admin.UpdateFeaturesResult#values()	
+org.apache.kafka.clients.admin.UserScramCredentialAlteration	18
+org.apache.kafka.clients.admin.UserScramCredentialAlteration#user()	5
+org.apache.kafka.clients.admin.UserScramCredentialsDescription	32
+org.apache.kafka.clients.admin.UserScramCredentialsDescription#UserScramCredentialsDescription(String,List)	15
+org.apache.kafka.clients.admin.UserScramCredentialsDescription#credentialInfos()	14
+org.apache.kafka.clients.admin.UserScramCredentialsDescription#equals(Object)	
+org.apache.kafka.clients.admin.UserScramCredentialsDescription#hashCode()	
+org.apache.kafka.clients.admin.UserScramCredentialsDescription#name()	3
+org.apache.kafka.clients.admin.UserScramCredentialsDescription#toString()	
+org.apache.kafka.clients.consumer.AcknowledgeType	15
+org.apache.kafka.clients.consumer.AcknowledgeType#ACCEPT	5
+org.apache.kafka.clients.consumer.AcknowledgeType#REJECT	17
+org.apache.kafka.clients.consumer.AcknowledgeType#RELEASE	12
+org.apache.kafka.clients.consumer.AcknowledgeType#RENEW	14
+org.apache.kafka.clients.consumer.AcknowledgeType#forId(byte)	24
+org.apache.kafka.clients.consumer.AcknowledgeType#id	7
+org.apache.kafka.clients.consumer.AcknowledgeType#toString()	
+org.apache.kafka.clients.consumer.AcknowledgementCommitCallback	26
+org.apache.kafka.clients.consumer.AcknowledgementCommitCallback#onComplete(Map,Exception)	163
+org.apache.kafka.clients.consumer.CloseOptions	26
+org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation()	13
+org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation(GroupMembershipOperation)	37
+org.apache.kafka.clients.consumer.CloseOptions#timeout()	16
+org.apache.kafka.clients.consumer.CloseOptions#timeout(Duration)	29
+org.apache.kafka.clients.consumer.CloseOptions#withGroupMembershipOperation(GroupMembershipOperation)	28
+org.apache.kafka.clients.consumer.CloseOptions#withTimeout(Duration)	32
+org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation	117
+org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation#DEFAULT	
+org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation#LEAVE_GROUP	
+org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation#REMAIN_IN_GROUP	
+org.apache.kafka.clients.consumer.Consumer	4357,54
+org.apache.kafka.clients.consumer.Consumer#assign(Collection)	155
+org.apache.kafka.clients.consumer.Consumer#assignment()	109
+org.apache.kafka.clients.consumer.Consumer#beginningOffsets(Collection)	76
+org.apache.kafka.clients.consumer.Consumer#beginningOffsets(Collection,Duration)	100
+org.apache.kafka.clients.consumer.Consumer#clientInstanceId(Duration)	197
+org.apache.kafka.clients.consumer.Consumer#close()	131
+org.apache.kafka.clients.consumer.Consumer#close(CloseOptions)	281
+org.apache.kafka.clients.consumer.Consumer#close(Duration)	287
+org.apache.kafka.clients.consumer.Consumer#commitAsync()	37
+org.apache.kafka.clients.consumer.Consumer#commitAsync(Map,OffsetCommitCallback)	237
+org.apache.kafka.clients.consumer.Consumer#commitAsync(OffsetCommitCallback)	158
+org.apache.kafka.clients.consumer.Consumer#commitSync()	418
+org.apache.kafka.clients.consumer.Consumer#commitSync(Duration)	390
+org.apache.kafka.clients.consumer.Consumer#commitSync(Map)	500
+org.apache.kafka.clients.consumer.Consumer#commitSync(Map,Duration)	499
+org.apache.kafka.clients.consumer.Consumer#committed(Set)	243
+org.apache.kafka.clients.consumer.Consumer#committed(Set,Duration)	186
+org.apache.kafka.clients.consumer.Consumer#currentLag(TopicPartition)	89
+org.apache.kafka.clients.consumer.Consumer#endOffsets(Collection)	145
+org.apache.kafka.clients.consumer.Consumer#endOffsets(Collection,Duration)	165
+org.apache.kafka.clients.consumer.Consumer#enforceRebalance()	225
+org.apache.kafka.clients.consumer.Consumer#enforceRebalance(String)	225
+org.apache.kafka.clients.consumer.Consumer#groupMetadata()	20
+org.apache.kafka.clients.consumer.Consumer#listTopics()	92
+org.apache.kafka.clients.consumer.Consumer#listTopics(Duration)	90
+org.apache.kafka.clients.consumer.Consumer#metrics()	44
+org.apache.kafka.clients.consumer.Consumer#offsetsForTimes(Map)	215
+org.apache.kafka.clients.consumer.Consumer#offsetsForTimes(Map,Duration)	211
+org.apache.kafka.clients.consumer.Consumer#partitionsFor(String)	186
+org.apache.kafka.clients.consumer.Consumer#partitionsFor(String,Duration)	179
+org.apache.kafka.clients.consumer.Consumer#pause(Collection)	181
+org.apache.kafka.clients.consumer.Consumer#paused()	19
+org.apache.kafka.clients.consumer.Consumer#poll(Duration)	382
+org.apache.kafka.clients.consumer.Consumer#position(TopicPartition)	218
+org.apache.kafka.clients.consumer.Consumer#position(TopicPartition,Duration)	197
+org.apache.kafka.clients.consumer.Consumer#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.consumer.Consumer#resume(Collection)	60
+org.apache.kafka.clients.consumer.Consumer#seek(TopicPartition,OffsetAndMetadata)	88
+org.apache.kafka.clients.consumer.Consumer#seek(TopicPartition,long)	296
+org.apache.kafka.clients.consumer.Consumer#seekToBeginning(Collection)	66
+org.apache.kafka.clients.consumer.Consumer#seekToEnd(Collection)	89
+org.apache.kafka.clients.consumer.Consumer#subscribe(Collection)	174
+org.apache.kafka.clients.consumer.Consumer#subscribe(Collection,ConsumerRebalanceListener)	317
+org.apache.kafka.clients.consumer.Consumer#subscribe(Pattern)	132
+org.apache.kafka.clients.consumer.Consumer#subscribe(Pattern,ConsumerRebalanceListener)	154
+org.apache.kafka.clients.consumer.Consumer#subscribe(SubscriptionPattern)	165
+org.apache.kafka.clients.consumer.Consumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)	165
+org.apache.kafka.clients.consumer.Consumer#subscription()	65
+org.apache.kafka.clients.consumer.Consumer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.consumer.Consumer#unsubscribe()	65
+org.apache.kafka.clients.consumer.Consumer#wakeup()	52
+org.apache.kafka.clients.consumer.ConsumerConfig	4
+org.apache.kafka.clients.consumer.ConsumerConfig#ALLOW_AUTO_CREATE_TOPICS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#ASSIGN_FROM_SUBSCRIBED_ASSIGNORS	
+org.apache.kafka.clients.consumer.ConsumerConfig#AUTO_COMMIT_INTERVAL_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#AUTO_OFFSET_RESET_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#AUTO_OFFSET_RESET_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#BOOTSTRAP_SERVERS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#CHECK_CRCS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#CLIENT_DNS_LOOKUP_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#CLIENT_ID_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#CLIENT_RACK_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#CONNECTIONS_MAX_IDLE_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)	13
+org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Properties)	13
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_ALLOW_AUTO_CREATE_TOPICS	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_API_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_CLIENT_RACK	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_EXCLUDE_INTERNAL_TOPICS	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_FETCH_MAX_BYTES	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_FETCH_MAX_WAIT_MS	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_FETCH_MIN_BYTES	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_GROUP_PROTOCOL	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_GROUP_REMOTE_ASSIGNOR	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_ISOLATION_LEVEL	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_MAX_PARTITION_FETCH_BYTES	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_MAX_POLL_RECORDS	
+org.apache.kafka.clients.consumer.ConsumerConfig#DEFAULT_SHARE_ACQUIRE_MODE	
+org.apache.kafka.clients.consumer.ConsumerConfig#ENABLE_AUTO_COMMIT_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#ENABLE_METRICS_PUSH_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#ENABLE_METRICS_PUSH_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#EXCLUDE_INTERNAL_TOPICS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#FETCH_MAX_BYTES_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#FETCH_MAX_WAIT_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#FETCH_MIN_BYTES_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#GROUP_ID_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#GROUP_INSTANCE_ID_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#GROUP_PROTOCOL_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#GROUP_PROTOCOL_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#GROUP_REMOTE_ASSIGNOR_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#GROUP_REMOTE_ASSIGNOR_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#HEARTBEAT_INTERVAL_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#INTERCEPTOR_CLASSES_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#INTERCEPTOR_CLASSES_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#ISOLATION_LEVEL_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#ISOLATION_LEVEL_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#KEY_DESERIALIZER_CLASS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#KEY_DESERIALIZER_CLASS_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#MAX_PARTITION_FETCH_BYTES_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#MAX_POLL_INTERVAL_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#MAX_POLL_RECORDS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#METADATA_MAX_AGE_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#METRICS_NUM_SAMPLES_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#METRICS_RECORDING_LEVEL_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#METRICS_SAMPLE_WINDOW_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#METRIC_REPORTER_CLASSES_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#PARTITION_ASSIGNMENT_STRATEGY_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#RECEIVE_BUFFER_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#RECONNECT_BACKOFF_MAX_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#RECONNECT_BACKOFF_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#REQUEST_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#RETRY_BACKOFF_MAX_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#RETRY_BACKOFF_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SECURITY_PROVIDERS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SEND_BUFFER_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SESSION_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SHARE_ACKNOWLEDGEMENT_MODE_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SHARE_ACQUIRE_MODE_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#VALUE_DESERIALIZER_CLASS_CONFIG	1
+org.apache.kafka.clients.consumer.ConsumerConfig#VALUE_DESERIALIZER_CLASS_DOC	
+org.apache.kafka.clients.consumer.ConsumerConfig#appendDeserializerToConfig(Map,Deserializer,Deserializer)	
+org.apache.kafka.clients.consumer.ConsumerConfig#configDef()	7
+org.apache.kafka.clients.consumer.ConsumerConfig#configNames()	12
+org.apache.kafka.clients.consumer.ConsumerConfig#main(String[])	
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata	21
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#ConsumerGroupMetadata(String)	0
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#ConsumerGroupMetadata(String,int,String,Optional)	0
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#equals(Object)	
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#generationId()	11
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupId()	8
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupInstanceId()	23
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#hashCode()	
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#memberId()	10
+org.apache.kafka.clients.consumer.ConsumerGroupMetadata#toString()	
+org.apache.kafka.clients.consumer.ConsumerRebalanceListener	907
+org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsAssigned(Collection)	270
+org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsLost(Collection)	262
+org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsRevoked(Collection)	357
+org.apache.kafka.clients.consumer.ConsumerRecord	204
+org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,K,V)	77
+org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional)	102
+org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional,Optional)	116
+org.apache.kafka.clients.consumer.ConsumerRecord#NO_TIMESTAMP	
+org.apache.kafka.clients.consumer.ConsumerRecord#NULL_SIZE	
+org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount()	27
+org.apache.kafka.clients.consumer.ConsumerRecord#headers()	4
+org.apache.kafka.clients.consumer.ConsumerRecord#key()	9
+org.apache.kafka.clients.consumer.ConsumerRecord#leaderEpoch()	18
+org.apache.kafka.clients.consumer.ConsumerRecord#offset()	10
+org.apache.kafka.clients.consumer.ConsumerRecord#partition()	8
+org.apache.kafka.clients.consumer.ConsumerRecord#serializedKeySize()	18
+org.apache.kafka.clients.consumer.ConsumerRecord#serializedValueSize()	18
+org.apache.kafka.clients.consumer.ConsumerRecord#timestamp()	11
+org.apache.kafka.clients.consumer.ConsumerRecord#timestampType()	6
+org.apache.kafka.clients.consumer.ConsumerRecord#toString()	
+org.apache.kafka.clients.consumer.ConsumerRecord#topic()	9
+org.apache.kafka.clients.consumer.ConsumerRecord#value()	2
+org.apache.kafka.clients.consumer.ConsumerRecords	27
+org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map)	0
+org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)	49
+org.apache.kafka.clients.consumer.ConsumerRecords#EMPTY	
+org.apache.kafka.clients.consumer.ConsumerRecords#count()	7
+org.apache.kafka.clients.consumer.ConsumerRecords#empty()	16
+org.apache.kafka.clients.consumer.ConsumerRecords#isEmpty()	15
+org.apache.kafka.clients.consumer.ConsumerRecords#iterator()	
+org.apache.kafka.clients.consumer.ConsumerRecords#nextOffsets()	30
+org.apache.kafka.clients.consumer.ConsumerRecords#partitions()	29
+org.apache.kafka.clients.consumer.ConsumerRecords#records(String)	8
+org.apache.kafka.clients.consumer.ConsumerRecords#records(TopicPartition)	15
+org.apache.kafka.clients.consumer.GroupProtocol	23
+org.apache.kafka.clients.consumer.GroupProtocol#CLASSIC	3
+org.apache.kafka.clients.consumer.GroupProtocol#CONSUMER	3
+org.apache.kafka.clients.consumer.GroupProtocol#name	6
+org.apache.kafka.clients.consumer.GroupProtocol#of(String)	27
+org.apache.kafka.clients.consumer.KafkaConsumer	4357
+org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map)	71
+org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)	96
+org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Properties)	37
+org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Properties,Deserializer,Deserializer)	94
+org.apache.kafka.clients.consumer.KafkaConsumer#assign(Collection)	155
+org.apache.kafka.clients.consumer.KafkaConsumer#assignment()	109
+org.apache.kafka.clients.consumer.KafkaConsumer#beginningOffsets(Collection)	76
+org.apache.kafka.clients.consumer.KafkaConsumer#beginningOffsets(Collection,Duration)	100
+org.apache.kafka.clients.consumer.KafkaConsumer#clientInstanceId(Duration)	197
+org.apache.kafka.clients.consumer.KafkaConsumer#close()	131
+org.apache.kafka.clients.consumer.KafkaConsumer#close(CloseOptions)	281
+org.apache.kafka.clients.consumer.KafkaConsumer#close(Duration)	287
+org.apache.kafka.clients.consumer.KafkaConsumer#commitAsync()	37
+org.apache.kafka.clients.consumer.KafkaConsumer#commitAsync(Map,OffsetCommitCallback)	237
+org.apache.kafka.clients.consumer.KafkaConsumer#commitAsync(OffsetCommitCallback)	158
+org.apache.kafka.clients.consumer.KafkaConsumer#commitSync()	418
+org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Duration)	390
+org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map)	500
+org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map,Duration)	499
+org.apache.kafka.clients.consumer.KafkaConsumer#committed(Set)	243
+org.apache.kafka.clients.consumer.KafkaConsumer#committed(Set,Duration)	186
+org.apache.kafka.clients.consumer.KafkaConsumer#currentLag(TopicPartition)	89
+org.apache.kafka.clients.consumer.KafkaConsumer#endOffsets(Collection)	145
+org.apache.kafka.clients.consumer.KafkaConsumer#endOffsets(Collection,Duration)	165
+org.apache.kafka.clients.consumer.KafkaConsumer#enforceRebalance()	225
+org.apache.kafka.clients.consumer.KafkaConsumer#enforceRebalance(String)	225
+org.apache.kafka.clients.consumer.KafkaConsumer#groupMetadata()	20
+org.apache.kafka.clients.consumer.KafkaConsumer#listTopics()	92
+org.apache.kafka.clients.consumer.KafkaConsumer#listTopics(Duration)	90
+org.apache.kafka.clients.consumer.KafkaConsumer#metrics()	44
+org.apache.kafka.clients.consumer.KafkaConsumer#offsetsForTimes(Map)	215
+org.apache.kafka.clients.consumer.KafkaConsumer#offsetsForTimes(Map,Duration)	211
+org.apache.kafka.clients.consumer.KafkaConsumer#partitionsFor(String)	186
+org.apache.kafka.clients.consumer.KafkaConsumer#partitionsFor(String,Duration)	179
+org.apache.kafka.clients.consumer.KafkaConsumer#pause(Collection)	181
+org.apache.kafka.clients.consumer.KafkaConsumer#paused()	19
+org.apache.kafka.clients.consumer.KafkaConsumer#poll(Duration)	382
+org.apache.kafka.clients.consumer.KafkaConsumer#position(TopicPartition)	218
+org.apache.kafka.clients.consumer.KafkaConsumer#position(TopicPartition,Duration)	197
+org.apache.kafka.clients.consumer.KafkaConsumer#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.consumer.KafkaConsumer#resume(Collection)	60
+org.apache.kafka.clients.consumer.KafkaConsumer#seek(TopicPartition,OffsetAndMetadata)	88
+org.apache.kafka.clients.consumer.KafkaConsumer#seek(TopicPartition,long)	296
+org.apache.kafka.clients.consumer.KafkaConsumer#seekToBeginning(Collection)	66
+org.apache.kafka.clients.consumer.KafkaConsumer#seekToEnd(Collection)	89
+org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Collection)	174
+org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Collection,ConsumerRebalanceListener)	317
+org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Pattern)	132
+org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Pattern,ConsumerRebalanceListener)	154
+org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern)	165
+org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)	165
+org.apache.kafka.clients.consumer.KafkaConsumer#subscription()	65
+org.apache.kafka.clients.consumer.KafkaConsumer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.consumer.KafkaConsumer#unsubscribe()	65
+org.apache.kafka.clients.consumer.KafkaConsumer#wakeup()	52
+org.apache.kafka.clients.consumer.KafkaShareConsumer	2492
+org.apache.kafka.clients.consumer.KafkaShareConsumer#KafkaShareConsumer(Map)	71
+org.apache.kafka.clients.consumer.KafkaShareConsumer#KafkaShareConsumer(Map,Deserializer,Deserializer)	96
+org.apache.kafka.clients.consumer.KafkaShareConsumer#KafkaShareConsumer(Properties)	37
+org.apache.kafka.clients.consumer.KafkaShareConsumer#KafkaShareConsumer(Properties,Deserializer,Deserializer)	94
+org.apache.kafka.clients.consumer.KafkaShareConsumer#acknowledge(ConsumerRecord)	60
+org.apache.kafka.clients.consumer.KafkaShareConsumer#acknowledge(ConsumerRecord,AcknowledgeType)	76
+org.apache.kafka.clients.consumer.KafkaShareConsumer#acknowledge(String,int,long,AcknowledgeType)	118
+org.apache.kafka.clients.consumer.KafkaShareConsumer#acquisitionLockTimeoutMs()	29
+org.apache.kafka.clients.consumer.KafkaShareConsumer#clientInstanceId(Duration)	202
+org.apache.kafka.clients.consumer.KafkaShareConsumer#close()	104
+org.apache.kafka.clients.consumer.KafkaShareConsumer#close(Duration)	223
+org.apache.kafka.clients.consumer.KafkaShareConsumer#commitAsync()	50
+org.apache.kafka.clients.consumer.KafkaShareConsumer#commitSync()	141
+org.apache.kafka.clients.consumer.KafkaShareConsumer#commitSync(Duration)	145
+org.apache.kafka.clients.consumer.KafkaShareConsumer#metrics()	44
+org.apache.kafka.clients.consumer.KafkaShareConsumer#poll(Duration)	195
+org.apache.kafka.clients.consumer.KafkaShareConsumer#registerMetricForSubscription(KafkaMetric)	132
+org.apache.kafka.clients.consumer.KafkaShareConsumer#setAcknowledgementCommitCallback(AcknowledgementCommitCallback)	18
+org.apache.kafka.clients.consumer.KafkaShareConsumer#subscribe(Collection)	142
+org.apache.kafka.clients.consumer.KafkaShareConsumer#subscription()	65
+org.apache.kafka.clients.consumer.KafkaShareConsumer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.consumer.KafkaShareConsumer#unsubscribe()	13
+org.apache.kafka.clients.consumer.KafkaShareConsumer#wakeup()	53
+org.apache.kafka.clients.consumer.MockConsumer	54
+org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(OffsetResetStrategy)	0
+org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)	20
+org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)	25
+org.apache.kafka.clients.consumer.MockConsumer#addedMetrics()	12
+org.apache.kafka.clients.consumer.MockConsumer#assign(Collection)	155
+org.apache.kafka.clients.consumer.MockConsumer#assignment()	109
+org.apache.kafka.clients.consumer.MockConsumer#beginningOffsets(Collection)	76
+org.apache.kafka.clients.consumer.MockConsumer#beginningOffsets(Collection,Duration)	100
+org.apache.kafka.clients.consumer.MockConsumer#clientInstanceId(Duration)	197
+org.apache.kafka.clients.consumer.MockConsumer#close()	131
+org.apache.kafka.clients.consumer.MockConsumer#close(CloseOptions)	281
+org.apache.kafka.clients.consumer.MockConsumer#close(Duration)	287
+org.apache.kafka.clients.consumer.MockConsumer#closed()	12
+org.apache.kafka.clients.consumer.MockConsumer#commitAsync()	37
+org.apache.kafka.clients.consumer.MockConsumer#commitAsync(Map,OffsetCommitCallback)	237
+org.apache.kafka.clients.consumer.MockConsumer#commitAsync(OffsetCommitCallback)	158
+org.apache.kafka.clients.consumer.MockConsumer#commitSync()	418
+org.apache.kafka.clients.consumer.MockConsumer#commitSync(Duration)	390
+org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map)	500
+org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map,Duration)	499
+org.apache.kafka.clients.consumer.MockConsumer#committed(Set)	243
+org.apache.kafka.clients.consumer.MockConsumer#committed(Set,Duration)	186
+org.apache.kafka.clients.consumer.MockConsumer#currentLag(TopicPartition)	89
+org.apache.kafka.clients.consumer.MockConsumer#disableTelemetry()	6
+org.apache.kafka.clients.consumer.MockConsumer#endOffsets(Collection)	145
+org.apache.kafka.clients.consumer.MockConsumer#endOffsets(Collection,Duration)	165
+org.apache.kafka.clients.consumer.MockConsumer#enforceRebalance()	225
+org.apache.kafka.clients.consumer.MockConsumer#enforceRebalance(String)	225
+org.apache.kafka.clients.consumer.MockConsumer#groupMetadata()	20
+org.apache.kafka.clients.consumer.MockConsumer#injectTimeoutException(int)	5
+org.apache.kafka.clients.consumer.MockConsumer#lastPollTimeout()	21
+org.apache.kafka.clients.consumer.MockConsumer#listTopics()	92
+org.apache.kafka.clients.consumer.MockConsumer#listTopics(Duration)	90
+org.apache.kafka.clients.consumer.MockConsumer#losePartitions(Collection)	70
+org.apache.kafka.clients.consumer.MockConsumer#metrics()	44
+org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes(Map)	215
+org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes(Map,Duration)	211
+org.apache.kafka.clients.consumer.MockConsumer#partitionsFor(String)	186
+org.apache.kafka.clients.consumer.MockConsumer#partitionsFor(String,Duration)	179
+org.apache.kafka.clients.consumer.MockConsumer#pause(Collection)	181
+org.apache.kafka.clients.consumer.MockConsumer#paused()	19
+org.apache.kafka.clients.consumer.MockConsumer#poll(Duration)	382
+org.apache.kafka.clients.consumer.MockConsumer#position(TopicPartition)	218
+org.apache.kafka.clients.consumer.MockConsumer#position(TopicPartition,Duration)	197
+org.apache.kafka.clients.consumer.MockConsumer#rebalance(Collection)	4
+org.apache.kafka.clients.consumer.MockConsumer#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.consumer.MockConsumer#resetShouldRebalance()	7
+org.apache.kafka.clients.consumer.MockConsumer#resume(Collection)	60
+org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask()	12
+org.apache.kafka.clients.consumer.MockConsumer#schedulePollTask(Runnable)	37
+org.apache.kafka.clients.consumer.MockConsumer#seek(TopicPartition,OffsetAndMetadata)	88
+org.apache.kafka.clients.consumer.MockConsumer#seek(TopicPartition,long)	296
+org.apache.kafka.clients.consumer.MockConsumer#seekToBeginning(Collection)	66
+org.apache.kafka.clients.consumer.MockConsumer#seekToEnd(Collection)	89
+org.apache.kafka.clients.consumer.MockConsumer#setClientInstanceId(Uuid)	14
+org.apache.kafka.clients.consumer.MockConsumer#setMaxPollRecords(long)	18
+org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException(KafkaException)	16
+org.apache.kafka.clients.consumer.MockConsumer#setPollException(KafkaException)	14
+org.apache.kafka.clients.consumer.MockConsumer#shouldRebalance()	16
+org.apache.kafka.clients.consumer.MockConsumer#subscribe(Collection)	174
+org.apache.kafka.clients.consumer.MockConsumer#subscribe(Collection,ConsumerRebalanceListener)	317
+org.apache.kafka.clients.consumer.MockConsumer#subscribe(Pattern)	132
+org.apache.kafka.clients.consumer.MockConsumer#subscribe(Pattern,ConsumerRebalanceListener)	154
+org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern)	165
+org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)	165
+org.apache.kafka.clients.consumer.MockConsumer#subscription()	65
+org.apache.kafka.clients.consumer.MockConsumer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.consumer.MockConsumer#unsubscribe()	65
+org.apache.kafka.clients.consumer.MockConsumer#updateBeginningOffsets(Map)	14
+org.apache.kafka.clients.consumer.MockConsumer#updateDurationOffsets(Map)	16
+org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets(Map)	14
+org.apache.kafka.clients.consumer.MockConsumer#updatePartitions(String,List)	17
+org.apache.kafka.clients.consumer.MockConsumer#wakeup()	52
+org.apache.kafka.clients.consumer.MockShareConsumer	21
+org.apache.kafka.clients.consumer.MockShareConsumer#MockShareConsumer()	6
+org.apache.kafka.clients.consumer.MockShareConsumer#acknowledge(ConsumerRecord)	60
+org.apache.kafka.clients.consumer.MockShareConsumer#acknowledge(ConsumerRecord,AcknowledgeType)	76
+org.apache.kafka.clients.consumer.MockShareConsumer#acknowledge(String,int,long,AcknowledgeType)	118
+org.apache.kafka.clients.consumer.MockShareConsumer#acquisitionLockTimeoutMs()	29
+org.apache.kafka.clients.consumer.MockShareConsumer#addRecord(ConsumerRecord)	
+org.apache.kafka.clients.consumer.MockShareConsumer#clientInstanceId(Duration)	202
+org.apache.kafka.clients.consumer.MockShareConsumer#close()	104
+org.apache.kafka.clients.consumer.MockShareConsumer#close(Duration)	223
+org.apache.kafka.clients.consumer.MockShareConsumer#commitAsync()	50
+org.apache.kafka.clients.consumer.MockShareConsumer#commitSync()	141
+org.apache.kafka.clients.consumer.MockShareConsumer#commitSync(Duration)	145
+org.apache.kafka.clients.consumer.MockShareConsumer#metrics()	44
+org.apache.kafka.clients.consumer.MockShareConsumer#poll(Duration)	195
+org.apache.kafka.clients.consumer.MockShareConsumer#registerMetricForSubscription(KafkaMetric)	132
+org.apache.kafka.clients.consumer.MockShareConsumer#setAcknowledgementCommitCallback(AcknowledgementCommitCallback)	18
+org.apache.kafka.clients.consumer.MockShareConsumer#setClientInstanceId(Uuid)	
+org.apache.kafka.clients.consumer.MockShareConsumer#subscribe(Collection)	142
+org.apache.kafka.clients.consumer.MockShareConsumer#subscription()	65
+org.apache.kafka.clients.consumer.MockShareConsumer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.consumer.MockShareConsumer#unsubscribe()	13
+org.apache.kafka.clients.consumer.MockShareConsumer#wakeup()	53
+org.apache.kafka.clients.consumer.OffsetAndMetadata	44
+org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long)	24
+org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)	28
+org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,String)	19
+org.apache.kafka.clients.consumer.OffsetAndMetadata#equals(Object)	
+org.apache.kafka.clients.consumer.OffsetAndMetadata#hashCode()	
+org.apache.kafka.clients.consumer.OffsetAndMetadata#leaderEpoch()	47
+org.apache.kafka.clients.consumer.OffsetAndMetadata#metadata()	16
+org.apache.kafka.clients.consumer.OffsetAndMetadata#offset()	8
+org.apache.kafka.clients.consumer.OffsetAndMetadata#toString()	
+org.apache.kafka.clients.consumer.OffsetAndTimestamp	7
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp(long,long)	24
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp(long,long,Optional)	30
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#equals(Object)	
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#hashCode()	
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#leaderEpoch()	42
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#offset()	5
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#timestamp()	5
+org.apache.kafka.clients.consumer.OffsetAndTimestamp#toString()	
+org.apache.kafka.clients.consumer.OffsetCommitCallback	27
+org.apache.kafka.clients.consumer.OffsetCommitCallback#onComplete(Map,Exception)	194
+org.apache.kafka.clients.consumer.ShareConsumer	15
+org.apache.kafka.clients.consumer.ShareConsumer#acknowledge(ConsumerRecord)	60
+org.apache.kafka.clients.consumer.ShareConsumer#acknowledge(ConsumerRecord,AcknowledgeType)	76
+org.apache.kafka.clients.consumer.ShareConsumer#acknowledge(String,int,long,AcknowledgeType)	118
+org.apache.kafka.clients.consumer.ShareConsumer#acquisitionLockTimeoutMs()	29
+org.apache.kafka.clients.consumer.ShareConsumer#clientInstanceId(Duration)	202
+org.apache.kafka.clients.consumer.ShareConsumer#close()	104
+org.apache.kafka.clients.consumer.ShareConsumer#close(Duration)	223
+org.apache.kafka.clients.consumer.ShareConsumer#commitAsync()	50
+org.apache.kafka.clients.consumer.ShareConsumer#commitSync()	141
+org.apache.kafka.clients.consumer.ShareConsumer#commitSync(Duration)	145
+org.apache.kafka.clients.consumer.ShareConsumer#metrics()	44
+org.apache.kafka.clients.consumer.ShareConsumer#poll(Duration)	195
+org.apache.kafka.clients.consumer.ShareConsumer#registerMetricForSubscription(KafkaMetric)	132
+org.apache.kafka.clients.consumer.ShareConsumer#setAcknowledgementCommitCallback(AcknowledgementCommitCallback)	18
+org.apache.kafka.clients.consumer.ShareConsumer#subscribe(Collection)	142
+org.apache.kafka.clients.consumer.ShareConsumer#subscription()	65
+org.apache.kafka.clients.consumer.ShareConsumer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.consumer.ShareConsumer#unsubscribe()	13
+org.apache.kafka.clients.consumer.ShareConsumer#wakeup()	53
+org.apache.kafka.clients.consumer.SubscriptionPattern	38
+org.apache.kafka.clients.consumer.SubscriptionPattern#SubscriptionPattern(String)	14
+org.apache.kafka.clients.consumer.SubscriptionPattern#equals(Object)	
+org.apache.kafka.clients.consumer.SubscriptionPattern#hashCode()	
+org.apache.kafka.clients.consumer.SubscriptionPattern#pattern()	7
+org.apache.kafka.clients.consumer.SubscriptionPattern#toString()	
+org.apache.kafka.clients.producer.Callback	34
+org.apache.kafka.clients.producer.Callback#onCompletion(RecordMetadata,Exception)	143
+org.apache.kafka.clients.producer.KafkaProducer	1282
+org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map)	64
+org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map,Serializer,Serializer)	120
+org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Properties)	38
+org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Properties,Serializer,Serializer)	94
+org.apache.kafka.clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX	
+org.apache.kafka.clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME	
+org.apache.kafka.clients.producer.KafkaProducer#abortTransaction()	271
+org.apache.kafka.clients.producer.KafkaProducer#beginTransaction()	130
+org.apache.kafka.clients.producer.KafkaProducer#clientInstanceId(Duration)	197
+org.apache.kafka.clients.producer.KafkaProducer#close()	90
+org.apache.kafka.clients.producer.KafkaProducer#close(Duration)	163
+org.apache.kafka.clients.producer.KafkaProducer#commitTransaction()	349
+org.apache.kafka.clients.producer.KafkaProducer#flush()	304
+org.apache.kafka.clients.producer.KafkaProducer#initTransactions()	235
+org.apache.kafka.clients.producer.KafkaProducer#metrics()	48
+org.apache.kafka.clients.producer.KafkaProducer#partitionsFor(String)	104
+org.apache.kafka.clients.producer.KafkaProducer#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.producer.KafkaProducer#send(ProducerRecord)	14
+org.apache.kafka.clients.producer.KafkaProducer#send(ProducerRecord,Callback)	934
+org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)	483
+org.apache.kafka.clients.producer.KafkaProducer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.producer.MockProducer	52
+org.apache.kafka.clients.producer.MockProducer#MockProducer()	18
+org.apache.kafka.clients.producer.MockProducer#MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)	66
+org.apache.kafka.clients.producer.MockProducer#MockProducer(boolean,Partitioner,Serializer,Serializer)	27
+org.apache.kafka.clients.producer.MockProducer#abortTransaction()	271
+org.apache.kafka.clients.producer.MockProducer#abortTransactionException	7
+org.apache.kafka.clients.producer.MockProducer#addedMetrics()	17
+org.apache.kafka.clients.producer.MockProducer#beginTransaction()	130
+org.apache.kafka.clients.producer.MockProducer#beginTransactionException	7
+org.apache.kafka.clients.producer.MockProducer#clear()	10
+org.apache.kafka.clients.producer.MockProducer#clientInstanceId(Duration)	197
+org.apache.kafka.clients.producer.MockProducer#close()	90
+org.apache.kafka.clients.producer.MockProducer#close(Duration)	163
+org.apache.kafka.clients.producer.MockProducer#closeException	9
+org.apache.kafka.clients.producer.MockProducer#closed()	17
+org.apache.kafka.clients.producer.MockProducer#commitCount()	14
+org.apache.kafka.clients.producer.MockProducer#commitTransaction()	349
+org.apache.kafka.clients.producer.MockProducer#commitTransactionException	7
+org.apache.kafka.clients.producer.MockProducer#completeNext()	15
+org.apache.kafka.clients.producer.MockProducer#consumerGroupOffsetsHistory()	14
+org.apache.kafka.clients.producer.MockProducer#disableTelemetry()	9
+org.apache.kafka.clients.producer.MockProducer#errorNext(RuntimeException)	18
+org.apache.kafka.clients.producer.MockProducer#fenceProducer()	13
+org.apache.kafka.clients.producer.MockProducer#flush()	304
+org.apache.kafka.clients.producer.MockProducer#flushException	7
+org.apache.kafka.clients.producer.MockProducer#flushed()	20
+org.apache.kafka.clients.producer.MockProducer#history()	12
+org.apache.kafka.clients.producer.MockProducer#initTransactionException	7
+org.apache.kafka.clients.producer.MockProducer#initTransactions()	235
+org.apache.kafka.clients.producer.MockProducer#injectTimeoutException(int)	21
+org.apache.kafka.clients.producer.MockProducer#metrics()	48
+org.apache.kafka.clients.producer.MockProducer#partitionsFor(String)	104
+org.apache.kafka.clients.producer.MockProducer#partitionsForException	7
+org.apache.kafka.clients.producer.MockProducer#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.producer.MockProducer#send(ProducerRecord)	17
+org.apache.kafka.clients.producer.MockProducer#send(ProducerRecord,Callback)	10
+org.apache.kafka.clients.producer.MockProducer#sendException	9
+org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)	483
+org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException	7
+org.apache.kafka.clients.producer.MockProducer#sentOffsets()	21
+org.apache.kafka.clients.producer.MockProducer#setClientInstanceId(Uuid)	16
+org.apache.kafka.clients.producer.MockProducer#setMockMetrics(MetricName,Metric)	7
+org.apache.kafka.clients.producer.MockProducer#transactionAborted()	16
+org.apache.kafka.clients.producer.MockProducer#transactionCommitted()	16
+org.apache.kafka.clients.producer.MockProducer#transactionInFlight()	17
+org.apache.kafka.clients.producer.MockProducer#transactionInitialized()	18
+org.apache.kafka.clients.producer.MockProducer#uncommittedOffsets()	26
+org.apache.kafka.clients.producer.MockProducer#uncommittedRecords()	22
+org.apache.kafka.clients.producer.MockProducer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.producer.Partitioner	33
+org.apache.kafka.clients.producer.Partitioner#close()	7
+org.apache.kafka.clients.producer.Partitioner#partition(String,Object,byte[],Object,byte[],Cluster)	56
+org.apache.kafka.clients.producer.Producer	7
+org.apache.kafka.clients.producer.Producer#abortTransaction()	271
+org.apache.kafka.clients.producer.Producer#beginTransaction()	130
+org.apache.kafka.clients.producer.Producer#clientInstanceId(Duration)	197
+org.apache.kafka.clients.producer.Producer#close()	90
+org.apache.kafka.clients.producer.Producer#close(Duration)	163
+org.apache.kafka.clients.producer.Producer#commitTransaction()	349
+org.apache.kafka.clients.producer.Producer#flush()	304
+org.apache.kafka.clients.producer.Producer#initTransactions()	235
+org.apache.kafka.clients.producer.Producer#metrics()	48
+org.apache.kafka.clients.producer.Producer#partitionsFor(String)	104
+org.apache.kafka.clients.producer.Producer#registerMetricForSubscription(KafkaMetric)	131
+org.apache.kafka.clients.producer.Producer#send(ProducerRecord)	14
+org.apache.kafka.clients.producer.Producer#send(ProducerRecord,Callback)	14,934
+org.apache.kafka.clients.producer.Producer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)	483
+org.apache.kafka.clients.producer.Producer#unregisterMetricFromSubscription(KafkaMetric)	56
+org.apache.kafka.clients.producer.ProducerConfig	16
+org.apache.kafka.clients.producer.ProducerConfig#ACKS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#BATCH_SIZE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#BOOTSTRAP_SERVERS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL	
+org.apache.kafka.clients.producer.ProducerConfig#BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL	
+org.apache.kafka.clients.producer.ProducerConfig#BUFFER_MEMORY_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#CLIENT_DNS_LOOKUP_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#CLIENT_ID_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#CLIENT_RACK_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#COMPRESSION_GZIP_LEVEL_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#COMPRESSION_LZ4_LEVEL_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#COMPRESSION_TYPE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#COMPRESSION_ZSTD_LEVEL_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#CONNECTIONS_MAX_IDLE_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#DEFAULT_CLIENT_RACK	
+org.apache.kafka.clients.producer.ProducerConfig#DELIVERY_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#ENABLE_IDEMPOTENCE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#ENABLE_IDEMPOTENCE_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#ENABLE_METRICS_PUSH_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#ENABLE_METRICS_PUSH_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#INTERCEPTOR_CLASSES_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#INTERCEPTOR_CLASSES_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#KEY_SERIALIZER_CLASS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#KEY_SERIALIZER_CLASS_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#LINGER_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#MAX_BLOCK_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION	1
+org.apache.kafka.clients.producer.ProducerConfig#MAX_REQUEST_SIZE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#METADATA_MAX_AGE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#METADATA_MAX_IDLE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#METRICS_NUM_SAMPLES_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#METRICS_RECORDING_LEVEL_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#METRICS_SAMPLE_WINDOW_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#METRIC_REPORTER_CLASSES_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG	
+org.apache.kafka.clients.producer.ProducerConfig#PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#PARTITIONER_CLASS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#PARTITIONER_IGNORE_KEYS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#PARTITIONER_RACK_AWARE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig(Map)	14
+org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig(Properties)	13
+org.apache.kafka.clients.producer.ProducerConfig#RECEIVE_BUFFER_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#RECONNECT_BACKOFF_MAX_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#RECONNECT_BACKOFF_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#REQUEST_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#RETRIES_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#RETRY_BACKOFF_MAX_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#RETRY_BACKOFF_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#SECURITY_PROVIDERS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#SEND_BUFFER_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#TRANSACTIONAL_ID_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#TRANSACTIONAL_ID_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#TRANSACTION_TIMEOUT_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#TRANSACTION_TIMEOUT_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#VALUE_SERIALIZER_CLASS_CONFIG	1
+org.apache.kafka.clients.producer.ProducerConfig#VALUE_SERIALIZER_CLASS_DOC	
+org.apache.kafka.clients.producer.ProducerConfig#configDef()	17
+org.apache.kafka.clients.producer.ProducerConfig#configNames()	13
+org.apache.kafka.clients.producer.ProducerConfig#main(String[])	11
+org.apache.kafka.clients.producer.ProducerRecord	206
+org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,K,V)	45
+org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,K,V,Iterable)	55
+org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,Long,K,V)	70
+org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,Long,K,V,Iterable)	80
+org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,K,V)	31
+org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,V)	19
+org.apache.kafka.clients.producer.ProducerRecord#equals(Object)	
+org.apache.kafka.clients.producer.ProducerRecord#hashCode()	
+org.apache.kafka.clients.producer.ProducerRecord#headers()	2
+org.apache.kafka.clients.producer.ProducerRecord#key()	9
+org.apache.kafka.clients.producer.ProducerRecord#partition()	16
+org.apache.kafka.clients.producer.ProducerRecord#timestamp()	8
+org.apache.kafka.clients.producer.ProducerRecord#toString()	
+org.apache.kafka.clients.producer.ProducerRecord#topic()	8
+org.apache.kafka.clients.producer.ProducerRecord#value()	2
+org.apache.kafka.clients.producer.RecordMetadata	12
+org.apache.kafka.clients.producer.RecordMetadata#RecordMetadata(TopicPartition,long,int,long,int,int)	8
+org.apache.kafka.clients.producer.RecordMetadata#UNKNOWN_PARTITION	7
+org.apache.kafka.clients.producer.RecordMetadata#hasOffset()	19
+org.apache.kafka.clients.producer.RecordMetadata#hasTimestamp()	16
+org.apache.kafka.clients.producer.RecordMetadata#offset()	20
+org.apache.kafka.clients.producer.RecordMetadata#partition()	7
+org.apache.kafka.clients.producer.RecordMetadata#serializedKeySize()	18
+org.apache.kafka.clients.producer.RecordMetadata#serializedValueSize()	18
+org.apache.kafka.clients.producer.RecordMetadata#timestamp()	21
+org.apache.kafka.clients.producer.RecordMetadata#toString()	
+org.apache.kafka.clients.producer.RecordMetadata#topic()	7
+org.apache.kafka.common.ClassicGroupState	4
+org.apache.kafka.common.ClassicGroupState#COMPLETING_REBALANCE	
+org.apache.kafka.common.ClassicGroupState#DEAD	
+org.apache.kafka.common.ClassicGroupState#EMPTY	
+org.apache.kafka.common.ClassicGroupState#PREPARING_REBALANCE	
+org.apache.kafka.common.ClassicGroupState#STABLE	
+org.apache.kafka.common.ClassicGroupState#UNKNOWN	
+org.apache.kafka.common.ClassicGroupState#parse(String)	9
+org.apache.kafka.common.ClassicGroupState#toString()	
+org.apache.kafka.common.Cluster	16
+org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set)	29
+org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Node)	29
+org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Set,Node)	29
+org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Set,Node,Map)	30
+org.apache.kafka.common.Cluster#availablePartitionsForTopic(String)	17
+org.apache.kafka.common.Cluster#bootstrap(List)	20
+org.apache.kafka.common.Cluster#clusterResource()	
+org.apache.kafka.common.Cluster#controller()	
+org.apache.kafka.common.Cluster#empty()	12
+org.apache.kafka.common.Cluster#equals(Object)	
+org.apache.kafka.common.Cluster#hashCode()	
+org.apache.kafka.common.Cluster#internalTopics()	
+org.apache.kafka.common.Cluster#invalidTopics()	
+org.apache.kafka.common.Cluster#isBootstrapConfigured()	
+org.apache.kafka.common.Cluster#leaderFor(TopicPartition)	39
+org.apache.kafka.common.Cluster#nodeById(int)	39
+org.apache.kafka.common.Cluster#nodeIfOnline(TopicPartition,int)	24
+org.apache.kafka.common.Cluster#nodes()	5
+org.apache.kafka.common.Cluster#partition(TopicPartition)	30
+org.apache.kafka.common.Cluster#partitionCountForTopic(String)	31
+org.apache.kafka.common.Cluster#partitionsForNode(int)	18
+org.apache.kafka.common.Cluster#partitionsForTopic(String)	16
+org.apache.kafka.common.Cluster#toString()	
+org.apache.kafka.common.Cluster#topicId(String)	
+org.apache.kafka.common.Cluster#topicIds()	
+org.apache.kafka.common.Cluster#topicName(Uuid)	
+org.apache.kafka.common.Cluster#topics()	8
+org.apache.kafka.common.Cluster#unauthorizedTopics()	
+org.apache.kafka.common.Cluster#withPartitions(Map)	9
+org.apache.kafka.common.ClusterResource	9
+org.apache.kafka.common.ClusterResource#ClusterResource(String)	31
+org.apache.kafka.common.ClusterResource#clusterId()	24
+org.apache.kafka.common.ClusterResource#equals(Object)	
+org.apache.kafka.common.ClusterResource#hashCode()	
+org.apache.kafka.common.ClusterResource#toString()	
+org.apache.kafka.common.Configurable	18
+org.apache.kafka.common.Configurable#configure(Map)	9
+org.apache.kafka.common.ElectionType	3
+org.apache.kafka.common.ElectionType#PREFERRED	
+org.apache.kafka.common.ElectionType#UNCLEAN	
+org.apache.kafka.common.ElectionType#value	
+org.apache.kafka.common.ElectionType#valueOf(byte)	
+org.apache.kafka.common.GroupState	58
+org.apache.kafka.common.GroupState#ASSIGNING	
+org.apache.kafka.common.GroupState#COMPLETING_REBALANCE	
+org.apache.kafka.common.GroupState#DEAD	
+org.apache.kafka.common.GroupState#EMPTY	
+org.apache.kafka.common.GroupState#NOT_READY	
+org.apache.kafka.common.GroupState#PREPARING_REBALANCE	
+org.apache.kafka.common.GroupState#RECONCILING	
+org.apache.kafka.common.GroupState#STABLE	
+org.apache.kafka.common.GroupState#UNKNOWN	
+org.apache.kafka.common.GroupState#groupStatesForType(GroupType)	
+org.apache.kafka.common.GroupState#parse(String)	8
+org.apache.kafka.common.GroupState#toString()	
+org.apache.kafka.common.GroupType	
+org.apache.kafka.common.GroupType#CLASSIC	
+org.apache.kafka.common.GroupType#CONSUMER	
+org.apache.kafka.common.GroupType#SHARE	
+org.apache.kafka.common.GroupType#STREAMS	
+org.apache.kafka.common.GroupType#UNKNOWN	
+org.apache.kafka.common.GroupType#parse(String)	13
+org.apache.kafka.common.GroupType#toString()	
+org.apache.kafka.common.IsolationLevel	
+org.apache.kafka.common.IsolationLevel#READ_COMMITTED	
+org.apache.kafka.common.IsolationLevel#READ_UNCOMMITTED	
+org.apache.kafka.common.IsolationLevel#forId(byte)	
+org.apache.kafka.common.IsolationLevel#id()	
+org.apache.kafka.common.IsolationLevel#toString()	
+org.apache.kafka.common.KafkaFuture	53
+org.apache.kafka.common.KafkaFuture#allOf(KafkaFuture[])	38
+org.apache.kafka.common.KafkaFuture#cancel(boolean)	28
+org.apache.kafka.common.KafkaFuture#completedFuture(U)	12
+org.apache.kafka.common.KafkaFuture#get()	13
+org.apache.kafka.common.KafkaFuture#get(long,TimeUnit)	21
+org.apache.kafka.common.KafkaFuture#getNow(T)	16
+org.apache.kafka.common.KafkaFuture#isCancelled()	11
+org.apache.kafka.common.KafkaFuture#isCompletedExceptionally()	10
+org.apache.kafka.common.KafkaFuture#isDone()	12
+org.apache.kafka.common.KafkaFuture#thenApply(BaseFunction)	47
+org.apache.kafka.common.KafkaFuture#toCompletionStage()	110
+org.apache.kafka.common.KafkaFuture#whenComplete(BiConsumer)	155
+org.apache.kafka.common.KafkaFuture$BaseFunction	14
+org.apache.kafka.common.KafkaFuture$BaseFunction#apply(A)	
+org.apache.kafka.common.KafkaFuture$BiConsumer	8
+org.apache.kafka.common.KafkaFuture$BiConsumer#accept(A,B)	
+org.apache.kafka.common.Metric	6
+org.apache.kafka.common.Metric#metricName()	5
+org.apache.kafka.common.Metric#metricValue()	14
+org.apache.kafka.common.MetricName	227
+org.apache.kafka.common.MetricName#MetricName(String,String,String,Map)	42
+org.apache.kafka.common.MetricName#description()	
+org.apache.kafka.common.MetricName#equals(Object)	
+org.apache.kafka.common.MetricName#group()	
+org.apache.kafka.common.MetricName#hashCode()	
+org.apache.kafka.common.MetricName#name()	
+org.apache.kafka.common.MetricName#tags()	
+org.apache.kafka.common.MetricName#toString()	
+org.apache.kafka.common.Node	5
+org.apache.kafka.common.Node#Node(int,String,int)	
+org.apache.kafka.common.Node#Node(int,String,int,String)	
+org.apache.kafka.common.Node#Node(int,String,int,String,boolean)	
+org.apache.kafka.common.Node#equals(Object)	
+org.apache.kafka.common.Node#hasRack()	8
+org.apache.kafka.common.Node#hashCode()	
+org.apache.kafka.common.Node#host()	6
+org.apache.kafka.common.Node#id()	6
+org.apache.kafka.common.Node#idString()	28
+org.apache.kafka.common.Node#isEmpty()	31
+org.apache.kafka.common.Node#isFenced()	27
+org.apache.kafka.common.Node#noNode()	
+org.apache.kafka.common.Node#port()	5
+org.apache.kafka.common.Node#rack()	5
+org.apache.kafka.common.Node#toString()	
+org.apache.kafka.common.PartitionInfo	11
+org.apache.kafka.common.PartitionInfo#PartitionInfo(String,int,Node,Node[],Node[])	
+org.apache.kafka.common.PartitionInfo#PartitionInfo(String,int,Node,Node[],Node[],Node[])	
+org.apache.kafka.common.PartitionInfo#equals(Object)	
+org.apache.kafka.common.PartitionInfo#hashCode()	
+org.apache.kafka.common.PartitionInfo#inSyncReplicas()	28
+org.apache.kafka.common.PartitionInfo#leader()	21
+org.apache.kafka.common.PartitionInfo#offlineReplicas()	8
+org.apache.kafka.common.PartitionInfo#partition()	3
+org.apache.kafka.common.PartitionInfo#replicas()	27
+org.apache.kafka.common.PartitionInfo#toString()	
+org.apache.kafka.common.PartitionInfo#topic()	3
+org.apache.kafka.common.TopicCollection	18
+org.apache.kafka.common.TopicCollection#ofTopicIds(Collection)	8
+org.apache.kafka.common.TopicCollection#ofTopicNames(Collection)	8
+org.apache.kafka.common.TopicCollection$TopicIdCollection	25
+org.apache.kafka.common.TopicCollection$TopicIdCollection#topicIds()	5
+org.apache.kafka.common.TopicCollection$TopicNameCollection	25
+org.apache.kafka.common.TopicCollection$TopicNameCollection#topicNames()	5
+org.apache.kafka.common.TopicIdPartition	28
+org.apache.kafka.common.TopicIdPartition#TopicIdPartition(Uuid,TopicPartition)	15
+org.apache.kafka.common.TopicIdPartition#TopicIdPartition(Uuid,int,String)	21
+org.apache.kafka.common.TopicIdPartition#equals(Object)	
+org.apache.kafka.common.TopicIdPartition#hashCode()	
+org.apache.kafka.common.TopicIdPartition#partition()	3
+org.apache.kafka.common.TopicIdPartition#toString()	
+org.apache.kafka.common.TopicIdPartition#topic()	9
+org.apache.kafka.common.TopicIdPartition#topicId()	7
+org.apache.kafka.common.TopicIdPartition#topicPartition()	5
+org.apache.kafka.common.TopicPartition	6
+org.apache.kafka.common.TopicPartition#TopicPartition(String,int)	
+org.apache.kafka.common.TopicPartition#equals(Object)	
+org.apache.kafka.common.TopicPartition#hashCode()	
+org.apache.kafka.common.TopicPartition#partition()	
+org.apache.kafka.common.TopicPartition#toString()	
+org.apache.kafka.common.TopicPartition#topic()	
+org.apache.kafka.common.TopicPartitionInfo	12
+org.apache.kafka.common.TopicPartitionInfo#TopicPartitionInfo(int,Node,List,List)	
+org.apache.kafka.common.TopicPartitionInfo#TopicPartitionInfo(int,Node,List,List,List,List)	66
+org.apache.kafka.common.TopicPartitionInfo#elr()	17
+org.apache.kafka.common.TopicPartitionInfo#equals(Object)	
+org.apache.kafka.common.TopicPartitionInfo#hashCode()	
+org.apache.kafka.common.TopicPartitionInfo#isr()	17
+org.apache.kafka.common.TopicPartitionInfo#lastKnownElr()	19
+org.apache.kafka.common.TopicPartitionInfo#leader()	12
+org.apache.kafka.common.TopicPartitionInfo#partition()	4
+org.apache.kafka.common.TopicPartitionInfo#replicas()	42
+org.apache.kafka.common.TopicPartitionInfo#toString()	
+org.apache.kafka.common.TopicPartitionReplica	11
+org.apache.kafka.common.TopicPartitionReplica#TopicPartitionReplica(String,int,int)	
+org.apache.kafka.common.TopicPartitionReplica#brokerId()	
+org.apache.kafka.common.TopicPartitionReplica#equals(Object)	
+org.apache.kafka.common.TopicPartitionReplica#hashCode()	
+org.apache.kafka.common.TopicPartitionReplica#partition()	
+org.apache.kafka.common.TopicPartitionReplica#toString()	
+org.apache.kafka.common.TopicPartitionReplica#topic()	
+org.apache.kafka.common.Uuid	65
+org.apache.kafka.common.Uuid#METADATA_TOPIC_ID	17
+org.apache.kafka.common.Uuid#ONE_UUID	11
+org.apache.kafka.common.Uuid#RESERVED	14
+org.apache.kafka.common.Uuid#Uuid(long,long)	27
+org.apache.kafka.common.Uuid#ZERO_UUID	17
+org.apache.kafka.common.Uuid#compareTo(Uuid)	
+org.apache.kafka.common.Uuid#equals(Object)	14
+org.apache.kafka.common.Uuid#fromString(String)	14
+org.apache.kafka.common.Uuid#getLeastSignificantBits()	11
+org.apache.kafka.common.Uuid#getMostSignificantBits()	11
+org.apache.kafka.common.Uuid#hashCode()	7
+org.apache.kafka.common.Uuid#randomUuid()	29
+org.apache.kafka.common.Uuid#toArray(List)	17
+org.apache.kafka.common.Uuid#toList(Uuid[])	17
+org.apache.kafka.common.Uuid#toString()	8
+org.apache.kafka.common.acl.AccessControlEntry	15
+org.apache.kafka.common.acl.AccessControlEntry#AccessControlEntry(String,String,AclOperation,AclPermissionType)	41
+org.apache.kafka.common.acl.AccessControlEntry#equals(Object)	
+org.apache.kafka.common.acl.AccessControlEntry#hashCode()	
+org.apache.kafka.common.acl.AccessControlEntry#host()	8
+org.apache.kafka.common.acl.AccessControlEntry#isUnknown()	9
+org.apache.kafka.common.acl.AccessControlEntry#operation()	10
+org.apache.kafka.common.acl.AccessControlEntry#permissionType()	10
+org.apache.kafka.common.acl.AccessControlEntry#principal()	6
+org.apache.kafka.common.acl.AccessControlEntry#toFilter()	8
+org.apache.kafka.common.acl.AccessControlEntry#toString()	
+org.apache.kafka.common.acl.AccessControlEntryFilter	8
+org.apache.kafka.common.acl.AccessControlEntryFilter#ANY	5
+org.apache.kafka.common.acl.AccessControlEntryFilter#AccessControlEntryFilter(String,String,AclOperation,AclPermissionType)	32
+org.apache.kafka.common.acl.AccessControlEntryFilter#equals(Object)	
+org.apache.kafka.common.acl.AccessControlEntryFilter#findIndefiniteField()	17
+org.apache.kafka.common.acl.AccessControlEntryFilter#hashCode()	
+org.apache.kafka.common.acl.AccessControlEntryFilter#host()	11
+org.apache.kafka.common.acl.AccessControlEntryFilter#isUnknown()	8
+org.apache.kafka.common.acl.AccessControlEntryFilter#matches(AccessControlEntry)	9
+org.apache.kafka.common.acl.AccessControlEntryFilter#matchesAtMostOne()	21
+org.apache.kafka.common.acl.AccessControlEntryFilter#operation()	3
+org.apache.kafka.common.acl.AccessControlEntryFilter#permissionType()	3
+org.apache.kafka.common.acl.AccessControlEntryFilter#principal()	5
+org.apache.kafka.common.acl.AccessControlEntryFilter#toString()	
+org.apache.kafka.common.acl.AclBinding	12
+org.apache.kafka.common.acl.AclBinding#AclBinding(ResourcePattern,AccessControlEntry)	19
+org.apache.kafka.common.acl.AclBinding#entry()	7
+org.apache.kafka.common.acl.AclBinding#equals(Object)	
+org.apache.kafka.common.acl.AclBinding#hashCode()	
+org.apache.kafka.common.acl.AclBinding#isUnknown()	8
+org.apache.kafka.common.acl.AclBinding#pattern()	6
+org.apache.kafka.common.acl.AclBinding#toFilter()	8
+org.apache.kafka.common.acl.AclBinding#toString()	
+org.apache.kafka.common.acl.AclBindingFilter	7
+org.apache.kafka.common.acl.AclBindingFilter#ANY	7
+org.apache.kafka.common.acl.AclBindingFilter#AclBindingFilter(ResourcePatternFilter,AccessControlEntryFilter)	22
+org.apache.kafka.common.acl.AclBindingFilter#entryFilter()	5
+org.apache.kafka.common.acl.AclBindingFilter#equals(Object)	
+org.apache.kafka.common.acl.AclBindingFilter#findIndefiniteField()	17
+org.apache.kafka.common.acl.AclBindingFilter#hashCode()	
+org.apache.kafka.common.acl.AclBindingFilter#isUnknown()	8
+org.apache.kafka.common.acl.AclBindingFilter#matches(AclBinding)	19
+org.apache.kafka.common.acl.AclBindingFilter#matchesAtMostOne()	24
+org.apache.kafka.common.acl.AclBindingFilter#patternFilter()	4
+org.apache.kafka.common.acl.AclBindingFilter#toString()	
+org.apache.kafka.common.acl.AclOperation	40
+org.apache.kafka.common.acl.AclOperation#ALL	2
+org.apache.kafka.common.acl.AclOperation#ALTER	2
+org.apache.kafka.common.acl.AclOperation#ALTER_CONFIGS	2
+org.apache.kafka.common.acl.AclOperation#ANY	6
+org.apache.kafka.common.acl.AclOperation#CLUSTER_ACTION	2
+org.apache.kafka.common.acl.AclOperation#CREATE	2
+org.apache.kafka.common.acl.AclOperation#CREATE_TOKENS	2
+org.apache.kafka.common.acl.AclOperation#DELETE	2
+org.apache.kafka.common.acl.AclOperation#DESCRIBE	2
+org.apache.kafka.common.acl.AclOperation#DESCRIBE_CONFIGS	2
+org.apache.kafka.common.acl.AclOperation#DESCRIBE_TOKENS	2
+org.apache.kafka.common.acl.AclOperation#IDEMPOTENT_WRITE	2
+org.apache.kafka.common.acl.AclOperation#READ	2
+org.apache.kafka.common.acl.AclOperation#TWO_PHASE_COMMIT	2
+org.apache.kafka.common.acl.AclOperation#UNKNOWN	15
+org.apache.kafka.common.acl.AclOperation#WRITE	2
+org.apache.kafka.common.acl.AclOperation#code()	6
+org.apache.kafka.common.acl.AclOperation#fromCode(byte)	14
+org.apache.kafka.common.acl.AclOperation#fromString(String)	24
+org.apache.kafka.common.acl.AclOperation#isUnknown()	7
+org.apache.kafka.common.acl.AclPermissionType	8
+org.apache.kafka.common.acl.AclPermissionType#ALLOW	2
+org.apache.kafka.common.acl.AclPermissionType#ANY	6
+org.apache.kafka.common.acl.AclPermissionType#DENY	2
+org.apache.kafka.common.acl.AclPermissionType#UNKNOWN	15
+org.apache.kafka.common.acl.AclPermissionType#code()	7
+org.apache.kafka.common.acl.AclPermissionType#fromCode(byte)	14
+org.apache.kafka.common.acl.AclPermissionType#fromString(String)	24
+org.apache.kafka.common.acl.AclPermissionType#isUnknown()	8
+org.apache.kafka.common.config.ConfigResource	7
+org.apache.kafka.common.config.ConfigResource#ConfigResource(Type,String)	22
+org.apache.kafka.common.config.ConfigResource#equals(Object)	
+org.apache.kafka.common.config.ConfigResource#hashCode()	
+org.apache.kafka.common.config.ConfigResource#isDefault()	20
+org.apache.kafka.common.config.ConfigResource#name()	4
+org.apache.kafka.common.config.ConfigResource#toString()	
+org.apache.kafka.common.config.ConfigResource#type()	4
+org.apache.kafka.common.config.ConfigResource$Type	3
+org.apache.kafka.common.config.ConfigResource$Type#BROKER	
+org.apache.kafka.common.config.ConfigResource$Type#BROKER_LOGGER	
+org.apache.kafka.common.config.ConfigResource$Type#CLIENT_METRICS	
+org.apache.kafka.common.config.ConfigResource$Type#GROUP	
+org.apache.kafka.common.config.ConfigResource$Type#TOPIC	
+org.apache.kafka.common.config.ConfigResource$Type#UNKNOWN	
+org.apache.kafka.common.config.ConfigResource$Type#forId(byte)	
+org.apache.kafka.common.config.ConfigResource$Type#id()	
+org.apache.kafka.common.config.LogLevelConfig	20
+org.apache.kafka.common.config.LogLevelConfig#DEBUG_LOG_LEVEL	15
+org.apache.kafka.common.config.LogLevelConfig#ERROR_LOG_LEVEL	15
+org.apache.kafka.common.config.LogLevelConfig#FATAL_LOG_LEVEL	16
+org.apache.kafka.common.config.LogLevelConfig#INFO_LOG_LEVEL	16
+org.apache.kafka.common.config.LogLevelConfig#TRACE_LOG_LEVEL	12
+org.apache.kafka.common.config.LogLevelConfig#VALID_LOG_LEVELS	
+org.apache.kafka.common.config.LogLevelConfig#WARN_LOG_LEVEL	7
+org.apache.kafka.common.config.SaslConfigs	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_KERBEROS_KINIT_CMD	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_KERBEROS_TICKET_RENEW_JITTER	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_KERBEROS_TICKET_RENEW_WINDOW_FACTOR	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_LOGIN_REFRESH_BUFFER_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_LOGIN_REFRESH_WINDOW_JITTER	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_MECHANISM	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_ASSERTION_ALGORITHM	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_SCOPE_CLAIM_NAME	
+org.apache.kafka.common.config.SaslConfigs#DEFAULT_SASL_OAUTHBEARER_SUB_CLAIM_NAME	
+org.apache.kafka.common.config.SaslConfigs#GSSAPI_MECHANISM	
+org.apache.kafka.common.config.SaslConfigs#SASL_CLIENT_CALLBACK_HANDLER_CLASS	
+org.apache.kafka.common.config.SaslConfigs#SASL_CLIENT_CALLBACK_HANDLER_CLASS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_JAAS_CONFIG	
+org.apache.kafka.common.config.SaslConfigs#SASL_JAAS_CONFIG_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_KINIT_CMD	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_KINIT_CMD_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_SERVICE_NAME	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_SERVICE_NAME_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_TICKET_RENEW_JITTER	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_TICKET_RENEW_JITTER_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_TICKET_RENEW_WINDOW_FACTOR	
+org.apache.kafka.common.config.SaslConfigs#SASL_KERBEROS_TICKET_RENEW_WINDOW_FACTOR_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_CALLBACK_HANDLER_CLASS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_CALLBACK_HANDLER_CLASS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_CLASS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_CLASS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_CONNECT_TIMEOUT_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_CONNECT_TIMEOUT_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_READ_TIMEOUT_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_READ_TIMEOUT_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_BUFFER_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_WINDOW_FACTOR	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_WINDOW_FACTOR_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_WINDOW_JITTER	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_REFRESH_WINDOW_JITTER_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_RETRY_BACKOFF_MAX_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_RETRY_BACKOFF_MAX_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_RETRY_BACKOFF_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_LOGIN_RETRY_BACKOFF_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_MECHANISM	9
+org.apache.kafka.common.config.SaslConfigs#SASL_MECHANISM_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ALLOW_UNVERIFIED_AUDIENCE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ALLOW_UNVERIFIED_AUDIENCE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ALLOW_UNVERIFIED_ISSUER	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ALLOW_UNVERIFIED_ISSUER_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_ALGORITHM	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_ALGORITHM_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_AUD	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_AUD_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_ISS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_ISS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_SUB	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_CLAIM_SUB_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_FILE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_FILE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_EXPECTED_AUDIENCE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_EXPECTED_AUDIENCE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_EXPECTED_ISSUER	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_EXPECTED_ISSUER_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_HEADER_URLENCODE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_HEADER_URLENCODE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_URL	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWKS_ENDPOINT_URL_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SCOPE	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SCOPE_CLAIM_NAME	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SCOPE_CLAIM_NAME_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SCOPE_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SUB_CLAIM_NAME	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SUB_CLAIM_NAME_DOC	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL	
+org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL_DOC	
+org.apache.kafka.common.config.SaslConfigs#addClientSaslSupport(ConfigDef)	
+org.apache.kafka.common.config.SecurityConfig	9
+org.apache.kafka.common.config.SecurityConfig#SECURITY_PROVIDERS_CONFIG	
+org.apache.kafka.common.config.SecurityConfig#SECURITY_PROVIDERS_DOC	
+org.apache.kafka.common.config.SslClientAuth	10
+org.apache.kafka.common.config.SslClientAuth#NONE	
+org.apache.kafka.common.config.SslClientAuth#REQUESTED	
+org.apache.kafka.common.config.SslClientAuth#REQUIRED	
+org.apache.kafka.common.config.SslClientAuth#VALUES	
+org.apache.kafka.common.config.SslClientAuth#forConfig(String)	
+org.apache.kafka.common.config.SslClientAuth#toString()	
+org.apache.kafka.common.config.SslConfigs	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_ENABLED_PROTOCOLS	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_KEYMANGER_ALGORITHM	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_KEYSTORE_TYPE	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_PROTOCOL	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_TRUSTMANAGER_ALGORITHM	
+org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_TRUSTSTORE_TYPE	
+org.apache.kafka.common.config.SslConfigs#NON_RECONFIGURABLE_CONFIGS	
+org.apache.kafka.common.config.SslConfigs#RECONFIGURABLE_CONFIGS	
+org.apache.kafka.common.config.SslConfigs#SSL_CIPHER_SUITES_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_CIPHER_SUITES_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_ENABLED_PROTOCOLS_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_ENABLED_PROTOCOLS_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_ENGINE_FACTORY_CLASS_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_ENGINE_FACTORY_CLASS_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYMANAGER_ALGORITHM_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYMANAGER_ALGORITHM_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_CERTIFICATE_CHAIN_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_KEY_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_KEY_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_LOCATION_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_LOCATION_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_PASSWORD_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_PASSWORD_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_TYPE_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_TYPE_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_KEY_PASSWORD_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_KEY_PASSWORD_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_PROTOCOL_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_PROTOCOL_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_PROVIDER_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_PROVIDER_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_SECURE_RANDOM_IMPLEMENTATION_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTMANAGER_ALGORITHM_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTMANAGER_ALGORITHM_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_CERTIFICATES_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_CERTIFICATES_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_LOCATION_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_LOCATION_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_PASSWORD_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_PASSWORD_DOC	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_TYPE_CONFIG	
+org.apache.kafka.common.config.SslConfigs#SSL_TRUSTSTORE_TYPE_DOC	
+org.apache.kafka.common.config.SslConfigs#addClientSslSupport(ConfigDef)	
+org.apache.kafka.common.config.TopicConfig	61
+org.apache.kafka.common.config.TopicConfig#CLEANUP_POLICY_COMPACT	
+org.apache.kafka.common.config.TopicConfig#CLEANUP_POLICY_CONFIG	
+org.apache.kafka.common.config.TopicConfig#CLEANUP_POLICY_DELETE	
+org.apache.kafka.common.config.TopicConfig#CLEANUP_POLICY_DOC	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_GZIP_LEVEL_CONFIG	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_GZIP_LEVEL_DOC	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_LZ4_LEVEL_CONFIG	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_LZ4_LEVEL_DOC	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_TYPE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_TYPE_DOC	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_ZSTD_LEVEL_CONFIG	
+org.apache.kafka.common.config.TopicConfig#COMPRESSION_ZSTD_LEVEL_DOC	
+org.apache.kafka.common.config.TopicConfig#DELETE_RETENTION_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#DELETE_RETENTION_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_DOC	
+org.apache.kafka.common.config.TopicConfig#FILE_DELETE_DELAY_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#FILE_DELETE_DELAY_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#FLUSH_MESSAGES_INTERVAL_CONFIG	
+org.apache.kafka.common.config.TopicConfig#FLUSH_MESSAGES_INTERVAL_DOC	
+org.apache.kafka.common.config.TopicConfig#FLUSH_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#FLUSH_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#INDEX_INTERVAL_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#INDEX_INTERVAL_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#LOCAL_LOG_RETENTION_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#LOCAL_LOG_RETENTION_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#LOCAL_LOG_RETENTION_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#LOCAL_LOG_RETENTION_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#MAX_COMPACTION_LAG_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MAX_COMPACTION_LAG_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#MAX_DECOMPRESSED_MESSAGE_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MAX_DECOMPRESSED_MESSAGE_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#MAX_MESSAGE_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MAX_MESSAGE_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#MESSAGE_DOWNCONVERSION_ENABLE_CONFIG	0
+org.apache.kafka.common.config.TopicConfig#MESSAGE_DOWNCONVERSION_ENABLE_DOC	0
+org.apache.kafka.common.config.TopicConfig#MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MESSAGE_TIMESTAMP_AFTER_MAX_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MESSAGE_TIMESTAMP_BEFORE_MAX_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#MESSAGE_TIMESTAMP_TYPE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MESSAGE_TIMESTAMP_TYPE_DOC	
+org.apache.kafka.common.config.TopicConfig#MIN_CLEANABLE_DIRTY_RATIO_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MIN_CLEANABLE_DIRTY_RATIO_DOC	
+org.apache.kafka.common.config.TopicConfig#MIN_COMPACTION_LAG_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MIN_COMPACTION_LAG_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#MIN_IN_SYNC_REPLICAS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#MIN_IN_SYNC_REPLICAS_DOC	
+org.apache.kafka.common.config.TopicConfig#PREALLOCATE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#PREALLOCATE_DOC	
+org.apache.kafka.common.config.TopicConfig#REMOTE_COPY_LAG_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#REMOTE_COPY_LAG_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#REMOTE_COPY_LAG_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#REMOTE_COPY_LAG_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#REMOTE_LOG_COPY_DISABLE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#REMOTE_LOG_COPY_DISABLE_DOC	
+org.apache.kafka.common.config.TopicConfig#REMOTE_LOG_DELETE_ON_DISABLE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#REMOTE_LOG_DELETE_ON_DISABLE_DOC	
+org.apache.kafka.common.config.TopicConfig#REMOTE_LOG_STORAGE_ENABLE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#REMOTE_LOG_STORAGE_ENABLE_DOC	
+org.apache.kafka.common.config.TopicConfig#RETENTION_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#RETENTION_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#RETENTION_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#RETENTION_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_INDEX_BYTES_CONFIG	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_INDEX_BYTES_DOC	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_JITTER_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_JITTER_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_MS_CONFIG	
+org.apache.kafka.common.config.TopicConfig#SEGMENT_MS_DOC	
+org.apache.kafka.common.config.TopicConfig#UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG	
+org.apache.kafka.common.config.TopicConfig#UNCLEAN_LEADER_ELECTION_ENABLE_DOC	
+org.apache.kafka.common.header.Header	7
+org.apache.kafka.common.header.Header#key()	14
+org.apache.kafka.common.header.Header#value()	13
+org.apache.kafka.common.header.Headers	28
+org.apache.kafka.common.header.Headers#add(Header)	40
+org.apache.kafka.common.header.Headers#add(String,byte[])	55
+org.apache.kafka.common.header.Headers#headers(String)	55
+org.apache.kafka.common.header.Headers#lastHeader(String)	36
+org.apache.kafka.common.header.Headers#remove(String)	52
+org.apache.kafka.common.header.Headers#toArray()	36
+org.apache.kafka.common.metrics.KafkaMetric	
+org.apache.kafka.common.metrics.KafkaMetric#KafkaMetric(Object,MetricName,MetricValueProvider,MetricConfig,Time)	48
+org.apache.kafka.common.metrics.KafkaMetric#config()	21
+org.apache.kafka.common.metrics.KafkaMetric#config(MetricConfig)	18
+org.apache.kafka.common.metrics.KafkaMetric#isMeasurable()	24
+org.apache.kafka.common.metrics.KafkaMetric#measurable()	23
+org.apache.kafka.common.metrics.KafkaMetric#metricName()	10
+org.apache.kafka.common.metrics.KafkaMetric#metricValue()	13
+org.apache.kafka.common.metrics.KafkaMetric#toString()	48
+org.apache.kafka.common.quota.ClientQuotaAlteration	12
+org.apache.kafka.common.quota.ClientQuotaAlteration#ClientQuotaAlteration(ClientQuotaEntity,Collection)	13
+org.apache.kafka.common.quota.ClientQuotaAlteration#entity()	7
+org.apache.kafka.common.quota.ClientQuotaAlteration#ops()	4
+org.apache.kafka.common.quota.ClientQuotaAlteration#toString()	
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op	
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op#Op(String,Double)	23
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op#equals(Object)	
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op#hashCode()	
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op#key()	5
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op#toString()	
+org.apache.kafka.common.quota.ClientQuotaAlteration$Op#value()	16
+org.apache.kafka.common.quota.ClientQuotaEntity	15
+org.apache.kafka.common.quota.ClientQuotaEntity#CLIENT_ID	
+org.apache.kafka.common.quota.ClientQuotaEntity#ClientQuotaEntity(Map)	33
+org.apache.kafka.common.quota.ClientQuotaEntity#IP	
+org.apache.kafka.common.quota.ClientQuotaEntity#USER	6
+org.apache.kafka.common.quota.ClientQuotaEntity#entries()	7
+org.apache.kafka.common.quota.ClientQuotaEntity#equals(Object)	
+org.apache.kafka.common.quota.ClientQuotaEntity#hashCode()	
+org.apache.kafka.common.quota.ClientQuotaEntity#isValidEntityType(String)	
+org.apache.kafka.common.quota.ClientQuotaEntity#toString()	
+org.apache.kafka.common.quota.ClientQuotaFilter	6
+org.apache.kafka.common.quota.ClientQuotaFilter#all()	11
+org.apache.kafka.common.quota.ClientQuotaFilter#components()	4
+org.apache.kafka.common.quota.ClientQuotaFilter#contains(Collection)	36
+org.apache.kafka.common.quota.ClientQuotaFilter#containsOnly(Collection)	36
+org.apache.kafka.common.quota.ClientQuotaFilter#equals(Object)	
+org.apache.kafka.common.quota.ClientQuotaFilter#hashCode()	
+org.apache.kafka.common.quota.ClientQuotaFilter#strict()	11
+org.apache.kafka.common.quota.ClientQuotaFilter#toString()	
+org.apache.kafka.common.quota.ClientQuotaFilterComponent	9
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#entityType()	5
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#equals(Object)	
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#hashCode()	
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#match()	25
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofDefaultEntity(String)	27
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofEntity(String,String)	34
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofEntityType(String)	24
+org.apache.kafka.common.quota.ClientQuotaFilterComponent#toString()	
+org.apache.kafka.common.record.TimestampType	6
+org.apache.kafka.common.record.TimestampType#CREATE_TIME	
+org.apache.kafka.common.record.TimestampType#LOG_APPEND_TIME	
+org.apache.kafka.common.record.TimestampType#NO_TIMESTAMP_TYPE	
+org.apache.kafka.common.record.TimestampType#forName(String)	
+org.apache.kafka.common.record.TimestampType#id	
+org.apache.kafka.common.record.TimestampType#name	
+org.apache.kafka.common.record.TimestampType#toString()	
+org.apache.kafka.common.resource.PatternType	3
+org.apache.kafka.common.resource.PatternType#ANY	8
+org.apache.kafka.common.resource.PatternType#LITERAL	40
+org.apache.kafka.common.resource.PatternType#MATCH	67
+org.apache.kafka.common.resource.PatternType#PREFIXED	22
+org.apache.kafka.common.resource.PatternType#UNKNOWN	15
+org.apache.kafka.common.resource.PatternType#code()	5
+org.apache.kafka.common.resource.PatternType#fromCode(byte)	14
+org.apache.kafka.common.resource.PatternType#fromString(String)	14
+org.apache.kafka.common.resource.PatternType#isSpecific()	18
+org.apache.kafka.common.resource.PatternType#isUnknown()	7
+org.apache.kafka.common.resource.ResourcePattern	14
+org.apache.kafka.common.resource.ResourcePattern#ResourcePattern(ResourceType,String,PatternType)	39
+org.apache.kafka.common.resource.ResourcePattern#WILDCARD_RESOURCE	14
+org.apache.kafka.common.resource.ResourcePattern#equals(Object)	
+org.apache.kafka.common.resource.ResourcePattern#hashCode()	
+org.apache.kafka.common.resource.ResourcePattern#isUnknown()	8
+org.apache.kafka.common.resource.ResourcePattern#name()	3
+org.apache.kafka.common.resource.ResourcePattern#patternType()	4
+org.apache.kafka.common.resource.ResourcePattern#resourceType()	7
+org.apache.kafka.common.resource.ResourcePattern#toFilter()	7
+org.apache.kafka.common.resource.ResourcePattern#toString()	
+org.apache.kafka.common.resource.ResourcePatternFilter	7
+org.apache.kafka.common.resource.ResourcePatternFilter#ANY	4
+org.apache.kafka.common.resource.ResourcePatternFilter#ResourcePatternFilter(ResourceType,String,PatternType)	114
+org.apache.kafka.common.resource.ResourcePatternFilter#equals(Object)	
+org.apache.kafka.common.resource.ResourcePatternFilter#findIndefiniteField()	16
+org.apache.kafka.common.resource.ResourcePatternFilter#hashCode()	
+org.apache.kafka.common.resource.ResourcePatternFilter#isUnknown()	8
+org.apache.kafka.common.resource.ResourcePatternFilter#matches(ResourcePattern)	8
+org.apache.kafka.common.resource.ResourcePatternFilter#matchesAtMostOne()	20
+org.apache.kafka.common.resource.ResourcePatternFilter#name()	3
+org.apache.kafka.common.resource.ResourcePatternFilter#patternType()	4
+org.apache.kafka.common.resource.ResourcePatternFilter#resourceType()	7
+org.apache.kafka.common.resource.ResourcePatternFilter#toString()	
+org.apache.kafka.common.resource.ResourceType	12
+org.apache.kafka.common.resource.ResourceType#ANY	6
+org.apache.kafka.common.resource.ResourceType#CLUSTER	5
+org.apache.kafka.common.resource.ResourceType#DELEGATION_TOKEN	3
+org.apache.kafka.common.resource.ResourceType#GROUP	3
+org.apache.kafka.common.resource.ResourceType#TOPIC	3
+org.apache.kafka.common.resource.ResourceType#TRANSACTIONAL_ID	3
+org.apache.kafka.common.resource.ResourceType#UNKNOWN	15
+org.apache.kafka.common.resource.ResourceType#USER	3
+org.apache.kafka.common.resource.ResourceType#code()	6
+org.apache.kafka.common.resource.ResourceType#fromCode(byte)	14
+org.apache.kafka.common.resource.ResourceType#fromString(String)	25
+org.apache.kafka.common.resource.ResourceType#isUnknown()	7
+org.apache.kafka.common.security.auth.KafkaPrincipal	212
+org.apache.kafka.common.security.auth.KafkaPrincipal#ANONYMOUS	
+org.apache.kafka.common.security.auth.KafkaPrincipal#KafkaPrincipal(String,String)	
+org.apache.kafka.common.security.auth.KafkaPrincipal#KafkaPrincipal(String,String,boolean)	
+org.apache.kafka.common.security.auth.KafkaPrincipal#USER_TYPE	
+org.apache.kafka.common.security.auth.KafkaPrincipal#equals(Object)	
+org.apache.kafka.common.security.auth.KafkaPrincipal#getName()	
+org.apache.kafka.common.security.auth.KafkaPrincipal#getPrincipalType()	
+org.apache.kafka.common.security.auth.KafkaPrincipal#hashCode()	
+org.apache.kafka.common.security.auth.KafkaPrincipal#toString()	
+org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated()	
+org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated(boolean)	
+org.apache.kafka.common.security.auth.SecurityProtocol	
+org.apache.kafka.common.security.auth.SecurityProtocol#PLAINTEXT	5
+org.apache.kafka.common.security.auth.SecurityProtocol#SASL_PLAINTEXT	5
+org.apache.kafka.common.security.auth.SecurityProtocol#SASL_SSL	4
+org.apache.kafka.common.security.auth.SecurityProtocol#SSL	2
+org.apache.kafka.common.security.auth.SecurityProtocol#forId(short)	
+org.apache.kafka.common.security.auth.SecurityProtocol#forName(String)	6
+org.apache.kafka.common.security.auth.SecurityProtocol#id	19
+org.apache.kafka.common.security.auth.SecurityProtocol#name	12
+org.apache.kafka.common.security.auth.SecurityProtocol#names()	
+org.apache.kafka.common.security.token.delegation.DelegationToken	6
+org.apache.kafka.common.security.token.delegation.DelegationToken#DelegationToken(TokenInformation,byte[])	
+org.apache.kafka.common.security.token.delegation.DelegationToken#equals(Object)	
+org.apache.kafka.common.security.token.delegation.DelegationToken#hashCode()	
+org.apache.kafka.common.security.token.delegation.DelegationToken#hmac()	
+org.apache.kafka.common.security.token.delegation.DelegationToken#hmacAsBase64String()	
+org.apache.kafka.common.security.token.delegation.DelegationToken#toString()	
+org.apache.kafka.common.security.token.delegation.DelegationToken#tokenInfo()	
+org.apache.kafka.common.security.token.delegation.TokenInformation	7
+org.apache.kafka.common.security.token.delegation.TokenInformation#TokenInformation(String,KafkaPrincipal,Collection,long,long,long)	
+org.apache.kafka.common.security.token.delegation.TokenInformation#TokenInformation(String,KafkaPrincipal,KafkaPrincipal,Collection,long,long,long)	
+org.apache.kafka.common.security.token.delegation.TokenInformation#equals(Object)	
+org.apache.kafka.common.security.token.delegation.TokenInformation#expiryTimestamp()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#fromRecord(String,KafkaPrincipal,KafkaPrincipal,Collection,long,long,long)	
+org.apache.kafka.common.security.token.delegation.TokenInformation#hashCode()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#issueTimestamp()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#maxTimestamp()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#owner()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#ownerAsString()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#ownerOrRenewer(KafkaPrincipal)	
+org.apache.kafka.common.security.token.delegation.TokenInformation#renewers()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#renewersAsString()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#setExpiryTimestamp(long)	
+org.apache.kafka.common.security.token.delegation.TokenInformation#toString()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#tokenId()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#tokenRequester()	
+org.apache.kafka.common.security.token.delegation.TokenInformation#tokenRequesterAsString()	
+org.apache.kafka.common.serialization.BooleanDeserializer	
+org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.BooleanSerializer	
+org.apache.kafka.common.serialization.BooleanSerializer#serialize(String,Boolean)	34
+org.apache.kafka.common.serialization.ByteArrayDeserializer	
+org.apache.kafka.common.serialization.ByteArrayDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.ByteArraySerializer	
+org.apache.kafka.common.serialization.ByteArraySerializer#serialize(String,byte[])	34
+org.apache.kafka.common.serialization.BytesDeserializer	
+org.apache.kafka.common.serialization.BytesDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.BytesSerializer	
+org.apache.kafka.common.serialization.BytesSerializer#serialize(String,Bytes)	34
+org.apache.kafka.common.serialization.Deserializer	82
+org.apache.kafka.common.serialization.Deserializer#close()	15
+org.apache.kafka.common.serialization.Deserializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,byte[])	96
+org.apache.kafka.common.serialization.Deserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.DoubleDeserializer	
+org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.DoubleSerializer	
+org.apache.kafka.common.serialization.DoubleSerializer#serialize(String,Double)	34
+org.apache.kafka.common.serialization.FloatDeserializer	
+org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.FloatSerializer	
+org.apache.kafka.common.serialization.FloatSerializer#serialize(String,Float)	34
+org.apache.kafka.common.serialization.IntegerDeserializer	
+org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.IntegerSerializer	
+org.apache.kafka.common.serialization.IntegerSerializer#serialize(String,Integer)	34
+org.apache.kafka.common.serialization.ListDeserializer	
+org.apache.kafka.common.serialization.ListDeserializer#ListDeserializer()	
+org.apache.kafka.common.serialization.ListDeserializer#ListDeserializer(Class,Deserializer)	
+org.apache.kafka.common.serialization.ListDeserializer#close()	15
+org.apache.kafka.common.serialization.ListDeserializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.ListDeserializer#deserialize(String,Headers,byte[])	96
+org.apache.kafka.common.serialization.ListDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.ListDeserializer#innerDeserializer()	
+org.apache.kafka.common.serialization.ListSerializer	
+org.apache.kafka.common.serialization.ListSerializer#ListSerializer()	
+org.apache.kafka.common.serialization.ListSerializer#ListSerializer(Serializer)	
+org.apache.kafka.common.serialization.ListSerializer#close()	15
+org.apache.kafka.common.serialization.ListSerializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.ListSerializer#getInnerSerializer()	
+org.apache.kafka.common.serialization.ListSerializer#serialize(String,Headers,List)	86
+org.apache.kafka.common.serialization.ListSerializer#serialize(String,List)	34
+org.apache.kafka.common.serialization.LongDeserializer	
+org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.LongSerializer	
+org.apache.kafka.common.serialization.LongSerializer#serialize(String,Long)	34
+org.apache.kafka.common.serialization.Serializer	82
+org.apache.kafka.common.serialization.Serializer#close()	15
+org.apache.kafka.common.serialization.Serializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.Serializer#serialize(String,Headers,T)	86
+org.apache.kafka.common.serialization.Serializer#serialize(String,T)	34
+org.apache.kafka.common.serialization.ShortDeserializer	
+org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.ShortSerializer	
+org.apache.kafka.common.serialization.ShortSerializer#serialize(String,Short)	34
+org.apache.kafka.common.serialization.StringDeserializer	30
+org.apache.kafka.common.serialization.StringDeserializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.StringSerializer	30
+org.apache.kafka.common.serialization.StringSerializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.StringSerializer#serialize(String,String)	34
+org.apache.kafka.common.serialization.UUIDDeserializer	42
+org.apache.kafka.common.serialization.UUIDDeserializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.UUIDSerializer	38
+org.apache.kafka.common.serialization.UUIDSerializer#configure(Map,boolean)	21
+org.apache.kafka.common.serialization.UUIDSerializer#serialize(String,UUID)	34
+org.apache.kafka.common.serialization.VoidDeserializer	
+org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,Headers,ByteBuffer)	146
+org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,byte[])	44
+org.apache.kafka.common.serialization.VoidSerializer	
+org.apache.kafka.common.serialization.VoidSerializer#serialize(String,Void)	34
+org.apache.kafka.common.utils.Bytes	55
+org.apache.kafka.common.utils.Bytes#BYTES_LEXICO_COMPARATOR	8
+org.apache.kafka.common.utils.Bytes#Bytes(byte[])	22
+org.apache.kafka.common.utils.Bytes#EMPTY	
+org.apache.kafka.common.utils.Bytes#compareTo(Bytes)	
+org.apache.kafka.common.utils.Bytes#equals(Object)	
+org.apache.kafka.common.utils.Bytes#get()	10
+org.apache.kafka.common.utils.Bytes#hashCode()	26
+org.apache.kafka.common.utils.Bytes#increment(Bytes)	33
+org.apache.kafka.common.utils.Bytes#toString()	
+org.apache.kafka.common.utils.Bytes#wrap(byte[])	38

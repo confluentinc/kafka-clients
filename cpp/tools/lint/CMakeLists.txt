@@ -47,7 +47,8 @@ set_target_properties(ck_java_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # cpp/CLAUDE.md as code: names, the §5 type table, the scope, the expected
 # shape of a Java class, the data files. Plain C++, no ANTLR, no LLVM.
 add_library(ck_rules STATIC
-    rules/cpp_type.cpp rules/names.cpp rules/types.cpp rules/data_files.cpp rules/scope.cpp rules/expected.cpp)
+    rules/cpp_type.cpp rules/names.cpp rules/types.cpp rules/data_files.cpp rules/scope.cpp rules/expected.cpp
+    rules/javadoc.cpp rules/doxygen.cpp)
 target_include_directories(ck_rules PUBLIC rules)
 target_link_libraries(ck_rules PUBLIC ck_java_model)
 target_compile_options(ck_rules PRIVATE ${CK_LINT_WARNINGS})
@@ -88,13 +89,15 @@ set(CK_LINT_FFI_INCLUDE_DIR "${_ck_lint_ffi_default}" CACHE PATH "The directory 
 
 add_library(ConfluentKafkaTidy MODULE
     tidy/module.cpp tidy/session.cpp tidy/class_checks.cpp tidy/header_check.cpp tidy/type_reader.cpp
-    tidy/pairing.cpp tidy/member_checks.cpp)
+    tidy/pairing.cpp tidy/member_checks.cpp tidy/doc_check.cpp tidy/abi_check.cpp
+    tidy/public_decls.cpp tidy/inventory.cpp)
 target_include_directories(ConfluentKafkaTidy SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 separate_arguments(_ck_llvm_definitions NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 target_compile_definitions(ConfluentKafkaTidy PRIVATE
     CK_LINT_KAFKA_JAVA_ROOT="${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java"
     CK_LINT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
-    CK_LINT_INCLUDE_ROOT="${CK_LINT_INCLUDE_ROOT}")
+    CK_LINT_INCLUDE_ROOT="${CK_LINT_INCLUDE_ROOT}"
+    CK_LINT_LEDGER="${CMAKE_CURRENT_SOURCE_DIR}/../../design/current/doc-contract-changes.md")
 target_compile_options(ConfluentKafkaTidy PRIVATE ${_ck_llvm_definitions} ${CK_LINT_WARNINGS})
 if(NOT LLVM_ENABLE_RTTI)
     target_compile_options(ConfluentKafkaTidy PRIVATE -fno-rtti)
@@ -123,7 +126,8 @@ if(BUILD_TESTING)
         target_compile_definitions(${name} PRIVATE
             CK_LINT_KAFKA_JAVA_ROOT="${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java"
             CK_LINT_DESIGN_DIR="${CK_LINT_DESIGN_DIR}"
-            CK_LINT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+            CK_LINT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+            CK_LINT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
     endfunction()
 
     # The model on small sources.
@@ -138,6 +142,34 @@ if(BUILD_TESTING)
     ck_lint_test(javamodel_kafka_test)
     add_test(NAME javamodel_kafka_test COMMAND javamodel_kafka_test)
 
+    # make -C cpp abi-check (cpp/CLAUDE.md §12.4) against HEAD: compatible
+    # changes pass, breaking ones fail. Needs git, g++ and abidiff.
+    add_test(NAME abi_check
+        COMMAND ${CMAKE_COMMAND}
+                -DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/../../..
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/abi_check_test
+                -DCLANG_TIDY=${CK_CLANG_TIDY}
+                -DPLUGIN=$<TARGET_FILE:ConfluentKafkaTidy>
+                -DCK_JAVA_MODEL=$<TARGET_FILE:ck_java_model_cli>
+                -DFFI_INCLUDE=${CK_LINT_FFI_INCLUDE_DIR}
+                -DABI_CHECK=${CMAKE_CURRENT_SOURCE_DIR}/../abi_check.cmake
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/test/abi_check_test.cmake)
+
+    # The Javadoc word counts the doc check measures against, from the Rust
+    # counter it ports (`cargo xtask javadoc --words`); javamodel_kafka_test's
+    # javadoc_words_parity compares them. Run by hand, it needs cargo.
+    set(_ck_rust_root "${CMAKE_CURRENT_SOURCE_DIR}/../../../rust")
+    add_custom_target(javadoc_words_vector
+        COMMAND $<TARGET_FILE:ck_java_model_cli> markers ${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java
+                > ${CMAKE_CURRENT_BINARY_DIR}/markers.txt
+        COMMAND ${CMAKE_COMMAND} -E chdir ${_ck_rust_root}
+                sh -c "cargo xtask javadoc --words < ${CMAKE_CURRENT_BINARY_DIR}/markers.txt > ${CMAKE_CURRENT_BINARY_DIR}/words.txt"
+        COMMAND sh -c "head -4 ${CMAKE_CURRENT_SOURCE_DIR}/test/data/javadoc_words.txt > ${CMAKE_CURRENT_BINARY_DIR}/vector.txt && cat ${CMAKE_CURRENT_BINARY_DIR}/words.txt >> ${CMAKE_CURRENT_BINARY_DIR}/vector.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/vector.txt
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/data/javadoc_words.txt
+        DEPENDS ck_java_model_cli
+        VERBATIM)
+
     # The plugin through the real clang-tidy: it loads, each fixture reports
     # exactly what its headers expect, and the binding's headers report nothing.
     add_executable(fixture_runner test/fixture_runner.cpp)
@@ -146,7 +178,8 @@ if(BUILD_TESTING)
         COMMAND fixture_runner checks ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
                 confluent-kafka-java-class confluent-kafka-java-inheritance confluent-kafka-java-enum
                 confluent-kafka-java-members confluent-kafka-java-signature confluent-kafka-surface
-                confluent-kafka-header)
+                confluent-kafka-header confluent-kafka-doc confluent-kafka-abi
+                confluent-kafka-inventory)
     file(GLOB _ck_fixtures LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/*")
     foreach(_fixture IN LISTS _ck_fixtures)
         if(IS_DIRECTORY "${_fixture}")

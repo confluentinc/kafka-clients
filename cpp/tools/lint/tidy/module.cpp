@@ -31,6 +31,9 @@ public:
         factories.registerCheck<JavaMembersCheck>("confluent-kafka-java-members");
         factories.registerCheck<JavaSignatureCheck>("confluent-kafka-java-signature");
         factories.registerCheck<SurfaceCheck>("confluent-kafka-surface");
+        factories.registerCheck<DocCheck>("confluent-kafka-doc");
+        factories.registerCheck<AbiCheck>("confluent-kafka-abi");
+        factories.registerCheck<InventoryCheck>("confluent-kafka-inventory");
         factories.registerCheck<HeaderCheck>("confluent-kafka-header");
     }
 };

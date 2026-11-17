@@ -38,10 +38,13 @@ namespace cklint::tidy {
 ///   ConfluentKafkaJavaRoot     the Java source root (kafka/clients/src/main/java)
 ///   ConfluentKafkaDataDir      the linter's data files (cpp/tools/lint/data)
 ///   ConfluentKafkaIncludeRoot  the binding's include directory (cpp/include)
+///   ConfluentKafkaLedger       the contract-change ledger
+///                              (cpp/design/current/doc-contract-changes.md)
 struct Settings {
     std::string java_root;
     std::string data_dir;
     std::string include_root;
+    std::string ledger;
 
     static Settings of(const clang::tidy::ClangTidyCheck::OptionsView& options);
     [[nodiscard]] std::string key() const { return java_root + '\n' + data_dir + '\n' + include_root; }

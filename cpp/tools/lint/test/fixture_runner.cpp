@@ -312,9 +312,14 @@ Run run_checks_on(const std::string& clang_tidy, const std::string& plugin, cons
             checks = listed;
         }
     }
+    // A fixture's own contract-change ledger: <include-root>/../ledger.md.
+    std::string ledger_option;
+    if (const auto ledger = fs::path(include_root).parent_path() / "ledger.md"; fs::exists(ledger)) {
+        ledger_option = ", ConfluentKafkaLedger: '" + ledger.string() + "'";
+    }
     const std::string config = "{Checks: '-*," + checks + "', CheckOptions: {ConfluentKafkaJavaRoot: '" + java_root +
                                "', ConfluentKafkaDataDir: '" + data_dir + "', ConfluentKafkaIncludeRoot: '" +
-                               include_root + "'}}";
+                               include_root + "'" + ledger_option + "}}";
     std::string command = quote(clang_tidy) + " -load " + quote(plugin) + " --quiet -header-filter='.*' -config=\"" +
                           config + "\" " + quote((work / "probe.cpp").string()) + " -- -std=c++20 -I" +
                           quote(include_root);

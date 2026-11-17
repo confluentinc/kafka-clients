@@ -15,7 +15,8 @@
 // The Java model of the kafka/ submodule's clients sources, checked against
 // the two lists the Rust lints read (the @InterfaceAudience.Public types and
 // the deprecated API), and the rules on it: the scope of cpp/CLAUDE.md §1.4
-// and the expected shapes of the eleven verification classes.
+// and the expected shapes of the eleven verification classes, and the Javadoc
+// word counts against the Rust counter's.
 
 #include <gtest/gtest.h>
 
@@ -29,6 +30,7 @@
 #include "data_files.hpp"
 #include "expected.hpp"
 #include "java_model.hpp"
+#include "javadoc.hpp"
 #include "scope.hpp"
 
 namespace {
@@ -237,6 +239,31 @@ TEST_F(JavaModelKafkaTest, DerivesTheVerificationClasses) {
 
     const auto offsets = shape("org.apache.kafka.clients.consumer.OffsetAndTimestamp");
     EXPECT_EQ(offsets.cpp_name, "confluent::kafka::consumer::OffsetAndTimestamp");
+}
+
+// The doc check's Javadoc word count is a port of the Rust one
+// (documentation.md §5): over every in-scope marker it gives what
+// `cargo xtask javadoc --words` printed into test/data/javadoc_words.txt.
+TEST_F(JavaModelKafkaTest, JavadocWordsMatchTheRustCount) {
+    std::ifstream in(std::string(CK_LINT_TEST_DATA_DIR) + "/javadoc_words.txt");
+    ASSERT_TRUE(in) << "test/data/javadoc_words.txt is missing";
+    std::string line;
+    std::size_t checked = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        const auto tab = line.find('\t');
+        ASSERT_NE(tab, std::string::npos) << line;
+        const auto marker = line.substr(0, tab);
+        std::string words;
+        for (const auto w : cklint::rules::javadoc_words(*model_, marker)) {
+            words += (words.empty() ? "" : ",") + std::to_string(w);
+        }
+        EXPECT_EQ(words, line.substr(tab + 1)) << marker;
+        ++checked;
+    }
+    EXPECT_GT(checked, 2000U);
 }
 
 }  // namespace

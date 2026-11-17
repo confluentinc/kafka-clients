@@ -94,6 +94,39 @@ public:
     void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
 };
 
+/// confluent-kafka-doc: every public declaration has a Doxygen comment with
+/// an `@param` per parameter (and none other) and an `@return` for a value;
+/// one translating a Java member has an `@throws` per Javadoc `@throws`, at
+/// most 150% of the Javadoc's words, at most one `@par Translation notes`
+/// and none without a Javadoc, a `WARNING:` only in the notes and only with
+/// an accepted ledger entry, and no Java file:line reference, inline tag or
+/// HTML left (cpp/CLAUDE.md §12.1, §12.2).
+class DocCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
+/// confluent-kafka-abi: no construct that freezes a later change (§12.3): a
+/// class with data holds one pointer and is not passed in registers nor an
+/// aggregate; no bit-field, virtual inheritance or unscoped enum, an enum's
+/// type written; a virtual only in an interface translation, never an
+/// overloaded virtual name.
+class AbiCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
+/// confluent-kafka-inventory: writes the API inventory to the file named by
+/// the option ConfluentKafkaInventoryFile, for `make -C cpp abi-check`
+/// (§12.4); reports nothing, and does nothing without the option.
+class InventoryCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
 /// confluent-kafka-header: every public header has the Apache 2.0 header and
 /// `#pragma once`, reaches the C header only through detail/ffi.hpp, is
 /// included by its module header, and has no TODO, FIXME or silenced check.

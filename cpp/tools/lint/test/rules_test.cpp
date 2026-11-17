@@ -23,6 +23,7 @@
 
 #include "data_files.hpp"
 #include "expected.hpp"
+#include "javadoc.hpp"
 #include "names.hpp"
 #include "scope.hpp"
 #include "types.hpp"
@@ -516,6 +517,85 @@ TEST(ExpectedTest, MergesOverloadsWithTheSameCppTypes) {
     EXPECT_EQ(function(e, "f").parameters.at(0).name, "topics");
     EXPECT_NE(function(e, "f").note.find("merges org.apache.kafka.common.A#f(List)"), std::string::npos);
     EXPECT_EQ(std::count(methods.begin(), methods.end(), "g"), 2);  // int32_t and int64_t stay distinct
+}
+
+// ---- Javadoc (documentation.md §3, §5; the parity with the Rust counter is
+// javamodel_kafka_test's)
+
+TEST(JavadocTest, CleansAndSplitsTheComment) {
+    const auto cleaned = cklint::rules::clean_javadoc("/**\n * Sends.\n *\n * @param topic the topic\n *   name\n */");
+    EXPECT_EQ(cleaned, "Sends.\n\n@param topic the topic\n  name");
+    const auto parsed = cklint::rules::parse_javadoc(cleaned);
+    EXPECT_EQ(parsed.body, "Sends.");
+    ASSERT_EQ(parsed.tags.size(), 1U);
+    EXPECT_EQ(parsed.tags[0].name, "param");
+    EXPECT_EQ(parsed.tags[0].arg, "topic");
+    EXPECT_EQ(parsed.tags[0].text, "the topic\n  name");
+    // A tag inside <pre> is code, not a block tag.
+    EXPECT_TRUE(cklint::rules::parse_javadoc("<pre>\n@Override\n</pre>").tags.empty());
+}
+
+TEST(JavadocTest, TranslatesTheStructure) {
+    EXPECT_EQ(cklint::rules::javadoc_markdown("A <b>bold</b> {@code x} {@link Foo#bar(int)} and {@link Foo label}."
+                                              "<p>Next &amp; last.<ul><li>one</li><li>two</ul>"),
+              "A **bold** `x` `Foo#bar(int)` and label.\n\nNext & last.\n\n- one\n- two");
+    EXPECT_EQ(cklint::rules::javadoc_markdown("Body.\n@param fooBar the bar\n@return it\n@throws java.lang.X when"),
+              "Body.\n\n# Arguments\n\n- `fooBar` - the bar\n\n# Returns\n\nit\n\n# Errors\n\n- `X` when");
+    EXPECT_EQ(cklint::rules::javadoc_markdown("<pre>{@code\n  a();\n    b();\n}</pre>"), "```java\na();\n  b();\n```");
+    EXPECT_EQ(
+        cklint::rules::javadoc_markdown("<table><tr><th>K</th><th>V</th></tr><tr><td>a</td><td>1</td></tr></table>"),
+        "| K | V |\n| --- | --- |\n| a | 1 |");
+}
+
+TEST(JavadocTest, CountsWordsAsTheRustCounter) {
+    using cklint::rules::word_count;
+    EXPECT_EQ(word_count("Check whether this node is empty"), 6U);
+    EXPECT_EQ(word_count("# Returns\n\ntrue if it is"), 4U);        // a heading is not counted
+    EXPECT_EQ(word_count("a `kafka_common_Error_is_x` b"), 3U);     // a code span is one word
+    EXPECT_EQ(word_count("see [the doc](https://x.y/z) now"), 4U);  // a link counts its label
+    EXPECT_EQ(word_count("```java\nfoo(bar);\n```"), 2U);           // fence lines are not counted
+    EXPECT_EQ(word_count("odd ` tick here"), 3U);                   // an unpaired backtick opens nothing
+    EXPECT_EQ(word_count("a `` x` `` b c d"), 5U);                  // a double-backtick span holds a backtick
+    EXPECT_EQ(word_count("a `b` c ` d"), 4U);
+    EXPECT_EQ(word_count("Kafka\u2019s naïve"), 3U);  // ’ splits a word, ï does not
+}
+
+TEST(JavadocTest, InheritsAndFollowsPointers) {
+    EXPECT_EQ(
+        cklint::rules::inherit_doc("{@inheritDoc} More.\n@param t {@inheritDoc}", "Base.\n@param t the t\n@return r"),
+        "Base. More.\n@param t the t\n@return  r");
+    EXPECT_EQ(cklint::rules::pointer_refs("See {@link KafkaConsumer#poll(Duration)}"),
+              std::vector<std::string>{"KafkaConsumer#poll(Duration)"});
+    EXPECT_EQ(cklint::rules::pointer_refs("@see KafkaConsumer#commitSync(Duration)\n@since 2.0"),
+              std::vector<std::string>{"KafkaConsumer#commitSync(Duration)"});
+    EXPECT_TRUE(cklint::rules::pointer_refs("Polls. See {@link KafkaConsumer#poll(Duration)}").empty());
+
+    const auto model = model_of({{"org/apache/kafka/common/Face.java", R"(
+            package org.apache.kafka.common;
+            public interface Face {
+                /** From the interface.
+                 * @param a the a */
+                void run(int a);
+                /** See {@link Impl#close()} */
+                void close();
+            }
+        )"},
+                                 {"org/apache/kafka/common/Impl.java", R"(
+            package org.apache.kafka.common;
+            public class Impl implements Face {
+                public void run(int a) {}
+                /** {@inheritDoc} And here. */
+                public void close() {}
+            }
+        )"}});
+    // An undocumented override takes the overridden doc; a pointer-only doc is
+    // replaced by what it points to, itself resolved.
+    EXPECT_EQ(cklint::rules::followed_javadocs(model, "org.apache.kafka.common.Impl#run(int)"),
+              std::vector<std::string>{"From the interface.\n@param a the a"});
+    EXPECT_EQ(cklint::rules::followed_javadocs(model, "org.apache.kafka.common.Face#close()"),
+              std::vector<std::string>{"See {@link Impl#close()} And here."});
+    EXPECT_EQ(cklint::rules::javadoc_words(model, "org.apache.kafka.common.Impl#run(int)"),
+              std::vector<std::size_t>{6U});
 }
 
 // ---- data files

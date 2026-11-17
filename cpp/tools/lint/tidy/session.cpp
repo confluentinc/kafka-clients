@@ -118,6 +118,7 @@ Settings Settings::of(const clang::tidy::ClangTidyCheck::OptionsView& options) {
     s.java_root = options.getLocalOrGlobal("ConfluentKafkaJavaRoot", CK_LINT_KAFKA_JAVA_ROOT).str();
     s.data_dir = options.getLocalOrGlobal("ConfluentKafkaDataDir", CK_LINT_DATA_DIR).str();
     s.include_root = options.getLocalOrGlobal("ConfluentKafkaIncludeRoot", CK_LINT_INCLUDE_ROOT).str();
+    s.ledger = options.getLocalOrGlobal("ConfluentKafkaLedger", CK_LINT_LEDGER).str();
     return s;
 }
 

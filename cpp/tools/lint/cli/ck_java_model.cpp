@@ -25,6 +25,19 @@
 //       reached it; scope-excluded.txt is read from the linter's data/
 //   ck_java_model expected [-j <threads>] <source-root> <binary name>...
 //       print the C++ shape cpp/CLAUDE.md derives from each Java type
+//   ck_java_model markers [-j <threads>] <source-root>
+//       print the marker of every in-scope type and of its public members
+//   ck_java_model javadoc [-j <threads>] <source-root> <marker>
+//       print the Markdown each Javadoc of a marker translates to, as
+//       `cargo xtask javadoc <marker>` does, minus its renames
+//   ck_java_model api-diff <old inventory> <new inventory>
+//       compare two API inventories (the confluent-kafka-inventory check's):
+//       a declaration removed or changed is breaking, one added is additive
+//       (cpp/CLAUDE.md §12.4); exits 1 when something breaks
+//   ck_java_model words [-j <threads>] <source-root> < markers
+//       print `<marker>\t<words>` for each marker read from stdin, as
+//       `cargo xtask javadoc --words` does: the word count of each Javadoc a
+//       doc translating it is measured against
 //
 // -j defaults to the number of hardware threads.
 
@@ -36,6 +49,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -45,6 +59,7 @@
 #include "expected.hpp"
 #include "java_model.hpp"
 #include "java_syntax.hpp"
+#include "javadoc.hpp"
 #include "scope.hpp"
 
 namespace {
@@ -182,11 +197,142 @@ int run_expected(const std::string& root, const std::vector<std::string>& names,
     return status;
 }
 
+int run_markers(const std::string& root, unsigned jobs) {
+    const auto model = cklint::java::load_model(root, jobs);
+    const auto excluded = cklint::rules::read_scope_excluded(std::string(CK_LINT_DATA_DIR) + "/scope-excluded.txt");
+    const auto scope = cklint::rules::compute_scope(model, excluded);
+    for (const auto& [name, reason] : scope.types) {
+        const auto* type = model.find(name);
+        if (type == nullptr) {
+            continue;
+        }
+        std::cout << name << '\n';
+        std::vector<std::string> members;
+        for (const auto* list : {&type->constructors, &type->methods}) {
+            for (const auto& m : *list) {
+                if (!m.implicit && m.visibility == cklint::java::Visibility::PUBLIC) {
+                    members.push_back(m.signature());
+                }
+            }
+        }
+        for (const auto& f : type->fields) {
+            if (f.visibility == cklint::java::Visibility::PUBLIC) {
+                members.push_back(f.name);
+            }
+        }
+        for (const auto& c : type->enum_constants) {
+            members.push_back(c.name);
+        }
+        std::sort(members.begin(), members.end());
+        members.erase(std::unique(members.begin(), members.end()), members.end());
+        for (const auto& m : members) {
+            std::cout << name << '#' << m << '\n';
+        }
+    }
+    return EXIT_SUCCESS;
+}
+
+int run_javadoc(const std::string& root, const std::string& marker, unsigned jobs) {
+    const auto model = cklint::java::load_model(root, jobs);
+    const auto docs = cklint::rules::followed_javadocs(model, marker);
+    if (docs.empty()) {
+        std::cout << '`' << marker << "` has no Javadoc\n";
+        return EXIT_SUCCESS;
+    }
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        const auto markdown = cklint::rules::javadoc_markdown(docs[i]);
+        std::cout << (i > 0 ? "\n----\n\n" : "") << markdown << "\n\n(" << cklint::rules::word_count(markdown)
+                  << " words)\n";
+    }
+    return EXIT_SUCCESS;
+}
+
+int run_words(const std::string& root, unsigned jobs) {
+    const auto model = cklint::java::load_model(root, jobs);
+    std::string marker;
+    while (std::getline(std::cin, marker)) {
+        if (marker.empty()) {
+            continue;
+        }
+        const auto hash = marker.find('#');
+        if (model.find(marker.substr(0, hash)) == nullptr) {
+            std::cout << marker << "\t?\n";
+            continue;
+        }
+        std::string words;
+        for (const auto w : cklint::rules::javadoc_words(model, marker)) {
+            words += (words.empty() ? "" : ",") + std::to_string(w);
+        }
+        std::cout << marker << '\t' << words << '\n';
+    }
+    return EXIT_SUCCESS;
+}
+
+struct InventoryLine {
+    std::string kind;
+    std::string detail;
+};
+
+std::vector<std::pair<std::string, InventoryLine>> read_inventory(const std::string& path, bool& ok) {
+    std::vector<std::pair<std::string, InventoryLine>> out;
+    std::ifstream in(path);
+    ok = static_cast<bool>(in);
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto first = line.find('\t');
+        const auto second = line.find('\t', first == std::string::npos ? first : first + 1);
+        if (first == std::string::npos || second == std::string::npos) {
+            continue;
+        }
+        out.emplace_back(line.substr(first + 1, second - first - 1),
+                         InventoryLine{line.substr(0, first), line.substr(second + 1)});
+    }
+    return out;
+}
+
+int run_api_diff(const std::string& old_path, const std::string& new_path) {
+    bool old_ok = false;
+    bool new_ok = false;
+    const auto before = read_inventory(old_path, old_ok);
+    const auto after = read_inventory(new_path, new_ok);
+    if (!old_ok || !new_ok) {
+        std::cerr << "cannot read " << (old_ok ? new_path : old_path) << '\n';
+        return 2;
+    }
+    std::map<std::string, InventoryLine> now(after.begin(), after.end());
+    std::map<std::string, InventoryLine> was(before.begin(), before.end());
+    std::size_t breaking = 0;
+    std::size_t additive = 0;
+    for (const auto& [key, line] : before) {
+        const auto it = now.find(key);
+        if (it == now.end()) {
+            std::cout << "breaking: removed " << line.kind << ' ' << key << '\n';
+            ++breaking;
+        } else if (it->second.kind != line.kind || it->second.detail != line.detail) {
+            std::cout << "breaking: changed " << line.kind << ' ' << key << ": " << line.detail << " -> "
+                      << it->second.detail << '\n';
+            ++breaking;
+        }
+    }
+    for (const auto& [key, line] : after) {
+        if (was.count(key) == 0) {
+            std::cout << "additive: added " << line.kind << ' ' << key << '\n';
+            ++additive;
+        }
+    }
+    std::cout << breaking << " breaking, " << additive << " additive\n";
+    return breaking == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 int usage() {
     std::cerr << "usage: ck_java_model parse [-j <threads>] <dir>...\n"
                  "       ck_java_model dump [-j <threads>] <source-root>\n"
                  "       ck_java_model scope [-j <threads>] <source-root>\n"
-                 "       ck_java_model expected [-j <threads>] <source-root> <binary name>...\n";
+                 "       ck_java_model expected [-j <threads>] <source-root> <binary name>...\n"
+                 "       ck_java_model markers [-j <threads>] <source-root>\n"
+                 "       ck_java_model javadoc [-j <threads>] <source-root> <marker>\n"
+                 "       ck_java_model api-diff <old inventory> <new inventory>\n"
+                 "       ck_java_model words [-j <threads>] <source-root> < markers\n";
     return 2;
 }
 
@@ -212,6 +358,18 @@ int main(int argc, char** argv) {
     }
     if (command == "scope" && args.size() == 1) {
         return run_scope(args.front(), jobs);
+    }
+    if (command == "markers" && args.size() == 1) {
+        return run_markers(args.front(), jobs);
+    }
+    if (command == "api-diff" && args.size() == 2) {
+        return run_api_diff(args[0], args[1]);
+    }
+    if (command == "javadoc" && args.size() == 2) {
+        return run_javadoc(args[0], args[1], jobs);
+    }
+    if (command == "words" && args.size() == 1) {
+        return run_words(args.front(), jobs);
     }
     if (command == "expected" && args.size() >= 2) {
         return run_expected(args.front(), {std::next(args.begin()), args.end()}, jobs);
