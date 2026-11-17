@@ -818,17 +818,22 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `errorNext()` or `flush()` (the throw to the completing call, the rejection to the FIFO), so a `send()` nested in a
   callback, or a `send()` whose drain runs the callbacks a pending `flush()` completed, leaves those errors to their
   own calls. The callback queue does not nest (the addon's `cbq_drain` returns inside a drain, and the FFI's
-  `CallbackQueue::execute` returns 0 there), so a `send()` made from a callback's synchronous part has its record's
-  callback run by the outer drain once that callback returns; that `send()` waits for it before it settles, and
-  rejects with its throw or rejection, as Java's nested `send()` throws it. A `completeNext()` or `errorNext()` made
+  `CallbackQueue::execute` returns 0 there), so with `autoComplete` a `send()` made from a callback's synchronous part
+  has its record's callback run by the outer drain once that callback returns; that `send()` waits for it before it
+  settles, and rejects with its throw or rejection, as Java's nested `send()` throws it *(deviation: Java's runs the
+  callback inside the nested `send()`. Why: the callback queue does not nest. Goes when: a drain started inside a
+  drain runs the callbacks, where `cbq_drain` and `CallbackQueue::execute` return at once)*. A nested completing call
+  (`#callbackDepth > 0`) neither clears nor takes `#callbackThrown`, so an earlier record's throw stays the outer
+  call's, as Java's first `onCompletion` throw ends it. A `completeNext()` or `errorNext()` made
   there cannot wait: the next record's callback runs once that callback returns, and its throw comes out of the outer
   completing call *(deviation: Java's nested call throws it. Why: the callback queue does not nest, and those calls
   are synchronous)*. A `close()` made from one of the mock's
   callbacks before its first `await` does not wait for the callbacks, its own among them, as Python's
   `AsyncMockProducer` skips the wait (`_in_async_callback`); the mock counts the callbacks running their
   synchronous part (`#callbackDepth`). After that `await` the core's close waits for the running callback's
-  report (the FFI's `in_callback` is the drain's thread only), and a `flush()` from a callback always waits for that
-  callback's report, so a callback that awaits either never settles, the anti-pattern the producer documents
+  report (the FFI's `in_callback` is the drain's thread only), and a `flush()` from a callback waits for that
+  callback's report too, unless a flush error is set, which it rejects with at once, as Java's (the core's `flush_cb`
+  waits for the reports only on success), so a callback that awaits either never settles, the anti-pattern the producer documents
   (`KafkaProducer` refuses a `flush()` made before the callback's first `await`; Java's mock makes no such check); Python's mock, not over the core, skips the wait after an `await` too. The record's future completes
   once the Promise settled, the deviation above for a throw covering this case too.
   `partitionsFor(null)` rejects with the FFI's `TypeError` "topic cannot be
