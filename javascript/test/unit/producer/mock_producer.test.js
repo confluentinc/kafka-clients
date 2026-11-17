@@ -691,6 +691,51 @@ test('a callback that awaits a nested send() before it fails rejects its own sen
   }
 });
 
+test("a send() from a callback's synchronous part rejects with its own callback's throw or rejection, as Java's nested send() throws it", async () => {
+  // Java's MockProducer#send with autoComplete runs Completion#complete, which
+  // calls onCompletion with no try, inside the nested send(). The callback
+  // queue does not nest, so the nested record's callback runs once the outer
+  // callback returned; the nested send() waits for it.
+  for (const shape of ['throws', 'rejects']) {
+    for (const outerAwaits of [true, false]) {
+      const nestedError = new Error(`nested callback ${shape}`);
+      const nestedCallback =
+        shape === 'throws'
+          ? () => {
+              throw nestedError;
+            }
+          : () => Promise.reject(nestedError);
+      const producer = buildMockProducer(true);
+      /** @type {Promise<unknown> | null} */
+      let nested = null;
+      /** @type {unknown} */
+      let caught = null;
+      await producer.send({
+        record: record1,
+        callback: outerAwaits
+          ? async () => {
+              try {
+                await producer.send({ record: record2, callback: nestedCallback });
+              } catch (e) {
+                caught = e;
+              }
+            }
+          : () => {
+              nested = producer.send({ record: record2, callback: nestedCallback });
+              nested.catch(() => {});
+            },
+      });
+      if (nested !== null) await assert.rejects(nested, (e) => e === nestedError);
+      else assert.equal(caught, nestedError, `${shape}: the awaited nested send() rejects with its own error`);
+      // No other call sees it.
+      await producer.send(record2);
+      await producer.flush();
+      await producer.close();
+      assert.equal(producer.history().length, 3);
+    }
+  }
+});
+
 test("a send() whose drain runs a pending flush()'s callbacks leaves their errors to the flush() and later calls", async () => {
   for (const throws of [false, true]) {
     const first = new Error('first');

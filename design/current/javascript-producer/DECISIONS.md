@@ -308,11 +308,16 @@ rules and readings. Newest entries are at the end; dates are in IST.
     `flush()` or `close()` raises the oldest, once (a deviation, as Python's `AsyncMockProducer`); no kept error is
     lost; `flush()` and `close()` (and `[Symbol.asyncDispose]`) wait for every callback Promise already started
     (`allSettled` semantics), then raise the oldest kept error, `flush()` flushing first even with a kept error.
-    Nothing is logged. Only the record's own `send()` gets its callback's error: each record's delivery function
-    captures whether its own hand-over is running, so a nested `send()`, or a `send()` that drains a pending
-    `flush()`'s callbacks, leaves their errors to their own calls. A `close()` from one of the mock's callbacks, before
-    its first `await`, skips the wait, as Python's `AsyncMockProducer`; after it the core's close waits for that
-    callback's report, as on `KafkaProducer`. Java's mock calls `onCompletion`
+    Nothing is logged. Only the record's own `send()` gets its callback's error: with `autoComplete` a record's
+    callback is its own `send()`'s whichever drain runs it, so a nested `send()`, or a `send()` that drains a pending
+    `flush()`'s callbacks, leaves their errors to their own calls. The callback queue does not nest, so a `send()`
+    made from a callback's synchronous part has its callback run by the outer drain once that callback returns, and
+    waits for it before it settles, rejecting with its error, as Java's nested `send()` throws it; a `completeNext()`
+    or `errorNext()` made there cannot wait, so the next record's throw comes out of the outer completing call (a
+    deviation). A `close()` from one of the mock's callbacks, before its first `await`, skips the wait, as Python's
+    `AsyncMockProducer`; after it the core's close waits for that callback's report, and a `flush()` from a callback
+    always does, so a callback that awaits either never settles (`KafkaProducer` refuses a `flush()` made before the
+    first `await`; Java's mock makes no such check). Java's mock calls `onCompletion`
     with no `try` (`MockProducer.Completion#complete`), so its error propagates and the record's future stays
     incomplete; here the core's mock completes the future once the Promise settled, the deviation already recorded
     for a throw, which now covers this case too.

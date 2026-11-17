@@ -107,8 +107,12 @@ newer.
   `close()` rejects with the oldest, once; `flush()` and `close()` wait for
   every callback Promise already started, `flush()` completing the waiting
   records first even with a kept error. Only a record's own `send()` gets its
-  callback's error. A `close()` inside a callback, before its first
-  `await`, does not wait for the callbacks, as Python's async mock. A serializer's error, an
+  callback's error, a `send()` made from a callback's synchronous part
+  settling after its own callback, which runs once the outer one returns. A
+  `close()` inside a callback, before its first `await`, does not wait for
+  the callbacks, as Python's async mock; after it, `close()` waits for that
+  callback, and a `flush()` from a callback always does, so a callback that
+  awaits either never settles. A serializer's error, an
   `ApiError` or a `TypeError` included, rejects the mock's `send()` as it is,
   as Java's mock serializes with no `try`. A closed mock nothing
   references is collected with its native mock, sends still waiting
