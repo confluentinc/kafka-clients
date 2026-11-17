@@ -136,8 +136,7 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   carrying Java's default methods with their interface (§3 Java names rule 10:
   `ConsumerRebalanceListenerExtensions` and `IConsumerRebalanceListenerWithPartitionsLost` beside
   `IConsumerRebalanceListener`, `Admin` beside `IAdmin`), the
-  shared consumer surface with `IConsumer` (`IConsumerCommon`), the Rust-only `ConsumerHandle` with
-  the consumer (the core's `consumer::ConsumerHandle`), and a C#-only enum with the type that takes
+  shared consumer surface with `IConsumer` (`IConsumerCommon`), and a C#-only enum with the type that takes
   it (`ClientQuotaMatchType` with `ClientQuotaFilterComponent` in `Common/Quota/`). *(Python keeps an
   async class in its sync class's module.)*
 - **Errors** follow the same rule. Each Java exception class the C enum `kafka_common_Error_e`
@@ -339,8 +338,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     // Mock TAKES the serializers — Java-faithful (MockProducer.java takes Serializer<K>/Serializer<V>
     // and serializes records into its history); UNLIKE the consumer, where mock-takes-deserializers is
     // a deviation. Send serializes K/V → bytes exactly like the real client (§4).
+    public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer);  // autoComplete true
     public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
-        bool autoComplete = true);
+        bool autoComplete);
     public bool CompleteNext();
     public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
@@ -464,7 +464,8 @@ public interface IConsumerCommon {               // shared sync surface (IAsyncC
     IReadOnlyCollection<TopicPartition> Assignment();
     IReadOnlyCollection<string> Subscription();
     IReadOnlyCollection<TopicPartition> Paused();
-    void EnforceRebalance(string? reason = null); // KIP-848 logged no-op → returns success
+    void EnforceRebalance();                      // KIP-848 logged no-op → returns success
+    void EnforceRebalance(string? reason);        // Java enforceRebalance(String); the same no-op
 
     // CommitAsync, Seek and CurrentLag live on each flavor's interface (decisions 13 and 22,
     // ledger 103): the async flavor returns a Task.
@@ -475,9 +476,8 @@ public interface IConsumerCommon {               // shared sync surface (IAsyncC
 
     // In-callback reentrancy (M9/P8). Java: the captured `consumer` variable inside a
     // callback — its acquire() is reentrant on the polling thread, the C ABI's guard is not.
-    // On a KafkaConsumer the handle's operations work only inside a callback (ledger 104),
-    // where the consumer's own calls route to it (ledger 114).
-    ConsumerHandle Handle();
+    // Inside a callback the consumer routes its own calls to an internal ConsumerHandle
+    // (ledger 114); there is no public handle, as in Python.
 }
 
 // Generic-only (M6/P1b): only Poll retypes; every other member is K/V-free and inherited from the
@@ -505,7 +505,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     Task CommitAsync(CancellationToken cancellationToken = default);
     Task CommitAsync(IOffsetCommitCallback callback, CancellationToken cancellationToken = default);
     Task CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null, CancellationToken cancellationToken = default);
+        IOffsetCommitCallback? callback, CancellationToken cancellationToken = default);  // a null literal is ambiguous
+        // with the IAsyncOffsetCommitCallback form: (IOffsetCommitCallback?)null is Java's commitAsync(Map, null)
     // Java commitAsync(callback) / commitAsync(Map, callback) with an async callback: Java has none;
     // Python's async consumer takes an `async def` one (M19/P1). Not on IConsumer or ConsumerHandle.
     Task CommitAsync(IAsyncOffsetCommitCallback callback, CancellationToken cancellationToken = default);
@@ -526,7 +527,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     Task Close(CloseOptions options, CancellationToken cancellationToken = default);  // Java close(CloseOptions), close_with_options_cb
 
     // Assignment() / Subscription() / Paused() / EnforceRebalance() / Wakeup() /
-    // GroupMetadata() / Metrics() / Handle() live on IConsumerCommon (non-blocking → stays sync)
+    // GroupMetadata() / Metrics() live on IConsumerCommon (non-blocking → stays sync)
 }
 
 public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue> {   // Java `KafkaConsumer` (KIP-848)
@@ -540,8 +541,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     // Deviation (§7): the ctor TAKES the deserializers (Java's mock doesn't) — its Poll decodes native
     // bytes like the real consumer. AddRecord stays BYTES-in (Java's is typed-in) — tests the deserialize
     // path in isolation + forced by the bytes-only core ABI. Mock helpers are inherent, not on IAsyncConsumer.
+    public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null);
+        string? autoOffsetReset);
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
     public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);    // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
     public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // lose_partitions_cb (ledger 48)
@@ -580,7 +582,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // J
     void CommitAsync();
     void CommitAsync(IOffsetCommitCallback callback);
     void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null);                           // null callback = Java's commitAsync(Map, null)
+        IOffsetCommitCallback? callback);                                  // null callback = Java's commitAsync(Map, null)
     void Seek(TopicPartition partition, long offset);                      // Java seek(tp, long) — blocking form
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
     long? CurrentLag(TopicPartition topicPartition);                       // Java currentLag(tp) — blocking form; empty → null (ledger 103)
@@ -601,7 +603,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // J
     void Close();                                                          // Java close()
     void Close(CloseOptions options);                                      // Java close(CloseOptions), close_with_options
     // Wakeup() / Assignment() / Subscription() / Paused() / GroupMetadata() / EnforceRebalance() /
-    // Metrics() / Handle() come from IConsumerCommon.
+    // Metrics() comes from IConsumerCommon.
 }
 
 public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   // Java `KafkaConsumer` (KIP-848), synchronous
@@ -610,8 +612,9 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   //
 }
 
 public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    // Java `MockConsumer`, synchronous
+    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null);   // deviation §7: takes deserializers (Java's mock doesn't)
+        string? autoOffsetReset);          // deviation §7: takes deserializers (Java's mock doesn't)
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
     public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);  // Java MockConsumer.rebalance — inherent (M9/P6)
     public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent
@@ -649,9 +652,9 @@ both interfaces, and `MockConsumer`'s inherent `Rebalance(newAssignment)` driver
 (`Subscribe(SubscriptionPattern[, listener])`, M23/P2), plus the **offset-commit
 callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads,
 on each flavor's interface since decision 13 (M9/P7; see the §4 commit-callback row), and its
-async form `IAsyncOffsetCommitCallback` on `IAsyncConsumer` (M19/P1), plus the **in-callback
-reentrancy handle** — the public `ConsumerHandle` and `ConsumerHandle Handle()` on
-`IConsumerCommon` (M9/P8; see the §4 reentrancy row). That closes the **consumer's**
+async form `IAsyncOffsetCommitCallback` on `IAsyncConsumer` (M19/P1), plus **in-callback
+reentrancy**: a consumer call made inside a callback goes through an internal `ConsumerHandle`
+(M9/P8, ledger 114; see the §4 reentrancy row). That closes the **consumer's**
 callback-parity work: a listener or commit callback can now call back into its own
 consumer, which is what Java gets for free. (The **producer's** half — Java's
 `send(record, Callback)` — closed later, in M14/P1; see the §4 delivery-callback
@@ -1248,8 +1251,8 @@ recorded deviation. A callback that awaits
 callback throws `ArgumentNullException`, and `Send(record, null)` does not compile.
 
 ⚠ **§4 reentrancy row — `ConsumerHandle` is host scaffolding that restores a Java
-behavior, not new API surface (M9/P8; DoD #7).** `ConsumerHandle` and
-`IConsumerCommon.Handle()` have **no Java counterpart**, and that needs stating
+behavior, not new API surface (M9/P8; DoD #7).** `ConsumerHandle` has
+**no Java counterpart**, and that needs stating
 plainly rather than being discovered in review. Java needs none: its callbacks run
 on the polling thread, where `KafkaConsumer.acquire()` is *reentrant*, so a listener
 simply captures the `consumer` variable and calls `consumer.commitSync()` from
@@ -1262,8 +1265,8 @@ the shape was flattened at the ABI (`dotnet/.claude/rules/bindings.md §1.2`), w
 allows. Python uses the same core handle for the same reason, but privately: a consumer
 call made inside a callback goes through it, and Python has no public handle type
 (`python/confluent_kafka/consumer/_base.py:701-718`, `:1645-1720` at `3f8a5bc6`). .NET keeps
-it public (M9/P8). Since ledger 114 .NET also routes a consumer call made inside a callback
-through it, as Python does, so a listener calls `consumer.Commit()` as Java's listener does
+it internal too, and routes a consumer call made inside a callback through it, as Python does
+(ledger 114), so a listener calls `consumer.Commit()` as Java's listener does
 (`ffi-marshalling.md` §B1).
 
 Four consequences worth stating with it:

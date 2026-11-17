@@ -376,26 +376,26 @@ public sealed class PublicSyncConsumerQueryTests
     }
 
     [Fact]
-    public void Committed_NullElementTopic_ThrowsArgument()
+    public void Committed_NullElementTopic_ThrowsArgumentNull()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
             () => consumer.Committed(new[] { default(TopicPartition) }));
         Assert.Equal("partitions", ex.ParamName);
-        Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("partitions must not contain a TopicPartition with a null topic", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void OffsetsForTimes_NullKeyTopic_ThrowsArgument()
+    public void OffsetsForTimes_NullKeyTopic_ThrowsArgumentNull()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long> { [default] = 1L };
 
-        ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.OffsetsForTimes(search));
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.OffsetsForTimes(search));
         Assert.Equal("timestampsToSearch", ex.ParamName);
-        Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("timestampsToSearch must not contain a TopicPartition with a null topic", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

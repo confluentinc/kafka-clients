@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Consumer;
 /// consumer is destroyed, <see cref="Wakeup"/> does nothing, <see cref="Assignment"/> and <see cref="Paused"/> still
 /// return, and every other operation throws <see cref="IllegalStateException"/>.
 /// </summary>
-public sealed class ConsumerHandle : IDisposable
+internal sealed class ConsumerHandle : IDisposable
 {
     // IDisposable only, not IAsyncDisposable: every operation, the destroy included, is a synchronous C call.
     private readonly NativeConsumerHandle _native;

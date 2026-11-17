@@ -25,11 +25,15 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Send checks for a closed producer before it serializes, as Java's doSend does, on all four producer types: the
 /// serializer is never invoked, so a stateful one takes no action for a doomed send, and its throw cannot mask
-/// the IllegalStateException. A null record is checked first.
+/// the IllegalStateException. The closed check also comes before the null-record check, as in Java.
 /// </summary>
 public sealed class PublicProducerSendClosedCheckTests
 {
     private const string Topic = "closed-check-topic";
+
+    private const string MockClosed = "MockProducer is already closed.";
+
+    private const string RealClosed = "Cannot perform operation after producer has been closed";
 
     private static Dictionary<string, object?> RealConfig() => new()
     {
@@ -115,15 +119,46 @@ public sealed class PublicProducerSendClosedCheckTests
     }
 
     [Fact]
-    public void Send_NullRecordOnClosedProducer_StillThrowsArgumentNull()
+    public void Send_NullRecordOnClosedProducer_ThrowsIllegalState()
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, Serdes.ByteArray().Serializer());
         TestTimeout.Dispose(producer);
 
-        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.Send(null!));
-        Assert.Equal("record", ex.ParamName);
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => producer.Send(null!));
+        Assert.Equal(MockClosed, ex.Message);
         Assert.Equal(0, key.InvocationCount);
+    }
+
+    [Fact]
+    public void EverySend_NullArgumentsOnClosedProducer_ThrowIllegalState_OnAllFourProducers()
+    {
+        ISerializer<byte[]> bytes = Serdes.ByteArray().Serializer();
+        MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(bytes, bytes);
+        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(bytes, bytes);
+        KafkaProducer<byte[], byte[]> real = new KafkaProducer<byte[], byte[]>(RealConfig(), bytes, bytes);
+        AsyncKafkaProducer<byte[], byte[]> asyncReal = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), bytes, bytes);
+        TestTimeout.Dispose(mock);
+        TestTimeout.Dispose(asyncMock);
+        TestTimeout.Dispose(real);
+        TestTimeout.Dispose(asyncReal);
+
+        AssertClosed(MockClosed, () => mock.Send(null!));
+        AssertClosed(MockClosed, () => mock.Send(null!, null!));
+        AssertClosed(MockClosed, () => { _ = asyncMock.Send(null!); });
+        AssertClosed(MockClosed, () => { _ = asyncMock.Send(null!, (ICallback)null!); });
+        AssertClosed(MockClosed, () => { _ = asyncMock.Send(null!, (IAsyncCallback)null!); });
+        AssertClosed(RealClosed, () => real.Send(null!));
+        AssertClosed(RealClosed, () => real.Send(null!, null!));
+        AssertClosed(RealClosed, () => { _ = asyncReal.Send(null!); });
+        AssertClosed(RealClosed, () => { _ = asyncReal.Send(null!, (ICallback)null!); });
+        AssertClosed(RealClosed, () => { _ = asyncReal.Send(null!, (IAsyncCallback)null!); });
+    }
+
+    private static void AssertClosed(string message, Action send)
+    {
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(send);
+        Assert.Equal(message, ex.Message);
     }
 
     [Fact]

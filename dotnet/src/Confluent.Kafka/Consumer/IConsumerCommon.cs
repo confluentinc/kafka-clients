@@ -83,8 +83,7 @@ public interface IConsumerCommon
     IReadOnlyCollection<TopicPartition> Paused();
 
     /// <summary>
-    /// Triggers a rebalance (Java <c>enforceRebalance()</c> and <c>enforceRebalance(String reason)</c>, one method
-    /// with an optional <paramref name="reason"/>).
+    /// Triggers a rebalance (Java <c>enforceRebalance()</c>).
     /// </summary>
     /// <remarks>
     /// Under the KIP-848 group protocol it only logs and returns, as Java's <c>AsyncKafkaConsumer</c> does. As in
@@ -92,7 +91,6 @@ public interface IConsumerCommon
     /// call does not refuse it; the core still refuses it while another operation is in flight. The
     /// <see cref="KafkaException"/> below cannot occur under that protocol.
     /// </remarks>
-    /// <param name="reason">An optional human-readable reason, or <see langword="null"/>.</param>
     /// <exception cref="ConcurrentModificationException">
     /// The core refused it while another operation was in flight (the core's own check).
     /// </exception>
@@ -100,7 +98,23 @@ public interface IConsumerCommon
     /// The core reported a rebalance failure (not reachable under the current KIP-848
     /// no-op).
     /// </exception>
-    void EnforceRebalance(string? reason = null);
+    void EnforceRebalance();
+
+    /// <summary>
+    /// Triggers a rebalance, giving a <paramref name="reason"/> (Java <c>enforceRebalance(String reason)</c>).
+    /// </summary>
+    /// <remarks>
+    /// It behaves as <see cref="EnforceRebalance()"/>: under the KIP-848 group protocol it only logs and returns.
+    /// </remarks>
+    /// <param name="reason">A human-readable reason, or <see langword="null"/>.</param>
+    /// <exception cref="ConcurrentModificationException">
+    /// The core refused it while another operation was in flight (the core's own check).
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a rebalance failure (not reachable under the current KIP-848
+    /// no-op).
+    /// </exception>
+    void EnforceRebalance(string? reason);
 
     /// <summary>
     /// Returns a snapshot of the consumer's metrics (Java <c>Map&lt;MetricName, ? extends Metric&gt;
@@ -118,20 +132,4 @@ public interface IConsumerCommon
     /// The consumer is closed: the native handle is gone, where Java's consumer still answers.
     /// </exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
-
-    /// <summary>
-    /// Returns a new <see cref="ConsumerHandle"/>, the way into this consumer from inside one of its own callbacks,
-    /// as a Java listener calls the <c>consumer</c> it captured. Inside a callback the consumer routes its own calls
-    /// to a handle of its own, which also has the forms <see cref="ConsumerHandle"/> lacks, so a callback can also
-    /// call the consumer directly.
-    /// </summary>
-    /// <remarks>
-    /// It may be called from any thread, a callback included. The handle holds the consumer weakly: it does not
-    /// keep the consumer alive. Once the consumer is destroyed, the handle's <see cref="ConsumerHandle.Wakeup"/> does
-    /// nothing, its <see cref="ConsumerHandle.Assignment"/> and <see cref="ConsumerHandle.Paused"/> still return, and
-    /// its other operations throw <see cref="IllegalStateException"/>. See <see cref="ConsumerHandle"/>.
-    /// </remarks>
-    /// <returns>A new, caller-owned handle (never <see langword="null"/>).</returns>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    ConsumerHandle Handle();
 }

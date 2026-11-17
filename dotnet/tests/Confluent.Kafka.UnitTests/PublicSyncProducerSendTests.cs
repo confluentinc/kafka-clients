@@ -143,15 +143,14 @@ public sealed class PublicSyncProducerSendTests
     }
 
     [Fact]
-    public void Send_NullRecord_ThrownBeforeDisposedCheck_EvenWhenClosed()
+    public void Send_NullRecordOnClosedProducer_ThrowsIllegalStateFirst()
     {
-        // The null check precedes the closed check, so a closed producer with a null record throws
-        // ArgumentNullException.
+        // As Java's MockProducer.send, the closed check precedes the null record.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         TestTimeout.Dispose(producer);
 
-        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.Send(null!));
-        Assert.Equal("record", ex.ParamName);
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => producer.Send(null!));
+        Assert.Equal("MockProducer is already closed.", ex.Message);
     }
 
     [Fact]

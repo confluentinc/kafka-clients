@@ -391,7 +391,7 @@ internal sealed partial class NativeAdminClient
 
                 if (entry.Value is null)
                 {
-                    throw new ArgumentException("Offset value must not be null.", nameof(offsets));
+                    throw new ArgumentNullException(nameof(offsets), "offsets must not contain null");
                 }
 
                 AdminStrings.Validate(entry.Key.Topic(), nameof(offsets));

@@ -49,6 +49,25 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
 
     /// <summary>
+    /// Creates a broker-free mock consumer with the default reset strategy, <c>"latest"</c>: the three-argument
+    /// constructor with a <see langword="null"/> strategy.
+    /// </summary>
+    /// <param name="keyDeserializer">Deserializer for record keys.</param>
+    /// <param name="valueDeserializer">Deserializer for record values.</param>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// </exception>
+    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer)
+        : this(keyDeserializer, valueDeserializer, null)
+    {
+    }
+
+    /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
     /// <see cref="AddRecord"/> with the two deserializers.
     /// </summary>
@@ -70,7 +89,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null)
+        string? autoOffsetReset)
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
@@ -219,7 +238,10 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
 
     /// <inheritdoc/>
-    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+    public void EnforceRebalance() => _native.EnforceRebalance(null);
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
     public void CommitAsync() => _native.CommitAsync();
@@ -230,14 +252,13 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null) =>
+        IOffsetCommitCallback? callback) =>
         _native.CommitAsync(offsets, callback);
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
-    /// <inheritdoc/>
-    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+    internal ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <summary>
     /// Sets the beginning offset of a partition, used when <see cref="SeekToBeginning"/> resets it (Java
@@ -317,8 +338,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>MockConsumer.updateDurationOffsets(Map)</c>).
     /// </summary>
     /// <param name="newOffsets">The offset of each partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A partition in <paramref name="newOffsets"/> has a null topic.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> is null, or a partition in it has a null topic.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateDurationOffsets(newOffsets);
