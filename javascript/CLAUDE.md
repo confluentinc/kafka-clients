@@ -581,8 +581,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   serializer's included, is counted in `record-error-rate` or
   `record-error-total`, which Java's `doSend` records for an `ApiException`
   or a `KafkaException` *(deviation. Why: the core's `send()` records no
-  error in that sensor. Goes when: the core records them; a core issue,
-  `DECISIONS.md` entry 31)*. The
+  error in that sensor, and a serializer's failure is answered in
+  JavaScript (`serializerFailed`), before the core. Goes when: the core
+  records its `send()`'s errors, a core issue, `DECISIONS.md` entry 31; and,
+  for a serializer's failure, the binding counts it, which it cannot today:
+  the FFI hands out only a snapshot of the producer's metrics
+  (`kafka_producer_Producer_metrics`), never its `Metrics` registry or its
+  `errors` sensor, and the binding gives the core no serializer (Serialization,
+  Q50). It needs an FFI entry that records a send failure on the producer, or
+  the core running the serializers)*. The
   binding's own check of what a serializer returns stays a `TypeError`.
   `MockProducer` passes every serializer error out raw, as Java's
   `MockProducer#send` serializes with no `try`. `stringSerializer()`

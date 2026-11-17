@@ -530,8 +530,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * reports, a serializer's included, is counted in the producer's
    * `record-error-rate` or `record-error-total`, which Java's `doSend`
    * records for an `ApiException` or a `KafkaException`. Why: the core's
-   * `send()` records no error in that sensor. Goes when: the core records
-   * them.)*
+   * `send()` records no error in that sensor, and a serializer's failure is
+   * answered in JavaScript, before the core. Goes when: the core records its
+   * `send()`'s errors, and, for a serializer's, the FFI can record one: the
+   * producer hands out no handle to its `errors` sensor.)*
    *
    * The client reads a `Buffer` or `Uint8Array` key or value after `send()`
    * returns. Don't write to it, transfer it or resize it until the Promise
