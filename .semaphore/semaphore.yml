@@ -53,7 +53,9 @@ name: build-test-release
 #      Cargo.toml version allows it.
 #   8. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
 #      against the RustSec advisory database; a vulnerable dependency fails.
-#   9. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
+#   9. "Coverage (Linux amd64)" -- one job per language that reports its tests'
+#      code coverage; today coverage-dotnet, the .NET unit tests'.
+#  10. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
 #      blocks, which run only on a release tag of their package (see the
 #      comments above them).
 #
@@ -284,17 +286,19 @@ blocks:
     #     jobs install no host .NET: the gRPC images build inside the .NET SDK
     #     image, and the harness is Rust.
     #
-    # Every job runs under this block's 30-minute limit. verify-dotnet's
+    # Every job runs under this block's 45-minute limit. verify-dotnet's
     # plaintext job is the longest: 26 minutes on 2026-09-30 and 20 on
-    # 2026-10-01, against about 11 for verify-c and verify-python. If it starts
-    # timing out, move the .NET jobs to a block of their own with a longer limit
-    # (see the note at the top of this file).
+    # 2026-10-01, against about 11 for verify-c and verify-python, and it
+    # reached the earlier 30-minute limit in November 2026. The limit is set for
+    # it, so a hung C or Python job also runs up to 45 minutes before it fails.
+    # If verify-dotnet outgrows 45, move the .NET jobs to a block of their own
+    # with a longer limit (see the note at the top of this file).
     #
     # Each job is a separate VM with its own broker, so the nine jobs do not
     # contend for Docker resources.
     dependencies: []
     execution_time_limit:
-      minutes: 30
+      minutes: 45
     task:
       prologue:
         # Runs before EACH job in this block; every job is a separate VM with
@@ -578,6 +582,40 @@ blocks:
           commands:
             - make audit
 
+  - name: "Coverage (Linux amd64)"
+    # One job per language that reports its tests' code coverage. A block of its
+    # own, so a coverage failure is told apart from a verify failure, and
+    # coverage has its own time limit. A new language adds a job here
+    # (coverage-<language> (Linux amd64)) and lists it in REQUIRED_CI_JOBS in
+    # create-release-tag.yml. Every job runs on every build: a skipped job records
+    # no result, and create-release-tag.yml then refuses to tag.
+    #
+    # coverage-dotnet runs the .NET unit tests with code coverage
+    # (`make coverage-dotnet`, see dotnet/Makefile). It prints the summary in the
+    # log and keeps the HTML report as the workflow artifact coverage/dotnet.tar.gz
+    # (about 3 MB; extract it and open report/index.html). One archive, because
+    # the report is several hundred pages that link to each other. It reports
+    # only: no coverage level fails it.
+    dependencies: []
+    execution_time_limit:
+      minutes: 30
+    task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "coverage-dotnet (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - (cd dotnet && retry dotnet tool restore)
+            - make coverage-dotnet
+            - tar -czf coverage-dotnet.tar.gz -C dotnet/artifacts/coverage report
+            - retry artifact push workflow --force --expire-in 2w coverage-dotnet.tar.gz --destination coverage/dotnet.tar.gz
+
   - name: "Release: CI passed"
     # Passes once every CI block has passed, as "Create release tag" requires
     # of every CI job before it tags a commit. The release blocks that need CI
@@ -599,6 +637,7 @@ blocks:
       - "Verify language bindings (Linux amd64)"
       - "Verify language bindings (macOS arm64)"
       - "Verify language bindings (Windows amd64)"
+      - "Coverage (Linux amd64)"
     run:
       when: "tag =~ '.*'"
     execution_time_limit:
