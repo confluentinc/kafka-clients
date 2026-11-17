@@ -128,7 +128,19 @@ private:
 
     std::string member_id(const java::Method& m) const { return type_.binary_name + "#" + m.signature(); }
 
+    /// §4.6: a record's key or value is optional with no decisions.txt line,
+    /// since Java records carry null keys and values (a tombstone).
+    bool is_record_key_or_value(const TypeRef& ref, Position position) const {
+        const bool record = type_.binary_name == "org.apache.kafka.clients.producer.ProducerRecord" ||
+                            type_.binary_name == "org.apache.kafka.clients.consumer.ConsumerRecord";
+        return record && (position == Position::PARAMETER || position == Position::RETURN) &&
+               ref.kind == TypeRef::Kind::TYPE_VARIABLE && ref.dimensions == 0 && (ref.name == "K" || ref.name == "V");
+    }
+
     Mapping mapped(const TypeRef& ref, Position position, const std::string& where, std::string_view java_name = {}) {
+        if (is_record_key_or_value(ref, position)) {
+            return Mapping{{Shape{value("std::optional", {value(ref.name)}), Decision::NONE}}, {}};
+        }
         auto m = map_type(model_, ref, position, java_name);
         if (!m.ok()) {
             problem(where + ": " + m.unmapped);

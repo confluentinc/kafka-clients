@@ -372,6 +372,33 @@ TEST(ExpectedTest, PutsAnEnumsStaticsInANamespaceNamedAfterIt) {
     EXPECT_EQ(default_type(ssl.constants[0].mapping), "std::array<confluent::kafka::common::config::SslClientAuth>");
 }
 
+TEST(ExpectedTest, MakesARecordsKeyAndValueOptional) {
+    // §4.6: a record key or value is std::optional, with no decisions.txt line.
+    const auto model = public_model_of({{"org/apache/kafka/clients/producer/ProducerRecord.java", R"(
+        package org.apache.kafka.clients.producer;
+        public class ProducerRecord<K, V> {
+            public ProducerRecord(String topic, K key, V value) {}
+            public K key() { return null; }
+            public String topic() { return null; }
+        }
+    )"},
+                                        {"org/apache/kafka/common/Holder.java", R"(
+        package org.apache.kafka.common;
+        public class Holder<K> { public K key() { return null; } }
+    )"}});
+    const auto e = cklint::rules::expected(model, *model.find("org.apache.kafka.clients.producer.ProducerRecord"));
+    const auto& ctor = function(e, "ProducerRecord");
+    ASSERT_EQ(ctor.parameters.size(), 3U);
+    EXPECT_EQ(default_type(ctor.parameters[1].mapping), "std::optional<K>");
+    EXPECT_EQ(ctor.parameters[1].mapping.shapes.size(), 1U);
+    EXPECT_EQ(default_type(ctor.parameters[2].mapping), "std::optional<V>");
+    EXPECT_EQ(default_type(function(e, "key").returns), "std::optional<K>");
+    EXPECT_EQ(default_type(function(e, "topic").returns), "std::string");
+    // Elsewhere a type variable is not optional.
+    const auto holder = cklint::rules::expected(model, *model.find("org.apache.kafka.common.Holder"));
+    EXPECT_EQ(default_type(function(holder, "key").returns), "K");
+}
+
 TEST(ExpectedTest, TranslatesConstantsAndFields) {
     // §2.4
     const auto model = public_model_of({{"org/apache/kafka/common/Uuid.java", R"(

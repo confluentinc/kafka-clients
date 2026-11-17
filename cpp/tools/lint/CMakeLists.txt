@@ -63,6 +63,44 @@ target_compile_options(ck_java_model_cli PRIVATE ${CK_LINT_WARNINGS})
 set(CK_LINT_DESIGN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../design/current" CACHE PATH
     "The repository's design/current: the public-audience and deprecated-API lists")
 
+# ---- The clang-tidy plugin.
+# A plugin loads only into the clang-tidy of the LLVM it was built against, so
+# one major is pinned (LLVM_VERSION). LLVM's package version file accepts only
+# its own major.minor, so the major is checked after loading it.
+file(STRINGS LLVM_VERSION CK_LLVM_MAJOR LIMIT_COUNT 1)
+set(CK_LLVM_ROOT "/usr/lib/llvm-${CK_LLVM_MAJOR}" CACHE PATH "The LLVM ${CK_LLVM_MAJOR} installation")
+find_package(LLVM REQUIRED CONFIG PATHS "${CK_LLVM_ROOT}/lib/cmake/llvm" NO_DEFAULT_PATH)
+if(NOT LLVM_VERSION_MAJOR EQUAL CK_LLVM_MAJOR)
+    message(FATAL_ERROR "The linter needs LLVM ${CK_LLVM_MAJOR} (LLVM_VERSION); found ${LLVM_PACKAGE_VERSION}")
+endif()
+find_package(Clang REQUIRED CONFIG PATHS "${CK_LLVM_ROOT}/lib/cmake/clang" NO_DEFAULT_PATH)
+find_program(CK_CLANG_TIDY clang-tidy HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+message(STATUS "Translation linter: LLVM ${LLVM_PACKAGE_VERSION}, ${CK_CLANG_TIDY}")
+
+set(CK_LINT_INCLUDE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../include" CACHE PATH "The binding's include directory")
+# The C header, for running the checks on the binding's own headers.
+if(DEFINED _ck_include_dir)
+    set(_ck_lint_ffi_default "${_ck_include_dir}")
+else()
+    set(_ck_lint_ffi_default "${CMAKE_CURRENT_SOURCE_DIR}/../../../rust/target/include")
+endif()
+set(CK_LINT_FFI_INCLUDE_DIR "${_ck_lint_ffi_default}" CACHE PATH "The directory of confluent_kafka_bindings.h")
+
+add_library(ConfluentKafkaTidy MODULE
+    tidy/module.cpp tidy/session.cpp tidy/class_checks.cpp tidy/header_check.cpp)
+target_include_directories(ConfluentKafkaTidy SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+separate_arguments(_ck_llvm_definitions NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+target_compile_definitions(ConfluentKafkaTidy PRIVATE
+    CK_LINT_KAFKA_JAVA_ROOT="${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java"
+    CK_LINT_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+    CK_LINT_INCLUDE_ROOT="${CK_LINT_INCLUDE_ROOT}")
+target_compile_options(ConfluentKafkaTidy PRIVATE ${_ck_llvm_definitions} ${CK_LINT_WARNINGS})
+if(NOT LLVM_ENABLE_RTTI)
+    target_compile_options(ConfluentKafkaTidy PRIVATE -fno-rtti)
+endif()
+# Clang's symbols come from the clang-tidy that loads the plugin.
+target_link_libraries(ConfluentKafkaTidy PRIVATE ck_rules)
+
 if(BUILD_TESTING)
     # GoogleTest from the system, else the pin of cpp/test/unit/CMakeLists.txt.
     find_package(GTest CONFIG QUIET)
@@ -98,4 +136,30 @@ if(BUILD_TESTING)
     # One process, so the tree is parsed once.
     ck_lint_test(javamodel_kafka_test)
     add_test(NAME javamodel_kafka_test COMMAND javamodel_kafka_test)
+
+    # The plugin through the real clang-tidy: it loads, each fixture reports
+    # exactly what its headers expect, and the binding's headers report nothing.
+    add_executable(fixture_runner test/fixture_runner.cpp)
+    target_compile_options(fixture_runner PRIVATE ${CK_LINT_WARNINGS})
+    add_test(NAME lint_plugin_loads
+        COMMAND fixture_runner checks ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
+                confluent-kafka-java-class confluent-kafka-java-inheritance confluent-kafka-java-enum
+                confluent-kafka-header)
+    file(GLOB _ck_fixtures LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/*")
+    foreach(_fixture IN LISTS _ck_fixtures)
+        if(IS_DIRECTORY "${_fixture}")
+            get_filename_component(_name "${_fixture}" NAME)
+            add_test(NAME lint_fixture_${_name}
+                COMMAND fixture_runner run ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
+                        "${_fixture}/java" "${_fixture}/include" "${_fixture}/data"
+                        "${CMAKE_CURRENT_BINARY_DIR}/fixtures/${_name}")
+        endif()
+    endforeach()
+    if(EXISTS "${CK_LINT_FFI_INCLUDE_DIR}/confluent_kafka_bindings.h")
+        add_test(NAME lint_binding_headers
+            COMMAND fixture_runner run ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
+                    "${CK_LINT_KAFKA_SOURCE_DIR}/clients/src/main/java" "${CK_LINT_INCLUDE_ROOT}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/data" "${CMAKE_CURRENT_BINARY_DIR}/binding"
+                    -isystem "${CK_LINT_FFI_INCLUDE_DIR}")
+    endif()
 endif()

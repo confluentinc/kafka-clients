@@ -1,6 +1,6 @@
 # C++ binding: status
 
-Updated 2026-11-14.
+Updated 2026-11-17.
 
 ## Done
 
@@ -40,9 +40,24 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   expected <FQN>`. The eleven verification classes derive with no problem except `Configurable`,
   whose `Map<String, ?>` has no §5 row, as planned. The word budget joins `expected` with the
   doc check (step 7).
-- (a) the plugin loading into `clang-tidy-21` and reading comments on template members, and
-  (b) `clang-tidy-21` parsing libstdc++ 15's `<chrono> <span> <compare> <functional>`: open,
-  waiting for LLVM 21 (`clang-21 clang-tidy-21 libclang-21-dev libclang-cpp21-dev llvm-21-dev`).
+- (a) **Yes**: a module built with the lint project's CMake (LLVM 21.1.8 from Ubuntu, RTTI on)
+  loads with `clang-tidy-21 -load`, reads a Doxygen comment's `@param` names on a member of a
+  class template, and prints parameter types as written (`int32_t`, `std::string_view`,
+  `std::span<const std::byte>`), not canonically. A class's injected name prints unqualified
+  (`const Box<K> &`), so the plugin builds types structurally. `find_package(LLVM)` takes no
+  version (its version file wants major.minor); the major is asserted after.
+- (b) **Yes**: `clang-tidy-21` parses a C++20 header including libstdc++ 15's `<chrono>`,
+  `<span>`, `<compare>` and `<functional>` with no error.
+
+- Step 3 done: the clang-tidy plugin `libConfluentKafkaTidy.so` (`tools/lint/tidy/`), loaded with
+  `clang-tidy-21 -load`, with `confluent-kafka-java-class`, `-java-inheritance`, `-java-enum` and
+  `-header`. They match the translation unit once, share the Java side (built once per process)
+  and read their inputs from the options `ConfluentKafkaJavaRoot`, `ConfluentKafkaDataDir`,
+  `ConfluentKafkaIncludeRoot`. Tests: `lint_plugin_loads`, one fixture per check under
+  `tools/lint/test/fixtures` (23 expected diagnostics and the passing cases beside them, run by
+  `fixture_runner` through the real clang-tidy), and `lint_binding_headers` (the binding's own
+  headers report nothing). The baseline of untranslated classes comes with the surface check
+  (step 5), which is the first check to report a missing class.
 
 ## Next
 
