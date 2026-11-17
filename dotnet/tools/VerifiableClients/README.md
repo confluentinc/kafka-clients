@@ -39,51 +39,86 @@ consumer tests, with `group_protocol=consumer`:
 | `consumer_test.py` `test_fencing_static_consumer` | `num_conflict_consumers=1`, `fencing_stage=stable` | passed, 1 min 27 s |
 | `compression_test.py` `test_compressed_topic` | `compression_types=[snappy, gzip, lz4, zstd, none]` | passed, 1 min 19 s |
 
-### Kafka's system-test libraries
+The steps use three shell variables. Set them first, in the shell you run the
+steps from; the values are examples:
 
-The nodes run Kafka from a checkout, which `systemTestLibs` builds. From the
-repository root, copy the `kafka` submodule to `<kafka>`, an absolute path
-outside the repository, so Gradle's output stays out of it, and build it;
-without a JDK on the host, in a JDK container (about 2.5 minutes; the volume
-keeps Gradle's downloads):
+    # Replace these values with your own.
+    export KAFKA=$HOME/kafka-systest-4.4                 # a copy of Kafka, outside the repository
+    export PUBLISH_DIR=$HOME/kafka-systest-dotnet-build  # where dotnet publish builds, outside the repository
+    export ARCH=arm64                                    # the host's architecture: arm64 or x64
 
-    mkdir -p <kafka> && git -C kafka archive HEAD | tar -x -C <kafka>
-    docker run --rm --memory=6g -v <kafka>:/kafka -v kafka-gradle-cache:/root/.gradle \
+Run each command from the repository root.
+
+### 1. Build Kafka's system-test libraries
+
+The nodes run Kafka from a checkout, which `systemTestLibs` builds. Copy the
+`kafka` submodule to `$KAFKA`, outside the repository so Gradle's output stays
+out of it, and build it; without a JDK on the host, in a JDK container (about
+2.5 minutes; the volume keeps Gradle's downloads):
+
+    mkdir -p "$KAFKA" && git -C kafka archive HEAD | tar -x -C "$KAFKA"
+    docker run --rm --memory=6g -v "$KAFKA":/kafka -v kafka-gradle-cache:/root/.gradle \
         -w /kafka eclipse-temurin:17-jdk-jammy \
         ./gradlew --no-daemon --max-workers=4 systemTestLibs
 
-### Building the tools for the nodes
+The build ends with `BUILD SUCCESSFUL`. Run it before step 5: the build and
+the cluster each need much of Docker's memory.
 
-The ducker-ak nodes are Ubuntu 22.04 on the host's architecture. Build the
-Linux native library with the `ubuntu:22.04` command of
-[`python/verifiable_clients/README.md`](../../../python/verifiable_clients/README.md):
-it writes `rust/target-linux/release/libconfluent_kafka.so`, and one build
-serves both bindings. The .NET tools need only its `cargo build`, without the
-Python packages and the `setup.py` step.
+### 2. Build the Linux native library
 
-Then, from the repository root, publish both tools self-contained for the
-host's architecture (`<arch>` is `arm64` or `x64`) into a directory under the
-Kafka checkout's `tests/` (mounted on every node as `/opt/kafka-dev/tests/`):
+The ducker-ak nodes are Ubuntu 22.04 on the host's architecture, so the native
+library is built in an `ubuntu:22.04` container:
+
+    docker run --rm -v "$PWD":/work -w /work/rust \
+        -e CARGO_TARGET_DIR=/work/rust/target-linux -e CARGO_BUILD_JOBS=8 \
+        -e HOST_OWNER="$(id -u):$(id -g)" ubuntu:22.04 bash -c '
+      set -e
+      apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+          gcc g++ make cmake clang nasm perl pkg-config git
+      curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      . "$HOME/.cargo/env"
+      cargo build -p confluent-kafka --release --lib --features ffi
+      chown -R "$HOST_OWNER" /work/rust/target-linux /work/rust/target/include'
+
+It writes `rust/target-linux/release/libconfluent_kafka.so` (`rust/target-linux`
+is in `.gitignore`). `--features ffi` builds the C API the .NET binding calls.
+The build also writes the C headers to `rust/target/include`, shared with the
+host's build, and runs as root, so the last line gives the files back to you.
+`CARGO_BUILD_JOBS` limits the build's parallel jobs; lower it if Docker runs
+out of memory. The same library serves the Python tools, whose
+[`README.md`](../../../python/verifiable_clients/README.md) adds the extension
+build to this command.
+
+### 3. Publish the tools
+
+Publish both tools self-contained for the host's architecture into a directory
+under the Kafka checkout's `tests/` (mounted on every node as
+`/opt/kafka-dev/tests/`):
 
     for tool in VerifiableProducer VerifiableConsumer; do
       dotnet publish dotnet/tools/VerifiableClients/$tool -c Release -f net8.0 \
-          -r linux-<arch> --self-contained --artifacts-path <dir> \
+          -r linux-$ARCH --self-contained --artifacts-path "$PUBLISH_DIR" \
           -p:NativeLibraryPath="$PWD/rust/target-linux/release/libconfluent_kafka.so" \
           -p:NativeLibraryFileName=libconfluent_kafka.so \
-          -o <kafka>/tests/dotnet-clients
+          -o "$KAFKA/tests/dotnet-clients"
     done
 
 The two `-p:` properties put the Linux library next to the executables in place
-of the host's. The build happens in `<dir>`, any directory outside the
-repository, so the repository's `bin/` and `obj/` directories are left
-untouched. The output carries the .NET runtime and the library, and the tools
-use invariant globalization, so the nodes need no .NET runtime, no ICU and no
-`LD_LIBRARY_PATH`.
+of the host's. The build happens in `$PUBLISH_DIR`, so the repository's `bin/` and
+`obj/` directories are left untouched. The output carries the .NET runtime and
+the library, and the tools use invariant globalization, so the nodes need no
+.NET runtime, no ICU and no `LD_LIBRARY_PATH`.
 
-### Running a case
+Check that a tool starts on Ubuntu 22.04; this prints
+`usage: verifiable-producer` and the options:
 
-Save these globals as `<kafka>/tests/dotnet-globals.json`:
+    docker run --rm -v "$KAFKA/tests/dotnet-clients":/t ubuntu:22.04 /t/VerifiableProducer --help
 
+### 4. Save the globals
+
+Save the globals in the Kafka copy's `tests/`:
+
+    cat > "$KAFKA/tests/dotnet-globals.json" <<'EOF'
     {
       "VerifiableProducer": {
         "class": "kafkatest.services.verifiable_client.VerifiableClientApp",
@@ -98,27 +133,36 @@ Save these globals as `<kafka>/tests/dotnet-globals.json`:
         "kill_signal": 15
       }
     }
+    EOF
 
 The executable is the .NET process itself, so the signal reaches the tool.
 `pids` is the pattern `VerifiableClientApp` would derive from `exec_cmd`,
 spelled out so that an `exec_cmd` starting with `env` (see Logging) still works.
 
-From `<kafka>`, bring the cluster up with `tests/docker/ducker-ak up -n 11`:
-ducker01 only runs ducktape, so a case needs one node more than its
-`@cluster(num_nodes=...)`; 11 covers the cases above, and the default, 14,
-works too. The first `up` builds the nodes' image, in about 20 minutes.
+### 5. Bring the cluster up
 
-Run one case at a time, selected with ducktape's `@` parameters, so the
-`classic` parametrizations, which cannot pass, are left out. The selector does
-not survive `ducker-ak test`'s shell quoting, so call ducktape on the first
-node:
+    (cd "$KAFKA" && tests/docker/ducker-ak up -n 11)
+
+ducker01 only runs ducktape, so a case needs one node more than its
+`@cluster(num_nodes=...)`. The largest case in this README asks for 10 nodes,
+so 11 covers them all, and the default, 14, works too. The first `up` builds
+the nodes' image, in about 20 minutes.
+
+### 6. Run the cases
+
+Run either one case or every case the client can run. Select cases with
+ducktape's `@` parameters, so the `classic` parametrizations, which cannot
+pass, are left out. A selector does not survive `ducker-ak test`'s shell
+quoting, so call ducktape on the first node.
+
+#### One case
 
     docker exec -w /opt/kafka-dev ducker01 ducktape \
         --cluster-file tests/docker/build/cluster.json \
         '<selector>' \
         --globals /opt/kafka-dev/tests/dotnet-globals.json
 
-The selectors of the cases above:
+The selectors of the four cases in the table at the start of this section:
 
     tests/kafkatest/tests/client/consumer_test.py::OffsetValidationTest.test_broker_rolling_bounce@{"metadata_quorum":"ISOLATED_KRAFT","group_protocol":"consumer"}
     tests/kafkatest/tests/client/consumer_test.py::OffsetValidationTest.test_consumer_bounce@{"clean_shutdown":true,"bounce_mode":"all","metadata_quorum":"ISOLATED_KRAFT","group_protocol":"consumer","enable_assignment_batching":true}
@@ -129,17 +173,7 @@ A selector must name every parameter of the case, with JSON booleans (`true`,
 not `True`). `ducktape --collect-only <file>` lists a file's cases with their
 parameters.
 
-The results go to `<kafka>/results/`. A service's `start()` first removes the
-tool's directory on each of its nodes, so a failed test's capture file (see
-Logging) holds only the runs since the service last started: when a test starts
-a service again, as the fencing test does its conflict consumers, the earlier
-runs (the fenced first run) are not in it. A node bounced with `stop_node` and
-`start_node`, as in `test_consumer_bounce`, appends to the same file.
-
-When you are done, `tests/docker/ducker-ak down`, from `<kafka>`, removes the
-nodes.
-
-### Running every case the client can run
+#### Every case the client can run
 
 [`system-tests.txt`](system-tests.txt) lists, one selector per line, the 53
 cases of Kafka 4.4.0-rc4 that use these tools and that the client can run. From
@@ -173,14 +207,12 @@ the 14 test files below, it keeps:
 Where only the producer is a .NET tool, Kafka's Java tools (`ConsoleConsumer`,
 or the tool the test is about) read the records.
 
-Build the libraries, publish the tools and save the globals as above, then copy
-the list next to the globals, from the repository root:
+Copy the list next to the globals:
 
-    cp dotnet/tools/VerifiableClients/system-tests.txt <kafka>/tests/dotnet-system-tests.txt
+    cp dotnet/tools/VerifiableClients/system-tests.txt "$KAFKA/tests/dotnet-system-tests.txt"
 
-The largest of these cases asks for 10 nodes, so `tests/docker/ducker-ak up -n
-11` covers them all. Check that every selector still matches a case; this
-prints `Collected 53 tests`:
+Check that every selector still matches a case; this prints
+`Collected 53 tests`:
 
     docker exec -w /opt/kafka-dev ducker01 bash -c \
         'mapfile -t S < tests/dotnet-system-tests.txt
@@ -196,14 +228,34 @@ Run them all in one ducktape session, which takes a few hours (on macOS, put
         'mapfile -t S < tests/dotnet-system-tests.txt
          ducktape --cluster-file tests/docker/build/cluster.json \
                   --globals /opt/kafka-dev/tests/dotnet-globals.json "${S[@]}"' \
-        2>&1 | tee <kafka>/dotnet-system-tests.log
+        2>&1 | tee "$KAFKA/dotnet-system-tests.log"
 
 To run a part of the list, filter it, for example
 `mapfile -t S < <(grep snapshot_test tests/dotnet-system-tests.txt)`.
 
-The session's directory is the newest under `<kafka>/results/`. Its
-`report.txt` gives each case's result, and each failed case's directory holds
-the tools' capture files and the broker logs.
+### 7. Read the results
+
+Each ducktape session writes a directory under `$KAFKA/results/`, named by
+date and session number (`2026-11-16--001`). This prints the newest session's
+`report.txt`, which gives each case's result:
+
+    RUN=$(ls -td "$KAFKA"/results/20*/ | head -1) && cat "$RUN/report.txt"
+
+Each failed case's directory in it holds the tools' capture files (see
+Logging) and the broker logs.
+
+A service's `start()` first removes the tool's directory on each of its nodes,
+so a failed test's capture file holds only the runs since the service last
+started: when a test starts a service again, as the fencing test does its
+conflict consumers, the earlier runs (the fenced first run) are not in it. A
+node bounced with `stop_node` and `start_node`, as in `test_consumer_bounce`,
+appends to the same file.
+
+### 8. Tear the cluster down
+
+    (cd "$KAFKA" && tests/docker/ducker-ak down)
+
+This removes the nodes and their network.
 
 ### What cannot pass yet
 
