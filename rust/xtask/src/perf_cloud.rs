@@ -1979,6 +1979,8 @@ fn build(group: Group) -> anyhow::Result<()> {
                     .arg("-B")
                     .arg(repo.join("c/build"))
                     .arg(format!("-DRUST_PROJECT_ROOT={}", rust.display()))
+                    // CMake links target/debug unless told otherwise.
+                    .arg("-DRUST_PROFILE=release")
                     .arg("-DCMAKE_C_FLAGS=-O2"),
             )?;
             step(

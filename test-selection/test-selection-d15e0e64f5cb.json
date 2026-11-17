@@ -1,0 +1,31 @@
+{
+  "base": "c2d6ade51c5b5ac7022574310b3ed73c3351b3a1",
+  "changed_files": [
+    "M python/confluent_kafka/_args.py"
+  ],
+  "created": 1794585980,
+  "head": "d15e0e64f5cbacfab8be70a1ac7ec667859d1fa3",
+  "merge_base": "c2d6ade51c5b5ac7022574310b3ed73c3351b3a1",
+  "python": {
+    "grpc": [],
+    "integration": [],
+    "performance": [],
+    "soak": [],
+    "static": [],
+    "typecheck": [],
+    "unit": [],
+    "verifiable_clients": []
+  },
+  "reasons": {
+    "python.grpc": "The Python gRPC server runs the Rust integration harness through confluent_kafka, which loads _args and runs reject_str in admin and consumer calls.",
+    "python.integration": "The broker tests import confluent_kafka, which loads _args and runs reject_str through the admin and consumer entry points.",
+    "python.performance": "The performance tests import confluent_kafka producers and consumers, which load the changed module.",
+    "python.soak": "The soak client imports confluent_kafka, which loads the changed module.",
+    "python.static": "The static tests scan the confluent_kafka sources, which include the edited _args.py.",
+    "python.typecheck": "mypy --strict checks the edited module confluent_kafka/_args.py, including the new module-level _TEXT_TYPES constant.",
+    "python.unit": "Nearly every confluent_kafka module imports _args at load time, and reject_str is tested directly in test_args.py and test_string_arguments.py and runs in the admin, consumer and common argument checks.",
+    "python.verifiable_clients": "The verifiable producer and consumer import confluent_kafka, which loads the changed module."
+  },
+  "tree": "d8b85a05b1d694f8e796e5452fb2e36cd5213be2",
+  "version": 2
+}
