@@ -105,7 +105,10 @@ newer.
   rejects with it, and `flush()` rejects with it; after `completeNext()` or
   `errorNext()` it is kept, oldest first, and the next `send()`, `flush()` or
   `close()` rejects with the oldest, once; `flush()` and `close()` wait for
-  every callback Promise already started. A serializer's error, an
+  every callback Promise already started, `flush()` completing the waiting
+  records first even with a kept error. Only a record's own `send()` gets its
+  callback's error. A `close()` inside a callback, before its first
+  `await`, does not wait for the callbacks, as Python's async mock. A serializer's error, an
   `ApiError` or a `TypeError` included, rejects the mock's `send()` as it is,
   as Java's mock serializes with no `try`. A closed mock nothing
   references is collected with its native mock, sends still waiting
@@ -187,7 +190,9 @@ newer.
   `({ metadata, exception }) => ...`. A callback that returns a Promise is
   awaited (its result is wrapped with `Promise.resolve`): the record's future
   completes, and a `flush()` or `close()` covering the record returns, once
-  it settled; a rejection is logged as a throw is, and reaches no caller.
+  it settled; a rejection is logged as a throw is, and reaches no caller,
+  except from the callback a serializer's `ApiError` runs inside `send()`,
+  whose throw or rejection rejects `send()`, as Java's does.
   Callbacks run one at a time, in the order their records complete, as
   Java's do: a later record's callback starts only once an earlier callback's
   Promise has settled.

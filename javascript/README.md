@@ -276,7 +276,9 @@ thread, before the record's future completes. A callback that returns a
 Promise is awaited: the record's future completes, and a `flush()` or
 `close()` that covers the record returns, only once that Promise settled, as
 Java's wait for the callback to return. A rejection is handled as a throw:
-the client logs it, and it reaches no caller. Do not wait inside the
+the client logs it, and it reaches no caller, except the callback a
+serializer's `ApiError` runs inside `send()`, whose throw or rejection
+rejects `send()`, as Java's `onCompletion` throws out of `send()` there. Do not wait inside the
 callback's Promise for `flush()` or `close()` of the same producer: they wait
 for it.
 
@@ -468,7 +470,15 @@ logs it: `send()` with `autoComplete` waits for it and rejects with it, and
 return before the Promise settles, the error is kept, oldest first, and the
 next `send()`, `flush()` or `close()` rejects with the oldest, once, as
 Python's async mock does. `flush()` and `close()` wait for every callback
-Promise already started, so no error is lost.
+Promise already started, so no error is lost; with a kept error, `flush()`
+still completes the waiting records and waits for their callbacks before it
+rejects. Only a record's own `send()` gets its callback's error: a `send()`
+made inside a callback, or one that runs callbacks a pending `flush()`
+completed, leaves those errors to their own calls. A `close()` called
+inside one of the mock's callbacks before its first `await` does not wait
+for the callbacks, as Python's async mock; after that `await`, and a
+`flush()` there at all, wait for that same callback and never settle, as on
+`KafkaProducer`.
 Java's public error fields are
 setters, and each call throws the very error it was given:
 
