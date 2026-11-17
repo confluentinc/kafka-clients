@@ -289,8 +289,12 @@ rules and readings. Newest entries are at the end; dates are in IST.
     - any other error rejects as it is, as Java rethrows it.
 
     No failure `send()` reports, a serializer's included, is counted in `record-error-rate` or `record-error-total`,
-    which Java's `doSend` records for an `ApiException` or a `KafkaException` (a deviation of the core's: its `send()`
-    records no error in that sensor; it goes when the core records them, entry 31). `MockProducer` keeps passing every serializer error out raw, as Java's
+    which Java's `doSend` records for an `ApiException` or a `KafkaException` (a deviation with two causes: the core's
+    `send()` records no error in that sensor, which goes when the core records them, entry 31; and a serializer's
+    failure is answered in JavaScript, before the core, so the binding would have to count it, which it cannot today:
+    the FFI hands out only a snapshot of the producer's metrics, never its `errors` sensor, and the binding gives the
+    core no serializer. That part goes when the FFI can record a send failure on the producer, or the core runs the
+    serializers). `MockProducer` keeps passing every serializer error out raw, as Java's
     `MockProducer#send` serializes with no `try`. `PlaintextProducerSendTest.testWrongSerializer` is ported. The .NET
     binding answers a synchronous callback the same way (`PublicProducerSerializerFailureTests`); for an async
     callback, .NET's async producer completes the send's first stage at once, fails the future once the callback
@@ -333,5 +337,8 @@ rules and readings. Newest entries are at the end; dates are in IST.
       records one exhaustion per dropped send (a `SendWait::Never` allocation not recording it, for example).
     - **`record-error-rate` and `record-error-total` count no failure of `send()`.** Java's `KafkaProducer#doSend`
       records the `errors` sensor for an `ApiException`, an `InterruptedException` or a `KafkaException`, a
-      serializer's `SerializationException` included; the core's `KafkaProducer::do_send` records it for none, so
-      the client's deviation (`send()`'s TSDoc) goes when the core records them.
+      serializer's `SerializationException` included; the core's `KafkaProducer::do_send` records it for none. The
+      client's deviation (`send()`'s TSDoc) goes, for the core's `send()` errors, when the core records them; a
+      serializer's failure never reaches the core (the binding answers it in JavaScript, the core having no
+      serializer), so it also needs an FFI entry that records a send failure on the producer, or the core running the
+      serializers, entry 29.
