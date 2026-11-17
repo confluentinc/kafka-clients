@@ -153,3 +153,13 @@ test("SecurityProtocol has java.lang.Enum's members", () => {
   // The constructor is TypeScript-private: no run-time guard.
   assert.equal(typeof SecurityProtocol, 'function');
 });
+
+// Java ships no SecurityProtocolTest; the core's security_protocol.rs
+// test_for_id_roundtrip: Java's SecurityProtocol#forId finds every protocol by
+// its id, 0 (the falsy one) included.
+test('forId finds each protocol by its id, 0 included', () => {
+  for (const p of SecurityProtocol.values()) assert.equal(SecurityProtocol.forId(p.id), p, p.name());
+  assert.equal(SecurityProtocol.forId(0), SecurityProtocol.PLAINTEXT);
+  assert.equal(SecurityProtocol.forId(2), SecurityProtocol.SASL_PLAINTEXT);
+  assert.equal(SecurityProtocol.forId({ id: 0 }), SecurityProtocol.PLAINTEXT);
+});

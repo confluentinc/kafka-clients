@@ -257,3 +257,15 @@ rules and readings. Newest entries are at the end; dates are in IST.
     still pending; only the callback's own record's future waits for it, and the docs name that one. Both are a
     **(root conflict)** marked in `javascript/CLAUDE.md`, the docs following Java and the core (entry 4's exception
     for text that, read literally, misdescribes what the client does).
+
+## Java's configuration tests through the constructor (2026-11-18)
+
+28. **`SaslConfigsTest` is ported through `new KafkaProducer`**, a reading by analogy (entry 2) with how
+    `test/unit/producer/producer_config.test.js` ports `ProducerConfigTest`'s rejected values. Java's tests parse a
+    `ConfigDef` built by `SaslConfigs.addClientSaslSupport`, which is not translated (Scope: the `ConfigDef`
+    machinery), but the core's `ProducerConfig` defines the same four `sasl.login.refresh.*` keys with Java's ranges
+    and checks them when the producer is built, so the ten tests of valid and refused values are observable with
+    Java's `ConfigDef.Range` messages (decided by the Manager, 2026-11-18). The skip reason "the ConfigDef machinery"
+    no longer applies to them; `testSaslLoginRefreshDefaults` stays skipped, as it reads parsed values no getter
+    exposes. `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence` is ported the same way: the constructor
+    reaches the core's post-processing.

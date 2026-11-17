@@ -771,7 +771,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   null" *(deviation: Java's mock answers `[]`, as its empty cluster has no
   topic. Why: the FFI checks its mandatory parameters, and the binding
   repeats no precondition, Q35. Goes when: the FFI's mock accepts a null
-  topic)*. Java's
+  topic)*. `send(null)` on a closed mock rejects with `TypeError` "record
+  must not be null" *(deviation: Java's mock checks `closed` first, an
+  `IllegalStateException` "MockProducer is already closed.". Why: root §4
+  has the FFI check a NULL mandatory argument first, and Q35 has the binding
+  repeat no precondition, as for `Headers.remove(null)`. Goes when: the
+  FFI's mock checks `closed` first)*. Java's
   public error fields are setters only (plan §5 item 2, Python's
   `set_send_exception`): `setSendException`, `setFlushException`,
   `setPartitionsForException`, `setCloseException`, over

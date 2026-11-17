@@ -17,14 +17,21 @@
 // SslConfigs, SaslConfigs and SecurityConfig, as
 // python/test/unit/test_config_classes.py checks the Python ones.
 //
-// Java's SaslConfigsTest (Apache Kafka 4.4.0), 11 tests
-// (testSaslLoginRefreshDefaults, testSaslLoginRefreshMinValuesAreValid,
-// testSaslLoginRefreshMaxValuesAreValid and the eight
-// testSaslLoginRefresh*IsReallyMinimum / *IsReallyMaximum): skipped, as in
-// python/test/unit/test_config_class_ports.py: each parses a ConfigDef built by
-// SaslConfigs.addClientSaslSupport(ConfigDef), which is not translated (root
-// conventions, Scope: the ConfigDef machinery); core: none. SslConfigs and
-// SecurityConfig have no Java test class.
+// Java's SaslConfigsTest (Apache Kafka 4.4.0), 11 tests. Each parses a
+// ConfigDef built by SaslConfigs.addClientSaslSupport(ConfigDef), which is not
+// translated (root conventions, Scope: the ConfigDef machinery), but the core's
+// ProducerConfig defines the same four keys with the same ranges
+// (with_client_sasl_support), so they are ported through the KafkaProducer
+// constructor, as producer_config.test.js ports ProducerConfigTest
+// (design/current/javascript-producer/DECISIONS.md, entry 28):
+//   testSaslLoginRefreshMinValuesAreValid, testSaslLoginRefreshMaxValuesAreValid:
+//     ported here (the producer builds; the parsed values are not readable).
+//   the eight testSaslLoginRefresh*IsReallyMinimum / *IsReallyMaximum: ported
+//     here, with Java's ConfigDef.Range message in full (Java checks the class).
+//   testSaslLoginRefreshDefaults: skipped: it reads the parsed defaults, and
+//     no getter of a parsed configuration is translated; core:
+//     config_def.rs test_client_sasl_support.
+// SslConfigs and SecurityConfig have no Java test class.
 
 const assert = require('node:assert/strict');
 
@@ -77,3 +84,115 @@ test("the store type defaults are Java's, not the core's", () => {
   assert.equal(SslConfigs.DEFAULT_SSL_KEYSTORE_TYPE, 'JKS');
   assert.equal(SslConfigs.DEFAULT_SSL_TRUSTSTORE_TYPE, 'JKS');
 });
+
+// SaslConfigsTest, through the producer's configuration check (header above).
+// The values are the strings Java's tests put in their props; Java's
+// ConfigException(name, value, message) prints the parsed value, so
+// -0.000001 is Java's Double.toString, -1.0E-6.
+const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
+const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+
+const SASL_BOOTSTRAP = { 'bootstrap.servers': '127.0.0.1:1' };
+
+/** @type {Array<[string, Record<string, string>]>} */
+const SASL_VALID = [
+  [
+    'testSaslLoginRefreshMinValuesAreValid',
+    {
+      [SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_FACTOR]: '0.5',
+      [SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_JITTER]: '0.0',
+      [SaslConfigs.SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS]: '0',
+      [SaslConfigs.SASL_LOGIN_REFRESH_BUFFER_SECONDS]: '0',
+    },
+  ],
+  [
+    'testSaslLoginRefreshMaxValuesAreValid',
+    {
+      [SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_FACTOR]: '1.0',
+      [SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_JITTER]: '0.25',
+      [SaslConfigs.SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS]: '900',
+      [SaslConfigs.SASL_LOGIN_REFRESH_BUFFER_SECONDS]: '3600',
+    },
+  ],
+];
+for (const [label, configs] of SASL_VALID) {
+  test(`SaslConfigsTest.${label}: the producer takes the values`, async () => {
+    // Java's assertEquals on the parsed values is not translatable: no getter
+    // of a parsed configuration.
+    const producer = new KafkaProducer({ ...SASL_BOOTSTRAP, ...configs });
+    await producer.close({ timeout: 0 });
+  });
+}
+
+/** @type {Array<[string, string, string, string, string]>} */
+const SASL_REFUSED = [
+  [
+    'testSaslLoginRefreshWindowFactorMinValueIsReallyMinimum',
+    SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_FACTOR,
+    '0.499999',
+    '0.499999',
+    'Value must be at least 0.5',
+  ],
+  [
+    'testSaslLoginRefreshWindowFactorMaxValueIsReallyMaximum',
+    SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_FACTOR,
+    '1.0001',
+    '1.0001',
+    'Value must be no more than 1.0',
+  ],
+  [
+    'testSaslLoginRefreshWindowJitterMinValueIsReallyMinimum',
+    SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_JITTER,
+    '-0.000001',
+    '-1.0E-6',
+    'Value must be at least 0.0',
+  ],
+  [
+    'testSaslLoginRefreshWindowJitterMaxValueIsReallyMaximum',
+    SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_JITTER,
+    '0.251',
+    '0.251',
+    'Value must be no more than 0.25',
+  ],
+  [
+    'testSaslLoginRefreshMinPeriodSecondsMinValueIsReallyMinimum',
+    SaslConfigs.SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS,
+    '-1',
+    '-1',
+    'Value must be at least 0',
+  ],
+  [
+    'testSaslLoginRefreshMinPeriodSecondsMaxValueIsReallyMaximum',
+    SaslConfigs.SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS,
+    '901',
+    '901',
+    'Value must be no more than 900',
+  ],
+  [
+    'testSaslLoginRefreshBufferSecondsMinValueIsReallyMinimum',
+    SaslConfigs.SASL_LOGIN_REFRESH_BUFFER_SECONDS,
+    '-1',
+    '-1',
+    'Value must be at least 0',
+  ],
+  [
+    'testSaslLoginRefreshBufferSecondsMaxValueIsReallyMaximum',
+    SaslConfigs.SASL_LOGIN_REFRESH_BUFFER_SECONDS,
+    '3601',
+    '3601',
+    'Value must be no more than 3600',
+  ],
+];
+for (const [label, key, value, printed, message] of SASL_REFUSED) {
+  test(`SaslConfigsTest.${label}: the producer refuses ${key}=${value}`, () => {
+    assert.throws(
+      () => new KafkaProducer({ ...SASL_BOOTSTRAP, [key]: value }),
+      (e) => {
+        assert.ok(e instanceof ConfigError && e instanceof KafkaError, `${e}`);
+        assert.equal(e.message, `Invalid value ${printed} for configuration ${key}: ${message}`);
+        return true;
+      },
+    );
+  });
+}
