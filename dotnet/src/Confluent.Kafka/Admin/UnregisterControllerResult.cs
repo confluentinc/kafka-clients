@@ -19,7 +19,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.UnregisterController"/> — Java's
+/// The result of <see cref="IAdmin.UnregisterController(int, UnregisterControllerOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.UnregisterControllerResult</c>: one future over the whole call.
 /// </summary>
 /// <seealso cref="AsyncUnregisterControllerResult"/>

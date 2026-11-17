@@ -39,15 +39,12 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefault()
     {
-        Assert.Equal(-1, ReadBack((ElectLeadersOptions?)null));
         Assert.Equal(-1, ReadBack(new ElectLeadersOptions()));
         Assert.Empty(new ElectLeadersOptions().Setters.InOrder);
 
-        Assert.Equal((-1, true), ReadBack((AlterPartitionReassignmentsOptions?)null));
         Assert.Equal((-1, true), ReadBack(new AlterPartitionReassignmentsOptions()));
         Assert.Empty(new AlterPartitionReassignmentsOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((ListPartitionReassignmentsOptions?)null));
         Assert.Equal(-1, ReadBack(new ListPartitionReassignmentsOptions()));
         Assert.Empty(new ListPartitionReassignmentsOptions().Setters.InOrder);
     }
@@ -103,7 +100,7 @@ public sealed class AdminP4SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IllegalArgumentException rejected = Assert.Throws<IllegalArgumentException>(
-            () => admin.ElectLeaders((ElectionType)value, Array.Empty<TopicPartition>(), options: null));
+            () => admin.ElectLeaders((ElectionType)value, Array.Empty<TopicPartition>(), options: new ElectLeadersOptions()));
 
         Assert.Equal(
             "Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of [PREFERRED, UNCLEAN]",
@@ -142,18 +139,18 @@ public sealed class AdminP4SubmitArgumentTests
         Assert.Equal(
             "partitions",
             Assert.Throws<ArgumentException>(
-                () => admin.ElectLeaders(ElectionType.PREFERRED, new[] { default(TopicPartition) }, options: null))
+                () => admin.ElectLeaders(ElectionType.PREFERRED, new[] { default(TopicPartition) }, options: new ElectLeadersOptions()))
                 .ParamName);
         Assert.Equal(
             "reassignments",
             Assert.Throws<ArgumentException>(
                 () => admin.AlterPartitionReassignments(
-                    new Dictionary<TopicPartition, NewPartitionReassignment?> { [default] = null }, options: null))
+                    new Dictionary<TopicPartition, NewPartitionReassignment?> { [default] = null }, options: new AlterPartitionReassignmentsOptions()))
                 .ParamName);
         Assert.Equal(
             "partitions",
             Assert.Throws<ArgumentException>(
-                () => admin.ListPartitionReassignments(new[] { default(TopicPartition) }, options: null))
+                () => admin.ListPartitionReassignments(new[] { default(TopicPartition) }, options: new ListPartitionReassignmentsOptions()))
                 .ParamName);
     }
 
@@ -165,7 +162,7 @@ public sealed class AdminP4SubmitArgumentTests
 
         Assert.Equal(
             "reassignments",
-            Assert.Throws<ArgumentNullException>(() => admin.AlterPartitionReassignments(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.AlterPartitionReassignments(null!, options: new AlterPartitionReassignmentsOptions())).ParamName);
     }
 
     [Fact]
@@ -186,7 +183,7 @@ public sealed class AdminP4SubmitArgumentTests
         Assert.Equal(2, request.Count);
 
         AlterPartitionReassignmentsResult altered =
-            AlterPartitionReassignmentsResult.OfClient(admin.AlterPartitionReassignments(request, options: null));
+            AlterPartitionReassignmentsResult.OfClient(admin.AlterPartitionReassignments(request, options: new AlterPartitionReassignmentsOptions()));
         Assert.Single(altered.Values());
         altered.All().Get(s_deadline);
 
@@ -211,10 +208,10 @@ public sealed class AdminP4SubmitArgumentTests
                 [kept] = new NewPartitionReassignment(new[] { 1 }),
                 [cancelled] = new NewPartitionReassignment(new[] { 1 }),
             },
-            options: null)).All().Get(s_deadline);
+            options: new AlterPartitionReassignmentsOptions())).All().Get(s_deadline);
         AlterPartitionReassignmentsResult.OfClient(admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?> { [cancelled] = null },
-            options: null)).All().Get(s_deadline);
+            options: new AlterPartitionReassignmentsOptions())).All().Get(s_deadline);
 
         Assert.Equal(new[] { kept }, List(admin, null).Keys);
     }
@@ -233,7 +230,7 @@ public sealed class AdminP4SubmitArgumentTests
                 [zero] = new NewPartitionReassignment(new[] { 1 }),
                 [one] = new NewPartitionReassignment(new[] { 1 }),
             },
-            options: null)).All().Get(s_deadline);
+            options: new AlterPartitionReassignmentsOptions())).All().Get(s_deadline);
 
         Assert.Equal(2, List(admin, null).Count);
         Assert.Empty(List(admin, Array.Empty<TopicPartition>()));
@@ -246,7 +243,7 @@ public sealed class AdminP4SubmitArgumentTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        var altered = admin.AlterPartitionReassignments(new Dictionary<TopicPartition, NewPartitionReassignment?>(), null);
+        var altered = admin.AlterPartitionReassignments(new Dictionary<TopicPartition, NewPartitionReassignment?>(), new AlterPartitionReassignmentsOptions());
         Assert.Empty(altered.Values);
         altered.Result.Dispose();
 
@@ -256,7 +253,7 @@ public sealed class AdminP4SubmitArgumentTests
     private static IReadOnlyDictionary<TopicPartition, PartitionReassignment> List(
         NativeAdminClient admin, IReadOnlyCollection<TopicPartition>? partitions)
     {
-        var listed = admin.ListPartitionReassignments(partitions, options: null);
+        var listed = admin.ListPartitionReassignments(partitions, options: new ListPartitionReassignmentsOptions());
         try
         {
             return new KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(listed.Reassignments)
@@ -271,7 +268,7 @@ public sealed class AdminP4SubmitArgumentTests
     private static Task SeedTopic(NativeAdminClient admin, string topic, int partitions) =>
         TestTimeout.Run(
             () => AsyncCreateTopicsResult.OfClient(
-                admin.CreateTopics(new[] { new NewTopic(topic, partitions, 1) }, null)).All().Get(),
+                admin.CreateTopics(new[] { new NewTopic(topic, partitions, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
     private static int? SelectionSize(IReadOnlyCollection<TopicPartition>? partitions)
@@ -295,7 +292,7 @@ public sealed class AdminP4SubmitArgumentTests
         }
     }
 
-    private static int ReadBack(ElectLeadersOptions? options)
+    private static int ReadBack(ElectLeadersOptions options)
     {
         IntPtr native = NativeAdminClient.NewElectLeadersOptions(options);
         try
@@ -312,7 +309,7 @@ public sealed class AdminP4SubmitArgumentTests
     }
 
     private static (int TimeoutMs, bool AllowReplicationFactorChange) ReadBack(
-        AlterPartitionReassignmentsOptions? options)
+        AlterPartitionReassignmentsOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterPartitionReassignmentsOptions(options);
         try
@@ -330,7 +327,7 @@ public sealed class AdminP4SubmitArgumentTests
         }
     }
 
-    private static int ReadBack(ListPartitionReassignmentsOptions? options)
+    private static int ReadBack(ListPartitionReassignmentsOptions options)
     {
         IntPtr native = NativeAdminClient.NewListPartitionReassignmentsOptions(options);
         try

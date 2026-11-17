@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeUserScramCredentials"/> — Java's
+/// Options for <see cref="IAdmin.DescribeUserScramCredentials(System.Collections.Generic.IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeUserScramCredentialsOptions</c>.
 /// </summary>
 public sealed class DescribeUserScramCredentialsOptions

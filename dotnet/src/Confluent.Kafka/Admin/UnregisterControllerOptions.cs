@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.UnregisterController"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.UnregisterController(int, UnregisterControllerOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.UnregisterControllerOptions</c>.
 /// </summary>
 /// <remarks>

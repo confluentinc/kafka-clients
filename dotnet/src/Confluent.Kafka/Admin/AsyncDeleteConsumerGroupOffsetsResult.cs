@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteConsumerGroupOffsets"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DeleteConsumerGroupOffsets(string, System.Collections.Generic.IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult</c>: the outcome per partition and for the whole request.
 /// </summary>
 /// <remarks>

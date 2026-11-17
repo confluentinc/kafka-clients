@@ -266,11 +266,9 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)1), ReadBack((DeleteTopicsOptions?)null));
         Assert.Equal((-1, (sbyte)1), ReadBack(new DeleteTopicsOptions()));
         Assert.Empty(new DeleteTopicsOptions().Setters.InOrder);
 
-        Assert.Equal((-1, (sbyte)0, 2000), ReadBack((DescribeTopicsOptions?)null));
         Assert.Equal((-1, (sbyte)0, 2000), ReadBack(new DescribeTopicsOptions()));
         Assert.Empty(new DescribeTopicsOptions().Setters.InOrder);
     }
@@ -377,12 +375,16 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             ParameterInfo[] parameters = method.GetParameters();
             Assert.Equal(method == delete ? "topics" : "topicNames", parameters[0].Name);
             Assert.False(parameters[0].IsOptional);
-            Assert.True(parameters[1].IsOptional);
-            Assert.Null(parameters[1].DefaultValue);
+            Assert.False(parameters[1].IsOptional);
+            Assert.False(parameters[1].HasDefaultValue);
+            MethodInfo? shortForm = type.GetMethod(method.Name, new[] { typeof(IReadOnlyCollection<string>) });
+            Assert.NotNull(shortForm);
+            Assert.Equal(method.ReturnType, shortForm!.ReturnType);
+            Assert.Equal(parameters[0].Name, Assert.Single(shortForm.GetParameters()).Name);
         }
 
-        Assert.Equal(2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DeleteTopics)));
-        Assert.Equal(2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DescribeTopics)));
+        Assert.Equal(4, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DeleteTopics)));
+        Assert.Equal(4, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DescribeTopics)));
     }
 
     [Fact]
@@ -489,7 +491,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
     }
 
-    private static (int TimeoutMs, sbyte RetryOnQuotaViolation) ReadBack(DeleteTopicsOptions? options)
+    private static (int TimeoutMs, sbyte RetryOnQuotaViolation) ReadBack(DeleteTopicsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDeleteTopicsOptions(options);
         try
@@ -508,7 +510,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     }
 
     private static (int TimeoutMs, sbyte IncludeAuthorizedOperations, int PartitionSizeLimitPerResponse) ReadBack(
-        DescribeTopicsOptions? options)
+        DescribeTopicsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeTopicsOptions(options);
         try

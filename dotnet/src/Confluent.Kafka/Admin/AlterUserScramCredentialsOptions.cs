@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.AlterUserScramCredentials"/> — Java's
+/// Options for <see cref="IAdmin.AlterUserScramCredentials(System.Collections.Generic.IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsOptions</c>.
 /// </summary>
 /// <remarks>

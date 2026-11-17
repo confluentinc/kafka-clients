@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of
-/// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
+/// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}, ListPartitionReassignmentsOptions)"/>
 /// — Java's <c>org.apache.kafka.clients.admin.ListPartitionReassignmentsResult</c>: one future over
 /// the whole listing.
 /// </summary>

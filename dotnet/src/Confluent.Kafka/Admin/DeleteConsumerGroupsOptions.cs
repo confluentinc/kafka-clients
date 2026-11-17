@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DeleteConsumerGroups"/> — the .NET realization of
+/// Options for <see cref="IAdmin.DeleteConsumerGroups(System.Collections.Generic.IReadOnlyCollection{string}, DeleteConsumerGroupsOptions)"/> — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.DeleteConsumerGroupsOptions</c>.
 /// </summary>
 /// <remarks>

@@ -184,10 +184,8 @@ public sealed class AdminP7SubmitArgumentTests
     [Fact]
     public void ScramOptions_NoSetterRan_TheCOptionsCarryTheDefaultTimeout()
     {
-        Assert.Equal(-1, DescribeTimeoutMs(null));
         Assert.Equal(-1, DescribeTimeoutMs(new DescribeUserScramCredentialsOptions()));
         Assert.Empty(new DescribeUserScramCredentialsOptions().Setters.InOrder);
-        Assert.Equal(-1, AlterTimeoutMs(null));
         Assert.Equal(-1, AlterTimeoutMs(new AlterUserScramCredentialsOptions()));
         Assert.Empty(new AlterUserScramCredentialsOptions().Setters.InOrder);
     }
@@ -220,31 +218,23 @@ public sealed class AdminP7SubmitArgumentTests
     [Fact]
     public void TokenOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
     {
-        foreach (CreateDelegationTokenOptions? create in new[] { null, new CreateDelegationTokenOptions() })
-        {
-            Assert.Empty(ReadCreate(create, native => Principals(ReadPointer(native, Native.CreateDelegationTokenOptionsRenewers))));
-            Assert.Equal(IntPtr.Zero, ReadCreate(create, native => ReadPointer(native, Native.CreateDelegationTokenOptionsOwner)));
-            Assert.Equal(-1L, ReadCreate(create, native => ReadInt64(native, Native.CreateDelegationTokenOptionsMaxLifetimeMs)));
-            Assert.Equal(-1, ReadCreate(create, native => ReadInt32(native, Native.CreateDelegationTokenOptionsTimeoutMs)));
-        }
+        CreateDelegationTokenOptions create = new CreateDelegationTokenOptions();
+        Assert.Empty(ReadCreate(create, native => Principals(ReadPointer(native, Native.CreateDelegationTokenOptionsRenewers))));
+        Assert.Equal(IntPtr.Zero, ReadCreate(create, native => ReadPointer(native, Native.CreateDelegationTokenOptionsOwner)));
+        Assert.Equal(-1L, ReadCreate(create, native => ReadInt64(native, Native.CreateDelegationTokenOptionsMaxLifetimeMs)));
+        Assert.Equal(-1, ReadCreate(create, native => ReadInt32(native, Native.CreateDelegationTokenOptionsTimeoutMs)));
 
-        foreach (RenewDelegationTokenOptions? renew in new[] { null, new RenewDelegationTokenOptions() })
-        {
-            Assert.Equal(-1L, ReadRenew(renew, native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
-            Assert.Equal(-1, ReadRenew(renew, native => ReadInt32(native, Native.RenewDelegationTokenOptionsTimeoutMs)));
-        }
+        RenewDelegationTokenOptions renew = new RenewDelegationTokenOptions();
+        Assert.Equal(-1L, ReadRenew(renew, native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
+        Assert.Equal(-1, ReadRenew(renew, native => ReadInt32(native, Native.RenewDelegationTokenOptionsTimeoutMs)));
 
-        foreach (ExpireDelegationTokenOptions? expire in new[] { null, new ExpireDelegationTokenOptions() })
-        {
-            Assert.Equal(-1L, ReadExpire(expire, native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
-            Assert.Equal(-1, ReadExpire(expire, native => ReadInt32(native, Native.ExpireDelegationTokenOptionsTimeoutMs)));
-        }
+        ExpireDelegationTokenOptions expire = new ExpireDelegationTokenOptions();
+        Assert.Equal(-1L, ReadExpire(expire, native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
+        Assert.Equal(-1, ReadExpire(expire, native => ReadInt32(native, Native.ExpireDelegationTokenOptionsTimeoutMs)));
 
-        foreach (DescribeDelegationTokenOptions? describe in new[] { null, new DescribeDelegationTokenOptions() })
-        {
-            Assert.Null(DescribeOwners(describe));
-            Assert.Equal(-1, ReadDescribe(describe, native => ReadInt32(native, Native.DescribeDelegationTokenOptionsTimeoutMs)));
-        }
+        DescribeDelegationTokenOptions describe = new DescribeDelegationTokenOptions();
+        Assert.Null(DescribeOwners(describe));
+        Assert.Equal(-1, ReadDescribe(describe, native => ReadInt32(native, Native.DescribeDelegationTokenOptionsTimeoutMs)));
 
         Assert.Empty(new CreateDelegationTokenOptions().Setters.InOrder);
         Assert.Empty(new RenewDelegationTokenOptions().Setters.InOrder);
@@ -394,12 +384,10 @@ public sealed class AdminP7SubmitArgumentTests
     [Fact]
     public void FeatureOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
     {
-        Assert.Equal(-1, ReadDescribeFeatures(null, native => ReadInt32(native, Native.DescribeFeaturesOptionsTimeoutMs)));
-        Assert.Equal(-1, NodeIdOf(null));
+        Assert.Equal(-1, ReadDescribeFeatures(new DescribeFeaturesOptions(), native => ReadInt32(native, Native.DescribeFeaturesOptionsTimeoutMs)));
         Assert.Equal(-1, NodeIdOf(new DescribeFeaturesOptions()));
         Assert.Empty(new DescribeFeaturesOptions().Setters.InOrder);
-        Assert.Equal(-1, ReadUpdateFeatures(null, native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
-        Assert.Equal(0, ValidateOnlyOf(null));
+        Assert.Equal(-1, ReadUpdateFeatures(new UpdateFeaturesOptions(), native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
         Assert.Equal(0, ValidateOnlyOf(new UpdateFeaturesOptions()));
         Assert.Empty(new UpdateFeaturesOptions().Setters.InOrder);
     }
@@ -497,7 +485,6 @@ public sealed class AdminP7SubmitArgumentTests
     [Fact]
     public void UnregisterControllerOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
     {
-        Assert.Equal(-1, UnregisterControllerTimeoutOf(null));
         Assert.Equal(-1, UnregisterControllerTimeoutOf(new UnregisterControllerOptions()));
         Assert.Empty(new UnregisterControllerOptions().Setters.InOrder);
     }
@@ -565,7 +552,7 @@ public sealed class AdminP7SubmitArgumentTests
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
-    private static int DescribeTimeoutMs(DescribeUserScramCredentialsOptions? options)
+    private static int DescribeTimeoutMs(DescribeUserScramCredentialsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeUserScramCredentialsOptions(options);
         try
@@ -578,7 +565,7 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static int AlterTimeoutMs(AlterUserScramCredentialsOptions? options)
+    private static int AlterTimeoutMs(AlterUserScramCredentialsOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterUserScramCredentialsOptions(options);
         try
@@ -623,7 +610,7 @@ public sealed class AdminP7SubmitArgumentTests
         return CopyRow(bytes.Data, bytes.Length);
     }
 
-    private static T ReadCreate<T>(CreateDelegationTokenOptions? options, Func<IntPtr, T> read)
+    private static T ReadCreate<T>(CreateDelegationTokenOptions options, Func<IntPtr, T> read)
     {
         IntPtr native = NativeAdminClient.NewCreateDelegationTokenOptions(options);
         try
@@ -636,7 +623,7 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static T ReadRenew<T>(RenewDelegationTokenOptions? options, Func<IntPtr, T> read)
+    private static T ReadRenew<T>(RenewDelegationTokenOptions options, Func<IntPtr, T> read)
     {
         IntPtr native = NativeAdminClient.NewRenewDelegationTokenOptions(options);
         try
@@ -649,7 +636,7 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static T ReadExpire<T>(ExpireDelegationTokenOptions? options, Func<IntPtr, T> read)
+    private static T ReadExpire<T>(ExpireDelegationTokenOptions options, Func<IntPtr, T> read)
     {
         IntPtr native = NativeAdminClient.NewExpireDelegationTokenOptions(options);
         try
@@ -662,7 +649,7 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static T ReadDescribe<T>(DescribeDelegationTokenOptions? options, Func<IntPtr, T> read)
+    private static T ReadDescribe<T>(DescribeDelegationTokenOptions options, Func<IntPtr, T> read)
     {
         IntPtr native = NativeAdminClient.NewDescribeDelegationTokenOptions(options);
         try
@@ -675,7 +662,7 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static IReadOnlyList<KafkaPrincipal>? DescribeOwners(DescribeDelegationTokenOptions? options) =>
+    private static IReadOnlyList<KafkaPrincipal>? DescribeOwners(DescribeDelegationTokenOptions options) =>
         ReadDescribe(options, native =>
         {
             IntPtr owners = ReadPointer(native, Native.DescribeDelegationTokenOptionsOwners);
@@ -714,7 +701,7 @@ public sealed class AdminP7SubmitArgumentTests
         return value;
     }
 
-    private static T ReadDescribeFeatures<T>(DescribeFeaturesOptions? options, Func<IntPtr, T> read)
+    private static T ReadDescribeFeatures<T>(DescribeFeaturesOptions options, Func<IntPtr, T> read)
     {
         IntPtr native = NativeAdminClient.NewDescribeFeaturesOptions(options);
         try
@@ -727,7 +714,7 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static T ReadUpdateFeatures<T>(UpdateFeaturesOptions? options, Func<IntPtr, T> read)
+    private static T ReadUpdateFeatures<T>(UpdateFeaturesOptions options, Func<IntPtr, T> read)
     {
         IntPtr native = NativeAdminClient.NewUpdateFeaturesOptions(options);
         try
@@ -740,10 +727,10 @@ public sealed class AdminP7SubmitArgumentTests
         }
     }
 
-    private static int NodeIdOf(DescribeFeaturesOptions? options) =>
+    private static int NodeIdOf(DescribeFeaturesOptions options) =>
         ReadDescribeFeatures(options, native => ReadInt32(native, Native.DescribeFeaturesOptionsNodeId));
 
-    private static sbyte ValidateOnlyOf(UpdateFeaturesOptions? options) =>
+    private static sbyte ValidateOnlyOf(UpdateFeaturesOptions options) =>
         ReadUpdateFeatures(options, native =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -752,7 +739,7 @@ public sealed class AdminP7SubmitArgumentTests
             return value;
         });
 
-    private static int UnregisterControllerTimeoutOf(UnregisterControllerOptions? options)
+    private static int UnregisterControllerTimeoutOf(UnregisterControllerOptions options)
     {
         IntPtr native = NativeAdminClient.NewUnregisterControllerOptions(options);
         try

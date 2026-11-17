@@ -896,7 +896,10 @@ out of date). The rule:
    optional `CancellationToken cancellationToken`.
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
    `Map` overload, and an overload taking a `java.util.regex.Pattern` is not translated. A Java abstract
-   class's constructors are `protected`; a struct or sealed class has none.
+   class's constructors are `protected`; a struct or sealed class has none. Each overload is a member of its own:
+   no public or protected method or constructor, on any public type, takes an optional parameter other than a last
+   `CancellationToken cancellationToken` (rule 7). A default is compiled into each caller, so a parameter added
+   later breaks every caller compiled before it, where a new overload breaks none.
 9. A Java enum's methods sit in a top-level static class named after the enum plus `Methods`, beside the enum
    (`ScramMechanismMethods`), as C# 14 extension members. Java's static methods go in an
    `extension(ScramMechanism)` block, so a C# 14 caller writes `ScramMechanism.FromMechanismName(…)` and an
@@ -913,10 +916,12 @@ out of date). The rule:
     only that method (`IConsumerRebalanceListenerWithPartitionsLost : IConsumerRebalanceListener`). The
     extension method calls the object's own method when it implements that interface, and runs Java's default
     otherwise; a user replaces the default by implementing that interface instead of the main one. Java's
-    `Admin` defaults that only convert their arguments stay members of `IAdmin` and `IAsyncAdmin`, whose
-    clients are their only implementers (allowlisted). A Java interface's static method goes in an
-    `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`, and on C#
-    14 `IAdmin.Create(…)`. An overloaded default gets one interface per overload, named after the parameter the
+    `Admin` defaults that only convert their arguments or fill in the options (`createTopics(newTopics)` passes
+    `new CreateTopicsOptions()`) stay members of `IAdmin` and `IAsyncAdmin`, one member per Java overload with no
+    optional parameter, each client writing the default's body; their clients are their only implementers
+    (allowlisted). A default Java adds to `Admin` later follows the rest of this rule. A Java interface's static
+    method goes in an `extension(IAdmin)` block of a static class with the Java interface's name: `Admin.Create(…)`,
+    and on C# 14 `IAdmin.Create(…)`. An overloaded default gets one interface per overload, named after the parameter the
     overload adds: `ISerializerWithHeaders<T>` for `serialize(String, Headers, T)`; when two overloads add a parameter
     of the same name, its type is added too. Java's `close()` is not a rule-10 default: `Closeable` is `IDisposable`
     (rule 7), which an implementer adds beside the interface, and there is no `I…WithClose`. Because the analyzer does

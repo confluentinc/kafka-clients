@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.IncrementalAlterConfigs"/> — the .NET realization of
+/// Options for <see cref="IAdmin.IncrementalAlterConfigs(System.Collections.Generic.IReadOnlyDictionary{Common.Config.ConfigResource, System.Collections.Generic.IReadOnlyCollection{AlterConfigOp}}, AlterConfigsOptions)"/> — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.AlterConfigsOptions</c>.
 /// </summary>
 /// <remarks>
