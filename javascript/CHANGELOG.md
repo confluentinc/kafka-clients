@@ -287,7 +287,7 @@ newer.
   the C API cannot give keeps its default, a recorded deviation
   (`CorrelationIdMismatchError`'s ids `-1`). `QuotaViolationError`'s
   `metric()` is a `KafkaMetric` with the metric's name and the error's value,
-  as the Python and .NET clients build it.
+  as the .NET client builds it (Python keeps the name and group only).
   `RecordDeserializationError` has Java's full payload (`origin()`,
   `topicPartition()`, `offset()`, `timestamp()`, `timestampType()`,
   `keyBuffer()`, `valueBuffer()`, `headers()`) and its nested
