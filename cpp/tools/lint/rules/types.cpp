@@ -162,6 +162,11 @@ Mapping kafka_type(const java::Model& model, const TypeRef& ref, Position positi
     }
     switch (type->kind) {
         case java::TypeKind::ENUM:
+            // A Java enum is a reference, so null is possible (§4.6): an enum is passed and
+            // returned by value, and std::optional where Java gives null a meaning.
+            if (position == Position::PARAMETER || position == Position::RETURN) {
+                return shapes({shape(self), shape(optional_of(self), Decision::NULLABLE)});
+            }
             return shapes({shape(self)});
         case java::TypeKind::INTERFACE:
             // §4.7: an interface the client keeps is a std::shared_ptr; §5.4: one handed out has

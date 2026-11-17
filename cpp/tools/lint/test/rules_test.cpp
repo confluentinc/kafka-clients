@@ -288,6 +288,16 @@ TEST_F(TypesTest, NamesTheDecisionEachAlternativeNeeds) {
     EXPECT_EQ(collection.shapes[1].decision, Decision::SET);
     const auto map = mapping("map", Position::PARAMETER);
     EXPECT_EQ(map.shapes.size(), 1U);  // one overload per Java overload (§5, §4.1)
+    // A Java enum is a reference: by value, or std::optional with its decision.
+    for (const auto position : {Position::PARAMETER, Position::RETURN}) {
+        const auto kind = mapping("kind", position);
+        // A return also takes the const& twin of each (§4.7).
+        ASSERT_EQ(kind.shapes.size(), position == Position::PARAMETER ? 2U : 4U);
+        EXPECT_EQ(kind.shapes[0].type.to_string(), "confluent::kafka::common::Kind");
+        EXPECT_EQ(kind.shapes[1].type.to_string(), "std::optional<confluent::kafka::common::Kind>");
+        EXPECT_EQ(kind.shapes[1].decision, Decision::NULLABLE);
+    }
+    EXPECT_EQ(mapping("kind", Position::TYPE_ARGUMENT).shapes.size(), 1U);
 }
 
 // ---- expected shapes
