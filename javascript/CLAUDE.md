@@ -782,7 +782,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   returns, only once it settled; a rejection is a throw, logged by the core
   and never propagated. Such a Promise must not wait for `flush()` or
   `close()` of its own producer, which wait for it (root conventions, Threads
-  and callbacks: anti-patterns inside a send callback).
+  and callbacks: anti-patterns inside a send callback). Before the callback's
+  first `await`, `flush()` is refused, as Java's throws, and `close()` closes
+  at once as `close({ timeout: 0 })`, with Java's warning, failing the records
+  still pending with "Producer is closed forcefully.", as Java's
+  `KafkaProducer.close` documents. **(root conflict)** The root conventions'
+  Q46 says the core refuses these calls before the callback's first `await`;
+  Java and the core refuse only `flush()` and close as `close(0)`, and the
+  code and docs follow Java and the core (`DECISIONS.md`, entries 4 and 27):
+  the root wording needs its owner.
 - Java's `Producer` interface is a TypeScript `interface` (root conventions,
   Class family, Q10) with the members `KafkaProducer` translates (`send`,
   `flush`, `close`, and `[Symbol.asyncDispose]` for Java's `Closeable`), in

@@ -292,18 +292,15 @@ number, is awaited too, so the callback that runs next may have waited for
 its turn behind it. A callback that need not be awaited returns nothing:
 `({ exception }) => { ... }`.
 
-Inside a callback, do not call `flush()` or `close()` of the same producer,
-do not run a transaction call, and do not await the future of a record sent
-later: each waits for the callback itself. Before its first `await`, a
-callback that did not wait for its turn is guarded, as Java's callbacks are:
-`flush()` there rejects with `KafkaError`, and `close()` closes at once. A
-callback that waited for its turn behind an earlier callback's result is
-not, like the rest of a callback after its first `await`: there `flush()` is
-not refused and `close()` does not close at once, so an awaited one waits
-for the callback itself and never settles. Refusing them there too is a
-planned improvement. A callback Promise that never settles has no time
-limit, as in Java: it holds its record's future, the callbacks of the
-records after it, `flush()` and `close()`, `close({ timeout })` included.
+Inside a callback, before its first `await`, `flush()` of the same producer
+is refused, as Java's throws, and `close()` does not wait: as Java's, it logs
+a warning and closes as `close({ timeout: 0 })`, failing the records still
+pending with "Producer is closed forcefully.". After the first `await`,
+`flush()` and `close()` wait for the callback itself and can hang, and so
+does awaiting the future of a record sent later. A callback Promise that
+never settles has no time limit, as in Java: it holds its record's future,
+the callbacks of the records after it, `flush()` and `close()`,
+`close({ timeout })` included.
 
 ### Parameters by name
 
