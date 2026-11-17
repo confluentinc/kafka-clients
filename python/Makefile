@@ -37,7 +37,7 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 # extension against that library.
 export CONFLUENT_KAFKA_LIB_DIR = $(RUST_PROJECT_ROOT)/target/$(PROFILE)
 
-.PHONY: init build test test-unit typecheck check-static docs test-soak test-verifiable-clients \
+.PHONY: init build test test-unit check typecheck check-static docs test-soak test-verifiable-clients \
 	test-integration test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
 
@@ -48,17 +48,15 @@ init:
 build:
 	CFLAGS="$(CFLAGS_EXTRA)" pip install -e .
 
-# `typecheck` runs after the dev extras are installed: mypy is one of them, and
-# a fresh venv (CI) has it only from that step. `test/integration` holds the
-# broker-backed binding tests (a testcontainers KRaft broker; they skip without
-# Docker): what the Java tests drive through a MockClient the binding cannot
-# inject. They are not the gRPC multilanguage arm of `test-integration` below.
+# The binding's tests; the checks that are not tests are `check` below.
+# `test/integration` holds the broker-backed binding tests (a testcontainers
+# KRaft broker; they skip without Docker): what the Java tests drive through a
+# MockClient the binding cannot inject. They are not the gRPC multilanguage arm
+# of `test-integration` below.
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
-	$(MAKE) typecheck
 	$(call selected_run,--section python.unit --default test/unit -- python -m pytest {} -v)
 	$(call selected_run,--section python.integration --default test/integration -- python -m pytest {} -v)
-	$(MAKE) check-static
 	$(MAKE) test-soak
 	$(MAKE) test-verifiable-clients
 	$(MAKE) test-integration
@@ -68,6 +66,15 @@ test: build
 test-unit: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	$(call selected_run,--section python.unit --default test/unit -- python -m pytest {} -v)
+
+# The binding's checks that are not tests: the type check and the static checks
+# below. CI runs them in their own job, "check-python (Linux amd64)". `typecheck`
+# runs after the dev extras are installed: mypy is one of them, and a fresh venv
+# (CI) has it only from that step.
+check: build
+	pip install .[dev] || pip install --no-dependencies .[dev]
+	$(MAKE) typecheck
+	$(MAKE) check-static
 
 # Static type check of the `confluent_kafka` package (CLAUDE.md, Python Binding
 # Conventions, Tests and typing: `mypy --strict` over the package runs in

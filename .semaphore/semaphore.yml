@@ -51,10 +51,14 @@ name: build-test-release
 #      release tag, where a breaking change fails unless the Cargo.toml version
 #      allows it (api-compat); rust/Cargo.lock against the RustSec advisory
 #      database, where a vulnerable dependency fails (audit).
-#   4. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
-#      the test suite, one job each; today coverage-dotnet, the .NET unit
-#      tests' code coverage. It runs every test on every build, a pull
-#      request's included: it is not a verify job.
+#   4. "Python additional checks (Linux amd64)" -- the Python checks that are
+#      not the test suite: mypy --strict over the package and the static checks
+#      of test/static (check-python).
+#   5. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
+#      the test suite, one job each: dotnet format over the solution and the
+#      soak projects and the examples' build and format check (check-dotnet),
+#      and the .NET unit tests' code coverage (coverage-dotnet), which runs
+#      every unit test on every build, a pull request's included.
 #   On a release tag, the "Release" promotion then starts release.yml, which
 #   holds the "Release (Rust):", "Release (Python):" and "Release (.NET):"
 #   blocks (see the comments there).
@@ -235,13 +239,15 @@ blocks:
     # __grpc_python / __grpc_dotnet) connects to the broker over the CONTAINER
     # listener for the active protocol:
     #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
-    #     — the full binding gate (ctest / pytest / dotnet test unit tests, the
-    #     PLAINTEXT gRPC arm, check-bindings, and the Python and .NET perf
-    #     suites).
+    #     — the binding's tests (ctest / pytest / dotnet test unit tests, the
+    #     PLAINTEXT gRPC arm, and the Python and .NET perf suites). The Python
+    #     and .NET checks that are not tests (mypy, the static checks, dotnet
+    #     format, the examples' build) run in "Python additional checks" and
+    #     ".NET additional checks", in parallel, as Rust's do.
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
-    #     unit tests, check-bindings and perf are protocol-independent, so
-    #     running them once in the PLAINTEXT job is enough. The .NET protocol
+    #     unit tests and perf are protocol-independent, so running them once in
+    #     the PLAINTEXT job is enough. The .NET protocol
     #     jobs install no host .NET: the gRPC images build inside the .NET SDK
     #     image, and the harness is Rust.
     #
@@ -583,6 +589,37 @@ blocks:
             - export PATH="$HOME/.cargo/bin:$PATH"
             - make audit
 
+  - name: "Python additional checks (Linux amd64)"
+    # The Python checks that are not the test suite, as "Rust additional
+    # checks" are for Rust: a block of their own, so a failure is told apart
+    # from a verify failure and no test job waits for them. No test selection
+    # applies: the checks run in full on every build. A new job here is also
+    # listed in REQUIRED_CI_JOBS in create-release-tag.yml.
+    #
+    # check-python (`make check-python`, python/Makefile's `check`) builds the
+    # extension against the debug all-features library, then runs mypy --strict
+    # over the package and test/unit/test_typing.py, and the static checks of
+    # test/static.
+    dependencies: []
+    execution_time_limit:
+      minutes: 30
+    task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+          - ./.semaphore/dependencies.sh
+      epilogue:
+        on_pass:
+          commands:
+            - .semaphore/ci-result.sh passed
+        on_fail:
+          commands:
+            - .semaphore/ci-result.sh failed
+      jobs:
+        - name: "check-python (Linux amd64)"
+          commands:
+            - make check-python
+
   - name: ".NET additional checks (Linux amd64)"
     # The .NET checks that are not the test suite, one job each on its own VM,
     # as "Rust additional checks" are for Rust: a block of their own, so a
@@ -590,7 +627,12 @@ blocks:
     # new job here is also listed in REQUIRED_CI_JOBS in create-release-tag.yml.
     # Every job runs on every build: a skipped job records no result, and
     # create-release-tag.yml then refuses to tag. No test selection applies
-    # here: coverage counts every unit test.
+    # here: the checks run in full, and coverage counts every unit test.
+    #
+    # check-dotnet (`make check-dotnet`, see dotnet/Makefile) builds the
+    # solution against the debug all-features library, then runs dotnet format
+    # --verify-no-changes over the solution and the soak projects, and builds
+    # and format-checks the examples.
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
     # (`make coverage-dotnet`, see dotnet/Makefile), against the debug
@@ -615,6 +657,13 @@ blocks:
           commands:
             - .semaphore/ci-result.sh failed
       jobs:
+        - name: "check-dotnet (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - make check-dotnet
         - name: "coverage-dotnet (Linux amd64)"
           commands:
             - ./.semaphore/install-dotnet.sh

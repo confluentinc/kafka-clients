@@ -50,7 +50,7 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 # through `env`.
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
-.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
+.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	test-examples-dotnet pack-dotnet package-check-dotnet coverage-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
@@ -161,13 +161,12 @@ build-dotnet:
 	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOLUTION)
 
-# build + format-check + the solution's tests: the unit tests (Mock* tests, no
-# broker) and the integration tests (a Testcontainers broker; they skip without
-# Docker, as python/test/integration does). Mirrors the python/c per-binding
-# `test` target. Format is dotnet-specific (no Python
-# analog): `dotnet format --verify-no-changes` enforces the checked-in
-# .editorconfig, and Directory.Build.props already makes analyzer/style
-# violations hard build errors (TreatWarningsAsErrors, EnforceCodeStyleInBuild).
+# build + the solution's tests: the unit tests (Mock* tests, no broker) and the
+# integration tests (a Testcontainers broker; they skip without Docker, as
+# python/test/integration does), then the soak client's tests. Mirrors the
+# python/c per-binding `test` target. The checks that are not tests are
+# `check-dotnet` below; Directory.Build.props already makes analyzer and style
+# violations build errors (TreatWarningsAsErrors, EnforceCodeStyleInBuild).
 #
 # Tests RUN on net8.0 AND net10.0 (Decision 2): SDK 10 runs net10.0 natively; the
 # net8.0 leg needs the .NET 8 base runtime present (provisioned in CI by
@@ -176,15 +175,24 @@ build-dotnet:
 # DOTNET_TEST_FILTER, empty by default, is a `dotnet test --filter` expression for
 # both test lines. The root's test-dotnet-macos-docker sets it to leave the
 # integration tests out, as Python's macOS job runs only its unit tests. The
-# test selection's `dotnet.solution` narrows it further. The build and the format
-# check always run.
+# test selection's `dotnet.solution` narrows it further. The build always runs.
 DOTNET_TEST_FILTER ?=
 
 test-dotnet: build-dotnet
-	$(DOTNET) format $(SOLUTION) --verify-no-changes
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOLUTION) {})
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOLUTION) {})
 	$(MAKE) test-soak-dotnet
+
+# The checks that are not tests: `dotnet format --verify-no-changes`, which
+# enforces the checked-in .editorconfig, over the solution and over the soak
+# projects, which are outside it (built first, as the soak tests build them), then
+# the examples' build and format check. CI runs them in their own job,
+# "check-dotnet (Linux amd64)".
+check-dotnet: build-dotnet
+	$(DOTNET) format $(SOLUTION) --verify-no-changes
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOAK_TESTS)
+	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
+	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
 	$(MAKE) test-examples-dotnet
 
 # ---------------------------------------------------------------------------
@@ -194,10 +202,10 @@ test-dotnet: build-dotnet
 # `test-dotnet` above, mirroring PR #172's `test: … $(MAKE) test-soak` wiring on
 # the Python side.
 #
-# ⚠ The format pass is NOT optional here and is the direct consequence of the
-# projects being outside the solution: `dotnet format $(SOLUTION)` above does not
-# reach them, so without these two lines the soak would ship unformatted while
-# the gate read green.
+# ⚠ The soak projects' format pass, in `check-dotnet`, is the direct consequence
+# of the projects being outside the solution: `dotnet format $(SOLUTION)` does not
+# reach them, so without it the soak would ship unformatted while the gate read
+# green.
 #
 # Depends on build-dotnet for the two-stage build (CLAUDE.md §7.1): the soak
 # P/Invokes the same native, and Confluent.Kafka.csproj's EnsureNativeLibraryExists
@@ -214,8 +222,6 @@ SOAK_TESTS := $(SOAK_DIR)/SoakClient.Tests/SoakClient.Tests.csproj
 
 test-soak-dotnet: build-dotnet
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOAK_TESTS)
-	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
-	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
 	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOAK_TESTS) {})
 	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOAK_TESTS) {})
 

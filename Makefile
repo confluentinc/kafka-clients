@@ -28,7 +28,7 @@ VENV = . venv/bin/activate
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
-	pack-dotnet package-check-dotnet coverage-dotnet \
+	pack-dotnet package-check-dotnet coverage-dotnet check-bindings check-python check-dotnet \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -392,10 +392,12 @@ verify-c: test-c
 verify-c-macos-docker: test-c-macos-docker
 	$(MAKE) test-integration-c-native
 
-verify-python: test-python check-bindings
+# The binding jobs run the tests only: CI runs check-python and check-dotnet in
+# their own jobs, "Python additional checks" and ".NET additional checks".
+verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
-# verify-dotnet = build + format + the unit and integration tests (net8+net10) +
+# verify-dotnet = build + the unit and integration tests (net8+net10) +
 # soak + the gRPC arms (__grpc_dotnet[_async]) + the Docker-gated net10.0 p99 perf
 # stage (landed M13/P1), mirroring verify-python's shape (which appends
 # test-integration-perf-python above). The allocation-budget assertions also live
@@ -488,10 +490,21 @@ audit:
 bump-version:
 	$(MAKE) -C rust bump-version
 
-# Static checks of the Python binding (see python/Makefile's `check-static`).
-# Needs no build artifacts, so it is cheap to run.
-check-bindings:
-	@($(VENV) && $(MAKE) -C python $(ROOTS) check-static)
+# The checks of the bindings that are not tests, which `make verify` runs: the
+# Python binding's (check-python). check-dotnet is left out, as `make verify`
+# runs no .NET target.
+check-bindings: check-python
+
+# The Python binding's checks that are not tests: mypy --strict and the static
+# checks (python/Makefile's `check`). CI runs it in "check-python (Linux amd64)".
+check-python: devel-build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=debug check)
+
+# The .NET binding's checks that are not tests: dotnet format and the examples'
+# build (dotnet/Makefile's `check-dotnet`). CI runs it in "check-dotnet (Linux
+# amd64)".
+check-dotnet:
+	$(MAKE) -C dotnet $(ROOTS) check-dotnet
 
 # ── Test selection ───────────────────────────────────────────────────────
 #
