@@ -165,15 +165,15 @@ public class PublicAdminMockSeedingTests
         Dictionary<TopicPartition, long> withNullTopic =
             new Dictionary<TopicPartition, long> { [default] = 1 };
 
-        Assert.Throws<ArgumentException>(() => admin.UpdateBeginningOffsets(withNullTopic));
-        Assert.Throws<ArgumentException>(() => admin.UpdateEndOffsets(withNullTopic));
-        Assert.Throws<ArgumentException>(() => admin.UpdateConsumerGroupOffsets(withNullTopic));
+        Assert.Throws<ArgumentNullException>(() => admin.UpdateBeginningOffsets(withNullTopic));
+        Assert.Throws<ArgumentNullException>(() => admin.UpdateEndOffsets(withNullTopic));
+        Assert.Throws<ArgumentNullException>(() => admin.UpdateConsumerGroupOffsets(withNullTopic));
     }
 
     [Fact]
     public async Task SeedingRejectsAConstructedNullTopic_AndSeedsNothing()
     {
-        const string Message = "The offsets map must not contain a topic partition with a null topic.";
+        const string Message = "newOffsets must not contain a TopicPartition with a null topic";
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition valid = new TopicPartition("seed-null-topic", 0);
@@ -190,7 +190,7 @@ public class PublicAdminMockSeedingTests
             () => admin.UpdateConsumerGroupOffsets(withNullTopic),
         })
         {
-            ArgumentException rejected = Assert.Throws<ArgumentException>(seed);
+            ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(seed);
             Assert.Equal("newOffsets", rejected.ParamName);
             Assert.StartsWith(Message, rejected.Message, StringComparison.Ordinal);
         }

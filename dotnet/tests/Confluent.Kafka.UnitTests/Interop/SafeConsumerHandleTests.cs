@@ -227,7 +227,7 @@ public sealed class SafeConsumerHandleTests
     }
 
     [Fact]
-    public void Dispose_WhileOtherThreadsCreateReentrancyHandles_DestroysOnTheClosingThreadBeforeItReturns()
+    public void Dispose_WhileOtherThreadsCreateCoreHandlesInsideAUse_DestroysOnTheClosingThreadBeforeItReturns()
     {
         for (int round = 0; round < HandleRaceRounds; round++)
         {
@@ -245,10 +245,21 @@ public sealed class SafeConsumerHandleTests
                     {
                         while (true)
                         {
-                            consumer.CreateReentrancyHandle().Dispose();
+                            int owner = EnterUse(consumer, "Unowned");
+                            try
+                            {
+                                NativeConsumerHandle.Create(consumer).Dispose();
+                            }
+                            finally
+                            {
+                                ExitUse(consumer, owner);
+                            }
                         }
                     }
                     catch (IllegalStateException)
+                    {
+                    }
+                    catch (TargetInvocationException e) when (e.InnerException is IllegalStateException)
                     {
                     }
                     catch (Exception e)
@@ -352,11 +363,11 @@ public sealed class SafeConsumerHandleTests
         }
     }
 
-    private static int EnterUse(NativeConsumer consumer)
+    private static int EnterUse(NativeConsumer consumer, string useKind = "Owned")
     {
         Type kind = typeof(NativeConsumer).GetNestedType("UseKind", BindingFlags.NonPublic)
             ?? throw new InvalidOperationException(nameof(NativeConsumer) + " has no UseKind.");
-        return (int)Method("EnterUse").Invoke(consumer, new[] { Enum.Parse(kind, "Owned"), (object)0 })!;
+        return (int)Method("EnterUse").Invoke(consumer, new[] { Enum.Parse(kind, useKind), (object)0 })!;
     }
 
     private static void ExitUse(NativeConsumer consumer, int owner) =>

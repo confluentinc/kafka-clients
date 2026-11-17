@@ -191,9 +191,8 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key.Topic() is null)
                 {
-                    throw new ArgumentException(
-                        "The reassignments map must not contain a topic partition with a null topic.",
-                        nameof(reassignments));
+                    throw new ArgumentNullException(
+                        nameof(reassignments), "reassignments must not contain a TopicPartition with a null topic");
                 }
 
                 AdminStrings.Validate(entry.Key.Topic(), nameof(reassignments));

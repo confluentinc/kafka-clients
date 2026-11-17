@@ -129,12 +129,12 @@ internal sealed class MockAdminClientBuilderCore
         for (int i = 0; i < snapshot.Length; i++)
         {
             IReadOnlyList<string> logDirs = brokerLogDirs[i]
-                ?? throw new ArgumentException("The broker log dirs must not contain a null element.", nameof(brokerLogDirs));
+                ?? throw new ArgumentNullException(nameof(brokerLogDirs), "brokerLogDirs must not contain null");
             string[] copy = new string[logDirs.Count];
             for (int j = 0; j < copy.Length; j++)
             {
                 copy[j] = logDirs[j]
-                    ?? throw new ArgumentException("The broker log dirs must not contain a null log dir.", nameof(brokerLogDirs));
+                    ?? throw new ArgumentNullException(nameof(brokerLogDirs), "brokerLogDirs must not contain null");
                 AdminStrings.Validate(copy[j], nameof(brokerLogDirs));
             }
 
@@ -224,8 +224,8 @@ internal sealed class MockAdminClientBuilderCore
             ValidateKey(entry.Key, nameof(defaultGroupConfigs));
             if (entry.Value is null)
             {
-                throw new ArgumentException(
-                    "The default group configs must not contain a null value.", nameof(defaultGroupConfigs));
+                throw new ArgumentNullException(
+                    nameof(defaultGroupConfigs), "defaultGroupConfigs must not contain null");
             }
 
             AdminStrings.Validate(entry.Value, nameof(defaultGroupConfigs));
@@ -262,7 +262,8 @@ internal sealed class MockAdminClientBuilderCore
         Node[] snapshot = new Node[nodes.Count];
         for (int i = 0; i < snapshot.Length; i++)
         {
-            snapshot[i] = nodes[i] ?? throw new ArgumentException("The brokers must not contain a null element.", parameterName);
+            snapshot[i] = nodes[i]
+                ?? throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             ValidateNode(snapshot[i], parameterName);
         }
 
@@ -284,7 +285,7 @@ internal sealed class MockAdminClientBuilderCore
     {
         if (key is null)
         {
-            throw new ArgumentException("The map must not contain a null key.", parameterName);
+            throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
         }
 
         AdminStrings.Validate(key, parameterName);

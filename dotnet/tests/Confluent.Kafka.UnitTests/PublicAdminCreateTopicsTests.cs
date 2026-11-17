@@ -528,7 +528,7 @@ public sealed class PublicAdminCreateTopicsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException failure = Assert.Throws<ArgumentException>(() => admin.CreateTopics(new[]
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(() => admin.CreateTopics(new[]
         {
             new NewTopic("fine", 1, 1),
             new NewTopic("null-config", 1, 1)
@@ -536,7 +536,7 @@ public sealed class PublicAdminCreateTopicsTests
         }));
         Assert.Equal("newTopics", failure.ParamName);
         Assert.StartsWith(
-            "The topics to create must not contain a null configuration value.",
+            "newTopics must not contain a NewTopic with a null config value",
             failure.Message,
             StringComparison.Ordinal);
 
@@ -553,11 +553,11 @@ public sealed class PublicAdminCreateTopicsTests
             Assert.Throws<ArgumentNullException>(() => admin.CreateTopics(null!));
         Assert.Equal("newTopics", nullTopics.ParamName);
 
-        ArgumentException nullElement =
-            Assert.Throws<ArgumentException>(() => admin.CreateTopics(new NewTopic[] { null! }));
+        ArgumentNullException nullElement =
+            Assert.Throws<ArgumentNullException>(() => admin.CreateTopics(new NewTopic[] { null! }));
         Assert.Equal("newTopics", nullElement.ParamName);
         Assert.StartsWith(
-            "The topics to create must not contain a null element.",
+            "newTopics must not contain null",
             nullElement.Message,
             StringComparison.Ordinal);
 

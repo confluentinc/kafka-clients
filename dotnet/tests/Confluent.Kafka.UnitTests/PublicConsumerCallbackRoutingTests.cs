@@ -34,8 +34,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// A consumer call made inside a callback, on the four consumers: routed to the consumer's own
-/// <see cref="ConsumerHandle"/>, refused at once, or sent to the core, inside a listener and a commit callback and
-/// after an await.
+/// <see cref="NativeConsumerHandle"/>, refused at once, or sent to the core, inside a listener and a commit callback
+/// and after an await.
 /// </summary>
 public sealed class PublicConsumerCallbackRoutingTests
 {
@@ -434,7 +434,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             await TestTimeout.Run(
                 () => consumer.CommitAsync(Empty(), new DelegateCallback(() => outcome = CallAsync(() => Wakeable(consumer, call)))),
                 s_deadline);
-            await TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline);
+            await TestTimeout.Run(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null), s_deadline);
 
             Assert.NotNull(outcome);
             Assert.StartsWith("faults " + TimedOut, outcome, StringComparison.Ordinal);
@@ -909,7 +909,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Commit()", Call(() => consumer.Commit()));
         Add("Commit(offsets)", Call(() => consumer.Commit(mock ? Offsets(5) : Empty())));
         Add("CommitAsync()", Call(() => consumer.CommitAsync()));
-        Add("CommitAsync(offsets)", Call(() => consumer.CommitAsync(mock ? Offsets(6) : Empty())));
+        Add("CommitAsync(offsets)", Call(() => consumer.CommitAsync(mock ? Offsets(6) : Empty(), null)));
         Add("Assignment", Call(() => Format(consumer.Assignment())));
         Add("Paused", Call(() => Format(consumer.Paused())));
         Add("CurrentLag", Call(() => Format(consumer.CurrentLag(s_tp0))));
@@ -959,7 +959,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Commit()", CallAsync(() => consumer.Commit()));
         Add("Commit(offsets)", CallAsync(() => consumer.Commit(mock ? Offsets(5) : Empty())));
         Add("CommitAsync()", CallAsync(() => consumer.CommitAsync()));
-        Add("CommitAsync(offsets)", CallAsync(() => consumer.CommitAsync(mock ? Offsets(6) : Empty())));
+        Add("CommitAsync(offsets)", CallAsync(() => consumer.CommitAsync(mock ? Offsets(6) : Empty(), (IOffsetCommitCallback?)null)));
         Add("Assignment", Call(() => Format(consumer.Assignment())));
         Add("Paused", Call(() => Format(consumer.Paused())));
         Add("CurrentLag", CallAsync(() => consumer.CurrentLag(s_tp0), Format));

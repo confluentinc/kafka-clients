@@ -176,10 +176,10 @@ public sealed class PublicAdminDeleteAclsTests
             "filters",
             Assert.Throws<ArgumentNullException>(() => admin.DeleteAcls(null!)).ParamName);
 
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(
             () => admin.DeleteAcls(new AclBindingFilter[] { null! }));
         Assert.StartsWith(
-            "The ACL filters must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
+            "filters must not contain null", nullElement.Message, StringComparison.Ordinal);
         Assert.Equal("filters", nullElement.ParamName);
 
         // A negative timeout is not a precondition: it is sent as 0.

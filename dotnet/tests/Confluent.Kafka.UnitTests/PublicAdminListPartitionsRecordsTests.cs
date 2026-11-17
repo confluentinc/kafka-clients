@@ -261,18 +261,18 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Throws<ArgumentNullException>(() => admin.CreatePartitions(null!));
         Assert.Throws<ArgumentNullException>(() => admin.DeleteRecords(null!));
 
-        ArgumentException nullEntry = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullEntry = Assert.Throws<ArgumentNullException>(
             () => admin.CreatePartitions(new Dictionary<string, NewPartitions> { ["t"] = null! }));
         Assert.Equal("newPartitions", nullEntry.ParamName);
-        Assert.Contains("must not be null", nullEntry.Message, StringComparison.Ordinal);
+        Assert.StartsWith("newPartitions must not contain null", nullEntry.Message, StringComparison.Ordinal);
 
-        ArgumentException nullRecords = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullRecords = Assert.Throws<ArgumentNullException>(
             () => admin.DeleteRecords(
                 new Dictionary<TopicPartition, RecordsToDelete> { [new TopicPartition("t", 0)] = null! }));
         Assert.Equal("recordsToDelete", nullRecords.ParamName);
 
         // A `default(TopicPartition)` has a null Topic, which the ABI would skip.
-        ArgumentException nullTopic = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
             () => admin.DeleteRecords(
                 new Dictionary<TopicPartition, RecordsToDelete>
                 {

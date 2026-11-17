@@ -47,8 +47,7 @@ public sealed class ClientQuotaFilter
     /// </summary>
     /// <param name="components">The components to filter on.</param>
     /// <returns>The filter.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="components"/> is null.</exception>
-    /// <exception cref="ArgumentException"><paramref name="components"/> contains a null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="components"/> is null or contains a null.</exception>
     public static ClientQuotaFilter Contains(IReadOnlyCollection<ClientQuotaFilterComponent> components) =>
         new ClientQuotaFilter(Copy(components), false);
 
@@ -58,8 +57,7 @@ public sealed class ClientQuotaFilter
     /// </summary>
     /// <param name="components">The components to filter on.</param>
     /// <returns>The filter.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="components"/> is null.</exception>
-    /// <exception cref="ArgumentException"><paramref name="components"/> contains a null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="components"/> is null or contains a null.</exception>
     public static ClientQuotaFilter ContainsOnly(IReadOnlyCollection<ClientQuotaFilterComponent> components) =>
         new ClientQuotaFilter(Copy(components), true);
 
@@ -150,7 +148,7 @@ public sealed class ClientQuotaFilter
         foreach (ClientQuotaFilterComponent component in components)
         {
             copy[i++] = component
-                ?? throw new ArgumentException("components must not contain null", nameof(components));
+                ?? throw new ArgumentNullException(nameof(components), "components must not contain null");
         }
 
         return copy;
