@@ -198,13 +198,6 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
 
-    public ConsumerHandle Handle()
-    {
-        ConsumerHandle handle = _inner.Handle();
-        _script.Handle = handle;
-        return handle;
-    }
-
     public void Dispose()
     {
         _script.OnCall("Dispose");

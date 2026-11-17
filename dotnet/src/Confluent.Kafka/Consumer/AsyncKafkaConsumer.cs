@@ -343,8 +343,6 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
-    internal ConsumerHandle Handle() => _native.CreateReentrancyHandle();
-
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 

@@ -34,8 +34,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// A consumer call made inside a callback, on the four consumers: routed to the consumer's own
-/// <see cref="ConsumerHandle"/>, refused at once, or sent to the core, inside a listener and a commit callback and
-/// after an await.
+/// <see cref="NativeConsumerHandle"/>, refused at once, or sent to the core, inside a listener and a commit callback
+/// and after an await.
 /// </summary>
 public sealed class PublicConsumerCallbackRoutingTests
 {

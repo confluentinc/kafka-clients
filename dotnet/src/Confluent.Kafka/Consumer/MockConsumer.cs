@@ -259,8 +259,6 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
-    internal ConsumerHandle Handle() => _native.CreateReentrancyHandle();
-
     /// <summary>
     /// Sets the beginning offset of a partition, used when <see cref="SeekToBeginning"/> resets it (Java
     /// <c>updateBeginningOffsets</c>, one entry).

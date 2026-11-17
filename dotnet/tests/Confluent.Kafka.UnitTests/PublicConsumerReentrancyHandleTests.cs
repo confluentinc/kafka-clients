@@ -14,9 +14,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
-using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -31,9 +29,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <see cref="ConsumerHandle"/> through the public API, broker-free: <see cref="IConsumerCommon.Handle"/> on the four
-/// consumers, the handle's operations inside and outside a callback, on a mock, after its own <c>Dispose</c> and
-/// after its consumer's destroy.
+/// The core's consumer handle through <see cref="NativeConsumerHandle"/>, the internal handle a consumer routes its
+/// in-callback calls to, broker-free: a handle over each of the four consumers, its operations inside and outside a
+/// callback, on a mock, and after its consumer's destroy.
 /// </summary>
 public sealed class PublicConsumerReentrancyHandleTests
 {
@@ -67,7 +65,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         IReadOnlyCollection<TopicPartition>? viaHandle = null;
         IReadOnlyCollection<TopicPartition>? viaConsumer = null;
@@ -102,7 +100,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         Assert.Empty(handle.Assignment());
         Assert.Empty(consumer.Assignment());
@@ -114,8 +112,8 @@ public sealed class PublicConsumerReentrancyHandleTests
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerHandle? obtainedInCallback = null;
-        ProbingListener listener = new ProbingListener(() => obtainedInCallback = consumer.Handle());
+        NativeConsumerHandle? obtainedInCallback = null;
+        ProbingListener listener = new ProbingListener(() => obtainedInCallback = CoreConsumerHandles.Of(consumer));
 
         consumer.Subscribe(new[] { Topic }, listener);
         consumer.Rebalance(new[] { s_tp0 });
@@ -128,43 +126,43 @@ public sealed class PublicConsumerReentrancyHandleTests
     }
 
     [Fact]
-    public void SyncMock_Handle_IsReachableThroughIConsumer()
+    public void SyncMock_AHandle_ReadsItsAssignment()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = HandleOf(consumer);
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         Assert.Empty(handle.Assignment());
     }
 
     [Fact]
-    public void AsyncMock_Handle_IsReachableThroughIAsyncConsumer()
+    public void AsyncMock_AHandle_ReadsItsAssignment()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = HandleOf(consumer);
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         Assert.Empty(handle.Assignment());
     }
 
     [Fact]
-    public void SyncKafkaConsumer_Handle_IsReachableThroughIConsumer()
+    public void SyncKafkaConsumer_AHandle_ReadsItsAssignment()
     {
         KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("p8-sync-handle");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = HandleOf(consumer);
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         Assert.Empty(handle.Assignment());
     }
 
     [Fact]
-    public async Task AsyncKafkaConsumer_Handle_IsReachableThroughIAsyncConsumer()
+    public async Task AsyncKafkaConsumer_AHandle_ReadsItsAssignment()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
             new AsyncKafkaConsumer<byte[], byte[]>(Config("p8-async-handle"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         await using (TestTimeout.AsyncDisposal(consumer))
         {
-            using ConsumerHandle handle = HandleOf(consumer);
+            using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
             Assert.Empty(handle.Assignment());
         }
     }
@@ -174,8 +172,8 @@ public sealed class PublicConsumerReentrancyHandleTests
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ConsumerHandle first = consumer.Handle();
-        using ConsumerHandle second = consumer.Handle();
+        NativeConsumerHandle first = CoreConsumerHandles.Of(consumer);
+        using NativeConsumerHandle second = CoreConsumerHandles.Of(consumer);
 
         Assert.NotSame(first, second);
         first.Dispose();
@@ -185,20 +183,11 @@ public sealed class PublicConsumerReentrancyHandleTests
     }
 
     [Fact]
-    public void Handle_AfterConsumerDispose_ThrowsIllegalState()
-    {
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        TestTimeout.Dispose(consumer);
-
-        Assert.Throws<IllegalStateException>(() => consumer.Handle());
-    }
-
-    [Fact]
     public void MockDerivedHandle_WakeupAndTheTwoGetters_Work()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         handle.Wakeup();
 
@@ -213,7 +202,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0, s_tp1 });
         consumer.Pause(new[] { s_tp1 });
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition()));
         Assert.Equal(new[] { s_tp1 }, handle.Paused());
@@ -226,7 +215,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
         consumer.Seek(s_tp0, 0);
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         handle.Wakeup();
 
@@ -235,32 +224,32 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.Empty(consumer.Poll(TimeSpan.Zero));
     }
 
-    // The theories take an operation's name: ConsumerHandle is internal, so a public test cannot take the operation.
+    // The theories take an operation's name: NativeConsumerHandle is internal, so a public test cannot take the
+    // operation.
     public static TheoryData<string> MockUnsupportedOperationsNames() => NamesOf(MockUnsupportedOperations());
 
     public static TheoryData<string> GatedOperationsNames() => NamesOf(GatedOperations());
 
-    public static TheoryData<string> AllOperationsNames() => NamesOf(AllOperations());
-
-    internal static TheoryData<string, Action<ConsumerHandle>> MockUnsupportedOperations()
+    internal static TheoryData<string, Action<NativeConsumerHandle>> MockUnsupportedOperations()
     {
-        IReadOnlyCollection<TopicPartition> one = new[] { s_tp0 };
-        IReadOnlyDictionary<TopicPartition, long> timestamps = new Dictionary<TopicPartition, long> { [s_tp0] = 1 };
+        (string Topic, int Partition)[] one = NativeConsumer.SnapshotPartitions(new[] { s_tp0 });
+        NativeConsumer.TimestampsSnapshot timestamps =
+            NativeConsumer.SnapshotTimestamps(new Dictionary<TopicPartition, long> { [s_tp0] = 1 });
 
-        return new TheoryData<string, Action<ConsumerHandle>>
+        return new TheoryData<string, Action<NativeConsumerHandle>>
         {
             { "Pause", h => h.Pause(one) },
             { "Resume", h => h.Resume(one) },
             { "SeekToBeginning", h => h.SeekToBeginning(one) },
             { "SeekToEnd", h => h.SeekToEnd(one) },
-            { "Seek", h => h.Seek(s_tp0, 5) },
-            { "Seek(OffsetAndMetadata)", h => h.Seek(s_tp0, new OffsetAndMetadata(5, null, "m")) },
-            { "Position", h => h.Position(s_tp0) },
-            { "Position(TimeSpan)", h => h.Position(s_tp0, TimeSpan.FromSeconds(1)) },
-            { "Committed", h => h.Committed(one) },
-            { "BeginningOffsets", h => h.BeginningOffsets(one) },
-            { "EndOffsets", h => h.EndOffsets(one) },
-            { "OffsetsForTimes", h => h.OffsetsForTimes(timestamps) },
+            { "Seek", h => h.Seek(Topic, 0, 5) },
+            { "Seek(OffsetAndMetadata)", h => h.SeekWithMetadata(Topic, 0, new OffsetAndMetadata(5, null, "m")) },
+            { "Position", h => h.Position(Topic, 0, timeoutMs: null) },
+            { "Position(TimeSpan)", h => h.Position(Topic, 0, timeoutMs: 1000) },
+            { "Committed", h => h.Committed(one, timeoutMs: null) },
+            { "BeginningOffsets", h => h.BeginningOffsets(one, timeoutMs: null) },
+            { "EndOffsets", h => h.EndOffsets(one, timeoutMs: null) },
+            { "OffsetsForTimes", h => h.OffsetsForTimes(timestamps, timeoutMs: null) },
         };
     }
 
@@ -268,11 +257,11 @@ public sealed class PublicConsumerReentrancyHandleTests
     [MemberData(nameof(MockUnsupportedOperationsNames))]
     public void MockDerivedHandle_EveryUnwiredOperation_ThrowsUnsupportedOperationException(string name)
     {
-        Action<ConsumerHandle> operation = OperationOf(MockUnsupportedOperations(), name);
+        Action<NativeConsumerHandle> operation = OperationOf(MockUnsupportedOperations(), name);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => operation(handle));
 
@@ -286,28 +275,25 @@ public sealed class PublicConsumerReentrancyHandleTests
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets, Exception? Exception)> seen =
             new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?)>();
         IOffsetCommitCallback recording = new DelegateCallback((o, e) => seen.Add((o, e)));
 
-        handle.Commit(Offsets(3));
+        handle.CommitSync(OffsetsSnapshot.Of(Offsets(3)), timeoutMs: null);
         Assert.Equal(3, CommittedOffset(consumer));
 
-        handle.CommitAsync(Offsets(4));
+        handle.CommitAsync(OffsetsSnapshot.Of(Offsets(4)), (IOffsetCommitCallback?)null);
         Assert.Equal(4, CommittedOffset(consumer));
 
-        handle.CommitAsync(Offsets(5), callback: null);
-        Assert.Equal(5, CommittedOffset(consumer));
-
-        handle.CommitAsync(Offsets(6), recording);
+        handle.CommitAsync(OffsetsSnapshot.Of(Offsets(6)), recording);
         Assert.Equal(6, CommittedOffset(consumer));
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? delivered, Exception? exception) = Assert.Single(seen);
         Assert.Equal(6, Assert.Single(delivered!).Value.Offset());
         Assert.Null(exception);
 
         consumer.Seek(s_tp0, 7);
-        handle.Commit();
+        handle.CommitSync(timeoutMs: null);
         Assert.Equal(7, CommittedOffset(consumer));
 
         consumer.Seek(s_tp0, 8);
@@ -321,7 +307,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.Equal(9, Assert.Single(seen[1].Offsets!).Value.Offset());
         Assert.Null(seen[1].Exception);
 
-        Assert.Equal((long?)0, handle.CurrentLag(s_tp0));
+        Assert.Equal((long?)0, handle.CurrentLag(Topic, 0));
     }
 
     [Fact]
@@ -329,7 +315,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ConsumerHandle handle = consumer.Handle();
+        NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         handle.Dispose();
         handle.Dispose();
@@ -338,29 +324,22 @@ public sealed class PublicConsumerReentrancyHandleTests
         Assert.Empty(consumer.Assignment());
     }
 
-    internal static TheoryData<string, Action<ConsumerHandle>> GatedOperations()
+    internal static TheoryData<string, Action<NativeConsumerHandle>> GatedOperations()
     {
-        TheoryData<string, Action<ConsumerHandle>> data = MockUnsupportedOperations();
-        data.Add("CurrentLag", h => h.CurrentLag(s_tp0));
-        data.Add("Commit", h => h.Commit());
-        data.Add("Commit(offsets)", h => h.Commit(Offsets(7)));
+        TheoryData<string, Action<NativeConsumerHandle>> data = MockUnsupportedOperations();
+        data.Add("CurrentLag", h => h.CurrentLag(Topic, 0));
+        data.Add("Commit", h => h.CommitSync(timeoutMs: null));
+        data.Add("Commit(offsets)", h => h.CommitSync(OffsetsSnapshot.Of(Offsets(7)), timeoutMs: null));
         data.Add("CommitAsync", h => h.CommitAsync());
         data.Add("CommitAsync(callback)", h => h.CommitAsync(new DelegateCallback((_, _) => { })));
-        data.Add("CommitAsync(offsets)", h => h.CommitAsync(Offsets(7)));
-        data.Add("CommitAsync(offsets, callback)", h => h.CommitAsync(Offsets(7), new DelegateCallback((_, _) => { })));
+        data.Add("CommitAsync(offsets)", h => h.CommitAsync(OffsetsSnapshot.Of(Offsets(7)), (IOffsetCommitCallback?)null));
+        data.Add(
+            "CommitAsync(offsets, callback)",
+            h => h.CommitAsync(OffsetsSnapshot.Of(Offsets(7)), new DelegateCallback((_, _) => { })));
         return data;
     }
 
-    internal static TheoryData<string, Action<ConsumerHandle>> AllOperations()
-    {
-        TheoryData<string, Action<ConsumerHandle>> data = GatedOperations();
-        data.Add("Wakeup", h => h.Wakeup());
-        data.Add("Assignment", h => h.Assignment());
-        data.Add("Paused", h => h.Paused());
-        return data;
-    }
-
-    private static TheoryData<string> NamesOf(TheoryData<string, Action<ConsumerHandle>> operations)
+    private static TheoryData<string> NamesOf(TheoryData<string, Action<NativeConsumerHandle>> operations)
     {
         TheoryData<string> names = new TheoryData<string>();
         foreach (object[] row in operations)
@@ -371,32 +350,18 @@ public sealed class PublicConsumerReentrancyHandleTests
         return names;
     }
 
-    private static Action<ConsumerHandle> OperationOf(TheoryData<string, Action<ConsumerHandle>> operations, string name) =>
-        (Action<ConsumerHandle>)operations.Single(row => (string)row[0] == name)[1];
-
-    [Theory]
-    [MemberData(nameof(AllOperationsNames))]
-    public void EveryOperation_AfterDispose_ThrowsObjectDisposed(string name)
-    {
-        Action<ConsumerHandle> operation = OperationOf(AllOperations(), name);
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ConsumerHandle handle = consumer.Handle();
-        handle.Dispose();
-
-        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(() => operation(handle));
-        Assert.Equal(nameof(ConsumerHandle), failure.ObjectName);
-        Assert.NotNull(name);
-    }
+    private static Action<NativeConsumerHandle> OperationOf(
+        TheoryData<string, Action<NativeConsumerHandle>> operations, string name) =>
+        (Action<NativeConsumerHandle>)operations.Single(row => (string)row[0] == name)[1];
 
     [Theory]
     [MemberData(nameof(GatedOperationsNames))]
     public void EveryBlockingOperation_AfterTheConsumersDestroy_ThrowsIllegalState(string name)
     {
-        Action<ConsumerHandle> operation = OperationOf(GatedOperations(), name);
+        Action<NativeConsumerHandle> operation = OperationOf(GatedOperations(), name);
         MockConsumer<byte[], byte[]> consumer = NewMock();
         consumer.Assign(new[] { s_tp0 });
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         TestTimeout.Dispose(consumer);
 
         IllegalStateException failure = Assert.Throws<IllegalStateException>(() => operation(handle));
@@ -408,84 +373,12 @@ public sealed class PublicConsumerReentrancyHandleTests
     public void KafkaConsumerHandle_AfterTheConsumersDestroy_ThrowsIllegalState()
     {
         KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-after-destroy");
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         TestTimeout.Run(consumer.Dispose, s_deadline);
 
-        IllegalStateException failure = Assert.Throws<IllegalStateException>(() => handle.Position(s_tp0));
+        IllegalStateException failure =
+            Assert.Throws<IllegalStateException>(() => handle.Position(Topic, 0, timeoutMs: null));
         Assert.Equal(ConsumerDestroyed, failure.Message);
-    }
-
-    [Fact]
-    public void Position_WithNegativeTimeout_ThrowsTheTimersMessage()
-    {
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
-
-        AssertTimerNegative(Assert.Throws<IllegalArgumentException>(() => handle.Position(s_tp0, TimeSpan.FromSeconds(-1))), -1000);
-        AssertTimerNegative(Assert.Throws<IllegalArgumentException>(() => handle.Position(s_tp0, TimeSpan.FromMilliseconds(-1))), -1);
-        AssertTimerNegative(Assert.Throws<IllegalArgumentException>(() => handle.Position(s_tp0, TimeSpan.FromTicks(-5000))), -1);
-    }
-
-    [Fact]
-    public void Position_WithNegativeTimeout_AfterDispose_ThrowsObjectDisposed()
-    {
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ConsumerHandle handle = consumer.Handle();
-        handle.Dispose();
-
-        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(
-            () => handle.Position(s_tp0, TimeSpan.FromSeconds(-1)));
-        Assert.Equal(nameof(ConsumerHandle), failure.ObjectName);
-    }
-
-    [Fact]
-    public void Position_WithNegativeTimeoutAndNullTopic_ThrowsForTheAssignmentFirst()
-    {
-        // Java's KafkaConsumer.position checks isAssigned before it builds the timer.
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
-
-        IllegalStateException failure = Assert.Throws<IllegalStateException>(
-            () => handle.Position(new TopicPartition(null!, 0), TimeSpan.FromSeconds(-1)));
-        Assert.Equal("You can only check the position for partitions assigned to this consumer.", failure.Message);
-    }
-
-    [Fact]
-    public void Pause_WithNullPartitions_ThrowsArgumentNull()
-    {
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
-
-        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(() => handle.Pause(null!));
-        Assert.Equal("partitions", failure.ParamName);
-    }
-
-    [Fact]
-    public void CommitAsync_WithANullCallback_ThrowsArgumentNull()
-    {
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
-
-        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(
-            () => handle.CommitAsync((IOffsetCommitCallback)null!));
-        Assert.Equal("callback", failure.ParamName);
-    }
-
-    [Fact]
-    public void Seek_WithNegativeOffset_ThrowsIllegalArgument()
-    {
-        MockConsumer<byte[], byte[]> consumer = NewMock();
-        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
-
-        IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(() => handle.Seek(s_tp0, -1));
-
-        Assert.Equal("seek offset must not be a negative number", failure.Message);
     }
 
     [Fact]
@@ -493,7 +386,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         SafeConsumerHandle native = consumer.Handle;
-        ConsumerHandle handle = consumer.CreateReentrancyHandle();
+        NativeConsumerHandle handle = NativeConsumerHandle.Create(consumer);
 
         TestTimeout.Dispose(consumer);
         Assert.True(native.IsClosed, "a live reentrancy handle must not defer the consumer's destroy");
@@ -506,7 +399,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         SafeConsumerHandle native = consumer.Handle;
-        ConsumerHandle handle = consumer.CreateReentrancyHandle();
+        NativeConsumerHandle handle = NativeConsumerHandle.Create(consumer);
 
         handle.Dispose();
         Assert.False(native.IsClosed, "disposing a handle must not release its consumer");
@@ -519,14 +412,15 @@ public sealed class PublicConsumerReentrancyHandleTests
     public void HandleOutstandingAcrossConsumerDispose_ReadsAndWakesButRefusesTheBlockingOperations()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        ConsumerHandle handle = consumer.Handle();
+        NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         TestTimeout.Dispose(consumer);
 
         Assert.Empty(handle.Assignment());
         Assert.Empty(handle.Paused());
         handle.Wakeup();
-        IllegalStateException failure = Assert.Throws<IllegalStateException>(() => handle.Commit(Offsets(1)));
+        IllegalStateException failure = Assert.Throws<IllegalStateException>(
+            () => handle.CommitSync(OffsetsSnapshot.Of(Offsets(1)), timeoutMs: null));
         Assert.Equal(ConsumerDestroyed, failure.Message);
 
         handle.Dispose();
@@ -536,11 +430,11 @@ public sealed class PublicConsumerReentrancyHandleTests
     public void ACommitRegistration_ThatAHandleCommitRefusedAfterTheConsumersDestroy_IsReleasedAtOnce()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         TestTimeout.Dispose(consumer);
 
         IllegalStateException failure = Assert.Throws<IllegalStateException>(
-            () => handle.CommitAsync(Offsets(1), new DelegateCallback((_, _) => { })));
+            () => handle.CommitAsync(OffsetsSnapshot.Of(Offsets(1)), new DelegateCallback((_, _) => { })));
 
         Assert.Equal(ConsumerDestroyed, failure.Message);
         CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
@@ -551,7 +445,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     public void SyncConsumerDispose_WithALiveHandleOutstanding_ReturnsWithoutHanging()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
-        ConsumerHandle handle = consumer.Handle();
+        NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         TestTimeout.Run(() => consumer.Dispose(), s_deadline);
 
@@ -562,7 +456,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     public async Task AsyncConsumerDisposeAsync_WithALiveHandleOutstanding_ReturnsWithoutHanging()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
-        ConsumerHandle handle = consumer.Handle();
+        NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
 
@@ -577,7 +471,7 @@ public sealed class PublicConsumerReentrancyHandleTests
 
         for (int i = 0; i < 200; i++)
         {
-            using ConsumerHandle handle = consumer.CreateReentrancyHandle();
+            using NativeConsumerHandle handle = NativeConsumerHandle.Create(consumer);
             Assert.Empty(handle.Assignment());
         }
 
@@ -589,7 +483,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     [MemberData(nameof(GatedOperationsNames))]
     public void KafkaConsumerHandle_OutsideACallback_RefusesEveryBlockingOperation(string name)
     {
-        Action<ConsumerHandle> operation = OperationOf(GatedOperations(), name);
+        Action<NativeConsumerHandle> operation = OperationOf(GatedOperations(), name);
         KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-outside-a-callback");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
@@ -597,7 +491,7 @@ public sealed class PublicConsumerReentrancyHandleTests
             () =>
             {
                 consumer.Assign(new[] { s_tp0 });
-                using ConsumerHandle handle = consumer.Handle();
+                using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
                 ConcurrentModificationException refused =
                     Assert.Throws<ConcurrentModificationException>(() => operation(handle));
@@ -618,7 +512,7 @@ public sealed class PublicConsumerReentrancyHandleTests
             {
                 consumer.Assign(new[] { s_tp0, s_tp1 });
                 consumer.Pause(new[] { s_tp1 });
-                using ConsumerHandle handle = consumer.Handle();
+                using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
                 Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition()));
                 Assert.Equal(new[] { s_tp1 }, handle.Paused());
@@ -642,7 +536,7 @@ public sealed class PublicConsumerReentrancyHandleTests
             () =>
             {
                 consumer.Assign(new[] { s_tp0 });
-                using ConsumerHandle handle = consumer.Handle();
+                using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
                 long? position = null;
                 long? lag = -1;
                 IReadOnlyCollection<TopicPartition>? paused = null;
@@ -653,15 +547,15 @@ public sealed class PublicConsumerReentrancyHandleTests
                 {
                     try
                     {
-                        handle.Seek(s_tp0, 5);
-                        position = handle.Position(s_tp0);
-                        handle.Pause(new[] { s_tp0 });
+                        handle.Seek(Topic, 0, 5);
+                        position = handle.Position(Topic, 0, timeoutMs: null);
+                        handle.Pause(NativeConsumer.SnapshotPartitions(new[] { s_tp0 }));
                         paused = handle.Paused();
-                        handle.Resume(new[] { s_tp0 });
+                        handle.Resume(NativeConsumer.SnapshotPartitions(new[] { s_tp0 }));
                         resumed = handle.Paused();
-                        lag = handle.CurrentLag(s_tp0);
-                        handle.CommitAsync(Empty());
-                        handle.Commit(Empty());
+                        lag = handle.CurrentLag(Topic, 0);
+                        handle.CommitAsync(OffsetsSnapshot.Of(Empty()), (IOffsetCommitCallback?)null);
+                        handle.CommitSync(OffsetsSnapshot.Of(Empty()), timeoutMs: null);
                     }
                     catch (Exception e)
                     {
@@ -695,7 +589,7 @@ public sealed class PublicConsumerReentrancyHandleTests
             () =>
             {
                 consumer.Assign(new[] { s_tp0 });
-                using ConsumerHandle handle = consumer.Handle();
+                using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
                 TopicPartition unassigned = new TopicPartition("unassigned-parity-topic", 0);
                 Exception? viaHandle = null;
 
@@ -703,7 +597,7 @@ public sealed class PublicConsumerReentrancyHandleTests
                 {
                     try
                     {
-                        handle.Position(unassigned);
+                        handle.Position(unassigned.Topic(), unassigned.Partition(), timeoutMs: null);
                     }
                     catch (Exception e)
                     {
@@ -733,14 +627,14 @@ public sealed class PublicConsumerReentrancyHandleTests
         consumer.UpdateEndOffset(s_tp0.Topic(), s_tp0.Partition(), 2);
         consumer.UpdateEndOffset(unassigned.Topic(), unassigned.Partition(), 2);
         consumer.Seek(s_tp0, 5);
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         long? lag = null;
         Exception? failure = null;
 
         consumer.CommitAsync(Empty(), new DelegateCallback((_, _) =>
         {
-            lag = handle.CurrentLag(s_tp0);
-            failure = Record.Exception(() => handle.CurrentLag(unassigned));
+            lag = handle.CurrentLag(Topic, 0);
+            failure = Record.Exception(() => handle.CurrentLag(unassigned.Topic(), unassigned.Partition()));
         }));
 
         Assert.Equal((long?)-3, lag);
@@ -758,15 +652,15 @@ public sealed class PublicConsumerReentrancyHandleTests
             () =>
             {
                 consumer.Assign(new[] { s_tp0 });
-                using ConsumerHandle handle = consumer.Handle();
+                using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
                 TopicPartition unassigned = new TopicPartition(Topic, 7);
                 long? lag = -1;
                 Exception? failure = null;
 
                 consumer.CommitAsync(Empty(), new DelegateCallback((_, _) =>
                 {
-                    lag = handle.CurrentLag(s_tp0);
-                    failure = Record.Exception(() => handle.CurrentLag(unassigned));
+                    lag = handle.CurrentLag(Topic, 0);
+                    failure = Record.Exception(() => handle.CurrentLag(unassigned.Topic(), unassigned.Partition()));
                 }));
                 consumer.Commit(Empty());
 
@@ -787,7 +681,7 @@ public sealed class PublicConsumerReentrancyHandleTests
             () =>
             {
                 consumer.Assign(new[] { new TopicPartition(NonAsciiTopic, 3) });
-                using ConsumerHandle handle = consumer.Handle();
+                using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
 
                 TopicPartition viaHandle = Assert.Single(handle.Assignment());
                 Assert.Equal(NonAsciiTopic, viaHandle.Topic());
@@ -795,11 +689,6 @@ public sealed class PublicConsumerReentrancyHandleTests
                 Assert.Equal(consumer.Assignment(), handle.Assignment());
             },
             s_deadline);
-    }
-
-    private static void AssertTimerNegative(IllegalArgumentException thrown, long ms)
-    {
-        Assert.Equal("Invalid negative timeout " + ms.ToString(CultureInfo.InvariantCulture), thrown.Message);
     }
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
@@ -828,23 +717,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset();
 
     private static CommitCallbackRegistration? Registration(object consumer) =>
-        ((NativeConsumer)consumer.GetType()
-            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .GetValue(consumer)!).CurrentCommitCallbackRegistration;
-
-    private static ConsumerHandle HandleOf(IConsumer<byte[], byte[]> consumer) => consumer switch
-    {
-        KafkaConsumer<byte[], byte[]> kafka => kafka.Handle(),
-        MockConsumer<byte[], byte[]> mock => mock.Handle(),
-        _ => throw new ArgumentException("Not a consumer of this library.", nameof(consumer)),
-    };
-
-    private static ConsumerHandle HandleOf(IAsyncConsumer<byte[], byte[]> consumer) => consumer switch
-    {
-        AsyncKafkaConsumer<byte[], byte[]> kafka => kafka.Handle(),
-        AsyncMockConsumer<byte[], byte[]> mock => mock.Handle(),
-        _ => throw new ArgumentException("Not a consumer of this library.", nameof(consumer)),
-    };
+        CoreConsumerHandles.NativeOf(consumer).CurrentCommitCallbackRegistration;
 
     /// <summary>Runs a probe inside <c>OnPartitionsAssigned</c>.</summary>
     private sealed class ProbingListener : IConsumerRebalanceListener

@@ -271,7 +271,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             await CancelACommitAwaitingTheAsyncCallbackItDelivered(consumer, afterTheOwnWake: null);
 
-            using ConsumerHandle handle = consumer.Handle();
+            using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
             handle.Wakeup();
 
             WakeupException woken = await Assert.ThrowsAsync<WakeupException>(
@@ -298,7 +298,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             await CancelACommitAwaitingTheAsyncCallbackItDelivered(consumer, afterTheOwnWake: null);
 
-            using ConsumerHandle handle = consumer.Handle();
+            using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
             TaskCompletionSource<Exception?> raised =
                 new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
             await TestTimeout.Run(
@@ -681,7 +681,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         Assert.False(withOffsets.GetParameters()[1].HasDefaultValue);
         Assert.True(withOffsets.GetParameters()[2].HasDefaultValue);
 
-        foreach (Type surface in new[] { typeof(IConsumer<byte[], byte[]>), typeof(IConsumerCommon), typeof(ConsumerHandle) })
+        foreach (Type surface in new[] { typeof(IConsumer<byte[], byte[]>), typeof(IConsumerCommon) })
         {
             Assert.DoesNotContain(
                 surface.GetMethods(),
@@ -718,22 +718,22 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             _ => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(5))),
         };
 
-    private static void CallTheHandle(ConsumerHandle handle, string call)
+    private static void CallTheHandle(NativeConsumerHandle handle, string call)
     {
         switch (call)
         {
             case "committed":
-                handle.Committed(new[] { s_tp0 });
+                handle.Committed(NativeConsumer.SnapshotPartitions(new[] { s_tp0 }), timeoutMs: null);
                 break;
             case "position":
-                handle.Position(s_tp0);
+                handle.Position(Topic, 0, timeoutMs: null);
                 break;
             case "commit":
-                handle.Commit(Offsets(1));
+                handle.CommitSync(OffsetsSnapshot.Of(Offsets(1)), timeoutMs: null);
                 break;
             default:
-                handle.Seek(s_tp0, 1);
-                handle.Commit();
+                handle.Seek(Topic, 0, 1);
+                handle.CommitSync(timeoutMs: null);
                 break;
         }
     }

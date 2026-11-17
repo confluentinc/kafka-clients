@@ -1416,7 +1416,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    // Inside a callback a call the consumer's own ConsumerHandle has a form of, timed or not, goes to it, as Python's
+    // Inside a callback a call the core's ConsumerHandle has a form of, timed or not, goes to it, as Python's
     // binding routes it; Poll, Subscribe, Unsubscribe and Assign, which it lacks, are refused before anything reaches
     // the core.
     private bool RoutesToTheHandle => _reporter.InCallback;
@@ -2252,19 +2252,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr view = NativeMethods.ConsumerMetrics(_handle, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return MetricsViewMarshal.CopyOutAndDestroy(view);
-        }
-        finally
-        {
-            ExitUse(owner);
-        }
-    }
-
-    internal ConsumerHandle CreateReentrancyHandle()
-    {
-        int owner = EnterUse(UseKind.Unowned);
-        try
-        {
-            return ConsumerHandle.Create(this);
         }
         finally
         {
