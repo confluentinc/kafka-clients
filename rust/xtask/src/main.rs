@@ -2784,7 +2784,8 @@ fn print_help() {
                   finding is shown
   ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   doc-baseline    Rewrite xtask/doc-baseline.txt with the current check-api-docs findings
-  javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit
+  javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit;
+                  `--words` prints the Javadoc word counts of the markers read from stdin
   doc-report      Print the open check-api-docs findings per module and per kind
   doc-fill        Insert the missing # Arguments / # Returns / # Errors entries Java's
                   tags give into the docs under the paths; `--write` applies them
@@ -2880,6 +2881,7 @@ Usage:
   cargo xtask ffi-baseline
   cargo xtask doc-baseline
   cargo xtask javadoc <marker|rust-path|C symbol>
+  cargo xtask javadoc --words < markers
   cargo xtask doc-report
   cargo xtask doc-fill [--write] <path>...
   cargo xtask lint [--keep-going]
