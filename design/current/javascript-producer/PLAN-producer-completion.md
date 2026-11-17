@@ -177,7 +177,12 @@ working on the rules sooner, with the hand-written modules recorded as a deviati
 
 ## 7. Blockers (a C FFI or Rust core change)
 
-- **None: nothing in the producer is blocked on the core** (`DECISIONS.md`, entry 26).
+- **Core issues** (`DECISIONS.md`, entry 31), handed to the core team, not fixed in this PR:
+  - `buffer-exhausted-total` counts 3 for one dropped send, where Java counts 1: the core's non-waiting `try_send`
+    runs twice, then the real wait runs, each recording an exhaustion. The ported test is skipped until the core
+    records one exhaustion per dropped send.
+  - `record-error-rate` / `record-error-total` count no failure of `send()`: the core never records the `errors`
+    sensor, where Java's `doSend` does for an `ApiException` or a `KafkaException`.
 - `QuotaViolationError.metric()` from the core is built from the view's metric name and the error's value, as
   .NET builds it (Python keeps the name and group only).
 - The items left out match the other bindings:
@@ -198,6 +203,6 @@ working on the rules sooner, with the hand-written modules recorded as a deviati
 
 ## 9. Future improvements
 
-- Property-based tests with `fast-check` (the test plan's TOOL-02): not integrated now, by the owner's decision of
+- Property-based tests with `fast-check`: not integrated now, by the owner's decision of
   2026-11-18.
 - The performance tests: built later, and kept local only.

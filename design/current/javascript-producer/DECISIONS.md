@@ -244,8 +244,8 @@ rules and readings. Newest entries are at the end; dates are in IST.
     metric always is. Python keeps only the name and the group, behind a value that is not measurable, so the JS
     metric is the closer to Java's. With no name from the view it has an empty one, as .NET's. `metric()` is typed `KafkaMetric`. The items still left out match the
     other bindings: `setMockMetrics` is left out as in .NET, whose mock also wraps the FFI's, and
-    `CorrelationIdMismatchError`'s ids are `-1` in all three. So nothing in the producer is blocked on the core; the
-    worker cleanup hook stays a Future improvement.
+    `CorrelationIdMismatchError`'s ids are `-1` in all three. The core issues the producer's tests found are listed in entry
+    31; the worker cleanup hook stays a Future improvement.
 
 ## Calls from inside a send callback (2026-11-17)
 
@@ -288,19 +288,45 @@ rules and readings. Newest entries are at the end; dates are in IST.
       `NullPointerException` there);
     - any other error rejects as it is, as Java rethrows it.
 
-    The serializer's `ApiError` is not counted in `record-error-rate` (a deviation: the serializers run in
-    JavaScript, before the core). `MockProducer` keeps passing every serializer error out raw, as Java's
+    No failure `send()` reports, a serializer's included, is counted in `record-error-rate` or `record-error-total`,
+    which Java's `doSend` records for an `ApiException` or a `KafkaException` (a deviation of the core's: its `send()`
+    records no error in that sensor; it goes when the core records them, entry 31). `MockProducer` keeps passing every serializer error out raw, as Java's
     `MockProducer#send` serializes with no `try`. `PlaintextProducerSendTest.testWrongSerializer` is ported. The .NET
-    binding answers the same way (`PublicProducerSerializerFailureTests`); Python passes the error through.
+    binding answers a synchronous callback the same way (`PublicProducerSerializerFailureTests`); for an async
+    callback, .NET's async producer completes the send's first stage at once, fails the future once the callback
+    ends, and keeps a faulted async callback out of the send, where this binding awaits the callback's Promise and
+    rejects `send()` with its rejection, as Java's `onCompletion` throwing out of `send()`. Python passes the error
+    through. A throw or rejection from that callback rejecting `send()` departs from the root's "the producer logs a
+    send callback's error", which describes the paths the core runs; it is a **(root conflict)** marked in
+    `javascript/CLAUDE.md` (entry 4).
 
 ## MockProducer callback rejections (decided by the owner, 2026-11-18)
 
 30. **A rejected callback Promise is the callback's error on `MockProducer`, as a synchronous throw is**, restoring
-    what review round 120 accepted for the earlier TypeScript mock: `send()` with `autoComplete` and `flush()` reject
+    the design accepted earlier for the TypeScript mock: `send()` with `autoComplete` and `flush()` reject
     with it; `completeNext()` and `errorNext()`, being synchronous, keep it in a FIFO, and the next `send()`,
     `flush()` or `close()` raises the oldest, once (a deviation, as Python's `AsyncMockProducer`); no kept error is
     lost; `flush()` and `close()` (and `[Symbol.asyncDispose]`) wait for every callback Promise already started
-    (`allSettled` semantics), then raise the oldest kept error. Nothing is logged. Java's mock calls `onCompletion`
+    (`allSettled` semantics), then raise the oldest kept error, `flush()` flushing first even with a kept error.
+    Nothing is logged. Only the record's own `send()` gets its callback's error: each record's delivery function
+    captures whether its own hand-over is running, so a nested `send()`, or a `send()` that drains a pending
+    `flush()`'s callbacks, leaves their errors to their own calls. A `close()` from one of the mock's callbacks, before
+    its first `await`, skips the wait, as Python's `AsyncMockProducer`; after it the core's close waits for that
+    callback's report, as on `KafkaProducer`. Java's mock calls `onCompletion`
     with no `try` (`MockProducer.Completion#complete`), so its error propagates and the record's future stays
     incomplete; here the core's mock completes the future once the Promise settled, the deviation already recorded
     for a throw, which now covers this case too.
+
+## Core issues (2026-11-18)
+
+31. **Two divergences of the core's producer from Java's**, found by the ported tests. Each is a core change, so a
+    blocker by entry 3, and is handed to the core team; neither is fixed in this PR:
+    - **`buffer-exhausted-total` counts 3 for one dropped send, where Java counts 1.** The FFI's `send_cb` runs the
+      core's non-waiting `try_send` on the calling thread, `submission_loop` runs it again, and then `send_waiter`
+      runs the real wait with `max.block.ms`; each runs `BufferPool::allocate` and records one exhaustion, where
+      Java's `BufferPool#awaitMemory` records once. The ported test is skipped; its skip is removed when the core
+      records one exhaustion per dropped send (a `SendWait::Never` allocation not recording it, for example).
+    - **`record-error-rate` and `record-error-total` count no failure of `send()`.** Java's `KafkaProducer#doSend`
+      records the `errors` sensor for an `ApiException`, an `InterruptedException` or a `KafkaException`, a
+      serializer's `SerializationException` included; the core's `KafkaProducer::do_send` records it for none, so
+      the client's deviation (`send()`'s TSDoc) goes when the core records them.

@@ -618,9 +618,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   serializer's class, a built-in's factory name, `stringSerializer`)
   *(deviation: Java writes fully qualified Java names, and a null key throws
   `NullPointerException` there. Why: JavaScript has no names of that form)*;
-  anything else rejects as it is. The serializer's `ApiError` is not counted
-  in `record-error-rate` *(deviation. Why: the serializers run in
-  JavaScript, before the core. Goes when: the core runs them)*. The
+  anything else rejects as it is. No failure `send()` reports, a
+  serializer's included, is counted in `record-error-rate` or
+  `record-error-total`, which Java's `doSend` records for an `ApiException`
+  or a `KafkaException` *(deviation. Why: the core's `send()` records no
+  error in that sensor. Goes when: the core records them; a core issue,
+  `DECISIONS.md` entry 31)*. The
   binding's own check of what a serializer returns stays a `TypeError`.
   `MockProducer` passes every serializer error out raw, as Java's
   `MockProducer#send` serializes with no `try`. `stringSerializer()`
@@ -754,7 +757,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (rule 6): the
   record's future completes, and a `flush()` or `close()` covering the record
   returns, only once it settled; a rejection is a throw, logged by the core
-  and never propagated. Such a Promise must not wait for `flush()` or
+  and never propagated, except the callback a serializer's `ApiError` runs
+  inside `send()`, whose throw or rejection rejects `send()`, as Java's
+  `onCompletion` throws out of `KafkaProducer#doSend`'s `ApiException` catch,
+  which has no `try` around it. **(root conflict)** The root conventions,
+  Threads and callbacks, say the producer logs a send callback's error; that
+  holds where the core runs the callback (the delivery path, and a hand-over
+  the core refuses, where the core logs the throw and `send()` resolves), but
+  not for the serializer's catch, which runs in JavaScript. The code follows
+  Java there (`DECISIONS.md`, entries 4 and 29): the root wording needs its
+  owner. Such a Promise must not wait for `flush()` or
   `close()` of its own producer, which wait for it (root conventions, Threads
   and callbacks: anti-patterns inside a send callback). Before the callback's
   first `await`, `flush()` is refused, as Java's throws, and `close()` closes
@@ -828,13 +840,22 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   *(deviation: Java's `flush()` stops at the first callback that throws, the
   later records staying waiting. Why: the core's mock completes all of them
   in one call. Goes when: the core's mock stops at the first throw)*. A callback's Promise that rejects is the
-  callback's error, as a throw is, and nothing logs it (owner's decision 2026-11-18, restoring review round 120's
-  fix): `send()` with `autoComplete` waits for its callback's Promise and rejects with its rejection, and `flush()`
+  callback's error, as a throw is, and nothing logs it (owner's decision 2026-11-18, restoring an earlier accepted design;
+  `DECISIONS.md` entry 30): `send()` with `autoComplete` waits for its callback's Promise and rejects with its rejection, and `flush()`
   rejects with it; `completeNext()` and `errorNext()`, being synchronous, keep it in a FIFO (`#callbackErrors`), and
   the next `send()`, `flush()` or `close()` raises the oldest, once *(deviation, as Python's `AsyncMockProducer`:
   Java's mock throws it from the completing call. Why: these calls return before the Promise settles)*. `flush()`
   and `close()` (so `[Symbol.asyncDispose]` too) wait for every callback Promise already started (`#running`,
-  `allSettled` semantics), then raise the oldest kept error, so no kept error is lost. The record's future completes
+  `allSettled` semantics), then raise the oldest kept error, so no kept error is lost; `flush()` with a kept error
+  still flushes first. A callback's error belongs to the `send()` that auto-completed its record only: each record's
+  delivery function captures whether its own send()'s hand-over and drain are running, so a `send()` nested in a
+  callback, or a `send()` whose drain runs the callbacks a pending `flush()` completed, leaves those errors to their
+  own calls (the throw to the completing call, the rejection to the FIFO). A `close()` made from one of the mock's
+  callbacks before its first `await` does not wait for the callbacks, its own among them, as Python's
+  `AsyncMockProducer` skips the wait (`_in_async_callback`); the mock counts the callbacks running their
+  synchronous part (`#callbackDepth`). After that `await` the core's close waits for the running callback's
+  report (the FFI's `in_callback` is the drain's thread only), and a `flush()` from a callback never settles, the
+  anti-pattern the producer documents; Python's mock, not over the core, skips the wait after an `await` too. The record's future completes
   once the Promise settled, the deviation above for a throw covering this case too.
   `partitionsFor(null)` rejects with the FFI's `TypeError` "topic cannot be
   null" *(deviation: Java's mock answers `[]`, as its empty cluster has no
@@ -842,10 +863,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   repeats no precondition, Q35. Goes when: the FFI's mock accepts a null
   topic)*. `send(null)` on a closed mock rejects with `TypeError` "record
   must not be null" *(deviation: Java's mock checks `closed` first, an
-  `IllegalStateException` "MockProducer is already closed.". Why: root §4
-  has the FFI check a NULL mandatory argument first, and Q35 has the binding
-  repeat no precondition, as for `Headers.remove(null)`. Goes when: the
-  FFI's mock checks `closed` first)*. Java's
+  `IllegalStateException` "MockProducer is already closed.". Why: the
+  binding keeps no closed state (Q61), and the record is checked in
+  JavaScript, by `#send`'s own TypeScript check, before the call reaches the
+  core's mock, which holds the closed state, the reason `KafkaProducer.send`
+  records for the same order)*. Java's
   public error fields are setters only (plan §5 item 2, Python's
   `set_send_exception`): `setSendException`, `setFlushException`,
   `setPartitionsForException`, `setCloseException`, over

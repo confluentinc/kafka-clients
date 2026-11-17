@@ -526,10 +526,12 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * null, a serializer's class, or a built-in's factory
    * (`stringSerializer`). *(deviation: Java writes fully qualified Java
    * names, and a null key there throws NullPointerException. Why: JavaScript
-   * has no class names of that form.)* *(deviation: an `ApiError` from a
-   * serializer is not counted in the producer's `record-error-rate`. Why:
-   * the serializers run in JavaScript, before the record reaches the core.
-   * Goes when: the core runs the serializers.)*
+   * has no class names of that form.)* *(deviation: no failure `send()`
+   * reports, a serializer's included, is counted in the producer's
+   * `record-error-rate` or `record-error-total`, which Java's `doSend`
+   * records for an `ApiException` or a `KafkaException`. Why: the core's
+   * `send()` records no error in that sensor. Goes when: the core records
+   * them.)*
    *
    * The client reads a `Buffer` or `Uint8Array` key or value after `send()`
    * returns. Don't write to it, transfer it or resize it until the Promise
