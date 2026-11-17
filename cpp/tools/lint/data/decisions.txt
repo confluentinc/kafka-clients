@@ -10,3 +10,7 @@ org.apache.kafka.common.Node#rack() return nullable field hasRack() tests the ra
 # org.apache.kafka.common.ClusterResource: its Javadoc says the cluster id may be null.
 org.apache.kafka.common.ClusterResource#ClusterResource(String) clusterId nullable javadoc cluster id may be null if the broker does not support cluster ids
 org.apache.kafka.common.ClusterResource#clusterId() return nullable javadoc it may be null if the broker does not support cluster ids
+# org.apache.kafka.common.config.SslClientAuth: forConfig has a null branch for its key and returns
+# null for a name that matches no constant.
+org.apache.kafka.common.config.SslClientAuth#forConfig(String) key nullable body a null key returns NONE
+org.apache.kafka.common.config.SslClientAuth#forConfig(String) return nullable body an unknown name returns null

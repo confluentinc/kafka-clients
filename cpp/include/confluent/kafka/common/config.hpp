@@ -17,3 +17,4 @@
 // The module header of confluent::kafka::common::config (cpp/CLAUDE.md §3.1).
 
 #include <confluent/kafka/common/config/config_resource.hpp>
+#include <confluent/kafka/common/config/ssl_client_auth.hpp>

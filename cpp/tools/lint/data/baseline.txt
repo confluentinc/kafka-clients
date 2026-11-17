@@ -256,7 +256,6 @@ missing-class org.apache.kafka.common.acl.AclOperation
 missing-class org.apache.kafka.common.config.LogLevelConfig
 missing-class org.apache.kafka.common.config.SaslConfigs
 missing-class org.apache.kafka.common.config.SecurityConfig
-missing-class org.apache.kafka.common.config.SslClientAuth
 missing-class org.apache.kafka.common.config.SslConfigs
 missing-class org.apache.kafka.common.config.TopicConfig
 missing-class org.apache.kafka.common.header.Header
