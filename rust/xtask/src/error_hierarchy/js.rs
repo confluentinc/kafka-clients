@@ -515,7 +515,8 @@ const CORE_READS: &[CoreRead] = &[
         "kafka_common_QuotaViolationError_t",
         &[
             // The metric's name; src/internal/payload.ts builds the KafkaMetric
-            // from it and the error's value, as the Python and .NET clients do.
+            // from it and the error's value, as the .NET client does (Python
+            // keeps the name and group only).
             (
                 "metric",
                 "kafka_common_QuotaViolationError_metric_name_err",

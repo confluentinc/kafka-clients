@@ -911,9 +911,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (`native/error_payload.c`, generated from the table in
   `rust/xtask/src/error_hierarchy/js.rs`), and `create` runs the class's
   constructors with a private token so each class sets its fields.
-  `QuotaViolationError`'s `metric()` is a `KafkaMetric` built, as the Python
-  and .NET clients build it, from the metric name the view gives and the
-  error's `value` (the value Java's `Sensor.checkQuotas` measured), with an
+  `QuotaViolationError`'s `metric()` is a `KafkaMetric` built, as the .NET
+  client builds it (Python keeps the name and group only), from the metric
+  name the view gives and the error's `value` (the value Java's `Sensor.checkQuotas` measured), with an
   empty name when the view gives none. A field the core cannot give keeps
   its default, listed in its module's header comment:
   `CorrelationIdMismatchError`'s ids are
