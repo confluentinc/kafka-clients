@@ -691,6 +691,48 @@ test('a callback that awaits a nested send() before it fails rejects its own sen
   }
 });
 
+test("a completing call made from a callback keeps an earlier callback's throw for the outer flush(), as Java's flush() throws it", async () => {
+  // Java's MockProducer#flush completes the records in order; the first
+  // onCompletion that throws ends it with that error. Here the core's mock
+  // completes both, and B's callback makes a completing call of its own,
+  // which must not drop A's throw.
+  for (const nestedCall of ['completeNext', 'errorNext', 'flush']) {
+    const producer = buildMockProducer(false);
+    const errorA = new Error('A');
+    /** @type {Promise<void> | null} */
+    let nested = null;
+    /** @type {unknown} */
+    let nestedThrew = null;
+    await producer.send({
+      record: record1,
+      callback: () => {
+        throw errorA;
+      },
+    });
+    await producer.send({
+      record: record2,
+      callback: () => {
+        try {
+          if (nestedCall === 'completeNext') producer.completeNext();
+          else if (nestedCall === 'errorNext') producer.errorNext(null);
+          else {
+            nested = producer.flush();
+            nested.catch(() => {});
+          }
+        } catch (e) {
+          nestedThrew = e;
+        }
+      },
+    });
+    await assert.rejects(producer.flush(), (e) => e === errorA, `${nestedCall}: the outer flush() rejects with A's throw`);
+    assert.equal(nestedThrew, null, `${nestedCall}: the nested call throws nothing of another record's`);
+    if (nested !== null) await nested;
+    // Raised once: later calls resolve.
+    await producer.flush();
+    await producer.close();
+  }
+});
+
 test("a send() from a callback's synchronous part rejects with its own callback's throw or rejection, as Java's nested send() throws it", async () => {
   // Java's MockProducer#send with autoComplete runs Completion#complete, which
   // calls onCompletion with no try, inside the nested send(). The callback
