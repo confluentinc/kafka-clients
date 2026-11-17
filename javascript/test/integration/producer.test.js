@@ -1208,21 +1208,27 @@ async function warmedProducer(what) {
     // forms, untimed and timed.
     for (const timed of [false, true]) {
       const topic = freshTopic(timed ? 'close-in-cb-timed' : 'close-in-cb');
-      // linger.ms holds the nested record in the accumulator well past the close.
+      // linger.ms holds the nested record in the accumulator well past the
+      // close. The first record fetches the topic's metadata itself, so the
+      // nested send needs no warm-up.
       const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 10000 } });
-      await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('warm') }))).get();
       /** @type {Promise<KafkaFuture<RecordMetadata>> | undefined} */
       let nested;
       /** @type {Promise<number> | undefined} */
       let closing;
       /** @type {Error | null | undefined} */
       let nestedException;
+      // Each callback fires exactly once.
+      let firstCalls = 0;
+      let nestedCalls = 0;
       const first = await producer.send({
         record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('first') }),
         callback: () => {
+          firstCalls += 1;
           nested = producer.send({
             record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('nested') }),
             callback: ({ exception }) => {
+              nestedCalls += 1;
               nestedException = exception;
             },
           });
@@ -1244,6 +1250,8 @@ async function warmedProducer(what) {
       });
       assert.ok(nestedException instanceof KafkaError);
       assert.equal(nestedException.message, 'Producer is closed forcefully.');
+      assert.equal(firstCalls, 1);
+      assert.equal(nestedCalls, 1);
     }
   },
   120000,

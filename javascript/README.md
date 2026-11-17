@@ -285,7 +285,8 @@ is refused, as Java's throws, and `close()` does not wait: as Java's, it logs
 a warning and closes as `close({ timeout: 0 })`, failing the records still
 pending with "Producer is closed forcefully.". After the first `await`,
 `flush()` and `close()` wait for the callback itself and can hang, and so
-does awaiting the future of a record sent later. A callback Promise that
+does awaiting the callback's own record's future, which completes only once
+the callback's Promise settles. A callback Promise that
 never settles has no time limit, as in Java: it holds its record's future,
 `flush()` and `close()`, `close({ timeout })` included.
 

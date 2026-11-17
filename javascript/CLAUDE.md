@@ -700,9 +700,12 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   still pending with "Producer is closed forcefully.", as Java's
   `KafkaProducer.close` documents. **(root conflict)** The root conventions'
   Q46 says the core refuses these calls before the callback's first `await`;
-  Java and the core refuse only `flush()` and close as `close(0)`, and the
-  code and docs follow Java and the core (`DECISIONS.md`, entries 4 and 27):
-  the root wording needs its owner.
+  Java and the core refuse only `flush()` and close as `close(0)`. Q46 also
+  says awaiting a later record's future waits for that same callback; in the
+  core each record's future waits only for its own callback, so a later
+  record's future completes, and only the callback's own record's future
+  waits for it. The code and docs follow Java and the core (`DECISIONS.md`,
+  entries 4 and 27): the root wording needs its owner.
 - Java's `Producer` interface is a TypeScript `interface` (root conventions,
   Class family, Q10) with the members `KafkaProducer` translates (`send`,
   `flush`, `close`, and `[Symbol.asyncDispose]` for Java's `Closeable`), in
