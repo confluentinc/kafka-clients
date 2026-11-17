@@ -269,3 +269,38 @@ rules and readings. Newest entries are at the end; dates are in IST.
     no longer applies to them; `testSaslLoginRefreshDefaults` stays skipped, as it reads parsed values no getter
     exposes. `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence` is ported the same way: the constructor
     reaches the core's post-processing.
+
+## Serializer errors in send() (decided by the owner, 2026-11-18)
+
+29. **`KafkaProducer.send()` answers a serializer's throw as Java's `KafkaProducer#doSend` does**, whether the key or
+    the value serializer throws or its Promise rejects:
+    - an `ApiError` (Java's `catch (ApiException e)`) does not reject `send()`: the callback runs once, inside the call,
+      with Java's failure metadata, `new RecordMetadata(appendCallbacks.topicPartition(), -1, -1,
+      RecordBatch.NO_TIMESTAMP, -1, -1)` (the record's topic and its partition, or -1 before partitioning, as
+      `KafkaProducer.AppendCallbacks#topicPartition` gives it), and `send()` resolves to a done future failed with the
+      error, Java's `FutureFailure`. What that callback throws, or its Promise rejects with, rejects `send()`, as
+      Java's `onCompletion` throws out of `doSend`'s catch;
+    - a `TypeError`, the JavaScript form of Java's `ClassCastException`, rejects as a `SerializationError` with
+      Java's message, "Can't convert key of class <class> to class <serializer> specified in key.serializer" (or
+      `value`), the `TypeError` its `cause`. The classes are spelled as JavaScript names them: the value's constructor
+      (`Buffer`), a primitive's wrapper (`String`), `null` for null, the serializer's class, or a built-in's factory
+      (`stringSerializer`), a recorded deviation from Java's fully qualified names (and Java's null key throws
+      `NullPointerException` there);
+    - any other error rejects as it is, as Java rethrows it.
+
+    The serializer's `ApiError` is not counted in `record-error-rate` (a deviation: the serializers run in
+    JavaScript, before the core). `MockProducer` keeps passing every serializer error out raw, as Java's
+    `MockProducer#send` serializes with no `try`. `PlaintextProducerSendTest.testWrongSerializer` is ported. The .NET
+    binding answers the same way (`PublicProducerSerializerFailureTests`); Python passes the error through.
+
+## MockProducer callback rejections (decided by the owner, 2026-11-18)
+
+30. **A rejected callback Promise is the callback's error on `MockProducer`, as a synchronous throw is**, restoring
+    what review round 120 accepted for the earlier TypeScript mock: `send()` with `autoComplete` and `flush()` reject
+    with it; `completeNext()` and `errorNext()`, being synchronous, keep it in a FIFO, and the next `send()`,
+    `flush()` or `close()` raises the oldest, once (a deviation, as Python's `AsyncMockProducer`); no kept error is
+    lost; `flush()` and `close()` (and `[Symbol.asyncDispose]`) wait for every callback Promise already started
+    (`allSettled` semantics), then raise the oldest kept error. Nothing is logged. Java's mock calls `onCompletion`
+    with no `try` (`MockProducer.Completion#complete`), so its error propagates and the record's future stays
+    incomplete; here the core's mock completes the future once the Promise settled, the deviation already recorded
+    for a throw, which now covers this case too.

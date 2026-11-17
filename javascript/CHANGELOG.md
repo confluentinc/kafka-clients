@@ -79,6 +79,14 @@ newer.
 
 - `KafkaProducer`, `ProducerRecord`, `RecordMetadata`, Java's `Callback` and,
   from `common`, `KafkaFuture` and `KafkaError`, over the Rust client's C FFI.
+- `send()` answers a serializer's error as Java's `KafkaProducer#doSend`
+  does: an `ApiError` runs the callback once, with Java's failure metadata
+  (the record's topic, its partition or -1, the rest -1), and `send()`
+  resolves to a done future failed with it; a `TypeError`, Java's
+  `ClassCastException`, rejects as a `SerializationError` "Can't convert key
+  of class <class> to class <serializer> specified in key.serializer", the
+  `TypeError` its `cause`, the classes named as JavaScript names them; any
+  other error rejects as it is.
 - `MockProducer`, Java's mock, over the Rust client's own mock through the
   C FFI, implementing `Producer`: the constructors `()` and `{ autoComplete,
   partitioner, keySerializer, valueSerializer }`, `send`, `flush`, `close`,
@@ -92,7 +100,14 @@ newer.
   out of the call that completed the record, as in Java, the record's future
   completing all the same (Java's stays incomplete), and `flush()`
   completing every waiting record before it rejects with the first throw
-  (Java's stops at it). A closed mock nothing
+  (Java's stops at it). A callback's Promise that rejects is the callback's
+  error too, never logged: `send()` with `autoComplete` waits for it and
+  rejects with it, and `flush()` rejects with it; after `completeNext()` or
+  `errorNext()` it is kept, oldest first, and the next `send()`, `flush()` or
+  `close()` rejects with the oldest, once; `flush()` and `close()` wait for
+  every callback Promise already started. A serializer's error, an
+  `ApiError` or a `TypeError` included, rejects the mock's `send()` as it is,
+  as Java's mock serializes with no `try`. A closed mock nothing
   references is collected with its native mock, sends still waiting
   included, and a refused record or an error given to the mock is released
   as soon as the core is done with it. `partitionsFor(null)` rejects with the

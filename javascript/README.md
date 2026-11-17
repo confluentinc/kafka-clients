@@ -373,6 +373,19 @@ and aliases) byte for byte as Java does, UTF-8 by default: a
 serializer object or a function that returns a Promise in a config key
 throws `ConfigError`.
 
+What a serializer throws, or its Promise rejects with, is answered as Java's
+`KafkaProducer` answers it. An `ApiError` (any class from `common/errors`
+whose Java class extends `ApiException`) does not reject `send()`: the
+callback runs once, with the error and metadata whose topic is the record's,
+whose partition is the record's or -1, and whose other fields are -1, and
+`send()` resolves to a done, failed `KafkaFuture`, whose `get()` rejects with
+an `ExecutionError` around the error. A `TypeError` rejects `send()` as a
+`SerializationError`, "Can't convert key of class Buffer to class
+stringSerializer specified in key.serializer" (or `value`), the `TypeError`
+its `cause`; the classes are JavaScript's names, not Java's. Anything else
+rejects `send()` as it is. `MockProducer` passes every serializer error out
+as it is, as Java's mock does.
+
 ### Headers
 
 `Header` and `Headers` are in `common/header`, with Java's members. A
@@ -436,6 +449,13 @@ callback runs inside the mock call that completes its record (`send()` with
 throws comes out of that call, as in Java (its record's future still
 completes: Java's would stay incomplete, and `flush()` completes every waiting
 record before it rejects with the first throw, where Java's stops at it).
+A callback's Promise that rejects is the callback's error too, and nothing
+logs it: `send()` with `autoComplete` waits for it and rejects with it, and
+`flush()` rejects with it. After `completeNext()` or `errorNext()`, which
+return before the Promise settles, the error is kept, oldest first, and the
+next `send()`, `flush()` or `close()` rejects with the oldest, once, as
+Python's async mock does. `flush()` and `close()` wait for every callback
+Promise already started, so no error is lost.
 Java's public error fields are
 setters, and each call throws the very error it was given:
 
