@@ -342,3 +342,12 @@ rules and readings. Newest entries are at the end; dates are in IST.
       serializer's failure never reaches the core (the binding answers it in JavaScript, the core having no
       serializer), so it also needs an FFI entry that records a send failure on the producer, or the core running the
       serializers, entry 29.
+
+## Generated code (decided by the owner, 2026-11-17)
+
+32. **No generators beyond the error codes' and the config's.** The owner reads the rules' "Code is generated wherever
+    it can be" as meant for the error codes. Those are generated, with the config constants and the producer's
+    configuration keys (`cargo xtask generate-error-codes`). The root text also calls the addon's C wrappers and
+    `native_types.ts` (Q4), the class modules and their form tables generated. These stay hand-written, and Phase C,
+    the plan's generators for them, is not built (`PLAN-producer-completion.md` §4). `javascript/CLAUDE.md`
+    ("Generated files") records it as a permanent deviation from the root's wording.

@@ -1325,14 +1325,14 @@ and the producer's configuration keys (the `ProducerConfigs` type,
 readonly X: string = '...'`, a `long` one a `bigint`), which
 `make build` compiles with the rest. *(deviation: the root conventions
 (Implementation over the FFI, Build, packaging and release, Class family)
-generate more, which is hand-written today: the addon's C wrappers
+generate more, which is hand-written here: the addon's C wrappers
 (`native/`) and their TypeScript types (`src/internal/native.ts`, the root's
 generated `native_types.ts`), the class modules and their form tables (in the
 modules that call `src/internal/args.ts`), and the data-class list, kept in
-the linter (`DATA_CLASSES`, `scripts/lint/java_ts.js`). Why: their generators
-are Phase C, not built yet
-(`design/current/javascript-producer/PLAN-producer-completion.md` §4). Goes
-when: Phase C lands.)* A generated file carries the license and `GENERATED,
+the linter (`DATA_CLASSES`, `scripts/lint/java_ts.js`). Why: the owner reads
+the root's "Code is generated wherever it can be" as meant for the error
+codes, so no generator is planned for the rest
+(`design/current/javascript-producer/DECISIONS.md`, entry 32).)* A generated file carries the license and `GENERATED,
 DO NOT EDIT` naming its generator, and is never edited by hand;
 `cargo xtask check-generated` fails on a stale, missing or orphaned one (a
 `.ts`, or a generated `.js` left in `src/`, or a generated `.c` or `.h` left
