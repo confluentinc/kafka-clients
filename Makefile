@@ -19,8 +19,10 @@ build: init-hooks build-all
 
 # The release builds, for packaging and the benchmarks: the Rust library with
 # every feature, the C library and the Python binding. The tests use
-# devel-build.
-build-all:
+# devel-build. Like the other cross-language targets it first initialises every
+# submodule (kafka/ included, which the code generator and the lints read); the
+# language folders fetch only what they need.
+build-all: submodules
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C c RUST_PROFILE=release build
 	$(MAKE) -C python PROFILE=release build
@@ -29,7 +31,7 @@ build-all:
 # library (rust/Makefile `devel-build-all-features`), the library unit the Rust
 # tests (`build-tests-all-features`) already build, so after the Rust tests it
 # is a no-op.
-devel-build:
+devel-build: submodules
 	$(MAKE) -C c devel-build
 	$(MAKE) -C python build
 
@@ -60,7 +62,7 @@ init-hooks:
 
 # The Rust tests with every feature compiled (the native-Rust ones; the gRPC
 # arms run with their binding), then the C and Python tests.
-test:
+test: submodules
 	$(MAKE) -C rust test-all-features
 	$(MAKE) -C c test
 	$(MAKE) -C python test
@@ -94,7 +96,7 @@ verify-commit:
 
 # The C build first, which builds the debug Rust library that check-generated
 # reads; then the Rust checks and integration tests, and the C tests.
-verify-commit-checks:
+verify-commit-checks: submodules
 	$(MAKE) -C c devel-build
 	$(MAKE) -C rust format-check check-generated lint test-integration
 	$(MAKE) -C c test
