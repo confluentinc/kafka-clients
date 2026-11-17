@@ -20,8 +20,9 @@ rules and readings. Newest entries are at the end; dates are in IST.
 
    A **blocker** is only something that needs a C FFI or Rust core change.
 4. **A conflict between two root rules** is implemented as the root text reads, then marked **(root conflict)** in
-   `javascript/CLAUDE.md` for the rule owner. The exception is text that, read literally, breaks the client; see
-   decision 16.
+   `javascript/CLAUDE.md` for the rule owner. The exception is text that, read literally, breaks the client (see
+   decision 16) or misdescribes what the client does (see decision 27): there the code and docs follow Java and the
+   core, and the mark stays.
 
 ## Structure
 
@@ -251,5 +252,8 @@ rules and readings. Newest entries are at the end; dates are in IST.
 27. **`close()` from inside a send callback** closes at once, as Java's `KafkaProducer.close` documents and the core
     does (a logged warning, then `close(0)`, the records still pending failing with "Producer is closed
     forcefully."); only `flush()` is refused there. Root Q46 says the core refuses these calls before the callback's
-    first `await`: a **(root conflict)** marked in `javascript/CLAUDE.md`, the docs following Java and the core
-    (entry 4's exception: the root text, read literally, misdescribes the client).
+    first `await`, and that awaiting a later record's future waits for that same callback. In the core each record's
+    future waits only for its own callback's report, so a later record's future completes while the callback is
+    still pending; only the callback's own record's future waits for it, and the docs name that one. Both are a
+    **(root conflict)** marked in `javascript/CLAUDE.md`, the docs following Java and the core (entry 4's exception
+    for text that, read literally, misdescribes what the client does).
