@@ -239,7 +239,6 @@ missing-class org.apache.kafka.common.KafkaFuture
 missing-class org.apache.kafka.common.KafkaFuture$BaseFunction
 missing-class org.apache.kafka.common.KafkaFuture$BiConsumer
 missing-class org.apache.kafka.common.Metric
-missing-class org.apache.kafka.common.MetricName
 missing-class org.apache.kafka.common.PartitionInfo
 missing-class org.apache.kafka.common.TopicCollection
 missing-class org.apache.kafka.common.TopicCollection$TopicIdCollection
