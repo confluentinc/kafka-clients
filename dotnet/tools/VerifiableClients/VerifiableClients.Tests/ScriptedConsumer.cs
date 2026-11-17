@@ -115,7 +115,7 @@ internal sealed class ScriptedConsumer : IConsumer<string, string>
 
     public void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null) =>
+        IOffsetCommitCallback? callback) =>
         Mock.CommitAsync(offsets, callback);
 
     public void Seek(TopicPartition partition, long offset) => Mock.Seek(partition, offset);
@@ -184,11 +184,11 @@ internal sealed class ScriptedConsumer : IConsumer<string, string>
 
     public IReadOnlyCollection<TopicPartition> Paused() => Mock.Paused();
 
-    public void EnforceRebalance(string? reason = null) => Mock.EnforceRebalance(reason);
+    public void EnforceRebalance() => Mock.EnforceRebalance();
+
+    public void EnforceRebalance(string? reason) => Mock.EnforceRebalance(reason);
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => Mock.Metrics();
-
-    public ConsumerHandle Handle() => Mock.Handle();
 
     public void Dispose() => Mock.Dispose();
 }
