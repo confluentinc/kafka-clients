@@ -153,7 +153,7 @@ public sealed class PublicAdminConfigsTests
         ConfigResource subscription = new ConfigResource(ConfigResourceType.CLIENT_METRICS, "sub-1");
 
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }).All().Get(), s_deadline));
+            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }, new ListConfigResourcesOptions()).All().Get(), s_deadline));
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -168,7 +168,7 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         IReadOnlyCollection<ConfigResource> filtered = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }, new ListConfigResourcesOptions()).All().Get(), s_deadline);
         Assert.Equal(subscription, Assert.Single(filtered));
 
         Config config = await TestTimeout.Run(

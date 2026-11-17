@@ -215,10 +215,7 @@ internal sealed partial class NativeAdminClient
                 new Dictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>(keys.Count);
             for (int i = 0; i < keys.Count; i++)
             {
-                IntPtr outErr = IntPtr.Zero;
-                IntPtr future = s_describeProducersPartitionResult(
-                    result.DangerousGetHandle(), partitions[i], ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr future = CallAccessor(result, s_describeProducersPartitionResult, partitions[i]);
                 futures.Add(
                     keys[i],
                     NativeFutureSource<DescribeProducersResult.PartitionProducerState>.Start(
@@ -296,10 +293,7 @@ internal sealed partial class NativeAdminClient
                 IntPtr future;
                 using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(transactionalId))
                 {
-                    IntPtr outErr = IntPtr.Zero;
-                    future = s_describeTransactionsDescription(
-                        result.DangerousGetHandle(), pinned.Pointer, ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    future = CallAccessor(result, s_describeTransactionsDescription, pinned.Pointer);
                 }
 
                 futures.Add(
@@ -503,16 +497,11 @@ internal sealed partial class NativeAdminClient
             {
                 using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(transactionalId))
                 {
-                    IntPtr outErr = IntPtr.Zero;
-                    IntPtr producerId = s_fenceProducersProducerId(
-                        result.DangerousGetHandle(), pinned.Pointer, ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    IntPtr producerId = CallAccessor(result, s_fenceProducersProducerId, pinned.Pointer);
                     KafkaFutureImpl<long> producerIdFuture = NativeFutureSource<long>.Start(
                         SafeKafkaFutureHandle.Owned(producerId), s_copyOutProducerId);
 
-                    IntPtr epoch = s_fenceProducersEpochId(
-                        result.DangerousGetHandle(), pinned.Pointer, ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    IntPtr epoch = CallAccessor(result, s_fenceProducersEpochId, pinned.Pointer);
                     KafkaFutureImpl<short> epochFuture = NativeFutureSource<short>.Start(
                         SafeKafkaFutureHandle.Owned(epoch), s_copyOutEpoch);
 
@@ -698,9 +687,7 @@ internal sealed partial class NativeAdminClient
     {
         try
         {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr outer = s_listTransactionsByBrokerId(result.DangerousGetHandle(), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr outer = CallAccessor(result, s_listTransactionsByBrokerId);
             NativeFutureSource<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
                 BrokerListings.Create(SafeKafkaFutureHandle.Owned(outer));
             source.Issue();

@@ -150,7 +150,7 @@ public sealed class AdminLogDirsMarshalTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await SeedTopic(admin, partitions: 2);
 
-        var described = admin.DescribeLogDirs(new[] { 0 }, null);
+        var described = admin.DescribeLogDirs(new[] { 0 }, new DescribeLogDirsOptions());
         IReadOnlyDictionary<string, LogDirDescription> directories = described.Descriptions[0].Get(s_deadline);
         described.Result.Dispose();
 
@@ -176,7 +176,7 @@ public sealed class AdminLogDirsMarshalTests
         await SeedTopic(admin, partitions: 1);
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
 
-        var described = admin.DescribeReplicaLogDirs(new[] { replica }, null);
+        var described = admin.DescribeReplicaLogDirs(new[] { replica }, new DescribeReplicaLogDirsOptions());
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info = described.Values[replica].Get(s_deadline);
         described.Result.Dispose();
 
@@ -198,7 +198,7 @@ public sealed class AdminLogDirsMarshalTests
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
 
         var altered = admin.AlterReplicaLogDirs(
-            new Dictionary<TopicPartitionReplica, string> { [replica] = "/not-a-configured-dir" }, null);
+            new Dictionary<TopicPartitionReplica, string> { [replica] = "/not-a-configured-dir" }, new AlterReplicaLogDirsOptions());
 
         KafkaStorageException failure = Assert.Throws<KafkaStorageException>(() => altered.Values[replica].Get(s_deadline));
         Assert.Equal("Log directory /not-a-configured-dir is offline", failure.Message);
@@ -246,7 +246,7 @@ public sealed class AdminLogDirsMarshalTests
     private static Task SeedTopic(NativeAdminClient admin, int partitions) =>
         TestTimeout.Run(
             () => AsyncCreateTopicsResult.OfClient(
-                admin.CreateTopics(new[] { new NewTopic(Topic, partitions, 1) }, null)).All().Get(),
+                admin.CreateTopics(new[] { new NewTopic(Topic, partitions, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
     private static LogDirDescription CopyOutBuilt(

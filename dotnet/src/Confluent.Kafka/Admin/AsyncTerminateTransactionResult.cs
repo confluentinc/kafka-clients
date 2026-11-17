@@ -19,7 +19,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.ForceTerminateTransaction"/> — Java's
+/// The result of <see cref="IAsyncAdmin.ForceTerminateTransaction(string, TerminateTransactionOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.TerminateTransactionResult</c>: one future over the termination.
 /// </summary>
 /// <seealso cref="TerminateTransactionResult"/>

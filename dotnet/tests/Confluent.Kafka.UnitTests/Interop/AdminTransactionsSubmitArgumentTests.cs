@@ -34,23 +34,18 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [Fact]
     public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, -1), ReadBack((DescribeProducersOptions?)null));
         Assert.Equal((-1, -1), ReadBack(new DescribeProducersOptions()));
         Assert.Empty(new DescribeProducersOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((DescribeTransactionsOptions?)null));
         Assert.Equal(-1, ReadBack(new DescribeTransactionsOptions()));
         Assert.Empty(new DescribeTransactionsOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((AbortTransactionOptions?)null));
         Assert.Equal(-1, ReadBack(new AbortTransactionOptions()));
         Assert.Empty(new AbortTransactionOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((FenceProducersOptions?)null));
         Assert.Equal(-1, ReadBack(new FenceProducersOptions()));
         Assert.Empty(new FenceProducersOptions().Setters.InOrder);
 
-        Assert.Equal(-1, ReadBack((TerminateTransactionOptions?)null));
         Assert.Equal(-1, ReadBack(new TerminateTransactionOptions()));
         Assert.Empty(new TerminateTransactionOptions().Setters.InOrder);
     }
@@ -190,16 +185,13 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [Fact]
     public void ListTransactions_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        foreach (ListTransactionsOptions? options in new[] { null, new ListTransactionsOptions() })
-        {
-            ListTransactionsReadBack read = ReadBack(options);
+        ListTransactionsReadBack read = ReadBack(new ListTransactionsOptions());
 
-            Assert.Equal(-1, read.TimeoutMs);
-            Assert.Empty(read.States);
-            Assert.Empty(read.ProducerIds);
-            Assert.Equal(-1L, read.DurationMs);
-            Assert.Null(read.Pattern);
-        }
+        Assert.Equal(-1, read.TimeoutMs);
+        Assert.Empty(read.States);
+        Assert.Empty(read.ProducerIds);
+        Assert.Equal(-1L, read.DurationMs);
+        Assert.Null(read.Pattern);
 
         Assert.Empty(new ListTransactionsOptions().Setters.InOrder);
     }
@@ -281,7 +273,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
             options.Setters.InOrder);
     }
 
-    private static (int TimeoutMs, int BrokerId) ReadBack(DescribeProducersOptions? options)
+    private static (int TimeoutMs, int BrokerId) ReadBack(DescribeProducersOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeProducersOptions(options);
         try
@@ -299,7 +291,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
         }
     }
 
-    private static int ReadBack(DescribeTransactionsOptions? options)
+    private static int ReadBack(DescribeTransactionsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeTransactionsOptions(options);
         try
@@ -315,7 +307,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
         }
     }
 
-    private static int ReadBack(AbortTransactionOptions? options)
+    private static int ReadBack(AbortTransactionOptions options)
     {
         IntPtr native = NativeAdminClient.NewAbortTransactionOptions(options);
         try
@@ -331,7 +323,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
         }
     }
 
-    private static int ReadBack(FenceProducersOptions? options)
+    private static int ReadBack(FenceProducersOptions options)
     {
         IntPtr native = NativeAdminClient.NewFenceProducersOptions(options);
         try
@@ -347,7 +339,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
         }
     }
 
-    private static int ReadBack(TerminateTransactionOptions? options)
+    private static int ReadBack(TerminateTransactionOptions options)
     {
         IntPtr native = NativeAdminClient.NewTerminateTransactionOptions(options);
         try
@@ -363,7 +355,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
         }
     }
 
-    private static ListTransactionsReadBack ReadBack(ListTransactionsOptions? options)
+    private static ListTransactionsReadBack ReadBack(ListTransactionsOptions options)
     {
         IntPtr native = NativeAdminClient.NewListTransactionsOptions(options);
         try

@@ -51,7 +51,7 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
 .PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	pack-dotnet package-check-dotnet
+	test-examples-dotnet pack-dotnet package-check-dotnet coverage-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -185,6 +185,7 @@ test-dotnet: build-dotnet
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOLUTION) {})
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOLUTION) {})
 	$(MAKE) test-soak-dotnet
+	$(MAKE) test-examples-dotnet
 
 # ---------------------------------------------------------------------------
 # Soak client (M16/P1). Kept OUT of the solution (like grpc-server and the perf
@@ -217,6 +218,56 @@ test-soak-dotnet: build-dotnet
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
 	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOAK_TESTS) {})
 	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOAK_TESTS) {})
+
+# ---------------------------------------------------------------------------
+# The examples (dotnet/examples/README.md). Kept out of the solution, like the soak
+# client: they target net8.0 only, as a user's program would, while test-dotnet runs
+# the solution on net10.0 too. Their own solution holds them; this target builds it
+# and checks its format, so the examples cannot rot. They are run by hand, against a
+# broker, as the README shows.
+# ---------------------------------------------------------------------------
+EXAMPLES_SOLUTION := $(REPO_ROOT)/dotnet/examples/Confluent.Kafka.Examples.sln
+
+test-examples-dotnet: build-dotnet
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(EXAMPLES_SOLUTION)
+	$(DOTNET) format $(EXAMPLES_SOLUTION) --verify-no-changes
+
+# ---------------------------------------------------------------------------
+# Unit-test coverage of the Confluent.Kafka library.
+#
+# Runs Confluent.Kafka.UnitTests on net10.0 with Microsoft Code Coverage, the
+# collector that Microsoft.NET.Test.Sdk already brings, and turns its Cobertura
+# output into a report with ReportGenerator, a local tool pinned in
+# .config/dotnet-tools.json. Only the Confluent.Kafka assembly is counted, not
+# the test assembly. One TFM is enough: net8.0 runs the same code, and net462
+# cannot run outside Windows. -sourcedirs lets the HTML report find the sources
+# in a CI build, whose PDBs name them /_/... (Directory.Build.props).
+#
+# Writes artifacts/coverage/report (Summary.txt, printed at the end, and an HTML
+# report), then prints a second total without Confluent.Kafka.Common.Errors: the
+# generated exception classes, whose unused constructor overloads are most of the
+# uncovered lines. CI runs it in the "coverage-dotnet (Linux amd64)" job and keeps
+# the HTML report as the workflow artifact coverage/dotnet.tar.gz. It reports only;
+# there is no threshold.
+# ---------------------------------------------------------------------------
+COVERAGE_DIR := $(REPO_ROOT)/dotnet/artifacts/coverage
+UNIT_TESTS := $(REPO_ROOT)/dotnet/tests/Confluent.Kafka.UnitTests/Confluent.Kafka.UnitTests.csproj
+REPORTGENERATOR = $(DOTNET) tool run reportgenerator
+
+coverage-dotnet: build-dotnet
+	rm -rf $(COVERAGE_DIR)
+	$(DOTNET) tool restore
+	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(UNIT_TESTS) \
+		--collect 'Code Coverage;Format=cobertura' --results-directory $(COVERAGE_DIR)/raw
+	$(REPORTGENERATOR) '-reports:$(COVERAGE_DIR)/raw/**/*.cobertura.xml' '-targetdir:$(COVERAGE_DIR)/report' \
+		'-sourcedirs:$(REPO_ROOT)' '-assemblyfilters:+Confluent.Kafka' \
+		'-reporttypes:TextSummary;Html' -verbosity:Warning
+	$(REPORTGENERATOR) '-reports:$(COVERAGE_DIR)/raw/**/*.cobertura.xml' '-targetdir:$(COVERAGE_DIR)/report-without-errors' \
+		'-sourcedirs:$(REPO_ROOT)' '-assemblyfilters:+Confluent.Kafka' '-classfilters:-Confluent.Kafka.Common.Errors.*' \
+		'-reporttypes:TextSummary' -verbosity:Warning
+	cat $(COVERAGE_DIR)/report/Summary.txt
+	@echo 'Without Confluent.Kafka.Common.Errors (the generated exception classes):'
+	@sed -n '2,/^$$/p' $(COVERAGE_DIR)/report-without-errors/Summary.txt
 
 # ---------------------------------------------------------------------------
 # The Confluent.Kafka NuGet package.

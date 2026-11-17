@@ -249,7 +249,11 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         Assert.Contains(
             typeof(AsyncKafkaAdminClient).GetMethods(),
             method => method.Name == nameof(IAsyncAdmin.ListPartitionReassignments));
-        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(nameof(IAsyncAdmin.ListOffsets)));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(
+            nameof(IAsyncAdmin.ListOffsets),
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetSpec>), typeof(ListOffsetsOptions) }));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(
+            nameof(IAsyncAdmin.ListOffsets), new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetSpec>) }));
     }
 
     [Theory]
@@ -264,20 +268,28 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         MethodInfo? optionsOnly = type.GetMethod(
             nameof(IAdmin.ListPartitionReassignments), new[] { typeof(ListPartitionReassignmentsOptions) });
 
+        MethodInfo? zeroArg = type.GetMethod(nameof(IAdmin.ListPartitionReassignments), Type.EmptyTypes);
+        MethodInfo? selectionOnly = type.GetMethod(
+            nameof(IAdmin.ListPartitionReassignments), new[] { typeof(IReadOnlyCollection<TopicPartition>) });
+
         Assert.NotNull(selection);
         ParameterInfo partitions = selection!.GetParameters()[0];
         Assert.Equal("partitions", partitions.Name);
-        Assert.True(partitions.HasDefaultValue);
-        Assert.Null(partitions.DefaultValue);
-        Assert.True(selection.GetParameters()[1].HasDefaultValue);
-        Assert.Null(selection.GetParameters()[1].DefaultValue);
+        Assert.False(partitions.HasDefaultValue);
+        Assert.False(selection.GetParameters()[1].HasDefaultValue);
 
         Assert.NotNull(optionsOnly);
         Assert.Equal(typeof(ListPartitionReassignmentsResult), optionsOnly!.ReturnType);
         Assert.False(optionsOnly.GetParameters()[0].IsOptional);
 
+        Assert.NotNull(zeroArg);
+        Assert.Equal(typeof(ListPartitionReassignmentsResult), zeroArg!.ReturnType);
+        Assert.NotNull(selectionOnly);
+        Assert.Equal(typeof(ListPartitionReassignmentsResult), selectionOnly!.ReturnType);
+        Assert.Equal("partitions", Assert.Single(selectionOnly.GetParameters()).Name);
+
         Assert.Equal(
-            2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.ListPartitionReassignments)));
+            4, type.GetMethods().Count(method => method.Name == nameof(IAdmin.ListPartitionReassignments)));
     }
 
     [Fact]

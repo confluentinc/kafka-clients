@@ -128,9 +128,9 @@ internal sealed partial class NativeAdminClient
 
     private delegate IntPtr RpcWithOptions(SafeAdminClientHandle admin, IntPtr options, ref IntPtr outErr);
 
-    private delegate IntPtr ResultFuture(IntPtr result, ref IntPtr outErr);
+    internal delegate IntPtr ResultFuture(IntPtr result, ref IntPtr outErr);
 
-    private delegate IntPtr KeyedResultFuture(IntPtr result, IntPtr key, ref IntPtr outErr);
+    internal delegate IntPtr KeyedResultFuture(IntPtr result, IntPtr key, ref IntPtr outErr);
 
     internal CreateTopicsRefinements CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options)
     {
@@ -363,10 +363,9 @@ internal sealed partial class NativeAdminClient
     {
         try
         {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr raw = accessor(result.DangerousGetHandle(), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr raw = CallAccessor(result, accessor);
             using SafeKafkaMapHandle map = new SafeKafkaMapHandle(raw);
+            IntPtr outErr = IntPtr.Zero;
             int count = NativeMethods.MapSize(map.DangerousGetHandle(), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             Dictionary<TKey, KafkaFutureImpl<TValue>> futures = new Dictionary<TKey, KafkaFutureImpl<TValue>>(count, comparer);
@@ -891,9 +890,7 @@ internal sealed partial class NativeAdminClient
     {
         try
         {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr future = accessor(result.DangerousGetHandle(), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr future = CallAccessor(result, accessor);
             return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);
         }
         catch
@@ -908,15 +905,55 @@ internal sealed partial class NativeAdminClient
     {
         try
         {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr future = accessor(result.DangerousGetHandle(), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr future = CallAccessor(result, accessor);
             return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Borrowed(future, result), convert);
         }
         catch
         {
             result.Dispose();
             throw;
+        }
+    }
+
+    // Every Result accessor call holds a reference on the Result, so a Dispose racing it cannot destroy the Result
+    // while the accessor reads it.
+    internal static IntPtr CallAccessor(SafeAdminResultHandle result, ResultFuture accessor)
+    {
+        bool added = false;
+        try
+        {
+            result.DangerousAddRef(ref added);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr value = accessor(result.DangerousGetHandle(), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return value;
+        }
+        finally
+        {
+            if (added)
+            {
+                result.DangerousRelease();
+            }
+        }
+    }
+
+    internal static IntPtr CallAccessor(SafeAdminResultHandle result, KeyedResultFuture accessor, IntPtr key)
+    {
+        bool added = false;
+        try
+        {
+            result.DangerousAddRef(ref added);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr value = accessor(result.DangerousGetHandle(), key, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return value;
+        }
+        finally
+        {
+            if (added)
+            {
+                result.DangerousRelease();
+            }
         }
     }
 

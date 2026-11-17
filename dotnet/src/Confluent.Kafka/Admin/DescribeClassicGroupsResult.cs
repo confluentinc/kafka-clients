@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeClassicGroups"/>, Java's <c>DescribeClassicGroupsResult</c>:
+/// The result of <see cref="IAdmin.DescribeClassicGroups(IReadOnlyCollection{string}, DescribeClassicGroupsOptions)"/>, Java's <c>DescribeClassicGroupsResult</c>:
 /// one future per group id.
 /// </summary>
 public sealed class DescribeClassicGroupsResult

@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.AlterConsumerGroupOffsets"/> — Java's
+/// The result of <see cref="IAsyncAdmin.AlterConsumerGroupOffsets(string, System.Collections.Generic.IReadOnlyDictionary{TopicPartition, Consumer.OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult</c>: the outcome per partition and for the whole request.
 /// </summary>
 /// <remarks>

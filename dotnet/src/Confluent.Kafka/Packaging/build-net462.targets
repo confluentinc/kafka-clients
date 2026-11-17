@@ -1,0 +1,6 @@
+<Project>
+
+  <!-- packages.config, and NuGet before 5.0, import build/; PackageReference imports buildTransitive/. -->
+  <Import Project="$(MSBuildThisFileDirectory)..\..\buildTransitive\net462\Confluent.Kafka.targets" />
+
+</Project>

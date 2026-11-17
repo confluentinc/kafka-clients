@@ -40,8 +40,6 @@ internal sealed class CreateTopicsRefinements
         Values = values;
     }
 
-    private delegate IntPtr TopicFuture(IntPtr result, IntPtr topic, ref IntPtr outErr);
-
     internal SafeAdminResultHandle Result { get; }
 
     internal IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values { get; }
@@ -58,7 +56,8 @@ internal sealed class CreateTopicsRefinements
     internal KafkaFutureImpl<int> ReplicationFactor(string topic) =>
         Refine(topic, NativeMethods.CreateTopicsResultReplicationFactor, s_readInt32);
 
-    private KafkaFutureImpl<T> Refine<T>(string topic, TopicFuture accessor, Func<IntPtr, T> convert)
+    private KafkaFutureImpl<T> Refine<T>(
+        string topic, NativeAdminClient.KeyedResultFuture accessor, Func<IntPtr, T> convert)
     {
         if (topic is null)
         {
@@ -67,21 +66,9 @@ internal sealed class CreateTopicsRefinements
 
         AdminStrings.Validate(topic, nameof(topic));
         IntPtr future;
-        bool added = false;
-        try
+        using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(topic))
         {
-            Result.DangerousAddRef(ref added);
-            using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(topic);
-            IntPtr outErr = IntPtr.Zero;
-            future = accessor(Result.DangerousGetHandle(), name.Pointer, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        }
-        finally
-        {
-            if (added)
-            {
-                Result.DangerousRelease();
-            }
+            future = NativeAdminClient.CallAccessor(Result, accessor, name.Pointer);
         }
 
         KafkaFutureImpl<T> source = NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);

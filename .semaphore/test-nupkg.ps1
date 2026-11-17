@@ -21,10 +21,16 @@
 # (packageSourceMapping), with an empty NuGet cache, so nothing but the package can be used. It is
 # built for the platform and run in a process of it, on net8.0, net10.0 and the agent's .NET
 # Framework (net462), with no RID of its own, as users build it: on .NET Framework the SDK gives an
-# application the RID of its PlatformTarget. A self-contained `dotnet publish` for the platform's
-# RID must carry the native library and run. The binding's unit tests then run against the package,
-# on the same three frameworks, with the platform's RID: the SDK gives a .NET Framework test project
-# none, and without one NuGet copies it no native library. The unit-test project's
+# application the RID of its PlatformTarget, and NuGet copies that RID's native library beside it.
+# A second .NET Framework build is AnyCPU. On x64 it sets no platform, as most applications do: the
+# SDK then gives it the win-x86 RID, so NuGet copies the win-x86 library beside it, yet it runs as a
+# 64-bit process, the reported failure. On x86 it sets AnyCPU and Prefer32Bit, so it has no RID and
+# nothing beside it, and runs as a 32-bit process. Either way it must load the library of its
+# process from runtimes\<rid>\native, where the package's build targets copy both Windows libraries. Each run must load one copy of the library, from where it is expected. A
+# self-contained `dotnet publish` for the platform's RID must carry the native library and run. The
+# binding's unit tests then run against the package, on the same three frameworks, with no RID, as
+# a test project is built; on .NET Framework they load the library the build targets copy. The
+# unit-test project's
 # -p:ConfluentKafkaPackageVersion swaps its project reference for the package, so the assembly and
 # the native library both come from it. Some of them read the Java sources of the kafka submodule,
 # which must be checked out.
@@ -116,12 +122,19 @@ function Write-NuGetConfig {
     [System.IO.File]::WriteAllText((Join-Path $Directory 'nuget.config'), $config, (New-Object System.Text.UTF8Encoding $false))
 }
 
-# Runs the smoke program and checks that it ran in a process of this platform.
+# Runs the smoke program and checks that it ran in a process of this platform and, with $Native,
+# that it loaded that native library, a path relative to the program's folder.
 function Invoke-Smoke {
-    param([string] $Command, [string[]] $Arguments)
+    param([string] $Command, [string[]] $Arguments, [string] $Native = '')
     Invoke-Native $Command $Arguments | Tee-Object -Variable output
     if (-not ($output | Where-Object { $_ -match "^Confluent\.Kafka .* $bits-bit process" })) {
         throw "the smoke program did not run in a $bits-bit process"
+    }
+    if ($Native) {
+        $loaded = @($output | Where-Object { $_ -match '^OK: loaded (.+) of the application$' } | ForEach-Object { $Matches[1] })
+        if ($loaded.Count -ne 1 -or $loaded[0] -ne $Native) {
+            throw "the smoke program loaded $($loaded -join ', '), not $Native"
+        }
     }
 }
 
@@ -161,11 +174,48 @@ foreach ($tfm in $tfms) {
         if (-not (Test-Path (Join-Path $exe[0].DirectoryName 'confluent_kafka.dll'))) {
             throw "the net462 smoke program has no confluent_kafka.dll beside it: NuGet did not copy the package's $rid library"
         }
-        Invoke-Smoke $exe[0].FullName @($version)
+        Invoke-Smoke $exe[0].FullName @($version) 'confluent_kafka.dll'
     } else {
         Invoke-Smoke $dotnet @((Join-Path $bin 'PackageSmoke.dll'), $version)
     }
 }
+
+# .NET Framework, AnyCPU: a 64-bit process on x64, a 32-bit one with Prefer32Bit on x86. Built in
+# a copy of its own, so it shares no obj folder with the build above.
+$anyCpu = @()
+if ($Platform -eq 'x86') {
+    $anyCpu = @('-p:PlatformTarget=AnyCPU', '-p:Prefer32Bit=true')
+}
+Write-Output "== smoke test, net462, AnyCPU$(if ($anyCpu.Count) { ' with Prefer32Bit' }), $Platform"
+$smokeAnyCpu = Join-Path $work 'smoke-anycpu'
+New-Item -ItemType Directory -Path $smokeAnyCpu | Out-Null
+Copy-Item (Join-Path $smoke '*') $smokeAnyCpu -Include 'PackageSmoke.csproj', 'Program.cs', 'Directory.Build.props', 'nuget.config'
+Push-Location $smokeAnyCpu
+try {
+    Invoke-Retry { Invoke-Native $dotnet (@('restore', '--configfile', 'nuget.config', "-p:ConfluentKafkaVersion=$version") + $anyCpu) }
+    Invoke-Native $dotnet (@('build', '--no-restore', '-c', 'Release', '-f', 'net462', "-p:ConfluentKafkaVersion=$version") + $anyCpu)
+} finally {
+    Pop-Location
+}
+$exe = @(Get-ChildItem -Recurse -Path (Join-Path $smokeAnyCpu 'bin\Release\net462') -Filter PackageSmoke.exe)
+if ($exe.Count -ne 1) {
+    throw "found $($exe.Count) AnyCPU PackageSmoke.exe, not 1"
+}
+foreach ($windowsRid in $WindowsRids.Values) {
+    if (-not (Test-Path (Join-Path $exe[0].DirectoryName "runtimes\$windowsRid\native\confluent_kafka.dll"))) {
+        throw "the AnyCPU net462 smoke program has no runtimes\$windowsRid\native\confluent_kafka.dll: the package's build targets did not copy it"
+    }
+}
+# The layout above: on x64 a library of the wrong platform beside the program, so that the run below
+# reproduces the reported failure; on x86 none.
+$adjacent = Test-Path (Join-Path $exe[0].DirectoryName 'confluent_kafka.dll')
+if ($Platform -eq 'x64' -and -not $adjacent) {
+    throw "the AnyCPU net462 smoke program has no confluent_kafka.dll beside it: the SDK no longer gives an AnyCPU application the win-x86 RID, so this run no longer reproduces a 64-bit process beside the win-x86 library"
+}
+if ($Platform -eq 'x86' -and $adjacent) {
+    throw "the AnyCPU net462 smoke program built with Prefer32Bit has a confluent_kafka.dll beside it, which the expected load below does not account for"
+}
+Invoke-Smoke $exe[0].FullName @($version) "runtimes\$rid\native\confluent_kafka.dll"
 
 Write-Output "== self-contained publish for $rid"
 $publish = Join-Path $work 'publish'
@@ -203,14 +253,18 @@ foreach ($dir in 'rust\xtask\src', 'design\current', 'dotnet\src\Confluent.Kafka
 }
 Write-NuGetConfig $unit
 $project = Join-Path $unit 'tests\Confluent.Kafka.UnitTests\Confluent.Kafka.UnitTests.csproj'
-$unitProperties = @("-p:ConfluentKafkaPackageVersion=$version", "-p:PlatformTarget=$Platform", "-p:RuntimeIdentifier=$rid")
+$unitProperties = @("-p:ConfluentKafkaPackageVersion=$version", "-p:PlatformTarget=$Platform")
 Invoke-Retry { Invoke-Native $dotnet (@('restore', '--configfile', (Join-Path $unit 'nuget.config'), $project) + $unitProperties) }
 $unitProperties += @('-c', 'Release', "-p:AbiHeaderPath=$Header")
 Invoke-Native $dotnet (@('build', '--no-restore', $project) + $unitProperties)
-# Without it every net462 test would fail with DllNotFoundException.
-$framework = @(Get-ChildItem -Recurse -Path (Join-Path $unit 'tests\Confluent.Kafka.UnitTests\bin\Release\net462') -Filter confluent_kafka.dll)
-if ($framework.Count -eq 0) {
-    throw "the net462 unit tests' output has no confluent_kafka.dll: the package's $rid library was not copied"
+# A .NET Framework test project has no RID, so NuGet copies it no native library; the package's
+# build targets copy both Windows libraries, and without them every net462 test would fail with
+# DllNotFoundException.
+$framework = Join-Path $unit 'tests\Confluent.Kafka.UnitTests\bin\Release\net462'
+foreach ($windowsRid in $WindowsRids.Values) {
+    if (-not (Test-Path (Join-Path $framework "runtimes\$windowsRid\native\confluent_kafka.dll"))) {
+        throw "the net462 unit tests' output has no runtimes\$windowsRid\native\confluent_kafka.dll: the package's build targets did not copy it"
+    }
 }
 $failed = @()
 foreach ($tfm in $tfms) {

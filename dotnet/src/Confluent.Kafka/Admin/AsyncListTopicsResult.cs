@@ -20,7 +20,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.ListTopics"/> — Java's
+/// The result of <see cref="IAsyncAdmin.ListTopics(ListTopicsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.ListTopicsResult</c>: one future over the whole cluster
 /// listing.
 /// </summary>

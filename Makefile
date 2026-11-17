@@ -28,7 +28,7 @@ VENV = . venv/bin/activate
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
-	pack-dotnet package-check-dotnet \
+	pack-dotnet package-check-dotnet coverage-dotnet \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -369,6 +369,12 @@ pack-dotnet:
 
 package-check-dotnet:
 	$(MAKE) -C dotnet $(ROOTS) package-check-dotnet
+
+# The unit tests' line and branch coverage of the .NET library, as a text summary
+# and an HTML report in dotnet/artifacts/coverage/report. See dotnet/Makefile;
+# CI runs it in semaphore.yml's "coverage-dotnet (Linux amd64)" job.
+coverage-dotnet:
+	$(MAKE) -C dotnet $(ROOTS) coverage-dotnet
 
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see

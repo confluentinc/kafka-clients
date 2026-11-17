@@ -87,6 +87,11 @@ NATIVE_FILES = {
     "win-x86": "confluent_kafka.dll",
 }
 
+# The .NET Framework build targets (dotnet/src/Confluent.Kafka/Packaging/): buildTransitive/ copies
+# both Windows natives into a project's output under runtimes/<rid>/native, for the library to load
+# the one of its process, and build/, which packages.config imports, imports it.
+FRAMEWORK_TARGETS = (f"buildTransitive/net462/{PACKAGE_ID}.targets", f"build/net462/{PACKAGE_ID}.targets")
+
 GLIBC_FLOOR = (2, 28)
 MACOS_FLOOR = (11, 0, 0)
 # The libraries a Linux native may load, all of them part of glibc or GCC's runtime on every
@@ -539,6 +544,7 @@ def check_package(path, version, rids, commit, dev):
             if rid not in NATIVE_FILES:
                 fail(f"--rids names {rid}, which is not one of {', '.join(NATIVE_FILES)}")
             expected.add(f"runtimes/{rid}/native/{NATIVE_FILES[rid]}")
+        expected |= set(FRAMEWORK_TARGETS)
         core_properties = [n for n in names if re.fullmatch(r"package/services/metadata/core-properties/[^/]+\.psmdcp", n)]
         if len(core_properties) != 1:
             problems.append(f"the package has {len(core_properties)} core-properties entries, not 1")
@@ -583,6 +589,31 @@ def check_package(path, version, rids, commit, dev):
                 problems.append(f"lib/{folder}/{PACKAGE_ID}.xml is not the XML documentation of {PACKAGE_ID}")
         for rid in rids:
             problems += check_native(rid, NATIVE_FILES[rid], archive.read(f"runtimes/{rid}/native/{NATIVE_FILES[rid]}"), dev)
+        problems += check_framework_targets(archive)
+    return problems
+
+
+def check_framework_targets(archive):
+    transitive, build = FRAMEWORK_TARGETS
+    try:
+        copying = ElementTree.fromstring(archive.read(transitive))
+        importing = ElementTree.fromstring(archive.read(build))
+    except ElementTree.ParseError as error:
+        return [f"a .NET Framework targets file is not MSBuild XML: {error}"]
+    problems = []
+    copied = {item.get("Include"): item for item in copying.iter("Content")}
+    for rid in ("win-x64", "win-x86"):
+        source = f"$(MSBuildThisFileDirectory)..\\..\\runtimes\\{rid}\\native\\{NATIVE_FILES[rid]}"
+        item = copied.get(source)
+        if item is None or item.get("Link") != f"runtimes\\{rid}\\native\\{NATIVE_FILES[rid]}" \
+                or item.get("CopyToOutputDirectory") != "PreserveNewest" or item.get("Pack") != "false":
+            problems.append(f"{transitive} does not copy runtimes/{rid}/native/{NATIVE_FILES[rid]} "
+                            f"to runtimes\\{rid}\\native in a project's output")
+    if len(copied) != 2:
+        problems.append(f"{transitive} copies {len(copied)} files, not the 2 Windows natives")
+    imports = [element.get("Project") for element in importing.iter("Import")]
+    if imports != ["$(MSBuildThisFileDirectory)..\\..\\" + transitive.replace("/", "\\")]:
+        problems.append(f"{build} does not import {transitive} only")
     return problems
 
 

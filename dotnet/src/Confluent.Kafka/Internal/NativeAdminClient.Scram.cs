@@ -304,23 +304,7 @@ internal sealed partial class NativeAdminClient
     private static KafkaFutureImpl<T> StartResultFuture<T>(
         SafeAdminResultHandle result, ResultFuture accessor, Func<IntPtr, T> convert)
     {
-        IntPtr future;
-        bool added = false;
-        try
-        {
-            result.DangerousAddRef(ref added);
-            IntPtr outErr = IntPtr.Zero;
-            future = accessor(result.DangerousGetHandle(), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        }
-        finally
-        {
-            if (added)
-            {
-                result.DangerousRelease();
-            }
-        }
-
+        IntPtr future = CallAccessor(result, accessor);
         return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);
     }
 }

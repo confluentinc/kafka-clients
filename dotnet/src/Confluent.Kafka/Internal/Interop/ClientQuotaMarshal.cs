@@ -157,7 +157,7 @@ internal static class ClientQuotaMarshal
                 KafkaException.ThrowIfFfiFailed(ref outErr);
 
                 // A NULL name is Java's null map value: the built-in default entity for the type.
-                copied.Add(Utf8Marshal.PtrToString(type) ?? string.Empty, Utf8Marshal.PtrToString(name));
+                copied[Utf8Marshal.PtrToString(type) ?? string.Empty] = Utf8Marshal.PtrToString(name);
             }
 
             return new ClientQuotaEntity(copied);

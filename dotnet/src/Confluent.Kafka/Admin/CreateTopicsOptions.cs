@@ -17,14 +17,14 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.CreateTopics"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.CreateTopics(System.Collections.Generic.IEnumerable{NewTopic}, CreateTopicsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.CreateTopicsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Built as in Java, by chaining setters: <c>new CreateTopicsOptions().TimeoutMs(5000).ValidateOnly(true)</c>.
 /// Each Java getter and setter of one name is a pair of overloads, the setter returning the options. Every
-/// default is Java's, so <c>options: null</c> behaves as a new instance.
+/// default is Java's.
 /// </para>
 /// </remarks>
 public sealed class CreateTopicsOptions

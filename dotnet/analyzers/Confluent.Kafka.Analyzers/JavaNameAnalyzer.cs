@@ -196,6 +196,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     pairedMarkers,
                     pairedTypes,
                     findings);
+                CheckOptionalParameters(type, findings);
             }
 
             HashSet<string> found = new HashSet<string>(findings.Select(f => f.Key), StringComparer.Ordinal);
@@ -454,6 +455,34 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         // An interface that replaces a Java default method declares that method alone, with Java's parameters: the
         // default overloads of that name with its suffix.
+        // Rule 8: Java's overloads stay overloads, on every public type. A default is compiled into each caller, so a
+        // parameter added to a method breaks every caller compiled before it, where a new overload breaks none.
+        private static void CheckOptionalParameters(INamedTypeSymbol type, List<Finding> findings)
+        {
+            IEnumerable<IMethodSymbol> methods = type.GetMembers()
+                .Concat(type.GetTypeMembers().Where(t => t.IsExtension).SelectMany(t => t.GetMembers()))
+                .OfType<IMethodSymbol>()
+                .Where(m => !m.IsImplicitlyDeclared || m.MethodKind == MethodKind.DelegateInvoke)
+                .Where(m => m.DeclaredAccessibility is Accessibility.Public or Accessibility.Protected
+                    or Accessibility.ProtectedOrInternal);
+            foreach (IMethodSymbol method in methods)
+            {
+                ImmutableArray<IParameterSymbol> parameters = method.Parameters;
+                List<string> optional = parameters
+                    .Where((p, i) => p.IsOptional && !(i == parameters.Length - 1 && IsCancellationToken(p)))
+                    .Select(p => p.Name)
+                    .ToList();
+                if (optional.Count > 0)
+                {
+                    findings.Add(new Finding(
+                        "optional " + DocId(method),
+                        "has the optional parameter(s) " + string.Join(", ", optional)
+                            + "; declare each overload as its own member",
+                        LocationOf(method)));
+                }
+            }
+        }
+
         private void CheckReplacement(INamedTypeSymbol type, Replacement replacement, List<Finding> findings)
         {
             IReadOnlyList<JavaType> chain = _api.Chain(replacement.Java);
@@ -1343,6 +1372,12 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         symbol.Locations.FirstOrDefault(l => l.IsInSource)
         ?? (symbol.ContainingType is not null ? LocationOf(symbol.ContainingType) : Location.None);
 
+    // .NET's own optional last parameter, which a method may add to Java's (rule 7).
+    private static bool IsCancellationToken(IParameterSymbol parameter) =>
+        parameter.IsOptional
+        && parameter.Name == "cancellationToken"
+        && parameter.Type.ToDisplayString() == "System.Threading.CancellationToken";
+
     /// <summary>How a .NET type pairs with a Java type: the Java type, if any, whether the .NET name is Java's, whether
     /// the type holds a Java enum's or interface's methods, checked with that type, and the Java default method it
     /// replaces, if it is an interface that replaces one.</summary>
@@ -1422,11 +1457,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 + string.Join(",", parameters.Select(p => (p.RefKind == RefKind.None ? "" : p.RefKind + " ") + p.Type.ToDisplayString()))
                 + ")";
             AsyncParameters = parameters.Count(p => WithoutAsync(p.Type.Name) != p.Type.Name);
-            IParameterSymbol? last = parameters.Count > 0 ? parameters[parameters.Count - 1] : null;
-            bool token = last is not null
-                && last.IsOptional
-                && last.Name == "cancellationToken"
-                && last.Type.ToDisplayString() == "System.Threading.CancellationToken";
+            bool token = parameters.Count > 0 && IsCancellationToken(parameters[parameters.Count - 1]);
             List<IParameterSymbol> compared = (token ? parameters.Take(parameters.Count - 1) : parameters).ToList();
             Names = compared.Select(p => p.Name).ToList();
             Types = compared.Select(p => p.Type).ToList();

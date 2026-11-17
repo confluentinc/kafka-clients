@@ -44,14 +44,11 @@ public sealed class AdminP5SubmitArgumentTests
     {
         Assert.Empty(new ListGroupsOptions().Setters.InOrder);
 
-        foreach (ListGroupsOptions? options in new[] { null, new ListGroupsOptions() })
-        {
-            ListGroupsReadBack sent = ReadBack(options);
-            Assert.Equal(-1, sent.TimeoutMs);
-            Assert.Empty(sent.GroupStates);
-            Assert.Empty(sent.ProtocolTypes);
-            Assert.Empty(sent.Types);
-        }
+        ListGroupsReadBack sent = ReadBack(new ListGroupsOptions());
+        Assert.Equal(-1, sent.TimeoutMs);
+        Assert.Empty(sent.GroupStates);
+        Assert.Empty(sent.ProtocolTypes);
+        Assert.Empty(sent.Types);
     }
 
     [Theory]
@@ -212,15 +209,9 @@ public sealed class AdminP5SubmitArgumentTests
         Assert.Empty(new DescribeConsumerGroupsOptions().Setters.InOrder);
         Assert.Empty(new DescribeClassicGroupsOptions().Setters.InOrder);
 
-        foreach (DescribeConsumerGroupsOptions? options in new[] { null, new DescribeConsumerGroupsOptions() })
-        {
-            Assert.Equal((-1, false), ReadBack(options));
-        }
+        Assert.Equal((-1, false), ReadBack(new DescribeConsumerGroupsOptions()));
 
-        foreach (DescribeClassicGroupsOptions? options in new[] { null, new DescribeClassicGroupsOptions() })
-        {
-            Assert.Equal((-1, false), ReadBack(options));
-        }
+        Assert.Equal((-1, false), ReadBack(new DescribeClassicGroupsOptions()));
     }
 
     [Theory]
@@ -287,8 +278,8 @@ public sealed class AdminP5SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Action<IReadOnlyCollection<string>> describe = classic
-            ? groupIds => admin.DescribeClassicGroups(groupIds, null)
-            : groupIds => admin.DescribeConsumerGroups(groupIds, null);
+            ? groupIds => admin.DescribeClassicGroups(groupIds, new DescribeClassicGroupsOptions())
+            : groupIds => admin.DescribeConsumerGroups(groupIds, new DescribeConsumerGroupsOptions());
 
         Assert.Equal("groupIds", Assert.Throws<ArgumentNullException>(() => describe(null!)).ParamName);
 
@@ -346,11 +337,11 @@ public sealed class AdminP5SubmitArgumentTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        var consumer = admin.DescribeConsumerGroups(Array.Empty<string>(), null);
+        var consumer = admin.DescribeConsumerGroups(Array.Empty<string>(), new DescribeConsumerGroupsOptions());
         Assert.Empty(consumer.DescribedGroups);
         consumer.Result.Dispose();
 
-        var classic = admin.DescribeClassicGroups(Array.Empty<string>(), null);
+        var classic = admin.DescribeClassicGroups(Array.Empty<string>(), new DescribeClassicGroupsOptions());
         Assert.Empty(classic.DescribedGroups);
         classic.Result.Dispose();
     }
@@ -373,7 +364,7 @@ public sealed class AdminP5SubmitArgumentTests
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
-    private static ListGroupsReadBack ReadBack(ListGroupsOptions? options)
+    private static ListGroupsReadBack ReadBack(ListGroupsOptions options)
     {
         IntPtr native = NativeAdminClient.NewListGroupsOptions(options);
         try
@@ -390,7 +381,7 @@ public sealed class AdminP5SubmitArgumentTests
         }
     }
 
-    private static (int TimeoutMs, bool IncludeAuthorizedOperations) ReadBack(DescribeConsumerGroupsOptions? options)
+    private static (int TimeoutMs, bool IncludeAuthorizedOperations) ReadBack(DescribeConsumerGroupsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeConsumerGroupsOptions(options);
         try
@@ -405,7 +396,7 @@ public sealed class AdminP5SubmitArgumentTests
         }
     }
 
-    private static (int TimeoutMs, bool IncludeAuthorizedOperations) ReadBack(DescribeClassicGroupsOptions? options)
+    private static (int TimeoutMs, bool IncludeAuthorizedOperations) ReadBack(DescribeClassicGroupsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeClassicGroupsOptions(options);
         try
@@ -571,25 +562,13 @@ public sealed class AdminP5SubmitArgumentTests
         Assert.Empty(new DeleteConsumerGroupOffsetsOptions().Setters.InOrder);
         Assert.Empty(new DeleteConsumerGroupsOptions().Setters.InOrder);
 
-        foreach (ListConsumerGroupOffsetsOptions? options in new[] { null, new ListConsumerGroupOffsetsOptions() })
-        {
-            Assert.Equal((-1, false), ReadBack(options));
-        }
+        Assert.Equal((-1, false), ReadBack(new ListConsumerGroupOffsetsOptions()));
 
-        foreach (AlterConsumerGroupOffsetsOptions? options in new[] { null, new AlterConsumerGroupOffsetsOptions() })
-        {
-            Assert.Equal(-1, ReadBack(options));
-        }
+        Assert.Equal(-1, ReadBack(new AlterConsumerGroupOffsetsOptions()));
 
-        foreach (DeleteConsumerGroupOffsetsOptions? options in new[] { null, new DeleteConsumerGroupOffsetsOptions() })
-        {
-            Assert.Equal(-1, ReadBack(options));
-        }
+        Assert.Equal(-1, ReadBack(new DeleteConsumerGroupOffsetsOptions()));
 
-        foreach (DeleteConsumerGroupsOptions? options in new[] { null, new DeleteConsumerGroupsOptions() })
-        {
-            Assert.Equal(-1, ReadBack(options));
-        }
+        Assert.Equal(-1, ReadBack(new DeleteConsumerGroupsOptions()));
     }
 
     [Theory]
@@ -710,11 +689,11 @@ public sealed class AdminP5SubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException nullGroupId = Assert.Throws<ArgumentNullException>(
-            () => admin.ListConsumerGroupOffsets((string)null!, null));
+            () => admin.ListConsumerGroupOffsets((string)null!, new ListConsumerGroupOffsetsOptions()));
         Assert.Equal("groupId", nullGroupId.ParamName);
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => admin.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!, null));
+            () => admin.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!, new ListConsumerGroupOffsetsOptions()));
         Assert.Equal("groupSpecs", missing.ParamName);
 
         AssertRejected(
@@ -743,12 +722,12 @@ public sealed class AdminP5SubmitArgumentTests
     private static void AssertRejected(
         NativeAdminClient admin, IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs, string message)
     {
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(groupSpecs, null));
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(groupSpecs, new ListConsumerGroupOffsetsOptions()));
         Assert.Equal("groupSpecs", rejected.ParamName);
         Assert.StartsWith(message, rejected.Message, StringComparison.Ordinal);
     }
 
-    private static (int TimeoutMs, bool RequireStable) ReadBack(ListConsumerGroupOffsetsOptions? options)
+    private static (int TimeoutMs, bool RequireStable) ReadBack(ListConsumerGroupOffsetsOptions options)
     {
         IntPtr native = NativeAdminClient.NewListConsumerGroupOffsetsOptions(options);
         try
@@ -763,7 +742,7 @@ public sealed class AdminP5SubmitArgumentTests
         }
     }
 
-    private static int ReadBack(AlterConsumerGroupOffsetsOptions? options)
+    private static int ReadBack(AlterConsumerGroupOffsetsOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterConsumerGroupOffsetsOptions(options);
         try
@@ -776,7 +755,7 @@ public sealed class AdminP5SubmitArgumentTests
         }
     }
 
-    private static int ReadBack(DeleteConsumerGroupOffsetsOptions? options)
+    private static int ReadBack(DeleteConsumerGroupOffsetsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDeleteConsumerGroupOffsetsOptions(options);
         try
@@ -789,7 +768,7 @@ public sealed class AdminP5SubmitArgumentTests
         }
     }
 
-    private static int ReadBack(DeleteConsumerGroupsOptions? options)
+    private static int ReadBack(DeleteConsumerGroupsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDeleteConsumerGroupsOptions(options);
         try
