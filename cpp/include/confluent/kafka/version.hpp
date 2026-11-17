@@ -19,11 +19,14 @@
 
 namespace confluent::kafka {
 
-/// The version of the C++ binding. The three numbers match the `project()`
+/// The major version of the C++ binding. The three numbers match the `project()`
 /// version in `cpp/CMakeLists.txt`, which the CMake configure step checks.
 inline constexpr std::int32_t VERSION_MAJOR = 0;
+/// The minor version of the C++ binding.
 inline constexpr std::int32_t VERSION_MINOR = 1;
+/// The patch version of the C++ binding.
 inline constexpr std::int32_t VERSION_PATCH = 0;
+/// The version of the C++ binding, `<major>.<minor>.<patch>`.
 inline constexpr std::string_view VERSION = "0.1.0";
 
 }  // namespace confluent::kafka

@@ -48,8 +48,10 @@ public:
     /// @param tags        additional key/value attributes of the metric
     MetricName(std::string_view name, std::string_view group, std::string_view description,
                const std::unordered_map<std::string, std::string>& tags)
-        : impl_(std::make_shared<const Impl>(
-              Impl{std::string(name), std::string(group), std::string(description), tags})) {}
+        : impl_(std::make_shared<const Impl>(Impl{.name = std::string(name),
+                                                  .group = std::string(group),
+                                                  .description = std::string(description),
+                                                  .tags = tags})) {}
 
     /// Returns the name of the metric.
     /// @return the name
@@ -95,7 +97,7 @@ inline std::string to_string(const MetricName& metric_name) {
     std::string tags;
     for (const auto& [key, value] :
          std::map<std::string, std::string>(metric_name.tags().begin(), metric_name.tags().end())) {
-        tags += (tags.empty() ? "" : ", ") + key + "=" + value;
+        tags.append(tags.empty() ? "" : ", ").append(key).append("=").append(value);
     }
     return "MetricName [name=" + metric_name.name() + ", group=" + metric_name.group() +
            ", description=" + metric_name.description() + ", tags={" + tags + "}]";
@@ -122,7 +124,7 @@ struct std::hash<confluent::kafka::common::MetricName> {
             tags += text(key) ^ text(value);
         }
         std::size_t h = 31U + text(metric_name.group());
-        h = 31U * h + text(metric_name.name());
-        return 31U * h + tags;
+        h = (31U * h) + text(metric_name.name());
+        return (31U * h) + tags;
     }
 };

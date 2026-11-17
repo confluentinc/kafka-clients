@@ -24,12 +24,11 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace confluent::kafka::common::config {
 
 /// Describes whether the server should require or request client authentication.
-///
-/// Java's constructor sets no integer field, so the values are the C header's (cpp/CLAUDE.md §3.3).
 enum class SslClientAuth : int32_t {
     /// Java's `REQUIRED`.
     REQUIRED = kafka_common_config_SslClientAuth_REQUIRED,
@@ -77,12 +76,16 @@ inline std::optional<SslClientAuth> for_config(std::optional<std::string_view> k
         return SslClientAuth::NONE;
     }
     std::string upper_case_key(*key);
-    std::transform(upper_case_key.begin(), upper_case_key.end(), upper_case_key.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    static constexpr std::array<std::string_view, 3> names{"REQUIRED", "REQUESTED", "NONE"};
-    for (std::size_t i = 0; i < VALUES.size(); ++i) {
-        if (upper_case_key == names[i]) {
-            return VALUES[i];
+    std::ranges::transform(upper_case_key, upper_case_key.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    static constexpr std::array<std::pair<std::string_view, SslClientAuth>, 3> NAMES{{
+        {"REQUIRED", SslClientAuth::REQUIRED},
+        {"REQUESTED", SslClientAuth::REQUESTED},
+        {"NONE", SslClientAuth::NONE},
+    }};
+    for (const auto& [name, auth] : NAMES) {
+        if (upper_case_key == name) {
+            return auth;
         }
     }
     return std::nullopt;

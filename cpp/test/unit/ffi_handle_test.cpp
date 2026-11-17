@@ -61,7 +61,7 @@ TEST(FfiHandle, MoveTransfersOwnership) {
 
 TEST(FfiHandle, NullMandatoryArgumentIsReportedAsJavaDoes) {
     ErrorSlot err;
-    kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new_err(nullptr, 0, err.slot());
+    const kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new_err(nullptr, 0, err.slot());
     EXPECT_EQ(tp, nullptr);
     ASSERT_TRUE(err.has_error());
 

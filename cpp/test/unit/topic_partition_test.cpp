@@ -50,7 +50,7 @@ TEST(TopicPartitionTest, IsEqualWhenTopicAndPartitionAre) {
     EXPECT_EQ(tp1, tp2);
     EXPECT_NE(tp1, tp3);
     EXPECT_NE(tp1, tp4);
-    const TopicPartition copy = tp1;  // copies share the value
+    const TopicPartition copy = tp1;  // NOLINT(performance-unnecessary-copy-initialization): the copy is the subject
     EXPECT_EQ(copy, tp1);
 }
 

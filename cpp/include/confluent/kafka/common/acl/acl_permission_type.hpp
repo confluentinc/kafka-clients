@@ -72,15 +72,14 @@ inline AclPermissionType from_code(int8_t code) {
 /// @return The AclPermissionType, or UNKNOWN if the string could not be matched.
 inline AclPermissionType from_string(std::string_view str) {
     std::string upper(str);
-    std::transform(upper.begin(), upper.end(), upper.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    static constexpr std::array<std::pair<std::string_view, AclPermissionType>, 4> names{{
+    std::ranges::transform(upper, upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    static constexpr std::array<std::pair<std::string_view, AclPermissionType>, 4> NAMES{{
         {"UNKNOWN", AclPermissionType::UNKNOWN},
         {"ANY", AclPermissionType::ANY},
         {"DENY", AclPermissionType::DENY},
         {"ALLOW", AclPermissionType::ALLOW},
     }};
-    for (const auto& [name, type] : names) {
+    for (const auto& [name, type] : NAMES) {
         if (upper == name) {
             return type;
         }

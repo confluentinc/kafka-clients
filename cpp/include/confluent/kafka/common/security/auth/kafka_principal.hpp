@@ -156,6 +156,6 @@ template <>
 struct std::hash<confluent::kafka::common::security::auth::KafkaPrincipal> {
     std::size_t operator()(const confluent::kafka::common::security::auth::KafkaPrincipal& principal) const noexcept {
         const std::hash<std::string> text;
-        return 31U * text(principal.principal_type()) + text(principal.name());
+        return (31U * text(principal.principal_type())) + text(principal.name());
     }
 };

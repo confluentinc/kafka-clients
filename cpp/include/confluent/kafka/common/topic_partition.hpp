@@ -32,7 +32,7 @@ public:
     /// @param topic the topic name
     /// @param partition the partition number
     TopicPartition(std::string_view topic, int32_t partition)
-        : impl_(std::make_shared<const Impl>(Impl{std::string(topic), partition})) {}
+        : impl_(std::make_shared<const Impl>(Impl{.topic = std::string(topic), .partition = partition})) {}
 
     /// Returns the partition number.
     /// @return the partition number
@@ -82,6 +82,6 @@ template <>
 struct std::hash<confluent::kafka::common::TopicPartition> {
     std::size_t operator()(const confluent::kafka::common::TopicPartition& tp) const noexcept {
         const std::size_t topic = std::hash<std::string>{}(tp.topic());
-        return 31U * (31U + static_cast<std::size_t>(static_cast<uint32_t>(tp.partition()))) + topic;
+        return (31U * (31U + static_cast<std::size_t>(static_cast<uint32_t>(tp.partition())))) + topic;
     }
 };

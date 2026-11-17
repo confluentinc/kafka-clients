@@ -48,21 +48,18 @@ enum class PatternType : int8_t {
     PREFIXED = 4,
 };
 
-/// Returns the code of this resource.
 /// @param pattern_type the pattern type
 /// @return the code of this resource.
 inline int8_t code(PatternType pattern_type) {
     return static_cast<int8_t>(pattern_type);
 }
 
-/// Returns whether this resource pattern type is UNKNOWN.
 /// @param pattern_type the pattern type
 /// @return whether this resource pattern type is UNKNOWN.
 inline bool is_unknown(PatternType pattern_type) {
     return pattern_type == PatternType::UNKNOWN;
 }
 
-/// Returns whether this resource pattern type is a concrete type, rather than UNKNOWN or one of the filter types.
 /// @param pattern_type the pattern type
 /// @return whether this resource pattern type is a concrete type, rather than UNKNOWN or one of the filter types.
 inline bool is_specific(PatternType pattern_type) {
@@ -94,14 +91,14 @@ inline PatternType from_code(int8_t code) {
 /// @param name the constant's name, matched exactly
 /// @return the pattern type
 inline PatternType from_string(std::string_view name) {
-    static constexpr std::array<std::pair<std::string_view, PatternType>, 5> names{{
+    static constexpr std::array<std::pair<std::string_view, PatternType>, 5> NAMES{{
         {"UNKNOWN", PatternType::UNKNOWN},
         {"ANY", PatternType::ANY},
         {"MATCH", PatternType::MATCH},
         {"LITERAL", PatternType::LITERAL},
         {"PREFIXED", PatternType::PREFIXED},
     }};
-    for (const auto& [constant, type] : names) {
+    for (const auto& [constant, type] : NAMES) {
         if (name == constant) {
             return type;
         }

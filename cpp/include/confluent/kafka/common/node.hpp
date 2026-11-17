@@ -50,8 +50,12 @@ public:
     /// @param is_fenced whether the broker is fenced
     Node(int32_t id, std::optional<std::string_view> host, int32_t port, std::optional<std::string_view> rack,
          bool is_fenced)
-        : impl_(std::make_shared<const Impl>(
-              Impl{id, std::to_string(id), optional_string(host), port, optional_string(rack), is_fenced})) {}
+        : impl_(std::make_shared<const Impl>(Impl{.id = id,
+                                                  .id_string = std::to_string(id),
+                                                  .host = optional_string(host),
+                                                  .port = port,
+                                                  .rack = optional_string(rack),
+                                                  .is_fenced = is_fenced})) {}
 
     /// Returns the placeholder node: id -1, empty host, port -1.
     /// @return the placeholder node
@@ -150,9 +154,9 @@ struct std::hash<confluent::kafka::common::Node> {
     std::size_t operator()(const confluent::kafka::common::Node& node) const noexcept {
         const std::hash<std::string> text;
         std::size_t h = 31U + (node.host() ? text(*node.host()) : 0U);
-        h = 31U * h + static_cast<std::size_t>(static_cast<uint32_t>(node.id()));
-        h = 31U * h + static_cast<std::size_t>(static_cast<uint32_t>(node.port()));
-        h = 31U * h + (node.rack() ? text(*node.rack()) : 0U);
-        return 31U * h + (node.is_fenced() ? 1231U : 1237U);
+        h = (31U * h) + static_cast<std::size_t>(static_cast<uint32_t>(node.id()));
+        h = (31U * h) + static_cast<std::size_t>(static_cast<uint32_t>(node.port()));
+        h = (31U * h) + (node.rack() ? text(*node.rack()) : 0U);
+        return (31U * h) + (node.is_fenced() ? 1231U : 1237U);
     }
 };

@@ -6,6 +6,9 @@
 # GCC 15, so it is off until the two agree. `cppcoreguidelines-pro-type-member-init`
 # does not see a member whose own class default-initializes it, and
 # `readability-redundant-member-init` rejects the `{}` that would satisfy it.
+# Two clang-tidy 21 checks contradict the rules: `portability-avoid-pragma-once`
+# (§3.1 requires `#pragma once`) and `performance-enum-size` (§3.3 fixes an
+# enum's underlying type: Java's field type, or the C header's int).
 Checks: >
   bugprone-*,
   cert-*,
@@ -25,6 +28,8 @@ Checks: >
   -misc-include-cleaner,
   -misc-non-private-member-variables-in-classes,
   -modernize-use-trailing-return-type,
+  -performance-enum-size,
+  -portability-avoid-pragma-once,
   -readability-magic-numbers,
   -readability-identifier-length
 WarningsAsErrors: '*'

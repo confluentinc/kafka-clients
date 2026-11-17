@@ -29,11 +29,17 @@ class ConfigResource {
 public:
     /// Type of resource.
     enum class Type : int8_t {
+        /// A consumer group's configs.
         GROUP = 32,
+        /// A client metrics subscription's configs.
         CLIENT_METRICS = 16,
+        /// A broker's logger levels.
         BROKER_LOGGER = 8,
+        /// A broker's configs.
         BROKER = 4,
+        /// A topic's configs.
         TOPIC = 2,
+        /// A resource type this client does not know.
         UNKNOWN = 0,
     };
 
@@ -41,7 +47,7 @@ public:
     /// @param type a non-null resource type
     /// @param name a non-null resource name
     ConfigResource(Type type, std::string_view name)
-        : impl_(std::make_shared<const Impl>(Impl{type, std::string(name)})) {}
+        : impl_(std::make_shared<const Impl>(Impl{.type = type, .name = std::string(name)})) {}
 
     /// Return the resource type.
     /// @return the resource type
@@ -144,7 +150,7 @@ inline ConfigResource::Type for_id(int8_t id) {
 template <>
 struct std::hash<confluent::kafka::common::config::ConfigResource> {
     std::size_t operator()(const confluent::kafka::common::config::ConfigResource& r) const noexcept {
-        return 31U * std::hash<confluent::kafka::common::config::ConfigResource::Type>{}(r.type()) +
+        return (31U * std::hash<confluent::kafka::common::config::ConfigResource::Type>{}(r.type())) +
                std::hash<std::string>{}(r.name());
     }
 };

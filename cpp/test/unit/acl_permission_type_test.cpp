@@ -21,6 +21,7 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -30,15 +31,15 @@ namespace acl_permission_type = confluent::kafka::common::acl::acl_permission_ty
 struct AclPermissionTypeTestInfo {
     AclPermissionType ty;
     int code;
-    std::string name;
+    std::string_view name;
     bool unknown;
 };
 
-const std::array<AclPermissionTypeTestInfo, 4> INFOS{{
-    {AclPermissionType::UNKNOWN, 0, "unknown", true},
-    {AclPermissionType::ANY, 1, "any", false},
-    {AclPermissionType::DENY, 2, "deny", false},
-    {AclPermissionType::ALLOW, 3, "allow", false},
+constexpr std::array<AclPermissionTypeTestInfo, 4> INFOS{{
+    {.ty = AclPermissionType::UNKNOWN, .code = 0, .name = "unknown", .unknown = true},
+    {.ty = AclPermissionType::ANY, .code = 1, .name = "any", .unknown = false},
+    {.ty = AclPermissionType::DENY, .code = 2, .name = "deny", .unknown = false},
+    {.ty = AclPermissionType::ALLOW, .code = 3, .name = "allow", .unknown = false},
 }};
 
 TEST(AclPermissionTypeTest, testIsUnknown) {
@@ -69,7 +70,7 @@ TEST(AclPermissionTypeTest, testName) {
 // is not translated (cpp/CLAUDE.md §3.3), so the codes walk the enumerators.
 TEST(AclPermissionTypeTest, testExhaustive) {
     for (std::size_t i = 0; i < INFOS.size(); ++i) {
-        EXPECT_EQ(INFOS[i].ty, acl_permission_type::from_code(static_cast<int8_t>(i)));
+        EXPECT_EQ(INFOS.at(i).ty, acl_permission_type::from_code(static_cast<int8_t>(i)));
     }
     EXPECT_EQ(acl_permission_type::from_code(static_cast<int8_t>(INFOS.size())), AclPermissionType::UNKNOWN);
 }

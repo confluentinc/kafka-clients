@@ -60,7 +60,7 @@ TEST(KafkaPrincipalTest, TokenFlagIsSetInPlaceAndNotCompared) {
     assigned = principal;
     EXPECT_EQ(assigned, principal);
     EXPECT_FALSE(assigned.token_authenticated());
-    KafkaPrincipal moved = std::move(assigned);
+    const KafkaPrincipal moved = std::move(assigned);
     EXPECT_EQ(moved.name(), "alice");
 }
 

@@ -29,11 +29,11 @@ namespace {
 using confluent::kafka::common::resource::PatternType;
 namespace pattern_type = confluent::kafka::common::resource::pattern_type;
 
-constexpr std::array<PatternType, 5> kValues{PatternType::UNKNOWN, PatternType::ANY, PatternType::MATCH,
-                                             PatternType::LITERAL, PatternType::PREFIXED};
+constexpr std::array<PatternType, 5> VALUES{PatternType::UNKNOWN, PatternType::ANY, PatternType::MATCH,
+                                            PatternType::LITERAL, PatternType::PREFIXED};
 
 TEST(PatternTypeTest, CodeRoundTripsForAllVariants) {
-    for (const auto pt : kValues) {
+    for (const auto pt : VALUES) {
         EXPECT_EQ(pattern_type::from_code(code(pt)), pt);
     }
 }
@@ -55,7 +55,7 @@ TEST(PatternTypeTest, IsSpecificOnlyForConcreteTypes) {
 }
 
 TEST(PatternTypeTest, IsUnknownOnlyForUnknown) {
-    for (const auto pt : kValues) {
+    for (const auto pt : VALUES) {
         EXPECT_EQ(is_unknown(pt), pt == PatternType::UNKNOWN);
     }
 }
