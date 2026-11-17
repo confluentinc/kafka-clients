@@ -834,3 +834,35 @@ test("every error class's form error lists its forms as JavaScript calls them, b
   }
   assert.ok(checked > 50, `${checked} classes`);
 });
+
+// Java's Throwable#getCause on each link; the core's error.rs
+// source_is_universal_and_readable: a chain keeps every link, built in
+// JavaScript or reported by the core (fromNative converts cause recursively).
+test('a cause chain keeps every link, whether built or reported by the core', () => {
+  const { SerializationError } = require('@confluentinc/kafka-javascript/common/errors');
+  const inner = new IllegalArgumentError('not utf-8');
+  const mid = new SerializationError({ message: 'bad bytes', cause: inner });
+  const outer = new KafkaError({ message: 'outer', cause: mid });
+  assert.equal(outer.cause, mid);
+  assert.equal(mid.cause, inner);
+  assert.equal(inner.cause, undefined);
+  const e = fromNative({
+    code: -1,
+    message: 'outer',
+    apiError: false,
+    cause: {
+      code: /** @type {number} */ (ownFfiId(SerializationError)),
+      message: 'bad bytes',
+      apiError: false,
+      cause: { code: -3, message: 'not utf-8', apiError: false },
+    },
+  });
+  assert.equal(e.constructor, KafkaError);
+  const c1 = /** @type {Error} */ (e.cause);
+  assert.equal(c1.constructor, SerializationError);
+  assert.equal(c1.message, 'bad bytes');
+  const c2 = /** @type {Error} */ (c1.cause);
+  assert.equal(c2.constructor, IllegalArgumentError);
+  assert.equal(c2.message, 'not utf-8');
+  assert.equal(c2.cause, undefined);
+});

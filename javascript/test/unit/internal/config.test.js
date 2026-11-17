@@ -124,6 +124,17 @@ test("configs is a plain object: a Map is refused, and a symbol key rejected wit
       return true;
     },
   );
+  // KafkaProducerTest.testConstructorWithNotStringKey: through the
+  // constructor, as Java's. Java's Properties form says "One or more keys is
+  // not a string."; JS has one configs form, Java's Map one, whose text this is.
+  assert.throws(
+    () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', [Symbol('k')]: 'x' } }),
+    (e) => {
+      assert.ok(e instanceof ConfigError && e instanceof KafkaError, `${e}`);
+      assert.equal(e.message, 'Invalid value x for configuration Symbol(k): Key must be a string.');
+      return true;
+    },
+  );
   assert.throws(() => configEntries(null), { name: 'TypeError', message: 'configs must not be null' });
   assert.throws(() => configEntries([]), { name: 'TypeError', message: 'configs must be a plain object, not array' });
 });
@@ -290,4 +301,29 @@ test('an undefined SSL password is reported as unused', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'closed\n');
   assert.ok(r.stderr.includes("These configurations '[ssl.keystore.password]' were supplied but are not used yet."), r.stderr);
+});
+
+// KafkaProducerTest.testUnusedConfigs: Java asserts
+// config.unused().contains(SslConfigs.SSL_PROTOCOL_CONFIG) for a PLAINTEXT
+// producer, before and after building it; ProducerConfig.unused() is not
+// translated, so the observable stand-in is AbstractConfig#logUnused's INFO
+// line after the construction. ssl.protocol is a key the core defines, read
+// only under SSL and SASL_SSL, so this catches a PLAINTEXT producer marking it
+// used, which the undefined-password test above cannot.
+test('an SSL key given to a PLAINTEXT producer is listed as unused', () => {
+  const script = `
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', 'ssl.protocol': 'TLS' } })
+      .close()
+      .then(() => console.log('closed'));
+  `;
+  const r = spawnSync(process.execPath, ['-e', script], {
+    cwd: path.join(__dirname, '..', '..', '..'),
+    encoding: 'utf8',
+    timeout: 120000,
+    env: { ...process.env, RUST_LOG: 'info' },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'closed\n');
+  assert.ok(r.stderr.includes("These configurations '[ssl.protocol]' were supplied but are not used yet."), r.stderr);
 });

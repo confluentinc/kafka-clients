@@ -142,3 +142,13 @@ test("equals and hashCode are Java's; the id and the port are Java's int", () =>
     });
   }
 });
+
+// Java ships no NodeTest; the core's node.rs test_node_equality: a node
+// differing only in its id, or only in its port, is not equal (Java's
+// Node#equals compares id, port, host, rack and isFenced).
+test('equals is false for a node that differs only in its id, or only in its port', () => {
+  const n1 = new Node({ id: 1, host: 'host', port: 9092 });
+  assert.equal(n1.equals(new Node({ id: 1, host: 'host', port: 9092 })), true);
+  assert.equal(n1.equals(new Node({ id: 2, host: 'host', port: 9092 })), false);
+  assert.equal(n1.equals(new Node({ id: 1, host: 'host', port: 9093 })), false);
+});
