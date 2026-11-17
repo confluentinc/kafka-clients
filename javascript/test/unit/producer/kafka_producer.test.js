@@ -17,11 +17,10 @@
 // The producer against an unreachable broker: no broker is needed, every
 // record fails in the core with its own error.
 //
-// Skip notes: PlaintextProducerSendTest.testWrongSerializer is not written:
-// Java's KafkaProducer#doSend wraps a serializer's ClassCastException as
-// SerializationException, while send() rejects with what the serializer
-// throws (stringSerializer's TypeError for a Buffer), as it is; it waits on
-// the owner's decision (2026-11-18) about serializer errors in send().
+// PlaintextProducerSendTest.testWrongSerializer is ported here: a Buffer
+// given to the configured stringSerializer rejects send() with
+// SerializationError, as Java's KafkaProducer#doSend wraps the serializer's
+// ClassCastException (a TypeError here).
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -1582,6 +1581,238 @@ test('what a serializer throws, rejects with or returns that is no bytes rejects
       assert.equal(calls.length, 0);
     } finally {
       await producer.close();
+    }
+  }
+});
+
+// Java's KafkaProducer#doSend answers a serializer's throw: an ApiException
+// goes to the callback and a FutureFailure, a ClassCastException becomes a
+// SerializationException, anything else is rethrown.
+
+test('PlaintextProducerSendTest.testWrongSerializer: a Buffer given to the configured stringSerializer rejects send() with SerializationError', async () => {
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+  try {
+    const record = new ProducerRecord({ topic: 'topic', partition: 0, key: Buffer.from('key'), value: Buffer.from('value') });
+    await assert.rejects(
+      // @ts-expect-error Buffers given to a producer of strings, as Java's test gives byte[] to StringSerializer
+      producer.send(record),
+      (e) =>
+        e instanceof errors.SerializationError &&
+        e.message === "Can't convert key of class Buffer to class stringSerializer specified in key.serializer" &&
+        e.cause instanceof TypeError &&
+        e.cause.message === 'stringSerializer: data must be a string or null, not a Buffer',
+    );
+  } finally {
+    await producer.close();
+  }
+});
+
+/**
+ * A serializer that throws `error`, or rejects with it when `async`.
+ *
+ * @param {unknown} error
+ * @param {boolean} async
+ * @returns {Serializer<unknown>}
+ */
+function failingSerializer(error, async) {
+  return {
+    serialize: () => {
+      if (async) return Promise.reject(error);
+      throw error;
+    },
+  };
+}
+
+/** A serializer of the data's bytes. @type {Serializer<unknown>} */
+const bytesOf = { serialize: ({ data }) => (data === null ? null : Buffer.from(String(data))) };
+
+/**
+ * A producer whose key or value serializer is `failing`, the other one
+ * `bytesOf`.
+ *
+ * @param {Serializer<unknown>} failing
+ * @param {boolean} isKey
+ */
+function producerFailing(failing, isKey) {
+  return new KafkaProducer({
+    configs: UNREACHABLE,
+    keySerializer: isKey ? failing : bytesOf,
+    valueSerializer: isKey ? bytesOf : failing,
+  });
+}
+
+const SERIALIZER_CASES = [
+  { isKey: true, async: false },
+  { isKey: true, async: true },
+  { isKey: false, async: false },
+  { isKey: false, async: true },
+];
+
+test("a serializer's ApiError runs the callback once with Java's failure metadata, and send() resolves to a failed future", async () => {
+  for (const { isKey, async } of SERIALIZER_CASES) {
+    for (const partition of [3, null]) {
+      const label = `${isKey ? 'key' : 'value'} ${async ? 'async' : 'sync'} partition ${partition}`;
+      const error = new errors.RecordTooLargeError('too large');
+      const producer = producerFailing(failingSerializer(error, async), isKey);
+      try {
+        /** @type {Array<{ metadata: RecordMetadata, exception: Error | null }>} */
+        const calls = [];
+        const record = new ProducerRecord({ topic: 'unit-serde-api', partition, key: 'k', value: 'v' });
+        const future = await producer.send({ record, callback: (r) => void calls.push(r) });
+        assert.equal(calls.length, 1, label);
+        assert.equal(calls[0].exception, error, label);
+        const { metadata } = calls[0];
+        assert.deepEqual(
+          [metadata.topic, metadata.partition, metadata.offset, metadata.hasOffset, metadata.timestamp],
+          ['unit-serde-api', partition ?? -1, -1n, false, -1n],
+          label,
+        );
+        assert.deepEqual([metadata.serializedKeySize, metadata.serializedValueSize], [-1, -1], label);
+        // Java's FutureFailure: done, failed, not cancellable.
+        assert.equal(future.isDone(), true, label);
+        assert.equal(future.isCompletedExceptionally(), true, label);
+        assert.equal(future.cancel({ mayInterruptIfRunning: true }), false, label);
+        await assert.rejects(future.get(), (e) => e instanceof ExecutionError && e.cause === error, label);
+        assert.equal(calls.length, 1, label);
+        // The record never reached the producer: its headers stay writable.
+        record.headers.add({ key: 'still', value: null });
+      } finally {
+        await producer.close();
+      }
+    }
+  }
+});
+
+test("a serializer's ApiError without a callback resolves send() to the failed future", async () => {
+  for (const { isKey, async } of SERIALIZER_CASES) {
+    const error = new errors.InvalidTopicError('invalid');
+    const producer = producerFailing(failingSerializer(error, async), isKey);
+    try {
+      const future = await producer.send(new ProducerRecord({ topic: 'unit-serde-api', value: 'v' }));
+      await assert.rejects(future.get(), (e) => e instanceof ExecutionError && e.cause === error);
+    } finally {
+      await producer.close();
+    }
+  }
+});
+
+test("a key serializer's ApiError leaves the value serializer unrun, as Java's doSend", async () => {
+  const error = new errors.RecordTooLargeError('too large');
+  let valueRan = false;
+  /** @type {Serializer<unknown>} */
+  const valueSerializer = { serialize: () => ((valueRan = true), null) };
+  const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer: failingSerializer(error, false), valueSerializer });
+  try {
+    await producer.send(new ProducerRecord({ topic: 'unit-serde-api', key: 'k', value: 'v' }));
+    assert.equal(valueRan, false);
+  } finally {
+    await producer.close();
+  }
+});
+
+test("the callback of a serializer's ApiError: a Promise it returns is awaited, and what it throws or rejects with rejects send()", async () => {
+  const error = new errors.RecordTooLargeError('too large');
+  const producer = producerFailing(failingSerializer(error, false), false);
+  try {
+    const record = new ProducerRecord({ topic: 'unit-serde-api', value: 'v' });
+    // Awaited: send() resolves once the callback's Promise did.
+    let done = false;
+    const future = await producer.send({
+      record,
+      callback: () =>
+        new Promise((resolve) => setTimeout(resolve, 20)).then(() => {
+          done = true;
+        }),
+    });
+    assert.equal(done, true);
+    assert.equal(future.isDone(), true);
+    // A throw, as Java's onCompletion throws out of send().
+    const thrown = new Error('callback');
+    await assert.rejects(
+      producer.send({
+        record,
+        callback: () => {
+          throw thrown;
+        },
+      }),
+      (e) => e === thrown,
+    );
+    // A rejection, as a throw.
+    await assert.rejects(producer.send({ record, callback: () => Promise.reject(thrown) }), (e) => e === thrown);
+  } finally {
+    await producer.close();
+  }
+});
+
+test("a serializer's TypeError rejects send() with SerializationError, Java's message and the TypeError as its cause", async () => {
+  class WrongSerializer {
+    /** @returns {Uint8Array} */
+    serialize() {
+      throw new TypeError('wrong type');
+    }
+  }
+  /** @type {Array<[unknown, string]>} */
+  const data = [
+    ['text', 'String'],
+    [7, 'Number'],
+    [7n, 'BigInt'],
+    [Buffer.from('b'), 'Buffer'],
+    [new Uint8Array(1), 'Uint8Array'],
+    [{}, 'Object'],
+    [Object.create(null), 'Object'],
+    [new Map(), 'Map'],
+    [null, 'null'],
+  ];
+  for (const { isKey, async } of SERIALIZER_CASES) {
+    for (const [given, className] of data) {
+      const field = isKey ? 'key' : 'value';
+      const cause = new TypeError('wrong type');
+      // A class instance names its class; a plain object Object.
+      for (const [serializer, serializerName] of /** @type {Array<[Serializer<unknown>, string]>} */ ([
+        [async ? { serialize: () => Promise.reject(cause) } : failingSerializer(cause, false), 'Object'],
+        [new WrongSerializer(), 'WrongSerializer'],
+      ])) {
+        if (async && serializerName === 'WrongSerializer') continue;
+        const producer = producerFailing(serializer, isKey);
+        try {
+          let ran = false;
+          const record = new ProducerRecord({ topic: 'unit-serde-cast', key: isKey ? given : 'k', value: isKey ? 'v' : given });
+          await assert.rejects(
+            producer.send({ record, callback: () => (ran = true) }),
+            (e) =>
+              e instanceof errors.SerializationError &&
+              e.message === `Can't convert ${field} of class ${className} to class ${serializerName} specified in ${field}.serializer` &&
+              e.cause instanceof TypeError &&
+              (serializerName === 'WrongSerializer' || e.cause === cause),
+          );
+          assert.equal(ran, false);
+        } finally {
+          await producer.close();
+        }
+      }
+    }
+  }
+});
+
+test("a serializer's other errors reject send() as they are: a KafkaError that is no ApiError, SerializationError included, and a non-Kafka error", async () => {
+  for (const { isKey, async } of SERIALIZER_CASES) {
+    for (const error of [
+      new errors.SerializationError('bad data'),
+      new KafkaError('not an api error'),
+      new RangeError('range'),
+      'a string',
+    ]) {
+      const producer = producerFailing(failingSerializer(error, async), isKey);
+      try {
+        let ran = false;
+        await assert.rejects(
+          producer.send({ record: new ProducerRecord({ topic: 'unit-serde-other', key: 'k', value: 'v' }), callback: () => (ran = true) }),
+          (e) => e === error,
+        );
+        assert.equal(ran, false);
+      } finally {
+        await producer.close();
+      }
     }
   }
 });

@@ -21,6 +21,7 @@ import { kind } from './args';
 import { illegalArgument } from './errors';
 import { ConfigError } from '../common/config/config_error';
 import { KafkaError } from '../common/kafka_error';
+import { SerializationError } from '../common/errors/serialization_error';
 import type { Serializer } from '../common/serialization/serializer';
 import { SerializerDefaults } from './serializer_defaults';
 
@@ -146,6 +147,85 @@ export function configuredSerializer(
     throw invalid(`the function returned ${kind(out)}, not a serializer: an object with a serialize({ topic, headers, data }) method`);
   }
   return out;
+}
+
+// The name of a built-in serializer's factory, on the object it made
+// (`stringSerializer()`'s), which a serializer's wrapped TypeError names as
+// Java names the class.
+const BUILT_IN_NAME: unique symbol = Symbol('built-in serializer');
+
+/**
+ * Marks `serde` as the built-in factory `name`'s, so that an error naming its
+ * class names the factory.
+ *
+ * @param serde - the serializer the factory made
+ * @param name - the factory's name
+ * @returns `serde`
+ */
+export function nameBuiltIn<T extends object>(serde: T, name: string): T {
+  Object.defineProperty(serde, BUILT_IN_NAME, { value: name });
+  return serde;
+}
+
+/**
+ * The class name of a value, as Java's `getClass().getName()` names it in
+ * `KafkaProducer#doSend`'s message, spelled for JavaScript: a value's
+ * constructor name (`Buffer`), a primitive's wrapper (`String`, `Number`),
+ * `Object` for an object without one, `null` for null, and a built-in
+ * serializer's factory name (`stringSerializer`). It never throws.
+ *
+ * @param value - the value
+ * @returns its class name
+ */
+export function className(value: unknown): string {
+  if (value === null) return 'null';
+  switch (typeof value) {
+    case 'undefined':
+      return 'undefined';
+    case 'string':
+      return 'String';
+    case 'number':
+      return 'Number';
+    case 'bigint':
+      return 'BigInt';
+    case 'boolean':
+      return 'Boolean';
+    case 'symbol':
+      return 'Symbol';
+    default:
+      break;
+  }
+  try {
+    const builtIn: unknown = (value as { [BUILT_IN_NAME]?: unknown })[BUILT_IN_NAME];
+    if (typeof builtIn === 'string') return builtIn;
+    const prototype: unknown = Object.getPrototypeOf(value);
+    const constructor: unknown = prototype === null ? undefined : (prototype as { constructor?: unknown }).constructor;
+    const name: unknown = typeof constructor === 'function' ? constructor.name : undefined;
+    return typeof name === 'string' && name !== '' ? name : 'Object';
+  } catch {
+    return 'Object';
+  }
+}
+
+/**
+ * What `KafkaProducer#doSend` makes of a serializer's throw: a `TypeError`,
+ * JavaScript's form of Java's `ClassCastException`, becomes a
+ * `SerializationError` with Java's message and the `TypeError` as its cause;
+ * anything else is returned as it is.
+ *
+ * @param thrown - what the serializer threw, or rejected with
+ * @param isKey - whether it is the key serializer
+ * @param data - the key or value it was given
+ * @param serializer - the serializer
+ * @returns the error to answer with
+ */
+export function serializerFailure(thrown: unknown, isKey: boolean, data: unknown, serializer: object): unknown {
+  if (!(thrown instanceof TypeError)) return thrown;
+  const field = isKey ? 'key' : 'value';
+  return new SerializationError({
+    message: `Can't convert ${field} of class ${className(data)} to class ${className(serializer)} specified in ${field}.serializer`,
+    cause: thrown,
+  });
 }
 
 /**
