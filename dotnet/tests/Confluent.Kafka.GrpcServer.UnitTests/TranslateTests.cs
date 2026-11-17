@@ -215,7 +215,7 @@ public sealed class TranslateTests
     public static TheoryData<Exception> ExceptionsWithoutAnId() => new TheoryData<Exception>
     {
         new InvalidOperationException("the admin result produced no value"),
-        new ObjectDisposedException("ConsumerHandle"),
+        new ObjectDisposedException("CancellationTokenSource"),
         new NotSupportedException("not supported"),
         new System.TimeoutException("Timeout expired after 500ms"),
         new NoSuchElementException("no such element"),

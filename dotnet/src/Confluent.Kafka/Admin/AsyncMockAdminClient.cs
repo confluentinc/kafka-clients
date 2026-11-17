@@ -83,10 +83,12 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// </summary>
     /// <param name="brokers">The brokers.</param>
     /// <param name="controller">The controller, one of <paramref name="brokers"/>.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="brokers"/> is null or contains a null element.
+    /// </exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="brokers"/> contains a null element, <paramref name="controller"/> is null or not one of them
-    /// (Java's message for both), or a host or rack cannot cross the C ABI unchanged.
+    /// <paramref name="controller"/> is null or not one of <paramref name="brokers"/> (Java's message for both), or a
+    /// host or rack cannot cross the C ABI unchanged.
     /// </exception>
     public AsyncMockAdminClient(IReadOnlyList<Node> brokers, Node controller)
         : this(NativeAdminClient.StartMock(MockAdminClientBuilderCore.NewMock(brokers, controller), AdminFlavour.Async))
@@ -695,10 +697,11 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// was seeded before.
     /// </summary>
     /// <param name="newOffsets">The beginning offset per topic partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// </exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character
-    /// (see the <see cref="IAdmin"/> remarks).
+    /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
@@ -710,10 +713,11 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <c>MockAdminClient.updateEndOffsets(Map)</c>. <b>Merges</b>.
     /// </summary>
     /// <param name="newOffsets">The end offset per topic partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// </exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character
-    /// (see the <see cref="IAdmin"/> remarks).
+    /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
@@ -728,10 +732,11 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// The mock keys these by partition only and ignores the group id, so there is no group
     /// parameter; the real client has no such restriction.
     /// </remarks>
-    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// </exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character
-    /// (see the <see cref="IAdmin"/> remarks).
+    /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been disposed.</exception>
     public void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>

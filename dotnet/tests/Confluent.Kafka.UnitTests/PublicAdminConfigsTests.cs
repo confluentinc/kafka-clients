@@ -301,17 +301,17 @@ public sealed class PublicAdminConfigsTests
         Assert.Throws<ArgumentNullException>(() => admin.DescribeConfigs(null!));
         Assert.Throws<ArgumentNullException>(() => admin.IncrementalAlterConfigs(null!));
 
-        ArgumentException nullResource = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullResource = Assert.Throws<ArgumentNullException>(
             () => admin.DescribeConfigs(new ConfigResource[] { null! }));
         Assert.Equal("resources", nullResource.ParamName);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
-        ArgumentException nullOps = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullOps = Assert.Throws<ArgumentNullException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }));
         Assert.Equal("configs", nullOps.ParamName);
 
-        ArgumentException nullOp = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullOp = Assert.Throws<ArgumentNullException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {

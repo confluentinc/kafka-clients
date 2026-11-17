@@ -1229,12 +1229,13 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     getter through `out_err`, a `_cb` form through its `cb`, queued like any completion.
     Both surface as `ConcurrentModificationException` with the core's message, sync and
     async, state reads included (decision 17, §B5). ⚠ **The one way back into a
-    consumer from its own callback is `ConsumerHandle`**, below; inside a callback the
-    consumer's own methods route to it (ledger 114).
+    consumer from its own callback is the core's `ConsumerHandle`**, below; inside a callback
+    the consumer's own methods route to it through the internal `NativeConsumerHandle`
+    (ledger 114). There is no .NET `ConsumerHandle` class, as Python has no public one.
   - **The owner check** (ledger 136), as Java's `acquire()`
     (`AsyncKafkaConsumer.java:2219-2228`) and Python's use table
     (`python/confluent_kafka/consumer/_base.py:397-416`, `:441-458` at `3f8a5bc6`). On
-    `KafkaConsumer` and `AsyncKafkaConsumer` every call but `Wakeup()`, `Handle()`,
+    `KafkaConsumer` and `AsyncKafkaConsumer` every call but `Wakeup()`,
     `Metrics()`, `EnforceRebalance()` and `Dispose` / `DisposeAsync` is one **use** of the
     thread that makes it, `Close` and the state reads included. `Metrics()` and
     `EnforceRebalance()` take only the use that keeps the handle alive, with no owner check, as
@@ -1278,7 +1279,7 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     its monitor's owner before the listener or the callback's body runs
     (`_mock_core.py:35-45`, `:212-232`, `:263-279`, `:616-635` at `3f8a5bc6`; ledger 142);
     the commit's own body and a sync commit callback still make it wait, as Python's
-    `RLock` does. Every mock call waits but `Wakeup()`, `Handle()`,
+    `RLock` does. Every mock call waits but `Wakeup()`,
     `Dispose` / `DisposeAsync` and the three Java's mock leaves unsynchronized:
     `GroupMetadata()`, `EnforceRebalance()` and `CurrentLag()` pass, as Java's mock and
     Python's do (`MockConsumer.java:764-787`, `_mock_core.py:45-47`, `:519-528` at
@@ -1350,7 +1351,8 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     binding routes it (`_base.py:1491-1509`, `:1597-1619`, `:1645-1725`;
     `python/confluent_kafka/consumer/consumer.py:490-604`, `async_consumer.py:316-434` at
     `3f8a5bc6`), on all four consumer classes:
-      - **To the consumer's own `ConsumerHandle`** where the handle has the form:
+      - **To the core's `ConsumerHandle`**, through the internal `NativeConsumerHandle`, where
+        the handle has the form:
         `Assignment`, `Paused`, `Pause`, `Resume`, `SeekToBeginning`, `SeekToEnd`, both
         `Seek`s, both `Position`s, `CurrentLag`, `Committed`, `BeginningOffsets`,
         `EndOffsets` and `OffsetsForTimes` with and without a timeout, `Commit()` and
@@ -1386,7 +1388,7 @@ the calling thread; a `_cb` form queues them, and its own completion, for
         which the core refuses
         with -2 while the op that delivers the callback holds its flag, as Python leaves
         `subscription()` to it (`_base.py:1497-1503`); and `Metrics()`, which it
-        answers. `Wakeup()` and `Handle()` are unchanged, and `Close` and `Dispose`
+        answers. `Wakeup()` is unchanged, and `Close` and `Dispose`
         follow ledgers 113 and 120 (`dotnet/CLAUDE.md` §4).
       - **Order:** a routed call first makes the checks its call makes outside a
         callback, in Python's order (closed, owner, null, `group.id`, timeout, except
@@ -1467,8 +1469,8 @@ is the core's, so the binding adds none there.
     leaves: just before and just after another thread's native call, and while an async
     result is handed back (ledger 136); no corruption. The same thread nests; an
     overlapping call of the owning thread gets the core's -2, as the same class.
-    Awaited async calls in sequence pass whichever thread each resumes on. `Wakeup()` and
-    `Handle()`, `Metrics()` and `EnforceRebalance()` from another thread pass the owner check
+    Awaited async calls in sequence pass whichever thread each resumes on. `Wakeup()`,
+    `Metrics()` and `EnforceRebalance()` from another thread pass the owner check
     meanwhile (the core may still refuse `EnforceRebalance()` with -2 while it holds its flag). A call made inside a callback on the drain thread passes the owner check, and on
     `AsyncMockConsumer` does not wait (no deadlock). On a mock, another thread's call waits
     for the running one, and is refused for the whole of `AsyncMockConsumer.Rebalance` and
