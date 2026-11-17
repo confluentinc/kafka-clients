@@ -314,13 +314,15 @@ rules and readings. Newest entries are at the end; dates are in IST.
     (`allSettled` semantics), then raise the oldest kept error, `flush()` flushing first even with a kept error.
     Nothing is logged. Only the record's own `send()` gets its callback's error: with `autoComplete` a record's
     callback is its own `send()`'s whichever drain runs it, so a nested `send()`, or a `send()` that drains a pending
-    `flush()`'s callbacks, leaves their errors to their own calls. The callback queue does not nest, so a `send()`
-    made from a callback's synchronous part has its callback run by the outer drain once that callback returns, and
-    waits for it before it settles, rejecting with its error, as Java's nested `send()` throws it; a `completeNext()`
+    `flush()`'s callbacks, leaves their errors to their own calls. The callback queue does not nest, so with
+    `autoComplete` a `send()` made from a callback's synchronous part has its callback run by the outer drain once that callback returns, and
+    waits for it before it settles, rejecting with its error, as Java's nested `send()` throws it (a deviation: Java runs
+    the callback inside the nested `send()`; it goes when a drain started inside a drain runs the callbacks); a `completeNext()`
     or `errorNext()` made there cannot wait, so the next record's throw comes out of the outer completing call (a
     deviation). A `close()` from one of the mock's callbacks, before its first `await`, skips the wait, as Python's
     `AsyncMockProducer`; after it the core's close waits for that callback's report, and a `flush()` from a callback
-    always does, so a callback that awaits either never settles (`KafkaProducer` refuses a `flush()` made before the
+    does too, unless a flush error is set, which it rejects with at once, so a callback that awaits either otherwise
+    never settles (`KafkaProducer` refuses a `flush()` made before the
     first `await`; Java's mock makes no such check). Java's mock calls `onCompletion`
     with no `try` (`MockProducer.Completion#complete`), so its error propagates and the record's future stays
     incomplete; here the core's mock completes the future once the Promise settled, the deviation already recorded
