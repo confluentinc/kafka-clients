@@ -101,7 +101,7 @@ rules and readings. Newest entries are at the end; dates are in IST.
 19. **Metrics:**
     - `KafkaMetric.config(MetricConfig)`, the setter, is left out (Q30).
     - `MetricName` keeps a `Map` argument by reference, as Java does; a plain object is read into a new `Map`.
-    - `setMockMetrics` is left out: the FFI has no `KafkaMetric` constructor.
+    - `setMockMetrics` is left out: the FFI has no `KafkaMetric` constructor (entry 26).
 20. **Error payloads:**
     - Every public type the errors reach is translated (`TimestampType`, `OffsetAndMetadata`,
       `RecordDeserializationError.DeserializationExceptionOrigin`). Q30 says untranslated types appear only in
@@ -234,3 +234,13 @@ rules and readings. Newest entries are at the end; dates are in IST.
     - config contents, which the core checks (Q52, Q54): a value of the wrong type (`'linger.ms': true`,
       `'batch.size': 42.5`, `acks: 5`), a missing `bootstrap.servers`, `{ configs: null }` read as a config map, and a
       NUL in a config key or value, a topic or a header key.
+
+## Nothing left blocked on the core (2026-11-17)
+
+26. **`QuotaViolationError.metric()` from the core** is built as the Python and .NET clients build it: a `KafkaMetric`
+    whose `MetricName` is the view's (`kafka_common_QuotaViolationError_metric_name`: name, group, description,
+    tags) and whose value is the error's `value`, the value Java's `Sensor.checkQuotas` measured. With no name from
+    the view it has an empty one, as .NET's. `metric()` is typed `KafkaMetric`. The items still left out match the
+    other bindings: `setMockMetrics` is left out as in .NET, whose mock also wraps the FFI's, and
+    `CorrelationIdMismatchError`'s ids are `-1` in all three. So nothing in the producer is blocked on the core; the
+    worker cleanup hook stays a Future improvement.

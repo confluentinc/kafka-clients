@@ -243,6 +243,53 @@ int payload_double(napi_env env, napi_value obj, const char* name, double value,
     return napi_create_double(env, value, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
 }
 
+// A borrowed C string as a JS string, NULL as "" (a metric name's fields are
+// never null in Java).
+static napi_value string_or_empty(napi_env env, const char* s) {
+    napi_value v;
+    return napi_create_string_utf8(env, s != NULL ? s : "", NAPI_AUTO_LENGTH, &v) == napi_ok ? v : NULL;
+}
+
+int payload_metric_name(napi_env env, napi_value obj, const char* name, const kafka_common_MetricName_t* value,
+                        kafka_common_Error_t* failed) {
+    if (accessor_failed(failed)) return 0;
+    napi_value v;
+    if (value == NULL) return napi_get_null(env, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char* n = NULL;
+    const char* g = NULL;
+    const char* d = NULL;
+    kafka_Map_t* tags = NULL;
+    int32_t size = 0;
+    error_discard(FFI_SET(n, kafka_common_MetricName_name_err(value, &ffi_err)));
+    error_discard(FFI_SET(g, kafka_common_MetricName_group_err(value, &ffi_err)));
+    error_discard(FFI_SET(d, kafka_common_MetricName_description_err(value, &ffi_err)));
+    error_discard(FFI_SET(tags, kafka_common_MetricName_tags_err(value, &ffi_err)));
+    if (tags != NULL) error_discard(FFI_SET(size, kafka_Map_size_err(tags, &ffi_err)));
+    napi_value arr, x;
+    int rc = napi_create_object(env, &v) == napi_ok && napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok
+                 ? 0
+                 : -1;
+    for (int32_t i = 0; i < size && rc == 0; i++) {
+        const char* key = NULL;
+        const char* tag = NULL;
+        error_discard(FFI_SET(key, (const char*)kafka_Map_key_err(tags, i, &ffi_err)));
+        error_discard(FFI_SET(tag, (const char*)kafka_Map_value_err(tags, i, &ffi_err)));
+        napi_value pair, k, t;
+        if (napi_create_array_with_length(env, 2, &pair) != napi_ok || (k = string_or_empty(env, key)) == NULL
+            || (t = string_or_empty(env, tag)) == NULL || napi_set_element(env, pair, 0, k) != napi_ok
+            || napi_set_element(env, pair, 1, t) != napi_ok || napi_set_element(env, arr, (uint32_t)i, pair) != napi_ok) {
+            rc = -1;
+        }
+    }
+    if (tags != NULL) error_discard(FFI_ERR(kafka_Map_destroy_err(tags, &ffi_err)));
+    if (rc == 0 && ((x = string_or_empty(env, n)) == NULL || set_named(env, v, "name", x))) rc = -1;
+    if (rc == 0 && ((x = string_or_empty(env, g)) == NULL || set_named(env, v, "group", x))) rc = -1;
+    if (rc == 0 && ((x = string_or_empty(env, d)) == NULL || set_named(env, v, "description", x))) rc = -1;
+    if (rc == 0 && set_named(env, v, "tags", arr)) rc = -1;
+    return rc == 0 ? set_named(env, obj, name, v) : -1;
+}
+
 int payload_int64(napi_env env, napi_value obj, const char* name, int64_t value, kafka_common_Error_t* failed) {
     if (accessor_failed(failed)) return 0;
     napi_value v;

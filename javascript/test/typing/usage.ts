@@ -501,6 +501,9 @@ new TopicAuthorizationError({ message: 'm', cause: sasl });
 new ExecutionError('failed');
 // @ts-expect-error QuotaViolationException has no (String) constructor: its one form is { metric, value, bound }
 new QuotaViolationError('m');
+// metric() is a KafkaMetric, an error the core reports included: its name comes from the core.
+declare const quota: QuotaViolationError;
+expectTypeOf(quota.metric()).toEqualTypeOf<KafkaMetric>();
 // The payload constructors (Q39): Java's other parameters by name, beside message and cause.
 const unauthorized = new TopicAuthorizationError({ unauthorizedTopics: ['a', 'b'] });
 expectTypeOf(unauthorized.unauthorizedTopics()).toEqualTypeOf<Set<string>>();

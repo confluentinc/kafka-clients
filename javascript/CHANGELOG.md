@@ -282,8 +282,9 @@ newer.
   error the core reports carries its payload, read through the C API's view
   of its class (an invalid topic's `InvalidTopicError` lists it); a field
   the C API cannot give keeps its default, a recorded deviation
-  (`QuotaViolationError`'s `metric()` `null`, typed `KafkaMetric | null`;
-  `CorrelationIdMismatchError`'s ids `-1`).
+  (`CorrelationIdMismatchError`'s ids `-1`). `QuotaViolationError`'s
+  `metric()` is a `KafkaMetric` with the metric's name and the error's value,
+  as the Python and .NET clients build it.
   `RecordDeserializationError` has Java's full payload (`origin()`,
   `topicPartition()`, `offset()`, `timestamp()`, `timestampType()`,
   `keyBuffer()`, `valueBuffer()`, `headers()`) and its nested

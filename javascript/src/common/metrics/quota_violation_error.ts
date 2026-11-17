@@ -15,10 +15,6 @@
 // GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
 // the Java source of `org.apache.kafka.common.metrics.QuotaViolationException`;
 // `cargo xtask check-generated` checks it is up to date.
-//
-// An error the core reports has no payload for `metric` (it is `null`, Java's
-// default) *(deviation: Java's error carries it. Why: the C API's view of the
-// class has no accessor for it. Goes when: the view exposes it)*.
 
 import { javaDoubleString, javaString } from '../../internal/java_string';
 import * as P from '../../internal/payload';
@@ -83,9 +79,9 @@ export class QuotaViolationError extends KafkaError {
    * @returns Java's `metric`
    * @throws `TypeError` when it is given an argument: it only reads
    */
-  metric(): KafkaMetric | null {
+  metric(): KafkaMetric {
     P.readOnly('metric', arguments.length);
-    return this.#metric;
+    return this.#metric as KafkaMetric;
   }
 
   /**
@@ -112,8 +108,7 @@ export class QuotaViolationError extends KafkaError {
 
   /**
    * Java's `toString()` override, Java's class name written as the error's
-   * `name`; `Error`'s text for an error the core reports without the field it
-   * reads.
+   * `name`; `Error`'s text when a field it reads is null.
    *
    * @returns the error's text
    */

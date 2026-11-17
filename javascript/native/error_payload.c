@@ -194,6 +194,11 @@ napi_value error_payload_to_js(napi_env env, int code, const kafka_common_Error_
         error_discard(FFI_SET(view, kafka_common_Error_quota_violation_err(e, &ffi_err)));
         if (view == NULL || napi_create_object(env, &obj) != napi_ok) return NULL;
         {
+            const kafka_common_MetricName_t* value = NULL;
+            kafka_common_Error_t* failed = FFI_SET(value, kafka_common_QuotaViolationError_metric_name_err(view, &ffi_err));
+            if (payload_metric_name(env, obj, "metric", value, failed)) return NULL;
+        }
+        {
             double value = 0.0;
             kafka_common_Error_t* failed = FFI_SET(value, kafka_common_QuotaViolationError_value_err(view, &ffi_err));
             if (payload_double(env, obj, "value", value, failed)) return NULL;
