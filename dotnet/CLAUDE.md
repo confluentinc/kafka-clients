@@ -1170,7 +1170,8 @@ exception, wrapped as that call wraps a callback's, while a `Poll` returns its r
 next awaited call throws it, as Python does (ledger 52;
 `python/confluent_kafka/consumer/async_consumer.py:184-194`, `:515-526` at `3f8a5bc6`). A
 `null` async callback throws `ArgumentNullException`. On `IAsyncConsumer`,
-`CommitAsync(offsets, null)` is ambiguous and does not compile: write `CommitAsync(offsets)`.
+`CommitAsync(offsets, null)` is ambiguous and does not compile: write
+`CommitAsync(offsets, (IOffsetCommitCallback?)null)`, Java's `commitAsync(Map, null)`.
 
 ⚠ **§4 divergence — the delivery callback is SYNC (with an async form on `IAsyncProducer`,
 M19/P1), and the callback-taking `send` is kept ALONGSIDE the future (M14/P1; mechanism changed
