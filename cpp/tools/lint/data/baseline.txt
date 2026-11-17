@@ -268,7 +268,6 @@ missing-class org.apache.kafka.common.quota.ClientQuotaEntity
 missing-class org.apache.kafka.common.quota.ClientQuotaFilter
 missing-class org.apache.kafka.common.quota.ClientQuotaFilterComponent
 missing-class org.apache.kafka.common.record.TimestampType
-missing-class org.apache.kafka.common.resource.PatternType
 missing-class org.apache.kafka.common.resource.ResourcePattern
 missing-class org.apache.kafka.common.resource.ResourcePatternFilter
 missing-class org.apache.kafka.common.resource.ResourceType
