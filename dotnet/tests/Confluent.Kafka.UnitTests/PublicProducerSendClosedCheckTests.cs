@@ -15,7 +15,9 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -25,7 +27,8 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Send checks for a closed producer before it serializes, as Java's doSend does, on all four producer types: the
 /// serializer is never invoked, so a stateful one takes no action for a doomed send, and its throw cannot mask
-/// the IllegalStateException. The closed check also comes before the null-record check, as in Java.
+/// the IllegalStateException. As in Java's MockProducer.send, a closed producer, a fenced mock and an injected send
+/// exception are all reported before the record is read.
 /// </summary>
 public sealed class PublicProducerSendClosedCheckTests
 {
@@ -34,6 +37,8 @@ public sealed class PublicProducerSendClosedCheckTests
     private const string MockClosed = "MockProducer is already closed.";
 
     private const string RealClosed = "Cannot perform operation after producer has been closed";
+
+    private const string MockFenced = "MockProducer is fenced.";
 
     private static Dictionary<string, object?> RealConfig() => new()
     {
@@ -153,6 +158,52 @@ public sealed class PublicProducerSendClosedCheckTests
         AssertClosed(RealClosed, () => { _ = asyncReal.Send(null!); });
         AssertClosed(RealClosed, () => { _ = asyncReal.Send(null!, (ICallback)null!); });
         AssertClosed(RealClosed, () => { _ = asyncReal.Send(null!, (IAsyncCallback)null!); });
+    }
+
+    [Fact]
+    public async Task EverySend_NullArgumentsOnAFencedMock_ReportTheFenceFirst()
+    {
+        ISerializer<byte[]> bytes = Serdes.ByteArray().Serializer();
+        MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(bytes, bytes);
+        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(bytes, bytes);
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
+        using IDisposable asyncMockDisposal = TestTimeout.Disposal(asyncMock);
+        mock.InitTransactions();
+        mock.FenceProducer();
+        await asyncMock.InitTransactions();
+        asyncMock.FenceProducer();
+
+        Assert.Equal(MockFenced, Assert.Throws<KafkaException>(() => mock.Send(null!)).Message);
+        Assert.Equal(MockFenced, Assert.Throws<KafkaException>(() => mock.Send(null!, null!)).Message);
+        Assert.Equal(MockFenced, (await Assert.ThrowsAsync<KafkaException>(() => asyncMock.Send(null!).AsTask())).Message);
+        Assert.Equal(
+            MockFenced,
+            (await Assert.ThrowsAsync<KafkaException>(() => asyncMock.Send(null!, (ICallback)null!).AsTask())).Message);
+        Assert.Equal(
+            MockFenced,
+            (await Assert.ThrowsAsync<KafkaException>(() => asyncMock.Send(null!, (IAsyncCallback)null!).AsTask())).Message);
+    }
+
+    [Fact]
+    public async Task EverySend_NullArgumentsWithAnInjectedSendException_ThrowThatException()
+    {
+        ISerializer<byte[]> bytes = Serdes.ByteArray().Serializer();
+        MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(bytes, bytes);
+        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(bytes, bytes);
+        using IDisposable mockDisposal = TestTimeout.Disposal(mock);
+        using IDisposable asyncMockDisposal = TestTimeout.Disposal(asyncMock);
+        KafkaException injected = new KafkaException("injected");
+        mock.SetSendException(injected);
+        asyncMock.SetSendException(injected);
+
+        Assert.Same(injected, Assert.Throws<KafkaException>(() => mock.Send(null!)));
+        Assert.Same(injected, Assert.Throws<KafkaException>(() => mock.Send(null!, null!)));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => asyncMock.Send(null!).AsTask()));
+        Assert.Same(
+            injected, await Assert.ThrowsAsync<KafkaException>(() => asyncMock.Send(null!, (ICallback)null!).AsTask()));
+        Assert.Same(
+            injected,
+            await Assert.ThrowsAsync<KafkaException>(() => asyncMock.Send(null!, (IAsyncCallback)null!).AsTask()));
     }
 
     private static void AssertClosed(string message, Action send)

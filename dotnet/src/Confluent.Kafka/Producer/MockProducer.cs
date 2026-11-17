@@ -97,8 +97,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <inheritdoc/>
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record)
     {
-        // As Java's doSend and MockProducer.send, a closed producer is reported before the record is read.
-        _native.ThrowIfClosed();
+        ThrowIfRefused();
 
         if (record is null)
         {
@@ -111,7 +110,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <inheritdoc/>
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
     {
-        _native.ThrowIfClosed();
+        ThrowIfRefused();
 
         if (record is null)
         {
@@ -126,14 +125,20 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
         return SendValidated(record, callback);
     }
 
-    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, ICallback? callback)
+    // As Java's MockProducer.send: a closed producer, then a fenced one, then the send exception, all before the
+    // record is read.
+    private void ThrowIfRefused()
     {
+        _native.ThrowIfClosed();
         Exception? refused = _native.MockSendRefusal();
         if (refused is not null)
         {
             ExceptionDispatchInfo.Capture(refused).Throw();
         }
+    }
 
+    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, ICallback? callback)
+    {
         // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(

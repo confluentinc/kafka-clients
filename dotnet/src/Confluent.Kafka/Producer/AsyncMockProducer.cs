@@ -97,8 +97,11 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
-        // As Java's doSend and MockProducer.send, a closed producer is reported before the record is read.
         _native.ThrowIfClosed();
+        if (_native.MockSendRefusal() is { } refused)
+        {
+            return Refused(refused);
+        }
 
         if (record is null)
         {
@@ -115,6 +118,10 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         CancellationToken cancellationToken = default)
     {
         _native.ThrowIfClosed();
+        if (_native.MockSendRefusal() is { } refused)
+        {
+            return Refused(refused);
+        }
 
         if (record is null)
         {
@@ -136,6 +143,10 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         CancellationToken cancellationToken = default)
     {
         _native.ThrowIfClosed();
+        if (_native.MockSendRefusal() is { } refused)
+        {
+            return Refused(refused);
+        }
 
         if (record is null)
         {
@@ -150,6 +161,11 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         return SendValidated(record, null, cancellationToken, callback);
     }
 
+    // As Java's MockProducer.send: a closed producer, then a fenced one, then the send exception, all before the
+    // record is read. The last two end the returned ValueTask, as the async mock reports a refused send.
+    private static ValueTask<AsyncKafkaFuture<RecordMetadata>> Refused(Exception refused) =>
+        new ValueTask<AsyncKafkaFuture<RecordMetadata>>(Task.FromException<AsyncKafkaFuture<RecordMetadata>>(refused));
+
     // Not async, so a serializer throw stays synchronous.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
@@ -157,13 +173,6 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         CancellationToken cancellationToken,
         IAsyncCallback? asyncCallback = null)
     {
-        Exception? refused = _native.MockSendRefusal();
-        if (refused is not null)
-        {
-            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(
-                Task.FromException<AsyncKafkaFuture<RecordMetadata>>(refused));
-        }
-
         // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(
