@@ -149,6 +149,19 @@ const ALLOWED = [
     reason: 'the settlements waiting for the event-loop turn (javascript/CLAUDE.md rule 3); the records are handed over at once',
   },
   {
+    key: 'MockProducer.#callbackErrors',
+    reason:
+      "the errors the mock's callback Promises rejected with, raised one per later call (Python's AsyncMockProducer._mock_callback_errors): errors, not records",
+  },
+  {
+    key: 'MockProducer.#running',
+    reason: "the mock's callback Promises not settled yet, which flush() and close() wait for: not a store of records",
+  },
+  {
+    key: 'MockProducer.#sendStarted',
+    reason: "the callback Promises one send()'s own auto-completed callback started, during its hand-over: not a store of records",
+  },
+  {
     key: 'MockProducer.#deferred',
     reason: "the mock's settlements waiting for the event-loop turn, as KafkaProducer's; the records are handed over at once",
   },
