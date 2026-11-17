@@ -266,7 +266,7 @@ echo "== Building Rust (FFI, release) + C producer_perf_test in $REPO =="
 export PATH="$HOME/.cargo/bin:$PATH"
 ( cd "$REPO/rust" && RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release )
 cd "$REPO"
-cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DCMAKE_C_FLAGS="-O2 -march=native"
+cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DRUST_PROFILE=release -DCMAKE_C_FLAGS="-O2 -march=native"
 cmake --build c/build --target producer_perf_test
 echo "== Bootstrap complete =="
 """
