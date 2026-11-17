@@ -112,10 +112,10 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
    members of an enum are free functions beside it. A field or an instance method takes the enum
    first and keeps its own name, found by ADL: `id(TimestampType::CREATE_TIME)`,
    `is_unknown(p)`, `toString` → `to_string(e)` and `operator<<` (§1.4). A static method or
-   static constant goes in a namespace beside the enum named after it in snake_case, the
-   enclosing classes first for a nested one: `timestamp_type::for_name("CreateTime")`,
-   `config_resource_type::for_id(2)`, `ssl_client_auth::VALUES` (an `inline constexpr` variable,
-   or a function as §2.4 says for a class type). An enum's kind, underlying type and values are
+   static constant goes in a namespace beside the enum spelled as its Java path, each class
+   snake_cased: `timestamp_type::for_name("CreateTime")`, `config_resource::type::for_id(2)` for
+   `ConfigResource.Type.forId`, `ssl_client_auth::VALUES` (an `inline constexpr` variable, or a
+   function as §2.4 says for a class type). An enum's kind, underlying type and values are
    frozen once released; new enumerators are appended.
 
 ## 4. Overloads and signatures

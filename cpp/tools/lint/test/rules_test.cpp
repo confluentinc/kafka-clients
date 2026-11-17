@@ -338,7 +338,7 @@ TEST(ExpectedTest, AnEnumWithOneIntegerFieldTakesItsValues) {
 }
 
 TEST(ExpectedTest, PutsAnEnumsStaticsInANamespaceNamedAfterIt) {
-    // §3.3: ConfigResource.Type.forId -> config_resource_type::for_id;
+    // §3.3: ConfigResource.Type.forId -> config_resource::type::for_id;
     // SslClientAuth.VALUES -> ssl_client_auth::VALUES, an inline constexpr.
     const auto model = public_model_of({{"org/apache/kafka/common/config/ConfigResource.java", R"(
         package org.apache.kafka.common.config;
@@ -361,9 +361,9 @@ TEST(ExpectedTest, PutsAnEnumsStaticsInANamespaceNamedAfterIt) {
         }
     )"}});
     const auto& type = *model.find("org.apache.kafka.common.config.ConfigResource$Type");
-    EXPECT_EQ(cklint::rules::enum_statics_namespace(model, type), "config_resource_type");
+    EXPECT_EQ(cklint::rules::enum_statics_namespace(model, type), "config_resource::type");
     const auto e = cklint::rules::expected(model, type);
-    EXPECT_EQ(function(e, "for_id").qualifier, "config_resource_type");
+    EXPECT_EQ(function(e, "for_id").qualifier, "config_resource::type");
     EXPECT_EQ(function(e, "id").qualifier, "");
 
     const auto ssl = cklint::rules::expected(model, *model.find("org.apache.kafka.common.config.SslClientAuth"));

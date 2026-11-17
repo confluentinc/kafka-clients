@@ -62,8 +62,8 @@ std::string method_name(const java::Method& method);
 std::vector<std::string> parameter_names(const java::Model& model, const java::Type& owner, const java::Method& method);
 
 /// §3.3: the namespace beside an enum that holds its static methods and static
-/// constants, the enum's name in snake_case with its enclosing classes' first:
-/// `timestamp_type`, `config_resource_type` for `ConfigResource.Type`.
+/// constants, its Java path with each class snake_cased: `timestamp_type`,
+/// `config_resource::type` for `ConfigResource.Type`.
 std::string enum_statics_namespace(const java::Model& model, const java::Type& enum_type);
 
 /// Whether `word` is a C++ keyword or alternative token.

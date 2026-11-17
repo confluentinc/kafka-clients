@@ -55,8 +55,8 @@ struct ExpectedFunction {
     Mapping returns;  ///< empty for a constructor
     bool is_virtual = false;
     bool is_pure = false;
-    /// The namespace beside an enum that holds it (§3.3): `timestamp_type`;
-    /// empty when it is not an enum's static.
+    /// The namespace beside an enum that holds it (§3.3): `timestamp_type`,
+    /// `config_resource::type`; empty when it is not an enum's static.
     std::string qualifier;
     /// `<binary name>#<signature>` or `#<FIELD>`; empty for a C++ convention.
     std::string java_member;

@@ -248,7 +248,7 @@ std::vector<std::string> parameter_names(const java::Model& model, const java::T
 std::string enum_statics_namespace(const java::Model& model, const java::Type& enum_type) {
     std::string out;
     for (const auto& name : type_chain(model, enum_type)) {
-        out += (out.empty() ? "" : "_") + snake_case(name);
+        out += (out.empty() ? "" : "::") + snake_case(name);
     }
     return out;
 }
