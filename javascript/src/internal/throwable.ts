@@ -263,9 +263,11 @@ export function errorArgs(cls: ErrorClassLike, args: readonly unknown[]): [strin
   if (isCoreArgs(args)) {
     const { message, cause, payload } = args[0];
     const fields: Record<string, unknown> = {};
+    const given = payload ?? {};
     for (const [field, [kind, coreDefault]] of Object.entries(r?.payload.fields ?? {})) {
-      const raw = payload?.[field];
-      fields[field] = raw === undefined ? coreDefault : kind.core(raw);
+      const raw = given[field];
+      if (raw !== undefined) fields[field] = kind.core(raw, given);
+      else fields[field] = kind.absent === undefined ? coreDefault : kind.absent(given);
     }
     pendingFields = fields;
     return [message, cause === undefined ? undefined : { cause }];

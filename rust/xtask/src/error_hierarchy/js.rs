@@ -291,6 +291,7 @@ enum CoreConv {
     String,
     Int32,
     Double,
+    MetricName,
 }
 
 impl CoreConv {
@@ -308,6 +309,7 @@ impl CoreConv {
             CoreConv::String => "const char*",
             CoreConv::Int32 => "int32_t",
             CoreConv::Double => "double",
+            CoreConv::MetricName => "const kafka_common_MetricName_t*",
         }
     }
 
@@ -336,6 +338,7 @@ impl CoreConv {
             CoreConv::String => "payload_string",
             CoreConv::Int32 => "payload_int32",
             CoreConv::Double => "payload_double",
+            CoreConv::MetricName => "payload_metric_name",
         }
     }
 }
@@ -511,6 +514,13 @@ const CORE_READS: &[CoreRead] = &[
         "kafka_common_Error_quota_violation_err",
         "kafka_common_QuotaViolationError_t",
         &[
+            // The metric's name; src/internal/payload.ts builds the KafkaMetric
+            // from it and the error's value, as the Python and .NET clients do.
+            (
+                "metric",
+                "kafka_common_QuotaViolationError_metric_name_err",
+                CoreConv::MetricName,
+            ),
             ("value", "kafka_common_QuotaViolationError_value_err", CoreConv::Double),
             ("bound", "kafka_common_QuotaViolationError_bound_err", CoreConv::Double),
         ],
@@ -1750,8 +1760,7 @@ fn render_getter(gt: &JsGetter, own: &[(String, Kind)]) -> Res<String> {
 
 /// Java's `toString()` override of a payload class, as TypeScript: the
 /// override's `+` chain, Java's class name as the error's `name`. A field it
-/// dereferences that is null (an error the core reports without it) prints
-/// `Error`'s text instead.
+/// dereferences that is null prints `Error`'s text instead.
 fn render_to_string(fqn: &str, expr: &str, own: &[(String, Kind)]) -> Res<String> {
     let parts = split_plus(expr);
     let bad = |what: &str| anyhow::anyhow!("{fqn}.toString(): unsupported {what} in `{expr}`");
@@ -1800,8 +1809,8 @@ fn render_to_string(fqn: &str, expr: &str, own: &[(String, Kind)]) -> Res<String
     Ok(format!(
         "{}\n  override toString(): string {{\n{fallback}    return {};\n  }}",
         tsdoc(
-            "Java's `toString()` override, Java's class name written as the error's `name`; `Error`'s text for an \
-             error the core reports without the field it reads.\n\n@returns the error's text",
+            "Java's `toString()` override, Java's class name written as the error's `name`; `Error`'s text when a \
+             field it reads is null.\n\n@returns the error's text",
             "  "
         ),
         js.join(" + ")
@@ -2542,6 +2551,14 @@ mod tests {
              kafka_common_RecordTooLargeError_record_too_large_partitions_err(view, &ffi_err));\n            \
              if (payload_topic_partition_long_map(env, obj, \"recordTooLargePartitions\", value, failed)) return NULL;\n"
         ));
+        // The metric of a quota violation is read through the view's metric name.
+        assert!(c.contains(
+            "            const kafka_common_MetricName_t* value = NULL;\n            \
+             kafka_common_Error_t* failed = FFI_SET(value, \
+             kafka_common_QuotaViolationError_metric_name_err(view, &ffi_err));\n            \
+             if (payload_metric_name(env, obj, \"metric\", value, failed)) return NULL;\n"
+        ));
+        assert!(quota.content.contains("  metric(): KafkaMetric {\n"));
         // A class with its parent's signatures declares no constructor.
         let buffer = find("BufferExhaustedError");
         assert_eq!(buffer.dir, "producer");

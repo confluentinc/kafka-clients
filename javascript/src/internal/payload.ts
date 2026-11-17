@@ -34,6 +34,7 @@
 // | TopicPartition           | a TopicPartition              | (no getter)               |
 // | Map<TopicPartition, Long>| a TopicPartitionMap           | a new TopicPartitionMap<bigint> |
 // | KafkaMetric              | a KafkaMetric                 | the same KafkaMetric      |
+//   (from the core: built from the metric's name and the error's value)
 // | ByteBuffer               | a Uint8Array, or null         | a Buffer over its memory  |
 // | Headers                  | a Headers (kept), or an iterable of Header | the same Headers |
 // | an enum                  | a constant, or null           | the constant              |
@@ -44,6 +45,7 @@ import { checkInt, checkLong } from './java_number';
 import { Header } from '../common/header/header';
 import { Headers } from '../common/header/headers';
 import { KafkaMetric } from '../common/metrics/kafka_metric';
+import { MetricName } from '../common/metric_name';
 import { OffsetAndMetadata } from '../consumer/offset_and_metadata';
 import { TopicPartition } from '../common/topic_partition';
 import { TopicPartitionMap } from '../common/topic_partition_map';
@@ -63,9 +65,18 @@ export interface Kind {
    * A field's value from the plain value native/error.c reads through the FFI.
    *
    * @param raw - the plain value read
+   * @param payload - the error's whole payload, for a field built from others
    * @returns the value to store
    */
-  core(raw: unknown): unknown;
+  core(raw: unknown, payload: Readonly<Record<string, unknown>>): unknown;
+  /**
+   * A field's value when the core gave none (its accessor failed), where
+   * Java's default would not do; absent, the field takes its default.
+   *
+   * @param payload - the error's whole payload
+   * @returns the value to store
+   */
+  absent?(payload: Readonly<Record<string, unknown>>): unknown;
   /**
    * What a getter returns for the stored value: a copy of a collection.
    *
@@ -260,13 +271,37 @@ export const topicPartitionLongMap: Kind = {
   copy: (stored) => (stored === null ? null : new TopicPartitionMap(stored as TopicPartitionMap<unknown>)),
 };
 
-/** Java's `KafkaMetric`: a KafkaMetric or null. */
+/**
+ * The KafkaMetric of an error the core reports, from the metric's name the
+ * FFI gives (`{ name, group, description, tags }`, or null) and the error's
+ * `value`: Java's `Sensor.checkQuotas` throws with the metric and the value it
+ * measured, so the metric's value is the error's. Without a name it has an
+ * empty one, as the .NET client builds it.
+ *
+ * @param raw - the metric name read, or null
+ * @param payload - the error's payload
+ * @returns the metric
+ */
+function coreMetric(raw: unknown, payload: Readonly<Record<string, unknown>>): KafkaMetric {
+  const n = (raw ?? { name: '', group: '', description: '', tags: [] }) as {
+    name: string;
+    group: string;
+    description: string;
+    tags: Array<[string, string]>;
+  };
+  const metricName = new MetricName({ name: n.name, group: n.group, description: n.description, tags: new Map(n.tags) });
+  const value = typeof payload.value === 'number' ? payload.value : 0;
+  return KafkaMetric.internalSnapshot(metricName, value, true);
+}
+
+/** Java's `KafkaMetric`: a KafkaMetric or null; the core gives its name (`coreMetric`). */
 export const kafkaMetric: Kind = {
   take(value, name) {
     if (value !== null && !(value instanceof KafkaMetric)) throw new TypeError(`${name} must be a KafkaMetric`);
     return value;
   },
-  core: same,
+  core: coreMetric,
+  absent: (payload) => coreMetric(null, payload),
   copy: same,
 };
 

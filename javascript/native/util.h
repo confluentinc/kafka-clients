@@ -128,6 +128,10 @@ int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* n
 int payload_string(napi_env env, napi_value obj, const char* name, const char* value, kafka_common_Error_t* failed);
 int payload_int32(napi_env env, napi_value obj, const char* name, int32_t value, kafka_common_Error_t* failed);
 int payload_double(napi_env env, napi_value obj, const char* name, double value, kafka_common_Error_t* failed);
+// A borrowed metric name as { name, group, description, tags }, its tags an
+// array of [key, value] pairs sorted by key; NULL as null.
+int payload_metric_name(napi_env env, napi_value obj, const char* name, const kafka_common_MetricName_t* value,
+                        kafka_common_Error_t* failed);
 int payload_int64(napi_env env, napi_value obj, const char* name, int64_t value, kafka_common_Error_t* failed);
 int payload_topic_partition(napi_env env, napi_value obj, const char* name, const kafka_common_TopicPartition_t* value,
                             kafka_common_Error_t* failed);
