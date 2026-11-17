@@ -1,0 +1,9 @@
+# org.apache.kafka.common.Node: isEmpty() and hashCode() test the host field for null, hasRack()
+# and hashCode() the rack field.
+org.apache.kafka.common.Node#Node(int,String,int) host nullable field isEmpty() tests the host field for null
+org.apache.kafka.common.Node#Node(int,String,int,String) host nullable field isEmpty() tests the host field for null
+org.apache.kafka.common.Node#Node(int,String,int,String,boolean) host nullable field isEmpty() tests the host field for null
+org.apache.kafka.common.Node#Node(int,String,int,String) rack nullable field hasRack() tests the rack field for null
+org.apache.kafka.common.Node#Node(int,String,int,String,boolean) rack nullable field hasRack() tests the rack field for null
+org.apache.kafka.common.Node#host() return nullable field isEmpty() tests the host field for null
+org.apache.kafka.common.Node#rack() return nullable field hasRack() tests the rack field for null
