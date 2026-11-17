@@ -12,7 +12,8 @@ open and still changing.
 
 - **Phase A** (PR #312): align the producer #312 already has with the rules.
 - **Phase B** (PR #333, stacked on #312): complete the producer.
-- **Phase C**: the generators the rules require (Q4, Q13, Q74). §4 has the timing decision.
+- **Phase C**: not needed. The owner reads the rules' "Code is generated wherever it can be" as meant for the error
+  codes (`DECISIONS.md`, entry 32), so §4's generators are not built.
 - **Not built:** transactions (by request); the rules' "Future improvements" (worker cleanup hook, borrowed-Buffer
   debug check, `[util.inspect.custom]`, refusing a call after a callback's first `await`, Q49); any KafkaJS-style API
   (decided after GA).
@@ -105,9 +106,11 @@ Phase A's send path (zero copy, no closed state, frozen records).
   the `Headers` row on plain `[key, value]` pairs (the other, how a `Header` from a changeable `Headers` stays valid,
   is answered for this binding by the owner's option 1, while the root row stays parked), when and how the never-closed warning is logged, and the other `tsc` settings (Q74).
 - **Transactions**: out of scope by request (the producer's and `MockProducer`'s transaction calls).
-- **Phase C** (§4): the generators of the class modules and the addon's C wrappers, its timing still to decide.
+## 4. Phase C: generators (not needed)
 
-## 4. Phase C: generators (decide the timing)
+**Decided by the owner (2026-11-17):** "Code is generated wherever it can be" is meant for the error codes, which
+are generated, so neither generator below is built and the hand-written modules stay (`DECISIONS.md`, entry 32;
+`javascript/CLAUDE.md`, "Generated files"). The analysis that led to the question:
 
 The rules say "Code is generated wherever it can be". "Each Java class is one **generated** snake_case file",
 `check-generated` covers "the form tables", and Q4 adds generated C wrappers with their TypeScript types. Today
@@ -121,8 +124,9 @@ the config constants and the producer's configuration keys (`src/producer/produc
   functions.
 - **C2 (L):** an xtask generator for the class modules and their form tables, under `check-generated`.
 
-**Decision:** C before B, which avoids writing B's classes by hand twice. Or C after A and B, which gets the producer
-working on the rules sooner, with the hand-written modules recorded as a deviation until C lands.
+The choice offered was C before B, which avoids writing B's classes by hand twice, or C after A and B, which gets the
+producer working on the rules sooner, with the hand-written modules recorded as a deviation until C lands. B landed
+first, and the owner's reading makes the deviation permanent.
 
 ## 5. Questions to settle
 
