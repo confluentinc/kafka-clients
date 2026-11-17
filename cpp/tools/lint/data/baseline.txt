@@ -269,7 +269,6 @@ missing-class org.apache.kafka.common.record.TimestampType
 missing-class org.apache.kafka.common.resource.ResourcePattern
 missing-class org.apache.kafka.common.resource.ResourcePatternFilter
 missing-class org.apache.kafka.common.resource.ResourceType
-missing-class org.apache.kafka.common.security.auth.KafkaPrincipal
 missing-class org.apache.kafka.common.security.auth.SecurityProtocol
 missing-class org.apache.kafka.common.security.token.delegation.DelegationToken
 missing-class org.apache.kafka.common.security.token.delegation.TokenInformation
