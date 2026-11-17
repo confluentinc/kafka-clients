@@ -136,6 +136,75 @@ a service again, as the fencing test does its conflict consumers, the earlier
 runs (the fenced first run) are not in it. A node bounced with `stop_node` and
 `start_node`, as in `test_consumer_bounce`, appends to the same file.
 
+When you are done, `tests/docker/ducker-ak down`, from `<kafka>`, removes the
+nodes.
+
+### Running every case the client can run
+
+[`system-tests.txt`](system-tests.txt) lists, one selector per line, the 53
+cases of Kafka 4.4.0-rc4 that use these tools and that the client can run. From
+the 14 test files below, it keeps:
+
+- the `group_protocol=consumer` variant of each case that has a
+  `group_protocol` parameter;
+- in `security_test.py`, only the case with a PLAINTEXT client;
+- in `security_rolling_upgrade_test.py`, only
+  `test_enable_separate_interbroker_listener`, as the other cases use an SSL or
+  SASL client;
+- every case of the other files.
+
+| Test file, in `tests/kafkatest/tests/` | .NET tools | Cases |
+|---|---|---|
+| `client/consumer_test.py` | producer and consumer | 24 |
+| `core/replication_replica_failure_test.py` | producer and consumer | 1 |
+| `core/security_test.py` | producer and consumer | 2 |
+| `client/compression_test.py` | producer | 1 |
+| `core/fetch_from_follower_test.py` | producer | 1 |
+| `core/reassign_partitions_test.py` | producer | 4 |
+| `core/log_dir_failure_test.py` | producer | 4 |
+| `core/throttling_test.py` | producer | 2 |
+| `core/snapshot_test.py` | producer | 4 |
+| `core/eligible_leader_replicas_test.py` | producer | 1 |
+| `core/security_rolling_upgrade_test.py` | producer | 1 |
+| `core/quorum_reconfiguration_test.py` | producer | 2 |
+| `core/get_offset_shell_test.py` | producer | 5 |
+| `tools/replica_verification_test.py` | producer | 1 |
+
+Where only the producer is a .NET tool, Kafka's Java tools (`ConsoleConsumer`,
+or the tool the test is about) read the records.
+
+Build the libraries, publish the tools and save the globals as above, then copy
+the list next to the globals, from the repository root:
+
+    cp dotnet/tools/VerifiableClients/system-tests.txt <kafka>/tests/dotnet-system-tests.txt
+
+The largest of these cases asks for 10 nodes, so `tests/docker/ducker-ak up -n
+11` covers them all. Check that every selector still matches a case; this
+prints `Collected 53 tests`:
+
+    docker exec -w /opt/kafka-dev ducker01 bash -c \
+        'mapfile -t S < tests/dotnet-system-tests.txt
+         ducktape --collect-only "${S[@]}" | grep Collected'
+
+A Kafka release that renames a test parameter makes a selector match nothing;
+`ducktape --collect-only <file>` shows the file's current cases and parameters.
+
+Run them all in one ducktape session, which takes a few hours (on macOS, put
+`caffeinate -i` before `docker exec` so the host does not sleep):
+
+    docker exec -w /opt/kafka-dev ducker01 bash -c \
+        'mapfile -t S < tests/dotnet-system-tests.txt
+         ducktape --cluster-file tests/docker/build/cluster.json \
+                  --globals /opt/kafka-dev/tests/dotnet-globals.json "${S[@]}"' \
+        2>&1 | tee <kafka>/dotnet-system-tests.log
+
+To run a part of the list, filter it, for example
+`mapfile -t S < <(grep snapshot_test tests/dotnet-system-tests.txt)`.
+
+The session's directory is the newest under `<kafka>/results/`. Its
+`report.txt` gives each case's result, and each failed case's directory holds
+the tools' capture files and the broker logs.
+
 ### What cannot pass yet
 
 - Classic group protocol: see above. `client/pluggable_test.py` runs it too:
