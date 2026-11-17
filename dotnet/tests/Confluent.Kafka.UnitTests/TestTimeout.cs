@@ -33,7 +33,8 @@ namespace Confluent.Kafka.UnitTests;
 /// name the client's type when it hangs; <see cref="Disposal"/> and <see cref="AsyncDisposal"/> stand in for a
 /// <c>using</c> or <c>await using</c> declaration. A timeout's message ends with diagnostics: whether the action started
 /// and when, and the thread pool's and the process's thread counts, to tell a pool that never ran it from a hung call;
-/// on macOS CI it also ends with the native stacks of the threads inside the native library (<see cref="NativeStacks"/>).
+/// on macOS CI it also ends with the native stacks of the threads inside the native library (<see cref="NativeStacks"/>),
+/// and, where dotnet-dump is given, with the pending awaits from a managed dump (<see cref="ManagedDump"/>).
 /// </summary>
 internal static class TestTimeout
 {
@@ -151,12 +152,12 @@ internal static class TestTimeout
 
     private static string TimedOut(TimeSpan timeout, StartProbe? probe) =>
         $"Operation did not complete within {timeout} — treated as a hang (fail fast). {StartProbe.Describe(probe)}"
-        + NativeStacks.Capture(timeout);
+        + ManagedDump.Capture(timeout) + NativeStacks.Capture(timeout);
 
     private static System.TimeoutException Hung(object target, TimeSpan timeout, StartProbe probe) =>
         new System.TimeoutException(
             $"Teardown of {NameOf(target.GetType())} did not complete within {timeout} — treated as a hang (fail fast). "
-            + StartProbe.Describe(probe) + NativeStacks.Capture(timeout));
+            + StartProbe.Describe(probe) + ManagedDump.Capture(timeout) + NativeStacks.Capture(timeout));
 
     private static string NameOf(Type type) =>
         type.IsGenericType

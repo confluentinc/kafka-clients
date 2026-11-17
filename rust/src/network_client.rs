@@ -728,7 +728,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     async fn initiate_connect(&mut self, node: &crate::common::Node, now: i64) {
         let node_connection_id = node.id_string();
         self.connection_states.connecting(node_connection_id, now, node.host());
-        match self.connection_states.current_address(node_connection_id).await {
+        // Temporary, for the macOS CI hang investigation: the Sender's steps (`hang_step`).
+        crate::consumer::internals::hang_step(
+            "connect: address resolution starts",
+            format_args!("node={node_connection_id} host={}", node.host()),
+        );
+        let resolved = self.connection_states.current_address(node_connection_id).await;
+        crate::consumer::internals::hang_step("connect: address resolution done", format_args!("{resolved:?}"));
+        match resolved {
             Ok(address) => {
                 kafka_debug!(
                     self.log_context,
@@ -737,7 +744,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     address
                 );
                 let addr = SocketAddr::new(address, node.port() as u16);
-                if let Err(e) = self
+                crate::consumer::internals::hang_step("connect: selector connect starts", format_args!("addr={addr}"));
+                let connected = self
                     .selector
                     .connect(
                         node_connection_id,
@@ -746,8 +754,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         self.socket_send_buffer,
                         self.socket_receive_buffer,
                     )
-                    .await
-                {
+                    .await;
+                crate::consumer::internals::hang_step("connect: selector connect done", format_args!("{connected:?}"));
+                if let Err(e) = connected {
                     kafka_warn!(self.log_context, "Error connecting to node {}: {}", node, e);
                     self.connection_states.disconnected(node_connection_id, now);
                     self.handle_server_disconnect(now, node_connection_id, None);
@@ -2135,7 +2144,12 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         }
 
         if self.connection_states.can_connect(node.id_string(), now) {
+            crate::consumer::internals::hang_step(
+                "ready: initiate_connect starts",
+                format_args!("node={}", node.id_string()),
+            );
             self.initiate_connect(node, now).await;
+            crate::consumer::internals::hang_step("ready: initiate_connect done", format_args!(""));
         }
 
         false
@@ -2179,10 +2193,16 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             return responses;
         }
 
+        crate::consumer::internals::hang_step("poll: maybe_update starts", format_args!(""));
         let metadata_timeout = self.maybe_update(now).await;
         let effective_timeout = timeout.min(metadata_timeout).min(self.default_request_timeout_ms as i64);
 
+        crate::consumer::internals::hang_step(
+            "poll: selector poll starts",
+            format_args!("timeout={timeout} metadata_timeout={metadata_timeout} effective={effective_timeout}"),
+        );
         let _poll_result = self.selector.poll(effective_timeout).await;
+        crate::consumer::internals::hang_step("poll: selector poll done", format_args!("{_poll_result:?}"));
 
         // Compute a fresh timestamp after the (potentially blocking) poll,
         // matching Java's `long updatedNow = this.time.milliseconds()`.
@@ -2192,14 +2212,19 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         // Process completed actions
         let mut responses = Vec::new();
         self.handle_completed_sends(&mut responses, updated_now);
+        crate::consumer::internals::hang_step("poll: handle_completed_receives starts", format_args!(""));
         self.handle_completed_receives(&mut responses, updated_now).await;
         self.handle_disconnections(&mut responses, updated_now);
         self.handle_connections();
         self.handle_initiate_api_version_requests(updated_now);
+        crate::consumer::internals::hang_step("poll: handle_timed_out_connections starts", format_args!(""));
         self.handle_timed_out_connections(&mut responses, updated_now).await;
+        crate::consumer::internals::hang_step("poll: handle_timed_out_requests starts", format_args!(""));
         self.handle_timed_out_requests(&mut responses, updated_now).await;
+        crate::consumer::internals::hang_step("poll: handle_rebootstrap starts", format_args!(""));
         self.handle_rebootstrap(&mut responses, updated_now).await;
         Self::complete_responses(&mut responses, &self.log_context);
+        crate::consumer::internals::hang_step("poll: done", format_args!("responses={}", responses.len()));
 
         responses
     }

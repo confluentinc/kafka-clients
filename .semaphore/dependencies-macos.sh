@@ -129,4 +129,9 @@ if [ "${MACOS_SKIP_COLIMA:-}" != "true" ]; then
   colima status
 fi
 
-set +x
+# The jobs source this script, so its options stay set in the job's shell. Turn
+# off -e as well as -x: with -e left on, the job's first failing command exits
+# the shell instead of failing the job, and every epilogue command after it
+# then fails too, so `colima stop`, the upload of the .NET hang samples and the
+# job's `failed` CI result never run.
+set +ex

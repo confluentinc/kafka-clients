@@ -498,19 +498,48 @@ impl Client {
         opaque: SendPtr,
         result: Result<(), Error>,
     ) {
+        self.deliver_traced(cb, opaque, result, None);
+    }
+
+    /// Temporary, for the macOS CI hang investigation: [`Self::deliver`], tracing
+    /// the push and the run of the completion under `trace`'s key.
+    fn deliver_traced(
+        &self,
+        cb: Required<kafka_producer_Producer_init_transactions_cb_t>,
+        opaque: SendPtr,
+        result: Result<(), Error>,
+        trace: Option<usize>,
+    ) {
         let error = result.err().map_or(std::ptr::null_mut(), box_error);
         let error = SendPtr(error as *mut c_void);
-        // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: each
-        // caller of `deliver` (`with_txn_control_cb`, `with_drain_cb`,
-        // `kafka_producer_Producer_close_with_timeout_cb`) passes them on unchanged and delivers
-        // them on one path only, so calling `cb` with `opaque` is the completion the caller is
-        // waiting for. `error` is null or the fresh `box_error` handle above, owned by no one else,
-        // so handing it to `cb` transfers its ownership, as
-        // `kafka_producer_Producer_init_transactions_cb_t` documents; the job is a `FnOnce`, so
-        // `cb` fires exactly once.
-        self.queue.push(Box::new(move || unsafe {
-            cb(error.get() as *mut kafka_common_Error_t, opaque.get())
+        let pushed = self.queue.push_reporting(Box::new(move || {
+            close_trace(trace, format_args!("close: report runs"));
+            // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point:
+            // each caller of `deliver` (`with_txn_control_cb`, `with_drain_cb`,
+            // `kafka_producer_Producer_close_with_timeout_cb`) passes them on unchanged and
+            // delivers them on one path only, so calling `cb` with `opaque` is the completion the
+            // caller is waiting for. `error` is null or the fresh `box_error` handle above, owned by
+            // no one else, so handing it to `cb` transfers its ownership, as
+            // `kafka_producer_Producer_init_transactions_cb_t` documents; the job is a `FnOnce`, so
+            // `cb` fires exactly once.
+            unsafe { cb(error.get() as *mut kafka_common_Error_t, opaque.get()) };
+            close_trace(trace, format_args!("close: end"));
         }));
+        match pushed {
+            None => close_trace(trace, format_args!("close: report ran inline, the queue was closed")),
+            Some((was_empty, hook_called)) => close_trace(
+                trace,
+                format_args!("close: report pushed, queue was empty={was_empty}, notify hook called={hook_called}"),
+            ),
+        }
+    }
+}
+
+/// Temporary, for the macOS CI hang investigation: appends `event` to the hang
+/// trace under the producer's key, when there is one.
+fn close_trace(trace: Option<usize>, event: std::fmt::Arguments<'_>) {
+    if let Some(id) = trace {
+        crate::consumer::internals::hang_trace_keyed("prod", id, event);
     }
 }
 
@@ -1125,16 +1154,41 @@ fn with_drain_cb<F, Fut>(
 {
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
+    // Temporary, for the macOS CI hang investigation: a close is traced under its
+    // producer's address, the key the core's close lines use; `handle=` is the
+    // view the binding passed, the key of the binding's own lines.
+    let trace = fn_name
+        .contains("_close")
+        .then(|| {
+            client
+                .producer()
+                .ok()
+                .map(|producer| Arc::as_ptr(&producer) as *const () as usize)
+        })
+        .flatten();
+    close_trace(
+        trace,
+        format_args!(
+            "close: start fn={fn_name} handle={:x} in_callback={in_callback}",
+            client as *const Arc<Client> as usize
+        ),
+    );
     let opaque = SendPtr(opaque);
     let task_client = Arc::clone(client);
     client.spawn(async move {
+        close_trace(trace, format_args!("close: task starts"));
         let result = catch_task_panic(fn_name, async {
-            let left = task_client.drain_within(bound).await?;
-            op(task_client.producer()?, left).await
+            let left = task_client.drain_within(bound).await;
+            close_trace(trace, format_args!("close: queued sends drained, ok={}", left.is_ok()));
+            let left = left?;
+            let result = op(task_client.producer()?, left).await;
+            close_trace(trace, format_args!("close: core close returned, ok={}", result.is_ok()));
+            result
         })
         .await;
         let result = task_client.wait_for_reports(result, wait, in_callback).await;
-        task_client.deliver(cb, opaque, result);
+        close_trace(trace, format_args!("close: delivery reports waited, ok={}", result.is_ok()));
+        task_client.deliver_traced(cb, opaque, result, trace);
     });
 }
 
