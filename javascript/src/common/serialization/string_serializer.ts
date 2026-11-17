@@ -21,6 +21,7 @@
 // without `()` (Q53).
 
 import { JavaForms, kind } from '../../internal/args';
+import { nameBuiltIn } from '../../internal/serde';
 import { encodeLikeJava, type JavaCharset, javaCharsetForName } from '../../internal/encode';
 import { SerializationError } from '../errors/serialization_error';
 import type { Serializer } from './serializer';
@@ -101,12 +102,15 @@ export function stringSerializer(options?: unknown): Serializer<string> {
     if (typeof isKey !== 'boolean') throw new TypeError(`isKey must be a boolean, not ${kind(isKey)}`);
     encoding = configure(configs as Readonly<Record<string, unknown>>, isKey);
   }
-  return {
-    serialize(given: { topic: string; data: string | null }): Uint8Array | null {
-      const data: unknown = given.data;
-      if (data === null) return null;
-      if (typeof data !== 'string') throw new TypeError(`stringSerializer: data must be a string or null, not ${kind(data)}`);
-      return encodeLikeJava(data, encoding);
+  return nameBuiltIn(
+    {
+      serialize(given: { topic: string; data: string | null }): Uint8Array | null {
+        const data: unknown = given.data;
+        if (data === null) return null;
+        if (typeof data !== 'string') throw new TypeError(`stringSerializer: data must be a string or null, not ${kind(data)}`);
+        return encodeLikeJava(data, encoding);
+      },
     },
-  };
+    'stringSerializer',
+  );
 }

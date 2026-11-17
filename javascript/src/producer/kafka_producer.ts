@@ -24,7 +24,8 @@ import { checkConfigs, configEntries } from '../internal/config';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { producerClosed, producerOpened, warnPreview } from '../internal/lifecycle';
-import { checkSerializer, closeSerializer, configuredSerializer, isThenable, serializedBytes } from '../internal/serde';
+import { checkSerializer, closeSerializer, configuredSerializer, isThenable, serializedBytes, serializerFailure } from '../internal/serde';
+import { ApiError } from '../common/errors/api_error';
 import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Metric } from '../common/metric';
@@ -33,13 +34,14 @@ import { MetricNameMap } from '../common/metric_name_map';
 import { KafkaMetric } from '../common/metrics/kafka_metric';
 import { Node } from '../common/node';
 import { PartitionInfo } from '../common/partition_info';
+import { TopicPartition } from '../common/topic_partition';
 import type { Serializer } from '../common/serialization/serializer';
 import type { Duration } from '../duration';
 import type { Callback } from './callback';
 import type { Producer } from './producer';
 import type { ProducerConfigs } from './producer_configs';
 import { ProducerRecord } from './producer_record';
-import type { RecordMetadata } from './record_metadata';
+import { RecordMetadata } from './record_metadata';
 
 /**
  * The parameters of {@link KafkaProducer.close}'s timed form, Java's
@@ -212,6 +214,55 @@ function thrownMessage(thrown: unknown): string {
   } catch {
     return 'the callback threw a value that cannot be converted to a string';
   }
+}
+
+/**
+ * `KafkaProducer#doSend`'s answer to a serializer's throw, once
+ * `serializerFailure` made it: an `ApiError` (Java's `catch (ApiException
+ * e)`) runs the callback once, on the calling thread, with Java's failure
+ * metadata, `RecordMetadata(appendCallbacks.topicPartition(), -1, -1,
+ * NO_TIMESTAMP, -1, -1)` (the record's topic and its partition, or -1 as it
+ * is not partitioned yet), and resolves to a done future failed with it,
+ * Java's `FutureFailure`; any other error is the rejection, as Java rethrows
+ * it. What the callback throws is the rejection, as Java's onCompletion
+ * throws out of `doSend`; a Promise it returns is awaited first, and its
+ * rejection is the rejection too.
+ *
+ * @param record - the record
+ * @param userCallback - the record's callback, or null
+ * @param error - the error to answer with
+ * @returns resolving to the failed future, or rejecting with `error`
+ */
+function serializerFailed(
+  record: ProducerRecord<unknown, unknown>,
+  userCallback: Callback | null,
+  error: unknown,
+): Promise<KafkaFuture<RecordMetadata>> {
+  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the serializer threw, whatever it is, as Java rethrows it (typed unknown by catch)
+  if (!(error instanceof ApiError)) return Promise.reject(error);
+  const future: KafkaFuture<RecordMetadata> = KafkaFuture.internalCreate(true);
+  const failed = (): KafkaFuture<RecordMetadata> => {
+    future.internalComplete(null as unknown as RecordMetadata, error);
+    return future;
+  };
+  if (userCallback === null) return Promise.resolve(failed());
+  const metadata = new RecordMetadata({
+    topicPartition: new TopicPartition({ topic: record.topic, partition: record.partition ?? RecordMetadata.UNKNOWN_PARTITION }),
+    baseOffset: -1,
+    batchIndex: -1,
+    timestamp: -1,
+    serializedKeySize: -1,
+    serializedValueSize: -1,
+  });
+  let returned: unknown;
+  try {
+    returned = userCallback({ metadata, exception: error });
+  } catch (thrown) {
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the user's callback threw, whatever it is (typed unknown by catch)
+    return Promise.reject(thrown);
+  }
+  if (returned === undefined) return Promise.resolve(failed());
+  return Promise.resolve(returned).then(failed);
 }
 
 /**
@@ -415,8 +466,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `SerializationError` rejects with it if the key or value are not
-   *   valid objects given the configured serializers (what a serializer
-   *   throws, or rejects with, rejects the send as it is)
+   *   valid objects given the configured serializers: a serializer's
+   *   `TypeError`, Java's `ClassCastException`, becomes one, "Can't convert
+   *   key of class <class> to class <serializer> specified in
+   *   key.serializer" (or the value's), the `TypeError` its `cause`
    * @throws `BootstrapResolutionError` rejects with it if DNS resolution of the
    *   bootstrap servers fails within `bootstrap.resolve.timeout.ms`
    * @throws `KafkaError` rejects with it if a Kafka related error occurs that
@@ -460,6 +513,25 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * a Promise is awaited before the hand-over, so sends that are not awaited
    * one by one may then reach the producer out of call order (`await
    * send()` keeps it).
+   *
+   * What a serializer throws, or its Promise rejects with, is answered as
+   * Java's `doSend` answers it. An `ApiError` does not reject: the callback
+   * runs once, inside the call, with the error and Java's failure metadata
+   * (the record's topic, its partition or -1, and -1 for the offset,
+   * timestamp and sizes), and the Promise resolves to a done future failed
+   * with it, whose `get()` rejects with an `ExecutionError` around it. What
+   * that callback throws, or its Promise rejects with, rejects the send
+   * instead, as Java's `onCompletion` throws out of `send()`. A `TypeError`
+   * rejects as a `SerializationError` (above); any other error rejects as
+   * it is. The message names classes as JavaScript does: a value's
+   * constructor (`Buffer`), a primitive's wrapper (`String`), `null` for
+   * null, a serializer's class, or a built-in's factory
+   * (`stringSerializer`). *(deviation: Java writes fully qualified Java
+   * names, and a null key there throws NullPointerException. Why: JavaScript
+   * has no class names of that form.)* *(deviation: an `ApiError` from a
+   * serializer is not counted in the producer's `record-error-rate`. Why:
+   * the serializers run in JavaScript, before the record reaches the core.
+   * Goes when: the core runs the serializers.)*
    *
    * The client reads a `Buffer` or `Uint8Array` key or value after `send()`
    * returns. Don't write to it, transfer it or resize it until the Promise
@@ -554,15 +626,25 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     // topic and headers (which a serializer may change: they are sealed only
     // at the hand-over). A serializer that returns a plain value costs no
     // microtask; one that returns a thenable is awaited.
+    // A serializer's throw is answered as Java's doSend answers it
+    // (serializerFailed).
     let key: unknown;
     if (keySerializer !== null) {
-      key = keySerializer.serialize({ topic: record.topic, headers: record.headers, data: record.key });
+      try {
+        key = keySerializer.serialize({ topic: record.topic, headers: record.headers, data: record.key });
+      } catch (thrown) {
+        return serializerFailed(record, userCallback, serializerFailure(thrown, true, record.key, keySerializer));
+      }
       if (isThenable(key)) return this.#sendAwaiting(record, userCallback, key, NOT_SERIALIZED);
       key = serializedBytes(key, 'keySerializer');
     }
     let value: unknown;
     if (valueSerializer !== null) {
-      value = valueSerializer.serialize({ topic: record.topic, headers: record.headers, data: record.value });
+      try {
+        value = valueSerializer.serialize({ topic: record.topic, headers: record.headers, data: record.value });
+      } catch (thrown) {
+        return serializerFailed(record, userCallback, serializerFailure(thrown, false, record.value, valueSerializer));
+      }
       if (isThenable(value)) return this.#sendAwaiting(record, userCallback, key, value);
       value = serializedBytes(value, 'valueSerializer');
     }
@@ -581,18 +663,44 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     key: unknown,
     value: unknown,
   ): Promise<KafkaFuture<RecordMetadata>> {
-    const keyBytes = isThenable(key) ? serializedBytes(await key, 'keySerializer') : (key as Uint8Array | null | undefined);
-    let valueBytes: Uint8Array | null | undefined;
+    // What a serializer throws or rejects with is answered as Java's doSend
+    // answers it (serializerFailed).
+    let keyBytes: Uint8Array | null | undefined;
+    if (isThenable(key)) {
+      let out: unknown;
+      try {
+        out = await key;
+      } catch (thrown) {
+        return serializerFailed(record, userCallback, serializerFailure(thrown, true, record.key, this.#keySerializer as object));
+      }
+      keyBytes = serializedBytes(out, 'keySerializer');
+    } else {
+      keyBytes = key as Uint8Array | null | undefined;
+    }
+    let pending: unknown = value;
     if (value === NOT_SERIALIZED) {
+      pending = undefined;
       const valueSerializer = this.#valueSerializer;
       if (valueSerializer !== null) {
-        const out: unknown = valueSerializer.serialize({ topic: record.topic, headers: record.headers, data: record.value });
-        valueBytes = serializedBytes(isThenable(out) ? await out : out, 'valueSerializer');
+        try {
+          pending = valueSerializer.serialize({ topic: record.topic, headers: record.headers, data: record.value });
+        } catch (thrown) {
+          return serializerFailed(record, userCallback, serializerFailure(thrown, false, record.value, valueSerializer));
+        }
+        if (!isThenable(pending)) pending = serializedBytes(pending, 'valueSerializer');
       }
-    } else if (isThenable(value)) {
-      valueBytes = serializedBytes(await value, 'valueSerializer');
+    }
+    let valueBytes: Uint8Array | null | undefined;
+    if (isThenable(pending)) {
+      let out: unknown;
+      try {
+        out = await pending;
+      } catch (thrown) {
+        return serializerFailed(record, userCallback, serializerFailure(thrown, false, record.value, this.#valueSerializer as object));
+      }
+      valueBytes = serializedBytes(out, 'valueSerializer');
     } else {
-      valueBytes = value as Uint8Array | null | undefined;
+      valueBytes = pending as Uint8Array | null | undefined;
     }
     return this.#handOver(record, userCallback, keyBytes, valueBytes);
   }
