@@ -82,6 +82,13 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   translation-unit findings are expected through `probe-expectations.txt`; four more mutations
   (a parameter type, a parameter name, a missing and an extra member).
 
+- Step 6, six of seven: `Node`, `ClusterResource`, `PatternType`, `SslClientAuth`, `MetricName`
+  and `KafkaPrincipal`, each clean under the seven checks, with its tests and decisions. Found on
+  the way and fixed in the linter: a Java enum may be `std::optional` (`forConfig` returns null);
+  a decision line names Java's parameter (`clusterId`). `KafkaPrincipal` is the first mutable
+  value type: one pointer still, but a copy clones it (its flag is set in place). `Configurable`
+  waits for its row: `configure(Map<String, ?>)` has none in §5, which the linter reports.
+
 ## Next
 
 1. `detail::check(out_err)` and the error hierarchy: the C++ emitter of
