@@ -158,10 +158,6 @@ const ALLOWED = [
     reason: "the mock's callback Promises not settled yet, which flush() and close() wait for: not a store of records",
   },
   {
-    key: 'MockProducer.#sendStarted',
-    reason: "the callback Promises one send()'s own auto-completed callback started, during its hand-over: not a store of records",
-  },
-  {
     key: 'MockProducer.#deferred',
     reason: "the mock's settlements waiting for the event-loop turn, as KafkaProducer's; the records are handed over at once",
   },

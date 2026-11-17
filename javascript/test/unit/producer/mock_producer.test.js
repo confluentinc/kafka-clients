@@ -142,9 +142,10 @@ test('shouldThrowOnSendIfProducerIsClosed', async () => {
 // Java's form of shouldThrowOnSendIfProducerIsClosed: send(null) on a closed
 // mock. Java's mock checks closed first (IllegalStateException "MockProducer
 // is already closed."); the JS mock refuses the null record first, a recorded
-// deviation (MockProducer.send's remarks, javascript/CLAUDE.md: root §4 has
-// the FFI check a NULL mandatory argument first, and the binding repeats no
-// precondition, Q35). The test above covers the closed error with a record.
+// deviation (MockProducer.send's remarks, javascript/CLAUDE.md: the binding
+// keeps no closed state, and its own TypeScript check of the record runs
+// before the call reaches the core's mock, which holds the closed state).
+// The test above covers the closed error with a record.
 test("shouldThrowOnSendIfProducerIsClosed, Java's null record: the null check comes first (deviation)", async () => {
   const producer = buildMockProducer(true);
   await producer.close();
@@ -647,6 +648,164 @@ test('flush() over a fast rejection and a slow resolution settles only after bot
   await assert.rejects(producer.flush(), (e) => e === boom);
   assert.equal(slowDone, true);
   assert.ok(Date.now() - started >= 25, 'flush() waited for the slow callback');
+  await producer.close();
+});
+
+// Blocks the JS thread, with no event-loop turn, until the core's mock has
+// completed every waiting record on its own task (its flush queues the
+// deliveries for the next drain), or 5 s passed.
+function blockUntilFlushed(/** @type {MockProducer<unknown, unknown>} */ producer) {
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  for (let waited = 0; !producer.flushed() && waited < 5000; waited += 5) Atomics.wait(cell, 0, 0, 5);
+  assert.equal(producer.flushed(), true, "the core's mock flushed within 5 s");
+}
+
+test('a callback that awaits a nested send() before it fails rejects its own send(), not a later call', async () => {
+  for (const nestedFirst of [true, false]) {
+    const outerError = new Error('outer');
+    const producer = buildMockProducer(true);
+    /** @type {Promise<unknown> | null} */
+    let nested = null;
+    const outer = producer.send({
+      record: record1,
+      callback: nestedFirst
+        ? async () => {
+            await producer.send(record2);
+            throw outerError;
+          }
+        : () => {
+            // A synchronous throw after a nested send.
+            nested = producer.send(record2);
+            nested.catch(() => {});
+            throw outerError;
+          },
+    });
+    outer.catch(() => {});
+    await assert.rejects(outer, (e) => e === outerError);
+    if (nested !== null) await nested;
+    // Nothing was kept for an unrelated call.
+    await producer.send(record2);
+    await producer.flush();
+    await producer.close();
+    assert.equal(producer.history().length, 3);
+  }
+});
+
+test("a send() whose drain runs a pending flush()'s callbacks leaves their errors to the flush() and later calls", async () => {
+  for (const throws of [false, true]) {
+    const first = new Error('first');
+    const second = new Error('second');
+    const producer = buildMockProducer(false);
+    const fail = (/** @type {Error} */ e) =>
+      throws
+        ? () => {
+            throw e;
+          }
+        : () => Promise.reject(e);
+    await producer.send({ record: record1, callback: fail(first) });
+    await producer.send({ record: record2, callback: fail(second) });
+    const flushing = producer.flush();
+    flushing.catch(() => {});
+    // The core's mock completes the records on its own task; the send()
+    // below then drains their deliveries in its own hand-over.
+    blockUntilFlushed(producer);
+    const sending = producer.send(record1);
+    sending.catch(() => {});
+    await assert.rejects(flushing, (e) => e === first);
+    await sending;
+    if (throws) {
+      // A throw is the completing call's only (the recorded deviation of
+      // flush()): nothing is kept.
+      await producer.close();
+    } else {
+      // The other rejection is kept for the next call.
+      await assert.rejects(producer.send(record2), (e) => e === second);
+      await producer.close();
+    }
+  }
+});
+
+test('Promise.allSettled([flush(), send()]): each error reaches its own caller', async () => {
+  // One mock for every round (each mock holds its runtime's threads until it
+  // is collected): a round leaves nothing kept, as the last assertions show.
+  // The send() raced the flush's drain in about one round in ten before the
+  // fix.
+  const producer = buildMockProducer(false);
+  for (let round = 0; round < 500; round++) {
+    const boom = new Error(`boom ${round}`);
+    await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+    const [flushed, sent] = await Promise.allSettled([producer.flush(), producer.send(record2)]);
+    assert.equal(flushed.status, 'rejected', `round ${round}`);
+    assert.equal(/** @type {PromiseRejectedResult} */ (flushed).reason, boom);
+    assert.equal(sent.status, 'fulfilled', `round ${round}`);
+    // record2 waits: flush it, nothing is kept.
+    await producer.flush();
+  }
+  await producer.close();
+});
+
+test('await close() inside an async callback, before its first await, settles, and so does the send() waiting for that callback', async () => {
+  for (const dispose of [false, true]) {
+    const close = (/** @type {MockProducer<unknown, unknown>} */ p) => (dispose ? p[Symbol.asyncDispose]() : p.close());
+    // An auto-completed send() waits for its callback, which awaits close().
+    const auto = buildMockProducer(true);
+    let closedInside = false;
+    await auto.send({
+      record: record1,
+      callback: async () => {
+        await close(auto);
+        closedInside = auto.closed();
+      },
+    });
+    assert.equal(closedInside, true);
+    // completeNext() runs the callback; the close() it awaits settles.
+    const manual = buildMockProducer(false);
+    /** @type {Promise<void>[]} */
+    const inner = [];
+    await manual.send({
+      record: record1,
+      callback: async () => {
+        const closing = close(manual);
+        inner.push(closing);
+        await closing;
+      },
+    });
+    manual.completeNext();
+    assert.equal(inner.length, 1);
+    await inner[0];
+    assert.equal(manual.closed(), true);
+  }
+});
+
+test('flush() with a kept error first flushes: it completes the waiting records and waits for their callbacks, then rejects with the oldest', async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(false);
+  await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  let slowDone = false;
+  await producer.send({
+    record: record2,
+    callback: () =>
+      new Promise((resolve) => setTimeout(resolve, 30)).then(() => {
+        slowDone = true;
+      }),
+  });
+  let lastDone = false;
+  const waiting = await producer.send({
+    record: record1,
+    callback: () => {
+      lastDone = true;
+    },
+  });
+  // The first callback rejects at once and its error is kept; the second
+  // runs 30 ms.
+  producer.completeNext();
+  await new Promise((resolve) => setImmediate(resolve));
+  producer.completeNext();
+  await assert.rejects(producer.flush(), (e) => e === boom);
+  assert.equal(slowDone, true);
+  assert.equal(lastDone, true);
+  assert.equal(waiting.isDone(), true);
+  assert.equal(producer.flushed(), true);
   await producer.close();
 });
 
