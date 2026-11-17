@@ -857,7 +857,8 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `InjectedError` holding the JS value, and `native/error.c` hands that very
   value back wherever the core reports the error (root conventions, Errors,
   Q38). Left out: transactions (by request), `setMockMetrics` (the FFI takes
-  a native `KafkaMetric_t`, which the binding cannot build), and the
+  a native `KafkaMetric_t`, which the binding cannot build, as .NET's mock,
+  which also wraps the FFI's, leaves it out), and the
   telemetry and metric-subscription calls (no FFI); `metrics()` is therefore
   always empty. The mock emits no preview warning.
 - A Java `long` is a `bigint` (root conventions, Types): returned always as a
@@ -948,12 +949,13 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   addon reads it through the FFI's view of the class and its accessors
   (`native/error_payload.c`, generated from the table in
   `rust/xtask/src/error_hierarchy/js.rs`), and `create` runs the class's
-  constructors with a private token so each class sets its fields; a field
-  the core cannot give keeps its default, listed in its module's header
-  comment: `QuotaViolationError`'s `metric()` is null, so typed
-  `KafkaMetric | null` *(deviation: Java's error carries the metric. Why: the
-  C API's view of the class gives the metric's name only. Goes when: the
-  view exposes the metric)*, and `CorrelationIdMismatchError`'s ids are
+  constructors with a private token so each class sets its fields.
+  `QuotaViolationError`'s `metric()` is a `KafkaMetric` built, as the Python
+  and .NET clients build it, from the metric name the view gives and the
+  error's `value` (the value Java's `Sensor.checkQuotas` measured), with an
+  empty name when the view gives none. A field the core cannot give keeps
+  its default, listed in its module's header comment:
+  `CorrelationIdMismatchError`'s ids are
   `-1`, as Python's *(deviation: Java's error carries them. Why: the class is
   in `common.requests`, not a supported API, so the C API has no view of it.
   Goes when: the C FFI gives a view of it)*. A form's doc says what Java's

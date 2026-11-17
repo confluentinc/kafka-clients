@@ -433,10 +433,49 @@ test('the number payloads: throttleTimeMs, the correlation ids, QuotaViolationEr
     String(quota),
     "QuotaViolationError: 'MetricName [name=n, group=g, description=d, tags={}]' violated quota. Actual: 2.0, Threshold: 1.5",
   );
-  // The core gives the value and the bound, not the KafkaMetric.
-  const reported = fromNative({ code: -26, message: '', payload: { value: 3, bound: 1 } });
-  assert.deepEqual([reported.metric(), reported.value(), reported.bound()], [null, 3, 1]);
-  assert.equal(String(reported), 'QuotaViolationError');
+  // The core gives the metric's name, the value and the bound
+  // (native/error_payload.c): the KafkaMetric is built from the name and the
+  // error's value, the value Java's Sensor.checkQuotas measured, as the Python
+  // and .NET clients build it.
+  const reported = fromNative({
+    code: -26,
+    message: '',
+    payload: {
+      metric: { name: 'byte-rate', group: 'producer-metrics', description: 'bytes/s', tags: [['client-id', 'c1']] },
+      value: 3,
+      bound: 1,
+    },
+  });
+  assert.ok(reported.metric() instanceof KafkaMetric);
+  const expectedName = new MetricName({
+    name: 'byte-rate',
+    group: 'producer-metrics',
+    description: 'bytes/s',
+    tags: new Map([['client-id', 'c1']]),
+  });
+  assert.ok(reported.metric().metricName().equals(expectedName));
+  assert.equal(reported.metric().metricName().description(), 'bytes/s');
+  assert.equal(reported.metric().metricValue(), 3);
+  assert.deepEqual([reported.value(), reported.bound()], [3, 1]);
+  assert.equal(reported.message, '');
+  // Java's toString() from the metric, the value and the bound.
+  assert.equal(
+    String(reported),
+    "QuotaViolationError: 'MetricName [name=byte-rate, group=producer-metrics, description=bytes/s, tags={client-id=c1}]' violated quota. Actual: 3.0, Threshold: 1.0",
+  );
+  // A name the view does not give (a failed accessor) is an empty one, the
+  // value still the error's, as the .NET client builds it; and an error with
+  // no payload at all has an empty metric of value 0.
+  for (const [payload, value] of [
+    [{ value: 5, bound: 2 }, 5],
+    [{ metric: null, value: 5, bound: 2 }, 5],
+    [undefined, 0],
+  ]) {
+    const bare = fromNative({ code: -26, message: '', payload });
+    const name = bare.metric().metricName();
+    assert.deepEqual([name.name(), name.group(), name.description(), [...name.tags()]], ['', '', '', []]);
+    assert.equal(bare.metric().metricValue(), value);
+  }
 });
 
 test("ConfigError: Java's (name, value) and (name, value, message) build the message", () => {
