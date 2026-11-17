@@ -34,7 +34,7 @@ internal static class ListConfigResources
         HashSet<ConfigResourceType> types = [.. args.Positional().Select(ConfigArgs.ParseResourceType)];
 
         // No types, as when the argument is left out, lists every type.
-        ListConfigResourcesResult result = admin.ListConfigResources(types);
+        ListConfigResourcesResult result = admin.ListConfigResources(types, new ListConfigResourcesOptions());
         IEnumerable<ConfigResource> resources = result.All().Get()
             .OrderBy(ConfigArgs.TypeName, StringComparer.Ordinal)
             .ThenBy(resource => resource.Name(), StringComparer.Ordinal);
