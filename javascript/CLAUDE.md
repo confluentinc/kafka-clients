@@ -561,7 +561,28 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   one, or none, and no config key) the record's own bytes are sent, checked
   at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
   type TypeScript cannot enforce, and a string throws `TypeError` pointing to
-  `stringSerializer()`. `stringSerializer()`
+  `stringSerializer()`. What a serializer throws, or its Promise rejects
+  with, is answered as Java's `KafkaProducer#doSend` answers it (owner's
+  decision 2026-11-18; `src/internal/serde.ts` `serializerFailure`,
+  `kafka_producer.ts` `serializerFailed`): an `ApiError` runs the callback
+  once, inside `send()`, with Java's failure metadata
+  (`RecordMetadata(appendCallbacks.topicPartition(), -1, -1, NO_TIMESTAMP,
+  -1, -1)`: the record's topic and its partition or -1) and resolves `send()`
+  to a done future failed with it (Java's `FutureFailure`), what that callback
+  throws or rejects with rejecting `send()` instead; a `TypeError`, Java's
+  `ClassCastException`, rejects as a `SerializationError` "Can't convert key
+  of class <class> to class <serializer> specified in key.serializer" (or
+  `value`), its `cause` the `TypeError`, the classes spelled as JavaScript
+  names them (a value's constructor, a primitive's wrapper, `null`, the
+  serializer's class, a built-in's factory name, `stringSerializer`)
+  *(deviation: Java writes fully qualified Java names, and a null key throws
+  `NullPointerException` there. Why: JavaScript has no names of that form)*;
+  anything else rejects as it is. The serializer's `ApiError` is not counted
+  in `record-error-rate` *(deviation. Why: the serializers run in
+  JavaScript, before the core. Goes when: the core runs them)*. The
+  binding's own check of what a serializer returns stays a `TypeError`.
+  `MockProducer` passes every serializer error out raw, as Java's
+  `MockProducer#send` serializes with no `try`. `stringSerializer()`
   (`src/common/serialization/string_serializer.ts`) is Java's
   `StringSerializer` through `encodeLikeJava`; it takes an optional
   `{ configs, isKey }`, Java's `configure`, so it goes in a serde config key
@@ -765,8 +786,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   running each callback, before it rejects with the first throw
   *(deviation: Java's `flush()` stops at the first callback that throws, the
   later records staying waiting. Why: the core's mock completes all of them
-  in one call. Goes when: the core's mock stops at the first throw)*; a callback's Promise that rejects is logged by
-  the core, as the producer's, since it settles after the call returned.
+  in one call. Goes when: the core's mock stops at the first throw)*. A callback's Promise that rejects is the
+  callback's error, as a throw is, and nothing logs it (owner's decision 2026-11-18, restoring review round 120's
+  fix): `send()` with `autoComplete` waits for its callback's Promise and rejects with its rejection, and `flush()`
+  rejects with it; `completeNext()` and `errorNext()`, being synchronous, keep it in a FIFO (`#callbackErrors`), and
+  the next `send()`, `flush()` or `close()` raises the oldest, once *(deviation, as Python's `AsyncMockProducer`:
+  Java's mock throws it from the completing call. Why: these calls return before the Promise settles)*. `flush()`
+  and `close()` (so `[Symbol.asyncDispose]` too) wait for every callback Promise already started (`#running`,
+  `allSettled` semantics), then raise the oldest kept error, so no kept error is lost. The record's future completes
+  once the Promise settled, the deviation above for a throw covering this case too.
   `partitionsFor(null)` rejects with the FFI's `TypeError` "topic cannot be
   null" *(deviation: Java's mock answers `[]`, as its empty cluster has no
   topic. Why: the FFI checks its mandatory parameters, and the binding
