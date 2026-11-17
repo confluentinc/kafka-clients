@@ -579,6 +579,18 @@ export class MockProducer<K, V> implements Producer<K, V> {
     return thrown;
   }
 
+  // The start of a completing call (completeNext(), errorNext(), flush()):
+  // returns whether it is made from a callback's synchronous part. Such a call
+  // runs no callback, as the callback queue does not nest: the outer
+  // completing call runs them, so the nested one neither clears nor takes what
+  // a callback threw, which stays the outer call's, its first throw winning, as
+  // Java's first onCompletion throw ends the outer call.
+  #beginCompleting(): boolean {
+    const fromCallback = this.#callbackDepth > 0;
+    if (!fromCallback) this.#callbackThrown = null;
+    return fromCallback;
+  }
+
   // completeNext() / errorNext() once the callbacks ran: throws what one threw.
   #rethrowCallback(): void {
     const thrown = this.#takeCallbackThrown();
@@ -637,12 +649,12 @@ export class MockProducer<K, V> implements Producer<K, V> {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's (typed unknown by catch)
       return Promise.reject(error);
     }
-    this.#callbackThrown = null;
-    const fromCallback = this.#callbackDepth > 0;
+    const fromCallback = this.#beginCompleting();
     return new Promise<void>((resolve, reject) => {
       native.producerFlush(this.#handle, (error) => {
-        // A callback the flush completed threw: Java's flush() throws it.
-        const thrown = this.#takeCallbackThrown();
+        // A callback the flush completed threw: Java's flush() throws it. A
+        // flush() made from a callback leaves it to the outer completing call.
+        const thrown = fromCallback ? null : this.#takeCallbackThrown();
         // Settles once every callback Promise already started has, its own
         // and those completeNext() and errorNext() started.
         void this.#awaitCallbacks(fromCallback).then(() => {
@@ -880,10 +892,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
   completeNext(): boolean;
   completeNext(options?: unknown): boolean {
     COMPLETE_NEXT_FORMS.match(options, arguments.length);
-    this.#callbackThrown = null;
+    const fromCallback = this.#beginCompleting();
     const completed = native.mockProducerCompleteNext(this.#handle, null);
     native.producerPump(this.#handle);
-    this.#rethrowCallback();
+    if (!fromCallback) this.#rethrowCallback();
     return completed;
   }
 
@@ -918,10 +930,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
   errorNext(options: unknown): boolean {
     ERROR_NEXT_FORMS.match(options, arguments.length);
     const e = checkError(ERROR_NEXT_FORMS.value(options, 'e'), 'e');
-    this.#callbackThrown = null;
+    const fromCallback = this.#beginCompleting();
     const completed = native.mockProducerCompleteNext(this.#handle, e);
     native.producerPump(this.#handle);
-    this.#rethrowCallback();
+    if (!fromCallback) this.#rethrowCallback();
     return completed;
   }
 
