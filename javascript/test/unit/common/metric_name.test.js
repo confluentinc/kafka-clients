@@ -162,3 +162,17 @@ test('a MetricNameMap is keyed by MetricName.equals, keeping the original keys',
   // @ts-expect-error an entry keyed by a number: the entry check throws TypeError
   assert.throws(() => new MetricNameMap([[1, 2]]), { constructor: TypeError, message: 'an entry must be a [MetricName, value] pair' });
 });
+
+// Java ships no MetricNameTest; the core's metric_name.rs
+// inequality_on_name_group_tags: Java's MetricName#equals compares the group,
+// the name and the tags, so a name differing in any one of them, a tag's value
+// included, is not equal.
+test('equals is false for a name that differs only in its name, its group or a tag value', () => {
+  /** @param {string} name @param {string} group @param {string} value */
+  const name = (name, group, value) => new MetricName({ name, group, description: '', tags: new Map([['k', value]]) });
+  const base = name('n', 'g', 'v');
+  assert.equal(base.equals(name('n', 'g', 'v')), true);
+  assert.equal(base.equals(name('n2', 'g', 'v')), false);
+  assert.equal(base.equals(name('n', 'g2', 'v')), false);
+  assert.equal(base.equals(name('n', 'g', 'v2')), false);
+});

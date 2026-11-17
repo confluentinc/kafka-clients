@@ -683,6 +683,10 @@ test('testLeakCompletableFuture', async () => {
   void comfut.then(() => '');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(kfut.isDone(), false);
+  // Java's assertFalse(comfut.isDone()): the stage itself is still pending, as
+  // a race against an already-settled Promise shows.
+  const pending = Symbol('pending');
+  assert.equal(await Promise.race([comfut, Promise.resolve(pending)]), pending);
   assert.equal(kfut.toCompletionStage(), comfut);
 });
 

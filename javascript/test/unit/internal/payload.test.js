@@ -514,3 +514,42 @@ test('an error the core reports carries the payload the FFI view gives', () => {
   // Without a payload, each field keeps Java's default.
   assert.deepEqual(fromNative({ code: 17, message: 'i', apiError: true }).invalidTopics(), null);
 });
+
+// The payload forms keep Java's message (the generic form test in
+// errors.test.js leaves them to this file). Java ships no tests of these
+// classes; the core's record_too_large_error.rs
+// new_record_too_large_partitions_records_the_map, error.rs
+// message_is_the_bare_text_and_display_adds_the_class_name and
+// correlation_id_mismatch_error.rs is_outside_the_kafka_error_hierarchy. Each
+// Java constructor calls super(message).
+test("the payload forms keep Java's message: RecordTooLargeError, GroupAuthorizationError, ThrottlingQuotaExceededError, the resource errors", () => {
+  const tooLarge = new RecordTooLargeError({
+    message: 'too big',
+    recordTooLargePartitions: new TopicPartitionMap([[tp('topic', 0), 42n]]),
+  });
+  assert.equal(tooLarge.message, 'too big');
+  assert.equal(tooLarge.recordTooLargePartitions()?.get(tp('topic', 0)), 42n);
+  assert.equal(String(tooLarge), 'RecordTooLargeError: too big');
+  const group = new GroupAuthorizationError({ message: 'not authorized', groupId: 'g1' });
+  assert.equal(group.message, 'not authorized');
+  assert.equal(group.groupId(), 'g1');
+  assert.equal(String(group), 'GroupAuthorizationError: not authorized');
+  const throttled = new ThrottlingQuotaExceededError({ throttleTimeMs: 42, message: 'throttled' });
+  assert.equal(throttled.message, 'throttled');
+  assert.equal(throttled.throttleTimeMs(), 42);
+  for (const cls of [ResourceNotFoundError, DuplicateResourceError]) {
+    assert.equal(new cls({ resource: 'r', message: 'm' }).message, 'm', cls.name);
+  }
+});
+
+test('CorrelationIdMismatchError keeps its message and is an IllegalStateError, not a KafkaError', () => {
+  const { IllegalStateError } = require('@confluentinc/kafka-javascript');
+  const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+  const e = new CorrelationIdMismatchError({ message: 'ids disagree', requestCorrelationId: 7, responseCorrelationId: 9 });
+  assert.equal(e.message, 'ids disagree');
+  assert.equal(String(e), 'CorrelationIdMismatchError: ids disagree');
+  // Java's CorrelationIdMismatchException extends IllegalStateException.
+  assert.ok(e instanceof IllegalStateError);
+  assert.ok(!(e instanceof KafkaError));
+  assert.deepEqual([e.requestCorrelationId(), e.responseCorrelationId()], [7, 9]);
+});

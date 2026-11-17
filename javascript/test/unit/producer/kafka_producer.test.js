@@ -16,6 +16,12 @@
 
 // The producer against an unreachable broker: no broker is needed, every
 // record fails in the core with its own error.
+//
+// Skip notes: PlaintextProducerSendTest.testWrongSerializer is not written:
+// Java's KafkaProducer#doSend wraps a serializer's ClassCastException as
+// SerializationException, while send() rejects with what the serializer
+// throws (stringSerializer's TypeError for a Buffer), as it is; it waits on
+// the owner's decision (2026-11-18) about serializer errors in send().
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -116,7 +122,12 @@ test('send resolves at hand-over; the future fails after the callback ran once',
     assert.equal(metadata.hasOffset, false);
     // Java's longs: bigints.
     assert.equal(metadata.offset, -1n);
+    // Java's nullMetadata (KafkaProducer#doSend's catch of an ApiException):
+    // no timestamp, and -1 for both serialized sizes.
+    assert.equal(metadata.hasTimestamp, false);
     assert.equal(metadata.timestamp, -1n);
+    assert.equal(metadata.serializedKeySize, -1);
+    assert.equal(metadata.serializedValueSize, -1);
     assert.equal(metadata.toString(), 'unit-t--1@-1');
     // The fields are data: a spread or JSON copy keeps every one, the longs
     // as decimal strings in JSON.
@@ -817,9 +828,16 @@ test('close() while a send waits for metadata rejects that send with a bare Kafk
   assert.equal(settled, false);
   const started = Date.now();
   await producer.close();
+  // ProducerMetadataTest.testMetadataAwaitAfterClose: Java's
+  // ProducerMetadata#awaitUpdate throws a bare KafkaException("Requested
+  // metadata update after close"), which KafkaProducer#doSend wraps. The cause
+  // is what shows the close ended the wait, not a timeout.
   await assert.rejects(sent, (/** @type {Error} */ e) => {
     assert.equal(e.constructor, KafkaError);
     assert.equal(e.message, 'Producer closed while send in progress');
+    assert.ok(e.cause instanceof KafkaError);
+    assert.equal(e.cause.constructor, KafkaError);
+    assert.equal(e.cause.message, 'Requested metadata update after close');
     return true;
   });
   // Well below max.block.ms (60 s), however loaded the machine.
@@ -1539,6 +1557,9 @@ test('the serializers run in send(), key then value, with the topic, the headers
     // The record's own headers, which the serializer may change before the
     // hand-over seals them.
     assert.equal(calls[0].headers, record.headers);
+    // KafkaProducerTest.testHeadersSuccess: both serializers get the record's
+    // headers.
+    assert.equal(calls[1].headers, record.headers);
     assert.throws(() => record.headers.add({ key: 'late', value: null }), {
       name: 'IllegalStateError',
       message: 'RecordHeaders has been closed.',
@@ -1804,6 +1825,9 @@ test('close() closes both serializers, a failure being a process warning, never 
   };
   const warnings = await warningsOf(async () => {
     const producer = new KafkaProducer({ configs: UNREACHABLE, keySerializer, valueSerializer });
+    // KafkaProducerTest.testSerializerClose: the serializers stay open while
+    // the producer is (Java's CLOSE_COUNT unchanged inside the try).
+    assert.deepEqual(closed, []);
     await producer.close();
     // A second close closes nothing again: the core's close, which holds Node
     // until its answer, as any call made on a closed producer does
@@ -2207,6 +2231,299 @@ test("metrics() is a MetricNameMap of KafkaMetric, read when it runs, keyed by J
     assert.notEqual(producer.metrics(), metrics);
     // @ts-expect-error an argument to a reader: the form check throws TypeError
     assert.throws(() => producer.metrics(1), { constructor: TypeError, message: 'metrics() only reads: it takes no argument' });
+  } finally {
+    await producer.close();
+  }
+});
+
+// KafkaProducerTest's configuration and construction tests (Apache Kafka
+// 4.4.0). Java's baseProperties() name StringSerializer for both serdes; the
+// configuration checks run in the core's ProducerConfig, reached through the
+// constructor (Java's new ProducerConfig(...) before its constructor's try),
+// so they throw a bare ConfigError, synchronously.
+
+const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
+
+/**
+ * A producer of Java's baseProperties() plus `configs`.
+ *
+ * @param {Record<string, unknown>} configs
+ */
+function baseProducer(configs) {
+  return new KafkaProducer({
+    configs: { 'bootstrap.servers': '127.0.0.1:1', ...configs },
+    keySerializer: stringSerializer(),
+    valueSerializer: stringSerializer(),
+  });
+}
+
+/**
+ * Asserts that the configuration builds a producer, and closes it. Java's
+ * getBoolean / getString read-backs of the parsed values are not translated
+ * (ProducerConfig is translated for its constants only).
+ *
+ * @param {Record<string, unknown>} configs
+ */
+async function assertBuilds(configs) {
+  const producer = baseProducer(configs);
+  await producer.close({ timeout: 0 });
+}
+
+/**
+ * Asserts that the configuration is refused with a ConfigError of `message`.
+ *
+ * @param {Record<string, unknown>} configs
+ * @param {string} message
+ */
+function assertRefused(configs, message) {
+  assert.throws(
+    () => baseProducer(configs),
+    (e) => {
+      assert.ok(e instanceof ConfigError && e instanceof KafkaError, `${e}`);
+      assert.equal(e.message, message);
+      return true;
+    },
+  );
+}
+
+// KafkaProducerTest.testAcksAndIdempotenceForIdempotentProducers. Java checks
+// only the class; the message is ProducerConfig#postProcessAndValidateIdempotenceConfigs'.
+// The transactional.id forms are left out with transactions (the preview has
+// no transaction surface).
+test('the idempotent producer refuses acks other than all when enable.idempotence is set; without it acks builds', async () => {
+  await assertBuilds({ acks: '0', 'enable.idempotence': false });
+  await assertBuilds({ acks: 'all', 'enable.idempotence': false });
+  await assertBuilds({ acks: '0' });
+  await assertBuilds({ acks: '1' });
+  assertRefused(
+    { acks: '1', 'enable.idempotence': true },
+    'Must set acks to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.',
+  );
+});
+
+// KafkaProducerTest.testRetriesAndIdempotenceForIdempotentProducers (the
+// transactional.id forms left out, as above).
+test('the idempotent producer refuses retries 0 when enable.idempotence is set; without it retries 0 builds', async () => {
+  await assertBuilds({ retries: 0, 'enable.idempotence': false });
+  await assertBuilds({ retries: 0 });
+  assertRefused({ retries: 0, 'enable.idempotence': true }, 'Must set retries to non-zero when using the idempotent producer.');
+});
+
+// KafkaProducerTest.testInflightRequestsAndIdempotenceForIdempotentProducers
+// (Java pins this message with assertEquals; the transactional.id forms left
+// out, as above).
+test('the idempotent producer refuses more than 5 in-flight requests per connection', async () => {
+  const message = 'To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. Current value is 6.';
+  await assertBuilds({ 'max.in.flight.requests.per.connection': 6, 'enable.idempotence': false });
+  assertRefused({ 'max.in.flight.requests.per.connection': 6 }, message);
+  assertRefused({ 'max.in.flight.requests.per.connection': 6, 'enable.idempotence': true }, message);
+});
+
+// KafkaProducerTest.testOsDefaultSocketBufferSizes,
+// testInvalidSocketSendBufferSize and testInvalidSocketReceiveBufferSize: -1
+// is Java's Selectable.USE_DEFAULT_BUFFER_SIZE; below it, ConfigDef.Range's
+// "Value must be at least -1" (Java asserts a KafkaException, which a
+// ConfigException is).
+test('send.buffer.bytes and receive.buffer.bytes take -1, the OS default, and refuse anything below', async () => {
+  const producer = new KafkaProducer({
+    configs: { 'bootstrap.servers': '127.0.0.1:1', 'send.buffer.bytes': -1, 'receive.buffer.bytes': -1 },
+  });
+  await producer.close({ timeout: 0 });
+  for (const key of ['send.buffer.bytes', 'receive.buffer.bytes']) {
+    assert.throws(
+      () => new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', [key]: -2 } }),
+      (e) => {
+        assert.ok(e instanceof ConfigError && e instanceof KafkaError, `${e}`);
+        assert.equal(e.message, `Invalid value -2 for configuration ${key}: Value must be at least -1`);
+        return true;
+      },
+    );
+  }
+});
+
+// KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig: inside Java's
+// constructor try (KafkaProducer#configureDeliveryTimeout), so relabelled
+// "Failed to construct kafka producer" with the ConfigError as its cause; the
+// boundary, 1000 = 999 + 1, builds.
+test('delivery.timeout.ms below linger.ms + request.timeout.ms fails the construction; equal to it builds', async () => {
+  const configs = {
+    'client.id': 'testDeliveryTimeoutAndLingerMsConfig',
+    'delivery.timeout.ms': 1000,
+    'linger.ms': 1000,
+    'request.timeout.ms': 1,
+  };
+  assert.throws(
+    () => baseProducer(configs),
+    (/** @type {KafkaError} */ e) => {
+      assert.equal(e.constructor, KafkaError);
+      assert.equal(e.message, 'Failed to construct kafka producer');
+      assert.ok(e.cause instanceof ConfigError);
+      assert.equal(e.cause.message, 'delivery.timeout.ms should be equal to or larger than linger.ms + request.timeout.ms');
+      return true;
+    },
+  );
+  await assertBuilds({ ...configs, 'linger.ms': 999 });
+});
+
+// KafkaProducerTest.testProducerBootstrapResolutionExceptionPropagated: Java
+// loops on partitionsFor for up to 15 s; the core ends the metadata wait when
+// the resolution budget runs out, so the first call fails, and so does every
+// later one ("This guards against accidentally clearing the bootstrap error
+// from the metadata layer.").
+test('an unresolvable bootstrap fails partitionsFor with BootstrapResolutionError, and every later call too', async () => {
+  const producer = new KafkaProducer({
+    configs: { 'bootstrap.servers': 'unresolvable.invalid:9092', 'bootstrap.resolve.timeout.ms': 3000 },
+    keySerializer: stringSerializer(),
+    valueSerializer: stringSerializer(),
+  });
+  const message = 'Failed to resolve bootstrap servers after 3000ms. Please check your bootstrap.servers configuration and DNS settings.';
+  /** @param {unknown} e */
+  const isBootstrapError = (e) => {
+    assert.ok(e instanceof errors.BootstrapResolutionError && e instanceof KafkaError, `${e}`);
+    assert.equal(e.message, message);
+    return true;
+  };
+  try {
+    await assert.rejects(producer.partitionsFor('test-topic'), isBootstrapError);
+    await assert.rejects(producer.partitionsFor('test-topic'), isBootstrapError);
+    await assert.rejects(producer.send(new ProducerRecord({ topic: 'test-topic', value: 'v' })), isBootstrapError);
+  } finally {
+    await producer.close();
+  }
+}, 30000);
+
+// KafkaProducerTest.testProducerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero:
+// the default bootstrap.resolve.timeout.ms, 0, resolves in the constructor,
+// where ClientUtils#parseAndValidateAddresses throws inside Java's try.
+test('with the default bootstrap.resolve.timeout.ms an unresolvable bootstrap fails the construction with a ConfigError cause', () => {
+  /** @type {string[]} */
+  const closed = [];
+  /** @param {string} name */
+  const serializer = (name) => ({ serialize: () => null, close: () => closed.push(name) });
+  assert.throws(
+    () =>
+      new KafkaProducer({
+        configs: { 'bootstrap.servers': 'unresolvable.invalid:9092' },
+        keySerializer: serializer('key'),
+        valueSerializer: serializer('value'),
+      }),
+    (/** @type {KafkaError} */ e) => {
+      assert.equal(e.constructor, KafkaError);
+      assert.equal(e.message, 'Failed to construct kafka producer');
+      assert.ok(e.cause instanceof ConfigError);
+      assert.equal(e.cause.message, 'No resolvable bootstrap urls given in bootstrap.servers');
+      return true;
+    },
+  );
+  // Inside Java's catch: the serializers given are closed.
+  assert.deepEqual(closed, ['key', 'value']);
+});
+
+// KafkaProducerTest.testCallbackAndInterceptorHandleError: Java's MockClient
+// only keeps the metadata from arriving, so the send fails on the metadata
+// wait, as here. The callback gets Java's nullMetadata
+// (RecordMetadata(tp, -1, -1, RecordBatch.NO_TIMESTAMP, -1, -1)). Java's
+// interceptor count is not translated (no interceptors).
+test("a failed send's callback gets Java's null metadata: the topic, no offset or timestamp, sizes and partition -1", async () => {
+  const producer = new KafkaProducer({
+    configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 1000 },
+    keySerializer: stringSerializer(),
+    valueSerializer: stringSerializer(),
+  });
+  try {
+    /** @type {Array<{ metadata: RecordMetadata, exception: Error | null }>} */
+    const calls = [];
+    // Java's "Invalid topic name due to space": like Java, nothing checks the
+    // name before the metadata wait.
+    await producer.send({
+      record: new ProducerRecord({ topic: 'topic abc', value: 'HelloKafka' }),
+      callback: ({ metadata, exception }) => {
+        calls.push({ metadata, exception });
+      },
+    });
+    assert.equal(calls.length, 1);
+    const [{ metadata, exception }] = calls;
+    assert.ok(exception instanceof errors.TimeoutError, `${exception}`);
+    assert.equal(exception.message, 'Topic topic abc not present in metadata after 1000 ms.');
+    assert.ok(metadata);
+    assert.equal(metadata.topic, 'topic abc', 'Topic name should be valid even on send failure');
+    assert.equal(metadata.hasOffset, false);
+    assert.equal(metadata.offset, -1n);
+    assert.equal(metadata.hasTimestamp, false);
+    assert.equal(metadata.timestamp, -1n);
+    assert.equal(metadata.serializedKeySize, -1);
+    assert.equal(metadata.serializedValueSize, -1);
+    assert.equal(metadata.partition, -1);
+  } finally {
+    await producer.close();
+  }
+});
+
+/** @param {string} name @param {string} clientId */
+function producerMetric(name, clientId) {
+  const { MetricName } = require('@confluentinc/kafka-javascript/common');
+  return new MetricName({ name, group: 'producer-metrics', description: '', tags: new Map([['client-id', clientId]]) });
+}
+
+// KafkaProducerTest.testFlushMeasureLatency: Java's MockClient and MockTime(1)
+// only give a flush a network and a clock that moves; a flush with nothing
+// pending needs neither. metrics() is a snapshot, so it is read after each
+// flush.
+test('flush() records flush-time-ns-total, which grows with each flush', async () => {
+  const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-flush-time' } });
+  const key = producerMetric('flush-time-ns-total', 'unit-flush-time');
+  try {
+    await producer.flush();
+    const first = producer.metrics().get(key)?.metricValue();
+    assert.equal(typeof first, 'number');
+    assert.ok(/** @type {number} */ (first) > 0);
+    await producer.flush();
+    assert.ok(/** @type {number} */ (producer.metrics().get(key)?.metricValue()) > /** @type {number} */ (first));
+  } finally {
+    await producer.close();
+  }
+});
+
+// KafkaProducerMetricsTest.shouldRemoveMetricsOnClose: Java's
+// KafkaProducerMetrics#close removes its seven *-time-ns-total metrics (and
+// txn-prepare-time-ns-total, which the Java test does not list); the other
+// metrics stay, as Java's Metrics.close() keeps the registry. metrics() has no
+// closed check in Java, and none here.
+test("close() removes the producer's *-time-ns-total metrics, as Java's KafkaProducerMetrics.close() does", async () => {
+  const names = [
+    'flush-time-ns-total',
+    'txn-init-time-ns-total',
+    'txn-begin-time-ns-total',
+    'txn-commit-time-ns-total',
+    'txn-abort-time-ns-total',
+    'txn-send-offsets-time-ns-total',
+    'metadata-wait-time-ns-total',
+    'txn-prepare-time-ns-total',
+  ];
+  const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-metrics-close' } });
+  const before = producer.metrics();
+  for (const name of names) {
+    assert.equal(before.has(producerMetric(name, 'unit-metrics-close')), true, name);
+    assert.equal(before.get(producerMetric(name, 'unit-metrics-close'))?.metricValue(), 0, name);
+  }
+  await producer.close();
+  const after = producer.metrics();
+  for (const name of names) assert.equal(after.has(producerMetric(name, 'unit-metrics-close')), false, name);
+  assert.equal(after.has(producerMetric('record-send-total', 'unit-metrics-close')), true);
+});
+
+// KafkaProducerMetricsTest.shouldRecordMetadataWaitTime, its failure half
+// (the success half needs a broker: test/integration/producer.test.js): a
+// send whose metadata wait times out records nothing, as Java's
+// KafkaProducer#waitOnMetadata throws inside its loop, before
+// recordMetadataWait.
+test('a send whose metadata wait times out leaves metadata-wait-time-ns-total at 0', async () => {
+  const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-metadata-wait' } });
+  const key = producerMetric('metadata-wait-time-ns-total', 'unit-metadata-wait');
+  try {
+    const future = await producer.send(new ProducerRecord({ topic: 'unit-mw', value: Buffer.from('v') }));
+    await assert.rejects(delivery(future), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-mw') });
+    assert.equal(producer.metrics().get(key)?.metricValue(), 0);
   } finally {
     await producer.close();
   }

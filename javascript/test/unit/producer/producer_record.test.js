@@ -132,28 +132,28 @@ const FORMS =
   '(topic, partition, timestamp, key, value), (topic, partition, key, value, headers), ' +
   '(topic, partition, key, value), (topic, key, value), (topic, value)';
 
-// Java's ProducerRecordTest.testEqualsAndHashCode. Java's value type there is
-// an Integer, which a JavaScript key or value cannot be (Data: bytes or a
-// string), so the values are the strings '1' and '2'.
+// Java's ProducerRecordTest.testEqualsAndHashCode, with Java's Integer values
+// as numbers: a ProducerRecord holds any key and value, as Java's
+// ProducerRecord<K, V> does, and hashes a number as Java's Integer.
 test('testEqualsAndHashCode', () => {
-  const producerRecord = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: '1' });
+  const producerRecord = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: 1 });
   assert.ok(producerRecord.equals(producerRecord));
   assert.equal(producerRecord.hashCode(), producerRecord.hashCode());
 
-  const equalRecord = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: '1' });
+  const equalRecord = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: 1 });
   assert.ok(producerRecord.equals(equalRecord));
   assert.equal(producerRecord.hashCode(), equalRecord.hashCode());
 
-  const topicMisMatch = new ProducerRecord({ topic: 'test-1', partition: 1, key: 'key', value: '1' });
+  const topicMisMatch = new ProducerRecord({ topic: 'test-1', partition: 1, key: 'key', value: 1 });
   assert.ok(!producerRecord.equals(topicMisMatch));
 
-  const partitionMismatch = new ProducerRecord({ topic: 'test', partition: 2, key: 'key', value: '1' });
+  const partitionMismatch = new ProducerRecord({ topic: 'test', partition: 2, key: 'key', value: 1 });
   assert.ok(!producerRecord.equals(partitionMismatch));
 
-  const keyMisMatch = new ProducerRecord({ topic: 'test', partition: 1, key: 'key-1', value: '1' });
+  const keyMisMatch = new ProducerRecord({ topic: 'test', partition: 1, key: 'key-1', value: 1 });
   assert.ok(!producerRecord.equals(keyMisMatch));
 
-  const valueMisMatch = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: '2' });
+  const valueMisMatch = new ProducerRecord({ topic: 'test', partition: 1, key: 'key', value: 2 });
   assert.ok(!producerRecord.equals(valueMisMatch));
 
   const nullFieldsRecord = new ProducerRecord({ topic: 'topic', partition: null, timestamp: null, key: null, value: null, headers: null });

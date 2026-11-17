@@ -894,6 +894,9 @@ async function assertSendOrder(futures) {
       const record = new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('v'), headers });
       record.headers.add({ key: 'b', value: Buffer.from('1') });
       const sent = producer.send(record);
+      // Handled at creation: the later await still sees a rejection, and a
+      // failing assertion before it leaves no unhandled rejection.
+      sent.catch(() => {});
       assert.throws(() => record.headers.add({ key: 'c', value: null }), {
         name: 'IllegalStateError',
         message: 'RecordHeaders has been closed.',
@@ -971,8 +974,12 @@ async function warmedProducer(what) {
             callbacks++;
             // A send from inside a delivery callback (inside a drain, maybe the
             // one send() runs on entry): its own pump does not nest.
-            if (nested === null)
-              nested = producer.send({ record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('nested') }) });
+            if (nested === null) {
+              const sent = producer.send({ record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('nested') }) });
+              // Handled at creation, awaited below.
+              sent.catch(() => {});
+              nested = sent;
+            }
           },
         });
         if (i % 10000 === 0) rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
@@ -1023,7 +1030,11 @@ async function warmedProducer(what) {
           watch.sends++;
           const sent = producer.send({ record: new ProducerRecord({ topic, partition: 0, key: null, value }), callback });
           if (j === 0) await sent;
-          else fired.push(sent);
+          else {
+            // Handled at creation, awaited after the loop.
+            sent.catch(() => {});
+            fired.push(sent);
+          }
         }
       }
       const ticksDuringLoop = ticks;
@@ -1277,15 +1288,23 @@ async function warmedProducer(what) {
         record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('first') }),
         callback: () => {
           firstCalls += 1;
-          nested = producer.send({
+          const sent = producer.send({
             record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('nested') }),
             callback: ({ exception }) => {
               nestedCalls += 1;
               nestedException = exception;
             },
           });
+          // Handled at creation: a refusal by the closing producer fails this
+          // test at its await below, not the whole file as an unhandled
+          // rejection.
+          sent.catch(() => {});
+          nested = sent;
           const start = Date.now();
-          closing = (timed ? producer.close({ timeout: 60000 }) : producer.close()).then(() => Date.now() - start);
+          const closed = (timed ? producer.close({ timeout: 60000 }) : producer.close()).then(() => Date.now() - start);
+          // Handled at creation, awaited below.
+          closed.catch(() => {});
+          closing = closed;
         },
       });
       await first.get();
@@ -1304,6 +1323,666 @@ async function warmedProducer(what) {
       assert.equal(nestedException.message, 'Producer is closed forcefully.');
       assert.equal(firstCalls, 1);
       assert.equal(nestedCalls, 1);
+    }
+  },
+  120000,
+);
+
+// BaseProducerSendTest's and PlaintextProducerSendTest's lingering-record
+// tests (Apache Kafka 4.4.0), with Java's createProducer(lingerMs =
+// Int.MaxValue, deliveryTimeoutMs = Int.MaxValue): nothing leaves the
+// accumulator until flush() or close() sends or aborts it. Java's topics have
+// RF 2; the scratch broker auto-creates them with one partition, RF 1.
+const INT_MAX = 2147483647;
+const LINGERING = { 'linger.ms': INT_MAX, 'delivery.timeout.ms': INT_MAX };
+
+/**
+ * A topic of `what` that exists: one record sent and delivered by a producer
+ * of its own, as Java creates its topics before the test.
+ *
+ * @param {string} what
+ */
+async function createdTopic(what) {
+  const topic = freshTopic(what);
+  const warmUp = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+  try {
+    await (await warmUp.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('warm-up') }))).get();
+  } finally {
+    await warmUp.close();
+  }
+  return topic;
+}
+
+// BaseProducerSendTest.testFlush, which also carries the half of
+// KafkaProducerTest.testFlushCompleteSendOfInflightBatches the test above
+// leaves out: none is done before flush(), all are after it. Java's messages.
+(SKIP ? test.skip : test)(
+  'flush sends every lingering record: none is done before flush(), all are after, 50 rounds',
+  async () => {
+    const topic = freshTopic('flush-linger');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, ...LINGERING } });
+    try {
+      const record = new ProducerRecord({ topic, value: Buffer.from('value') });
+      for (let round = 0; round < 50; round++) {
+        /** @type {KafkaFuture<RecordMetadata>[]} */
+        const futures = [];
+        for (let i = 0; i < 100; i++) futures.push(await producer.send(record));
+        assert.ok(
+          futures.every((f) => !f.isDone()),
+          'No request is complete.',
+        );
+        await producer.flush();
+        assert.ok(
+          futures.every((f) => f.isDone()),
+          'All requests are complete.',
+        );
+      }
+    } finally {
+      await producer.close();
+    }
+  },
+  300000,
+);
+
+// BaseProducerSendTest.testCloseWithZeroTimeoutFromCallerThread, carrying
+// RecordAccumulatorTest.testAbortIncompleteBatches' assertions in its first
+// round: close({ timeout: 0 }) aborts every lingering record with
+// RecordAccumulator#abortIncompleteBatches' bare KafkaException("Producer is
+// closed forcefully."), the callbacks first, and nothing reaches the broker.
+(SKIP ? test.skip : test)(
+  'close({ timeout: 0 }) fails every lingering record with a bare KafkaError, 50 producers',
+  async () => {
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    const topic = await createdTopic('close-zero');
+    const { highWatermark: before } = await fetchRecords(BOOTSTRAP, topic, 0);
+    const record = new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('value') });
+    for (let round = 0; round < 50; round++) {
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, ...LINGERING } });
+      /** @type {Array<Error | null>} */
+      const exceptions = [];
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const futures = [];
+      for (let i = 0; i < 100; i++) {
+        futures.push(
+          await producer.send({
+            record,
+            callback: ({ exception }) => {
+              exceptions.push(exception);
+            },
+          }),
+        );
+      }
+      assert.ok(
+        futures.every((f) => !f.isDone()),
+        'No request is complete.',
+      );
+      await producer.close({ timeout: 0 });
+      assert.equal(exceptions.length, 100);
+      for (const [i, future] of futures.entries()) {
+        const exception = exceptions[i];
+        assert.ok(exception instanceof KafkaError);
+        // Java: assertEquals(classOf[KafkaException], e.getCause.getClass).
+        assert.equal(exception.constructor, KafkaError);
+        assert.equal(exception.message, 'Producer is closed forcefully.');
+        assert.equal(future.isDone(), true);
+        assert.equal(future.isCompletedExceptionally(), true);
+        await assert.rejects(future.get(), (e) => {
+          assert.ok(e instanceof ExecutionError);
+          assert.equal(/** @type {Error} */ (e.cause).constructor, KafkaError);
+          assert.equal(/** @type {Error} */ (e.cause).message, 'Producer is closed forcefully.');
+          return true;
+        });
+      }
+    }
+    // Nothing reached the broker: the public view of Java's
+    // assertFalse(accum.hasUndrained()) after the abort.
+    const { highWatermark } = await fetchRecords(BOOTSTRAP, topic, 0);
+    assert.equal(highWatermark, before);
+  },
+  300000,
+);
+
+// BaseProducerSendTest.testCloseWithZeroTimeoutFromSenderThread: Java's
+// CloseCallback calls close(0) and then close() from every record's callback
+// ("The close call will be called by all the message callbacks. This tests
+// idempotence of the close call." / "Test close with non zero timeout.
+// Should not block at all."); the first record's callback first sends 100
+// more ("Trigger another batch in accumulator before close the producer.
+// These messages should not be sent."). The flushed records reach the broker.
+(SKIP ? test.skip : test)(
+  'close({ timeout: 0 }) and close() from the send callbacks neither block nor lose the records sent before, 50 rounds',
+  async () => {
+    const topic = await createdTopic('close-in-callbacks');
+    const { highWatermark: base } = await fetchRecords(BOOTSTRAP, topic, 0);
+    const record = new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('value') });
+    for (let round = 0; round < 50; round++) {
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, ...LINGERING } });
+      /** @type {Promise<unknown>[]} */
+      const closes = [];
+      /** @type {Promise<unknown>[]} */
+      const nested = [];
+      /** @param {boolean} sendRecords @returns {Callback} */
+      const closeCallback = (sendRecords) => () => {
+        if (sendRecords) {
+          for (let i = 0; i < 100; i++) {
+            const sent = producer.send(record);
+            // Handled at creation; settled below.
+            sent.catch(() => {});
+            nested.push(sent);
+          }
+        }
+        for (const closed of [producer.close({ timeout: 0 }), producer.close()]) {
+          // Handled at creation, settled below.
+          closed.catch(() => {});
+          closes.push(closed);
+        }
+      };
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const responses = [];
+      for (let i = 0; i < 100; i++) responses.push(await producer.send({ record, callback: closeCallback(i === 0) }));
+      assert.ok(
+        responses.every((f) => !f.isDone()),
+        'No request is complete.',
+      );
+      await producer.flush();
+      assert.ok(
+        responses.every((f) => f.isDone()),
+        'All requests are complete.',
+      );
+      // Each close settles, none rejected, within the core's 30 s bound.
+      const settled = await Promise.race([
+        Promise.allSettled(closes),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 30000)),
+      ]);
+      assert.notEqual(settled, 'timeout', 'a close() from a callback blocked');
+      for (const outcome of /** @type {PromiseSettledResult<unknown>[]} */ (settled)) assert.equal(outcome.status, 'fulfilled');
+      assert.equal(closes.length, 200);
+      // The nested sends reached a closing producer, each handled when made.
+      await Promise.allSettled(nested);
+      const { highWatermark } = await fetchRecords(BOOTSTRAP, topic, 0);
+      assert.ok(
+        highWatermark >= base + 100 * (round + 1),
+        `Consumed ${highWatermark - base} records before timeout instead of the expected ${100 * (round + 1)} records`,
+      );
+      await holdingTheLoop(() => producer.close());
+    }
+  },
+  600000,
+);
+
+/**
+ * Runs `body` with the event loop held by a timer: a closed producer no
+ * longer keeps Node running.
+ *
+ * @template T
+ * @param {() => Promise<T>} body
+ * @returns {Promise<T>}
+ */
+async function holdingTheLoop(body) {
+  const hold = setInterval(() => {}, 1000);
+  try {
+    return await body();
+  } finally {
+    clearInterval(hold);
+  }
+}
+
+// BaseProducerSendTest.testSendNonCompressedMessageWithCreateTime and
+// testSendCompressedMessageWithCreateTime (gzip): 100 lingering records keep
+// their CreateTime through close(20 s). Java asserts inside onCompletion; the
+// callback records, the test asserts. Java checks the metadata only, so the
+// gzip case needs no read-back.
+for (const codec of ['none', 'gzip']) {
+  (SKIP ? test.skip : test)(
+    `CreateTime: 100 lingering records keep their timestamps through close({ timeout: 20000 }), compression ${codec}`,
+    async () => {
+      const topic = freshTopic(`create-time-${codec}`);
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'compression.type': codec, ...LINGERING } });
+      const baseTimestamp = 123456;
+      /** @type {string[]} */
+      const failures = [];
+      let offset = 0;
+      let timestampDiff = 1;
+      /** @param {{ metadata: RecordMetadata, exception: Error | null }} outcome */
+      const callback = ({ metadata, exception }) => {
+        if (exception !== null) failures.push(`Send callback returns the following exception: ${exception}`);
+        else checkMetadata(metadata);
+      };
+      /** @param {RecordMetadata} metadata */
+      const checkMetadata = (metadata) => {
+        if (metadata.offset !== BigInt(offset)) failures.push(`offset ${metadata.offset}, expected ${offset}`);
+        if (metadata.topic !== topic) failures.push(`topic ${metadata.topic}`);
+        if (metadata.timestamp !== BigInt(baseTimestamp + timestampDiff)) failures.push(`timestamp ${metadata.timestamp}`);
+        if (metadata.partition !== 0) failures.push(`partition ${metadata.partition}`);
+        offset += 1;
+        timestampDiff += 1;
+      };
+      /** @type {Array<[KafkaFuture<RecordMetadata>, number]>} */
+      const sent = [];
+      for (let i = 1; i <= 100; i++) {
+        const timestamp = baseTimestamp + i;
+        const record = new ProducerRecord({
+          topic,
+          partition: 0,
+          timestamp,
+          key: Buffer.from(`key${i}`),
+          value: Buffer.from(`value${i}`),
+        });
+        sent.push([await producer.send({ record, callback }), timestamp]);
+      }
+      await producer.close({ timeout: 20000 });
+      for (const [future, timestamp] of sent) assert.equal((await future.get()).timestamp, BigInt(timestamp));
+      assert.deepEqual(failures, []);
+      assert.equal(offset, 100, `Should have offset 100 but only successfully sent ${offset}`);
+    },
+    120000,
+  );
+}
+
+// PlaintextProducerSendTest.testBatchSizeZero: batch.size 0 with lingering
+// records; close(20 s) sends them all, in order (sendAndVerify).
+(SKIP ? test.skip : test)(
+  'batch.size 0 with linger.ms Int.MaxValue: close({ timeout: 20000 }) delivers every record in order',
+  async () => {
+    const topic = freshTopic('batch-zero');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, ...LINGERING, 'batch.size': 0 } });
+    /** @type {KafkaFuture<RecordMetadata>[]} */
+    const futures = [];
+    for (let i = 1; i <= 100; i++) {
+      futures.push(
+        await producer.send(new ProducerRecord({ topic, partition: 0, key: Buffer.from(`key${i}`), value: Buffer.from(`value${i}`) })),
+      );
+    }
+    await producer.close({ timeout: 20000 });
+    let lastOffset = 0;
+    for (const [index, future] of futures.entries()) {
+      const m = await future.get();
+      assert.equal(m.topic, topic);
+      assert.equal(m.partition, 0);
+      assert.equal(m.offset, BigInt(index));
+      lastOffset += 1;
+    }
+    assert.equal(lastOffset, 100);
+  },
+  120000,
+);
+
+/**
+ * Java's TestUtils.computeUntilTrue (15 000 ms, 100 ms pause) over a send:
+ * until its future is pending, or done and successful. Returns the last one.
+ *
+ * @param {() => Promise<KafkaFuture<RecordMetadata>>} send
+ */
+async function sendUntilQueued(send) {
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const future = await send();
+    if (!future.isDone() || !future.isCompletedExceptionally()) return future;
+    if (Date.now() >= deadline) return future;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/** @param {KafkaFuture<RecordMetadata>} future @param {string} topic */
+async function verifySendSuccess(future, topic) {
+  const m = await future.get({ timeout: 30000 });
+  assert.equal(m.topic, topic);
+  assert.equal(m.partition, 0);
+  assert.ok(m.offset >= 0n, `Invalid offset ${m}`);
+}
+
+// PlaintextProducerSendTest.testNonBlockingProducer: with max.block.ms 0 a
+// send fails at once, with Java's exact classes: Kafka's TimeoutException
+// without metadata, BufferExhaustedException with a full buffer. Both are
+// ApiExceptions, so send() resolves with a done, failed future.
+(SKIP ? test.skip : test)(
+  'max.block.ms 0: a send fails at once without metadata, and with a full buffer',
+  async () => {
+    const { BufferExhaustedError } = require('@confluentinc/kafka-javascript/producer');
+    const topic = freshTopic('non-blocking');
+    /** @param {KafkaProducer<Buffer, Buffer>} p */
+    const send = (p) => p.send(new ProducerRecord({ topic, partition: 0, key: Buffer.from('key'), value: Buffer.alloc(1000) }));
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'max.block.ms': 0 } });
+    const producer2 = new KafkaProducer({
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'max.block.ms': 0, 'linger.ms': 15000, 'batch.size': 1100, 'buffer.memory': 1500 },
+    });
+    try {
+      // The topic has no metadata yet: the first send fails at once.
+      const f = await send(producer);
+      assert.equal(f.isDone(), true, 'Send should be completed immediately');
+      await assert.rejects(f.get(), (e) => {
+        assert.ok(e instanceof ExecutionError);
+        assert.equal(/** @type {Error} */ (e.cause).constructor, TimeoutError);
+        return true;
+      });
+      await verifySendSuccess(await sendUntilQueued(() => send(producer)), topic);
+      // The first record fills the buffer: the second needs a new batch that
+      // does not fit.
+      const future2 = await sendUntilQueued(() => send(producer2));
+      const f2 = await send(producer2);
+      assert.equal(f2.isDone(), true, 'Send should be completed immediately');
+      await assert.rejects(f2.get(), (e) => {
+        assert.ok(e instanceof ExecutionError);
+        assert.equal(/** @type {Error} */ (e.cause).constructor, BufferExhaustedError);
+        assert.ok(/** @type {Error} */ (e.cause).message.startsWith('Failed to allocate '), /** @type {Error} */ (e.cause).message);
+        return true;
+      });
+      await producer2.flush();
+      await verifySendSuccess(future2, topic);
+    } finally {
+      await producer.close();
+      await producer2.close();
+    }
+  },
+  120000,
+);
+
+/**
+ * A producer of `configs` whose metadata cache holds `topic`, which exists:
+ * partitionsFor retried until it resolves, as each try has only max.block.ms.
+ *
+ * @param {Record<string, unknown>} configs
+ * @param {string} topic
+ */
+async function producerKnowing(configs, topic) {
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, ...configs } });
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    try {
+      await producer.partitionsFor(topic);
+      return producer;
+    } catch (e) {
+      if (Date.now() >= deadline) {
+        // The caller gets no producer to close.
+        await producer.close({ timeout: 0 });
+        throw e;
+      }
+    }
+  }
+}
+
+/** @param {string} topic */
+const kiloRecord = (topic) => new ProducerRecord({ topic, partition: 0, key: Buffer.from('key'), value: Buffer.alloc(1000) });
+
+// BufferPoolTest.testBufferExhaustedExceptionIsThrown and testBlockTimeout,
+// through the public API with testNonBlockingProducer's sizes: a send that
+// cannot get a 1100-byte batch from the 400 bytes left fails after
+// max.block.ms with BufferPool#allocate's message. BufferExhaustedException
+// extends TimeoutException, an ApiException: send() resolves with a failed
+// future and calls the callback.
+//
+// While a send waits for memory the pool has a waiter, which makes the
+// lingering batch sendable (RecordAccumulator#ready's `exhausted`, in Java as
+// in the core): a Sender that checks it within max.block.ms drains the batch,
+// the memory is freed and the send succeeds. Java's own public-API test uses
+// max.block.ms 0 to avoid that race. Here the second send comes once the
+// Sender, woken by the first batch, is back in its linger wait; a try that
+// still drains is retried with a new producer (Java's computeUntilTrue idea),
+// and the assertions run on the try that waited.
+/**
+ * The flow of BufferPoolTest.testBufferExhaustedExceptionIsThrown and
+ * testBlockTimeout (above): asserts all of it but the metric, and returns
+ * buffer-exhausted-total as read after the drop.
+ */
+async function exhaustTheBuffer() {
+  const { BufferExhaustedError } = require('@confluentinc/kafka-javascript/producer');
+  const { MetricName } = require('@confluentinc/kafka-javascript/common');
+  const topic = await createdTopic('exhausted');
+  for (let attempt = 1; ; attempt++) {
+    const producer = await producerKnowing(
+      { 'client.id': 'js-it-exhausted', 'max.block.ms': 500, 'linger.ms': 15000, 'batch.size': 1100, 'buffer.memory': 1500 },
+      topic,
+    );
+    try {
+      const first = await producer.send(kiloRecord(topic));
+      assert.equal(first.isDone(), false);
+      // The Sender, woken by the new batch, goes back to its linger wait.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      /** @type {Array<Error | null>} */
+      const calls = [];
+      const started = Date.now();
+      const second = await producer.send({ record: kiloRecord(topic), callback: ({ exception }) => calls.push(exception) });
+      const waited = Date.now() - started;
+      if (!second.isDone() && attempt < 20) continue; // the batch drained: memory was freed (see above)
+      assert.equal(second.isDone(), true);
+      assert.equal(second.isCompletedExceptionally(), true);
+      assert.equal(calls.length, 1);
+      await assert.rejects(second.get(), (e) => {
+        assert.ok(e instanceof ExecutionError);
+        const cause = /** @type {Error} */ (e.cause);
+        assert.equal(cause.constructor, BufferExhaustedError);
+        assert.ok(cause instanceof TimeoutError);
+        assert.equal(cause, calls[0]);
+        assert.equal(
+          cause.message,
+          'Failed to allocate 1100 bytes within the configured max blocking time 500 ms. Total memory: 1500 bytes. Available memory: 400 bytes. Poolable size: 1100 bytes',
+        );
+        return true;
+      });
+      assert.ok(waited >= 500, 'BufferExhaustedException should not throw before maxBlockTimeMs');
+      assert.ok(waited < 500 + 1000, 'BufferExhaustedException should throw soon after maxBlockTimeMs');
+      const exhausted = new MetricName({
+        name: 'buffer-exhausted-total',
+        group: 'producer-metrics',
+        description: '',
+        tags: new Map([['client-id', 'js-it-exhausted']]),
+      });
+      const exhaustedTotal = producer.metrics().get(exhausted)?.metricValue();
+      await producer.flush();
+      await verifySendSuccess(first, topic);
+      return exhaustedTotal;
+    } finally {
+      await producer.close({ timeout: 0 });
+    }
+  }
+}
+
+(SKIP ? test.skip : test)(
+  'a send that cannot get buffer memory within max.block.ms fails with BufferExhaustedError, after max.block.ms',
+  async () => {
+    await exhaustTheBuffer();
+  },
+  180000,
+);
+
+// BufferPool#awaitMemory records buffer-exhausted-total once for the dropped
+// send. Waits on the core (DECISIONS.md, entry 31, a core issue): its FFI
+// first tries a send without waiting (KafkaProducer::try_send, Rust-only), on
+// the calling thread and again on its submission task, and each try's
+// zero-budget BufferPool.allocate records an exhaustion too, so one dropped
+// send counts 3. Remove the skip when the core records one exhaustion per
+// dropped send (its non-waiting tries record none).
+test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool#awaitMemory records it', async () => {
+  assert.equal(await exhaustTheBuffer(), 1);
+});
+
+// BufferPoolTest.testCloseNotifyWaiters: BufferPool#close wakes every send
+// waiting for memory, which BufferPool#awaitMemory fails with a bare
+// KafkaException("Producer closed while allocating memory"); not an
+// ApiException, so KafkaProducer#doSend rethrows it: send() rejects and the
+// callback is not called. Java's numWorkers = 2. As above, a try whose
+// lingering batch drains (freeing the memory) is retried with a new producer
+// until both sends are still waiting when close() runs.
+(SKIP ? test.skip : test)(
+  'close() releases the sends waiting for buffer memory with KafkaError "Producer closed while allocating memory"',
+  async () => {
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    const topic = await createdTopic('close-waiters');
+    for (let attempt = 1; ; attempt++) {
+      const producer = await producerKnowing(
+        { 'max.block.ms': 60000, 'linger.ms': 15000, 'batch.size': 1100, 'buffer.memory': 1500 },
+        topic,
+      );
+      let closed = false;
+      try {
+        const first = await producer.send(kiloRecord(topic));
+        // The Sender, woken by the new batch, goes back to its linger wait.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        let callbacks = 0;
+        let settled = 0;
+        const waiting = [0, 1].map(() => {
+          const sent = producer.send({ record: kiloRecord(topic), callback: () => callbacks++ });
+          sent.then(
+            () => settled++,
+            () => settled++,
+          );
+          return sent;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        if (settled !== 0 && attempt < 20) {
+          await Promise.allSettled(waiting);
+          continue; // the batch drained: memory was freed (see above)
+        }
+        assert.equal(settled, 0);
+        const started = Date.now();
+        closed = true;
+        await producer.close();
+        for (const sent of waiting) {
+          await assert.rejects(sent, (e) => {
+            assert.ok(e instanceof KafkaError);
+            assert.equal(e.constructor, KafkaError);
+            assert.equal(e.message, 'Producer closed while allocating memory');
+            return true;
+          });
+        }
+        assert.equal(callbacks, 0);
+        assert.ok(Date.now() - started < 30000, `close took ${Date.now() - started} ms`);
+        // close() without a timeout sends what the accumulator holds.
+        await holdingTheLoop(() => first.get());
+        return;
+      } finally {
+        // Every try's producer is closed, the retried ones and a failed one.
+        if (!closed) await producer.close({ timeout: 0 });
+      }
+    }
+  },
+  600000,
+);
+
+// KafkaProducerMetricsTest.shouldRecordMetadataWaitTime, through the public
+// API: Java records an exact value through the internal recorder; here a
+// send's wait for a fresh topic's metadata makes it grow, and a send with the
+// metadata cached adds nothing (KafkaProducer#waitOnMetadata returns before
+// its loop when the partition count is known).
+(SKIP ? test.skip : test)(
+  'metadata-wait-time-ns-total counts a send waiting for a fresh topic metadata, and only that',
+  async () => {
+    const { MetricName } = require('@confluentinc/kafka-javascript/common');
+    const { KafkaMetric } = require('@confluentinc/kafka-javascript/common/metrics');
+    const topic = freshTopic('metadata-wait');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-metadata-wait' } });
+    const key = new MetricName({
+      name: 'metadata-wait-time-ns-total',
+      group: 'producer-metrics',
+      description: '',
+      tags: new Map([['client-id', 'js-it-metadata-wait']]),
+    });
+    try {
+      const initial = producer.metrics().get(key);
+      assert.ok(initial instanceof KafkaMetric);
+      assert.equal(initial.metricValue(), 0);
+      await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
+      const waited = /** @type {number} */ (producer.metrics().get(key)?.metricValue());
+      assert.ok(waited > 0, `${waited}`);
+      await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
+      assert.equal(producer.metrics().get(key)?.metricValue(), waited);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+// ProducerFailureHandlingTest.testSendAfterClosed, Java's three acks
+// settings, each producer closed after a delivered send ("first send a
+// message to make sure the metadata is refreshed"). The gRPC arm cannot
+// show this (its server forgets a closed producer).
+(SKIP ? test.skip : test)(
+  'send() after close() rejects with IllegalStateError, for acks 0, 1 and -1',
+  async () => {
+    const { IllegalStateError } = require('@confluentinc/kafka-javascript');
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    const topic = freshTopic('send-after-closed');
+    const producers = ['0', '1', '-1'].map(
+      (acks) =>
+        new KafkaProducer({
+          configs: {
+            'bootstrap.servers': BOOTSTRAP,
+            acks,
+            retries: 0,
+            'request.timeout.ms': 30000,
+            'max.block.ms': 10000,
+            'buffer.memory': 30000,
+          },
+        }),
+    );
+    const record = new ProducerRecord({ topic, partition: null, key: Buffer.from('key'), value: Buffer.from('value') });
+    for (const p of producers) await (await p.send(record)).get();
+    for (const p of producers) {
+      await p.close();
+      await holdingTheLoop(() =>
+        assert.rejects(p.send(record), (e) => {
+          assert.ok(e instanceof IllegalStateError && !(e instanceof KafkaError), `${e}`);
+          assert.equal(e.message, 'Cannot perform operation after producer has been closed');
+          return true;
+        }),
+      );
+    }
+  },
+  120000,
+);
+
+// FutureRecordMetadataTest.testFutureGetWithSeconds: a Temporal.Duration of
+// one second is passed on as 1000 ms, and no JavaScript timer runs (the core
+// enforces the deadline). The message is the client's recorded deviation
+// (src/common/kafka_future.ts remarks: Java's is "Timeout after waiting for
+// 1000 ms."). The chained half needs a mocked ProduceRequestResult: N/A.
+(SKIP ? test.skip : test)(
+  "a record's future takes a Temporal.Duration timeout: one second waits 1000 ms",
+  async () => {
+    const { Temporal } = require('@js-temporal/polyfill');
+    const topic = freshTopic('future-seconds');
+    // Well under the test's 120 s: a stalled metadata wait or delivery fails
+    // with the client's own error, not the test's timeout.
+    const producer = new KafkaProducer({
+      configs: {
+        'bootstrap.servers': BOOTSTRAP,
+        'linger.ms': 5000,
+        'max.block.ms': 30000,
+        'request.timeout.ms': 10000,
+        'delivery.timeout.ms': 30000,
+      },
+    });
+    try {
+      await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('warm-up') }))).get();
+      const future = await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }));
+      assert.equal(future.isDone(), false);
+      const realSetTimeout = globalThis.setTimeout;
+      let timers = 0;
+      globalThis.setTimeout = /** @type {typeof setTimeout} */ (
+        /** @type {unknown} */ (
+          (/** @type {Parameters<typeof setTimeout>} */ ...args) => {
+            timers++;
+            return realSetTimeout(...args);
+          }
+        )
+      );
+      try {
+        const started = Date.now();
+        await assert.rejects(future.get({ timeout: Temporal.Duration.from({ seconds: 1 }) }), (e) => {
+          assert.equal(/** @type {Error} */ (e).constructor, RootTimeoutError);
+          assert.equal(/** @type {Error} */ (e).message, 'Timed out waiting for KafkaFuture after 1000 ms');
+          return true;
+        });
+        assert.ok(Date.now() - started >= 900, `${Date.now() - started} ms`);
+      } finally {
+        globalThis.setTimeout = realSetTimeout;
+      }
+      assert.equal(timers, 0);
+      const metadata = await future.get();
+      assert.equal(await future.get(Temporal.Duration.from({ seconds: 1 })), metadata);
+    } finally {
+      await producer.close();
     }
   },
   120000,

@@ -136,6 +136,21 @@ test('shouldThrowOnSendIfProducerIsClosed', async () => {
   );
 });
 
+// Java's form of shouldThrowOnSendIfProducerIsClosed: send(null) on a closed
+// mock. Java's mock checks closed first (IllegalStateException "MockProducer
+// is already closed."); the JS mock refuses the null record first, a recorded
+// deviation (MockProducer.send's remarks, javascript/CLAUDE.md: root §4 has
+// the FFI check a NULL mandatory argument first, and the binding repeats no
+// precondition, Q35). The test above covers the closed error with a record.
+test("shouldThrowOnSendIfProducerIsClosed, Java's null record: the null check comes first (deviation)", async () => {
+  const producer = buildMockProducer(true);
+  await producer.close();
+  await holdingTheLoop(() =>
+    // @ts-expect-error a null record: Java's test sends one, the binding's null check throws TypeError
+    assert.rejects(producer.send(null), { constructor: TypeError, message: 'record must not be null' }),
+  );
+});
+
 test('shouldThrowOnFlushProducerIfProducerIsClosed', async () => {
   const producer = buildMockProducer(true);
   await producer.close();
@@ -145,21 +160,43 @@ test('shouldThrowOnFlushProducerIfProducerIsClosed', async () => {
 });
 
 test('shouldThrowClassCastException', async () => {
-  // Java's IntegerSerializer given a string throws ClassCastException; the
-  // JavaScript serializer of a type throws its TypeError, which rejects the
-  // send as it is.
+  // Java's IntegerSerializer (the key serializer) given the string "key1"
+  // throws ClassCastException; the JavaScript serializer of a type throws its
+  // TypeError, which rejects the send as it is. The key serializer runs first,
+  // so the value serializer is never reached.
+  /** @type {unknown[]} */
+  const valueCalls = [];
+  const valueSerializer = stringSerializer();
   const customProducer = new MockProducer({
     autoComplete: true,
     partitioner: null,
-    keySerializer: { serialize: ({ data }) => (typeof data === 'number' ? Buffer.alloc(4) : assert.fail('not reached')) },
-    valueSerializer: stringSerializer(),
+    keySerializer: {
+      serialize: ({ data }) => {
+        if (typeof data !== 'number') throw new TypeError(`integerSerializer: data must be a number or null, not a ${typeof data}`);
+        return Buffer.alloc(4);
+      },
+    },
+    valueSerializer: {
+      serialize: (args) => {
+        valueCalls.push(args.data);
+        return valueSerializer.serialize(args);
+      },
+    },
   });
+  await assert.rejects(customProducer.send(new ProducerRecord({ topic, key: 'key1', value: 'value1' })), {
+    constructor: TypeError,
+    message: 'integerSerializer: data must be a number or null, not a string',
+  });
+  assert.deepEqual(valueCalls, []);
+  // The value serializer's own type check, as before: a number for the string serializer.
+  const stringValued = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer });
   // @ts-expect-error a number for the string serializer: its type check throws TypeError
-  await assert.rejects(customProducer.send(new ProducerRecord({ topic, key: 1, value: 2 })), {
+  await assert.rejects(stringValued.send(new ProducerRecord({ topic, key: null, value: 2 })), {
     constructor: TypeError,
     message: 'stringSerializer: data must be a string or null, not a number',
   });
   await customProducer.close();
+  await stringValued.close();
 });
 
 test('shouldBeFlushedIfNoBufferedRecords', async () => {

@@ -312,7 +312,11 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * one throws rejects the send as it is *(deviation: Java's mock checks
    * that it is closed, fenced or has a send error before it serializes. Why:
    * the serializers run in JavaScript before the call reaches the core's
-   * mock)*. With `autoComplete`, the callback runs inside the call, before
+   * mock)*. A null `record` rejects with `TypeError` even on a closed mock
+   * *(deviation: Java's mock checks that it is closed first. Why: root §4
+   * has the FFI check a NULL mandatory argument first, and the binding
+   * repeats no precondition, Q35. Goes when: the FFI's mock checks that it
+   * is closed first)*. With `autoComplete`, the callback runs inside the call, before
    * the returned Promise resolves; the record's headers stay writable, as
    * Java's mock leaves them.
    */
