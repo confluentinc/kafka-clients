@@ -51,9 +51,10 @@ name: build-test-release
 #      release tag, where a breaking change fails unless the Cargo.toml version
 #      allows it (api-compat); rust/Cargo.lock against the RustSec advisory
 #      database, where a vulnerable dependency fails (audit).
-#   4. "Coverage (Linux amd64)" -- one job per language that reports its tests'
-#      code coverage; today coverage-dotnet, the .NET unit tests'. It runs every
-#      test on every build, a pull request's included: it is not a verify job.
+#   4. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
+#      the test suite, one job each; today coverage-dotnet, the .NET unit
+#      tests' code coverage. It runs every test on every build, a pull
+#      request's included: it is not a verify job.
 #   On a release tag, the "Release" promotion then starts release.yml, which
 #   holds the "Release (Rust):", "Release (Python):" and "Release (.NET):"
 #   blocks (see the comments there).
@@ -582,14 +583,14 @@ blocks:
             - export PATH="$HOME/.cargo/bin:$PATH"
             - make audit
 
-  - name: "Coverage (Linux amd64)"
-    # One job per language that reports its tests' code coverage. A block of its
-    # own, so a coverage failure is told apart from a verify failure, and
-    # coverage has its own time limit. A new language adds a job here
-    # (coverage-<language> (Linux amd64)) and lists it in REQUIRED_CI_JOBS in
-    # create-release-tag.yml. Every job runs on every build: a skipped job records
-    # no result, and create-release-tag.yml then refuses to tag. No test selection
-    # applies here: coverage counts every unit test.
+  - name: ".NET additional checks (Linux amd64)"
+    # The .NET checks that are not the test suite, one job each on its own VM,
+    # as "Rust additional checks" are for Rust: a block of their own, so a
+    # failure is told apart from a verify failure, with its own time limit. A
+    # new job here is also listed in REQUIRED_CI_JOBS in create-release-tag.yml.
+    # Every job runs on every build: a skipped job records no result, and
+    # create-release-tag.yml then refuses to tag. No test selection applies
+    # here: coverage counts every unit test.
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
     # (`make coverage-dotnet`, see dotnet/Makefile), against the debug
