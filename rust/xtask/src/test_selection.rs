@@ -874,14 +874,15 @@ fn select_into(options: &SelectOptions, head: &str, target: &Target) -> anyhow::
 /// input: one `<local ref> <local commit> <remote ref> <remote commit>` line
 /// per pushed ref.
 ///
-/// When HEAD is pushed and its committed `test-selection/` folder holds no
+/// When HEAD is pushed to a branch and its committed `test-selection/` folder holds no
 /// selection made for it, it selects for HEAD (keeping a selection already
 /// made for it in the folder), commits the folder, and exits with 1: git has
 /// chosen the commits it pushes before the hook runs, so the push stops, to
 /// be repeated with the new commit. Otherwise the push goes on: when HEAD is
 /// not pushed or already carries its selection, and, with no selection and so
 /// every test running in CI, when the working tree holds changes HEAD does not
-/// or the selection fails.
+/// or the selection fails. A tag, or any ref outside `refs/heads/`, is never
+/// given a selection commit: it keeps the commit it was pushed with.
 pub fn pre_push(args: &[String]) -> anyhow::Result<()> {
     let (remote, args) = remote_option(args)?;
     let mut options = select_options("pre-push", &args, false)?;
@@ -920,10 +921,7 @@ pub fn pre_push(args: &[String]) -> anyhow::Result<()> {
     let commit = git(&["rev-parse", "HEAD"])?;
     let short = commit.get(..COMMIT_ABBREV).unwrap_or(&commit);
     eprintln!("pre-push: committed {short} \"{message}\", which this push does not include");
-    let others = refs
-        .lines()
-        .filter(|line| line.split_whitespace().nth(1) != Some(head.as_str()))
-        .count();
+    let others = refs.lines().count() - head_branch_refs(&refs, &head).count();
     if others > 0 {
         eprintln!("pre-push: this push also updates {others} other ref(s), which stop with it: push them again");
     }
@@ -992,14 +990,7 @@ fn remote_option(args: &[String]) -> anyhow::Result<(Option<String>, Vec<String>
 fn repush_args(refs: &str, head: &str, commit: &str, is_ancestor: impl Fn(&str) -> bool) -> Vec<String> {
     let mut leases = Vec::new();
     let mut refspecs = Vec::new();
-    for line in refs.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let [_, local, remote_ref, remote_commit] = fields[..] else {
-            continue;
-        };
-        if local != head {
-            continue;
-        }
+    for (remote_ref, remote_commit) in head_branch_refs(refs, head) {
         if !remote_commit.bytes().all(|b| b == b'0') && !is_ancestor(remote_commit) {
             leases.push(format!("--force-with-lease={remote_ref}:{remote_commit}"));
         }
@@ -1008,9 +999,24 @@ fn repush_args(refs: &str, head: &str, commit: &str, is_ancestor: impl Fn(&str) 
     leases.into_iter().chain(refspecs).collect()
 }
 
-/// Whether the hook's standard input `refs` pushes the commit `head`.
+/// Whether the hook's standard input `refs` pushes the commit `head` to a
+/// branch.
 fn pushes(refs: &str, head: &str) -> bool {
-    refs.lines().any(|line| line.split_whitespace().nth(1) == Some(head))
+    head_branch_refs(refs, head).next().is_some()
+}
+
+/// The `(remote ref, remote commit)` of each line of the hook's standard input
+/// `refs` that pushes the commit `head` to a branch, a remote ref under
+/// `refs/heads/`. A tag on HEAD is left out, so the hook never moves it to the
+/// selection commit.
+fn head_branch_refs<'a>(refs: &'a str, head: &'a str) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    refs.lines().filter_map(move |line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [_, local, remote_ref, remote_commit] = fields[..] else {
+            return None;
+        };
+        (local == head && remote_ref.starts_with("refs/heads/")).then_some((remote_ref, remote_commit))
+    })
 }
 
 /// The selection HEAD's committed folder holds for the tree `tree`, `None`
@@ -2049,6 +2055,14 @@ mod tests {
         ));
         assert!(!pushes(&format!("refs/heads/a {other} refs/heads/a {head}\n"), head));
         assert!(!pushes(&format!("(delete) {zero} refs/heads/b {head}\n"), head));
+        assert!(
+            !pushes(&format!("refs/tags/v1 {head} refs/tags/v1 {zero}\n"), head),
+            "a tag on HEAD"
+        );
+        assert!(
+            pushes(&format!("HEAD {head} refs/heads/b#confluentinc {zero}\n"), head),
+            "an Airlock ref"
+        );
         assert!(!pushes("", head));
     }
 
@@ -2082,6 +2096,16 @@ mod tests {
                 &format!("{commit}:refs/heads/c")
             ]),
             "only HEAD's refs are pushed, and a forced one keeps its lease"
+        );
+        assert_eq!(
+            repush_args(
+                &format!("refs/tags/v1 {head} refs/tags/v1 {zero}\nrefs/heads/b {head} refs/heads/b {base}\n"),
+                head,
+                commit,
+                is_ancestor
+            ),
+            strings(&[&format!("{commit}:refs/heads/b")]),
+            "a tag on HEAD keeps its commit"
         );
         assert!(repush_args("", head, commit, is_ancestor).is_empty());
     }
