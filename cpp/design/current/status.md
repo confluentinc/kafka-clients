@@ -89,6 +89,36 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   value type: one pointer still, but a copy clones it (its flag is set in place). `Configurable`
   waits for its row: `configure(Map<String, ?>)` has none in §5, which the linter reports.
 
+- Step 7 done: `confluent-kafka-doc` (`tidy/doc_check.cpp`) on every public declaration: a
+  comment, an `@param` per parameter and no other, `@return` for a value, `@throws XError` per
+  Javadoc `@throws`, at most 150% of the Javadoc's words, one `@par Translation notes` and none
+  without a Javadoc, `WARNING:` only in the notes and only with an accepted entry in
+  `design/current/doc-contract-changes.md` (stale and malformed entries reported), no Java
+  file:line reference, inline tag or HTML. The Javadoc side (`rules/javadoc.cpp`) ports the Rust
+  counter without its renames, which never change a count; `cargo xtask javadoc --words` prints
+  the Rust counts and `test/data/javadoc_words.txt` holds them for all 2629 in-scope markers,
+  equal to the C++ ones (`javadoc_words_parity`; regenerate with the `javadoc_words_vector`
+  target). Two counter fixes on both sides: a supertype named by a simple name is an enclosing
+  class's member first (Rust missed `StreamsGroupTopologyDescription.Node`), and a code span is
+  delimited by matching backtick runs, so Java's stray backtick in `PatternType.MATCH` no longer
+  halves its count. A fixture per finding and three mutations of real headers.
+
+- Step 8 done: `confluent-kafka-abi` (`tidy/abi_check.cpp`): a class with data holds one pointer
+  and is not passed in registers (Clang's `canPassInRegisters`, the property a later destructor
+  or copy would flip) nor an aggregate; no bit-field, virtual inheritance, unscoped or untyped
+  enum, virtual outside an interface translation, overloaded virtual name. The header-version
+  recorder of §12.3 waits for the first interface. `make abi-check` (`tools/abi_check.cmake`):
+  the baseline from `BASELINE=` or the highest `cpp/v*` tag, extracted with `git archive`; the
+  API inventories (`confluent-kafka-inventory`) compared by `ck_java_model api-diff`; `abidiff`
+  on probe libraries built with `-fkeep-inline-functions`; the baseline's unit tests compiled
+  against the new headers. The `abi_check` test runs it against HEAD: unchanged and an appended
+  enumerator pass, an inserted enumerator and a removed overload fail.
+- Step 9 done: `cpp/Makefile` `lint` (stock checks plus the plugin), `lint-plugin`,
+  `lint-custom`, `lint-tests`, `lint-baseline`, `abi-check`, `verify`; root `lint-cpp`,
+  `verify-cpp`; README and CLAUDE.md §12.4, §13.3. CI is not wired: a Semaphore job needs LLVM
+  21 from apt.llvm.org on Ubuntu 24.04, a JRE, `abidiff` and the Rust FFI build, and runs
+  `make verify-cpp`.
+
 ## Next
 
 1. `detail::check(out_err)` and the error hierarchy: the C++ emitter of
@@ -99,9 +129,9 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
    `RecordMetadata`, `Callback`, the serdes, the completion thread; `KafkaProducerTest` and
    `MockProducerTest`.
 4. The consumer family, then the admin family.
-5. The rest of the translation linter (Java model, rules, checks, `abi-check` with the API
-   inventory and `abidiff` of §12.4), `verify-cpp`, the integration tests and the gRPC
-   conformance backend (§11.3), the vcpkg overlay port (§13.3).
+5. `Configurable`, once §5 has a row for `Map<String, ?>`; the Semaphore job for
+   `make verify-cpp`; the integration tests and the gRPC conformance backend (§11.3), the vcpkg
+   overlay port (§13.3).
 
 ## Core and FFI asks
 

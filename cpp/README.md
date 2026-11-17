@@ -4,8 +4,9 @@ A header-only C++20 binding of the Confluent Kafka Rust client, built on the cli
 (`confluent_kafka_bindings.h`). Its API is the Apache Kafka Java client's `org.apache.kafka.clients`
 API in C++ form; the rules that derive it are in [CLAUDE.md](CLAUDE.md).
 
-**Status: scaffold.** The build, the test framework, the formatter and the linter are in place;
-the public API is not generated yet. See `design/current/status.md`.
+**Status: scaffold.** The build, the test framework, the formatter and the translation linter are in
+place, with the first value types and enums translated by hand to prove the linter; the client
+families are not generated yet. See `design/current/status.md`.
 
 ## Toolchain
 
@@ -16,6 +17,7 @@ the public API is not generated yet. See `design/current/status.md`.
 | Rust core | `cargo build --features ffi` under `../rust` (produces `libconfluent_kafka` and the C header) |
 | Tests | GoogleTest 1.17 (system package, or fetched by CMake) |
 | Format / lint | clang-format and clang-tidy 18 or later |
+| Translation linter | LLVM 21 (`clang-tidy-21 libclang-21-dev libclang-cpp21-dev llvm-21-dev`), a JRE for ANTLR, `abidiff` for `abi-check` |
 
 ## Build
 
@@ -28,7 +30,11 @@ make test-cpp
 make build            # configure (Ninja) + build
 make test             # ctest
 make format-check     # clang-format --dry-run --Werror
-make lint             # clang-tidy over the test sources
+make lint             # clang-tidy over the test sources, then the translation linter
+make lint-tests       # the translation linter's own tests
+make lint-baseline    # rewrite tools/lint/data/baseline.txt
+make abi-check        # against the previous cpp/vX.Y.Z tag, or BASELINE=<rev>; STRICT=ON fails on a break
+make verify           # format-check, lint, test, lint-tests, abi-check
 ```
 
 The CMake project locates the core through cache variables:
@@ -55,7 +61,8 @@ clang-tidy build lacks its own resource directory.
 include/confluent/kafka/   the library (one header per Java class; detail/ is internal)
 test/unit/                 GoogleTest, one executable per file
 test/probe/                a shared library instantiating every public header (ABI baseline)
-tools/                     checks run by CTest and the Makefile
+tools/lint/                the translation linter: Java model, rules, clang-tidy checks, data files
+tools/abi_check.cmake      the interface check against a previous release
 design/current/            plans, status, the documentation contract-change ledger
 design/history/            finished milestones
 ```

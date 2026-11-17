@@ -459,11 +459,12 @@ Interfaces Java declares:
    constructor records the header version the subclass was compiled against, so the binding
    calls a new slot only on an object that has it; interfaces cross as `std::shared_ptr`, so an
    added method needs no new constructor.
-4. The interface check: an API inventory (every public declaration, through libclang) compared
-   with the previous release's; the previous release's unit tests compiled against the new
-   headers (catches an ambiguous new overload); and the ABI probe (`test/probe`, a shared
-   library instantiating every public class) compared with the previous release's dump through
-   `abidiff`. In development a rule change may alter interfaces per PR; in preview a change
+4. The interface check (`make abi-check`, against the previous release's git tag or `BASELINE=`):
+   an API inventory (every public declaration, written by the linter's
+   `confluent-kafka-inventory`) compared with the previous release's by `ck_java_model api-diff`;
+   the previous release's unit tests compiled against the new headers (catches an ambiguous new
+   overload); and a probe library of each tree, built with `-fkeep-inline-functions` so the
+   header-only classes leave their members and types, compared through `abidiff`. In development a rule change may alter interfaces per PR; in preview a change
    warns; after GA a change fails in a minor and warns in a major, where the ABI report is the
    release notes' list of breaks.
 5. A member Java deprecates (`design/current/java-deprecated.txt`) is not generated, as the root
@@ -487,9 +488,19 @@ Interfaces Java declares:
    group not enabled; `make format`, `make format-check`, `make lint` in `cpp/`. Every
    translation unit of the project builds with `-Wall -Wextra -Wpedantic -Werror` (MSVC: `/W4
    /WX /permissive-`).
-3. `check-generated` covers the error emitter's output and every generated header. Released
+3. The translation linter (`tools/lint`): a clang-tidy plugin, built against one LLVM major
+   (`tools/lint/LLVM_VERSION`), that parses `kafka/clients/src/main/java` with an
+   ANTLR-generated parser and checks the headers against these rules: `confluent-kafka-java-class`,
+   `-java-inheritance`, `-java-enum`, `-java-members`, `-java-signature` (§1-§5), `-doc` (§12.1,
+   §12.2), `-abi` (§12.3), `-header` and `-surface` (§1.4). `make lint` runs it with clang-tidy's
+   own checks and fails on any finding; `make lint-tests` runs its tests; `ck_java_model expected
+   <FQN>` prints the shape it expects for a Java class. Every exception is a line of a data file
+   under `tools/lint/data/`, never a `NOLINT`: `baseline.txt` (in-scope classes not translated yet,
+   rewritten by `make lint-baseline`, only shrinking), `decisions.txt` (§4.6) and
+   `scope-excluded.txt` (what these rules cut out of §1.4's scope).
+4. `check-generated` covers the error emitter's output and every generated header. Released
    through a vcpkg overlay port under `cpp/vcpkg/` (headers plus a prebuilt cdylib per platform),
    versioned separately from the core, starting at a preview version; no Conan recipe.
-4. Every file carries the Apache 2.0 header, copyright Confluent Inc.; code translated from
+5. Every file carries the Apache 2.0 header, copyright Confluent Inc.; code translated from
    OpenJDK keeps GPL with Classpath Exception. No TODO or FIXME: a Java path not implemented
    fails with the right `Error`, never silently.
