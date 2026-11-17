@@ -31,9 +31,12 @@
 //   mock's transactions out, by request.
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+const { RecordTooLargeError } = require('@confluentinc/kafka-javascript/common/errors');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { MockProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
@@ -456,6 +459,226 @@ test("a callback that throws makes the completing call throw it, as Java's mock 
   await manual.close();
 });
 
+test("a serializer's error rejects the mock's send() as it is, an ApiError included: Java's mock serializes with no try", async () => {
+  for (const isKey of [true, false]) {
+    for (const async of [false, true]) {
+      for (const error of [new RecordTooLargeError('too large'), new TypeError('wrong type'), new KafkaError('other')]) {
+        const failing = {
+          serialize: () => {
+            if (async) return Promise.reject(error);
+            throw error;
+          },
+        };
+        const producer = new MockProducer({
+          autoComplete: true,
+          partitioner: null,
+          keySerializer: isKey ? failing : mockSerializer(),
+          valueSerializer: isKey ? mockSerializer() : failing,
+        });
+        let ran = false;
+        await assert.rejects(producer.send({ record: record1, callback: () => (ran = true) }), (e) => e === error);
+        assert.equal(ran, false);
+        assert.deepEqual(producer.history(), []);
+        await producer.close();
+      }
+    }
+  }
+});
+
+// A callback's Promise that rejects is the callback's error, as a throw is
+// (root conventions, Threads and callbacks). send() with autoComplete and
+// flush() reject with it; completeNext() and errorNext(), being synchronous,
+// keep it, oldest first, for the next send(), flush() or close(), once
+// (Python's AsyncMockProducer). flush() and close() wait for every callback
+// Promise already started. The next call is made at once, with no
+// event-loop turn in between.
+
+test("send() with autoComplete rejects with its callback Promise's rejection, and nothing is logged", async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(true);
+  /** @type {string[]} */
+  const warnings = [];
+  const onWarning = (/** @type {Error} */ w) => warnings.push(w.message);
+  process.on('warning', onWarning);
+  try {
+    await assert.rejects(producer.send({ record: record1, callback: () => Promise.reject(boom) }), (e) => e === boom);
+    // Raised once: the next calls are not affected.
+    await producer.send(record2);
+    await producer.flush();
+    await producer.close();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(warnings, []);
+  } finally {
+    process.off('warning', onWarning);
+  }
+});
+
+test("send() with autoComplete waits for its callback's Promise", async () => {
+  const producer = buildMockProducer(true);
+  let done = false;
+  const future = await producer.send({
+    record: record1,
+    callback: () =>
+      new Promise((resolve) => setTimeout(resolve, 20)).then(() => {
+        done = true;
+      }),
+  });
+  assert.equal(done, true);
+  assert.equal(future.isDone(), true);
+  await producer.close();
+});
+
+test("flush() rejects with a callback Promise's rejection, once it settled", async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(false);
+  const future = await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  await assert.rejects(producer.flush(), (e) => e === boom);
+  // The core's mock completes the record's future all the same, as for a
+  // throw (the recorded deviation: Java's leaves it incomplete).
+  assert.equal(future.isDone(), true);
+  // Raised once.
+  await producer.flush();
+  await producer.close();
+});
+
+test("completeNext() and errorNext() keep a callback Promise's rejection for the next send()", async () => {
+  for (const complete of [
+    (/** @type {MockProducer<unknown, unknown>} */ p) => p.completeNext(),
+    (/** @type {MockProducer<unknown, unknown>} */ p) => p.errorNext(new KafkaError('next')),
+  ]) {
+    const boom = new Error('boom');
+    const producer = buildMockProducer(false);
+    await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+    assert.equal(complete(producer), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(producer.send(record2), (e) => e === boom);
+    // Raised once.
+    await producer.send(record2);
+    await producer.close();
+  }
+});
+
+test('completeNext(); await close() waits for the callback and rejects with its error', async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(false);
+  await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  producer.completeNext();
+  await assert.rejects(producer.close(), (e) => e === boom);
+  assert.equal(producer.closed(), true);
+  // [Symbol.asyncDispose], the end of an `await using` scope, waits the same way.
+  const disposed = buildMockProducer(false);
+  await disposed.send({ record: record1, callback: () => Promise.reject(boom) });
+  disposed.completeNext();
+  await assert.rejects(disposed[Symbol.asyncDispose](), (e) => e === boom);
+});
+
+test('completeNext(); await flush() waits for the callback and rejects with its error', async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(false);
+  const future = await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  producer.completeNext();
+  await assert.rejects(producer.flush(), (e) => e === boom);
+  assert.equal(future.isDone(), true);
+  // Raised once.
+  await producer.flush();
+  await producer.close();
+});
+
+test('two failing callbacks: both errors are raised, oldest first, one per later call', async () => {
+  const first = new Error('first');
+  const second = new Error('second');
+  const producer = buildMockProducer(false);
+  await producer.send({ record: record1, callback: () => Promise.reject(first) });
+  await producer.send({ record: record2, callback: () => Promise.reject(second) });
+  producer.completeNext();
+  producer.completeNext();
+  await assert.rejects(producer.flush(), (e) => e === first);
+  await assert.rejects(producer.send(record1), (e) => e === second);
+  await producer.flush();
+  await producer.close();
+});
+
+test('two rejections inside one flush(): it waits for every callback, rejects with the oldest (the first to reject), and keeps the other', async () => {
+  const first = new Error('first');
+  const second = new Error('second');
+  const producer = buildMockProducer(false);
+  /** @type {() => void} */
+  let release = () => {};
+  const gate = new Promise((resolve) => {
+    release = () => resolve(undefined);
+  });
+  // The first callback rejects late, the second at once, a third resolves late.
+  await producer.send({ record: record1, callback: () => gate.then(() => Promise.reject(first)) });
+  await producer.send({ record: record2, callback: () => Promise.reject(second) });
+  let slowDone = false;
+  const slow = await producer.send({
+    record: record1,
+    callback: () =>
+      new Promise((resolve) => setTimeout(resolve, 30)).then(() => {
+        slowDone = true;
+      }),
+  });
+  let settled = false;
+  const flushing = producer.flush().finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'flush() waits for the callbacks it started');
+  release();
+  await assert.rejects(flushing, (e) => e === second);
+  assert.equal(slowDone, true);
+  assert.equal(slow.isDone(), true);
+  await assert.rejects(producer.close(), (e) => e === first);
+});
+
+test('flush() over a fast rejection and a slow resolution settles only after both', async () => {
+  const boom = new Error('boom');
+  const producer = buildMockProducer(false);
+  await producer.send({ record: record1, callback: () => Promise.reject(boom) });
+  let slowDone = false;
+  await producer.send({
+    record: record2,
+    callback: () =>
+      new Promise((resolve) => setTimeout(resolve, 30)).then(() => {
+        slowDone = true;
+      }),
+  });
+  const started = Date.now();
+  await assert.rejects(producer.flush(), (e) => e === boom);
+  assert.equal(slowDone, true);
+  assert.ok(Date.now() - started >= 25, 'flush() waited for the slow callback');
+  await producer.close();
+});
+
+test('the kept callback errors raise no unhandled rejection under --unhandled-rejections=strict', () => {
+  const r = spawnSync(
+    process.execPath,
+    [
+      '--unhandled-rejections=strict',
+      '--no-warnings',
+      '-e',
+      `
+    const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    (async () => {
+      const p = new MockProducer();
+      const record = new ProducerRecord({ topic: 't', value: Buffer.from('v') });
+      for (let i = 0; i < 3; i++) await p.send({ record, callback: () => Promise.reject(new Error('cb' + i)) });
+      p.completeNext();
+      p.errorNext(new Error('delivery'));
+      await p.flush().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // One error kept, never raised: still no unhandled rejection.
+      await p.close().catch(() => {});
+      console.log('done');
+    })();
+  `,
+    ],
+    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 30000 },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'done');
+});
+
 test('flush() completes every waiting record before it rejects with the first throw (a recorded deviation)', async () => {
   const mock = new MockProducer();
   /** @type {string[]} */
@@ -521,8 +744,6 @@ test('a refused send is not in history() and keeps nothing: its callback never r
  * @param {number} [timeout]
  */
 function runNode(script, timeout = 60000) {
-  const { spawnSync } = require('node:child_process');
-  const path = require('node:path');
   return spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', script], {
     cwd: path.join(__dirname, '..', '..', '..'),
     encoding: 'utf8',

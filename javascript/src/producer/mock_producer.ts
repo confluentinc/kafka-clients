@@ -146,42 +146,6 @@ function completeRecord(
 }
 
 /**
- * `Promise.resolve(returned)`, the callback's result, with the record's delivery recorded once it settled.
- *
- * @param returned - what the callback returned
- * @param future - the record's future
- * @param metadata - the record's metadata
- * @param error - the delivery's error, or null
- * @returns a Promise of the text of the rejection, or of undefined
- */
-function completeWhenSettled(
-  returned: unknown,
-  future: KafkaFuture<RecordMetadata>,
-  metadata: RecordMetadata,
-  error: Error | null,
-): Promise<string | undefined> {
-  return Promise.resolve(returned).then(
-    () => completeRecord(future, metadata, error, undefined),
-    (reason: unknown) => completeRecord(future, metadata, error, thrownMessage(reason)),
-  );
-}
-
-/**
- * The text of what a callback threw, which the core logs; it never throws.
- *
- * @param thrown - the thrown value
- * @returns its text
- */
-function thrownMessage(thrown: unknown): string {
-  try {
-    if (thrown instanceof Error) return `${String(thrown.name)}: ${String(thrown.message)}`;
-    return String(thrown);
-  } catch {
-    return 'the callback threw a value that cannot be converted to a string';
-  }
-}
-
-/**
  * A mock of the producer interface you can use for testing code that uses
  * Kafka.
  *
@@ -208,7 +172,16 @@ function thrownMessage(thrown: unknown): string {
  * with the first throw *(deviation: Java's `flush()` stops at the first
  * callback that throws, the later records staying waiting. Why: the core's
  * mock completes all of them in one call. Goes when: the core's mock stops at
- * the first throw)*.
+ * the first throw)*. A callback's Promise that rejects is the callback's
+ * error, as a throw is, and is never logged: `send()` with `autoComplete`
+ * waits for it and rejects with it, and `flush()` rejects with it. After
+ * `completeNext()` or `errorNext()` it is kept, oldest first, and the next
+ * `send()`, `flush()` or `close()` rejects with the oldest, once
+ * *(deviation, as Python's `AsyncMockProducer`: Java's mock throws it from
+ * the completing call. Why: those calls return before the Promise
+ * settles)*. `flush()` and `close()` wait for every callback Promise already
+ * started before they settle; the record's future completes once the Promise
+ * settled, as for a throw.
  */
 export class MockProducer<K, V> implements Producer<K, V> {
   #handle: ProducerHandle;
@@ -231,6 +204,16 @@ export class MockProducer<K, V> implements Producer<K, V> {
   // autoComplete, completeNext(), errorNext(), flush()), which that call
   // throws, as Java's mock lets it propagate; the first one of the call.
   #callbackThrown: { readonly error: unknown } | null = null;
+  // The rejections of the callback Promises no call raised yet, oldest first:
+  // each later send(), flush() or close() raises the oldest, once (Python's
+  // AsyncMockProducer keeps them the same way).
+  readonly #callbackErrors: unknown[] = [];
+  // Every callback Promise started and not settled yet, each tracked by a
+  // Promise that never rejects: flush() and close() wait for them all.
+  readonly #running = new Set<Promise<void>>();
+  // While send() hands its record over: the callback Promises its own
+  // callback started, whose rejection is that send()'s, or null.
+  #sendStarted: Array<Promise<{ readonly error: unknown } | null>> | null = null;
 
   /**
    * Create a new mock producer with invented metadata.
@@ -309,7 +292,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    *
    * @remarks The error set with `setSendException` rejects the send as it is,
    * the very same value. The serializers run first, key then value, and what
-   * one throws rejects the send as it is *(deviation: Java's mock checks
+   * one throws rejects the send as it is, an `ApiError` or a `TypeError`
+   * included, as Java's mock serializes with no `try` *(deviation: Java's mock checks
    * that it is closed, fenced or has a send error before it serializes. Why:
    * the serializers run in JavaScript before the call reaches the core's
    * mock)*. A null `record` rejects with `TypeError` even on a closed mock
@@ -317,8 +301,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * has the FFI check a NULL mandatory argument first, and the binding
    * repeats no precondition, Q35. Goes when: the FFI's mock checks that it
    * is closed first)*. With `autoComplete`, the callback runs inside the call, before
-   * the returned Promise resolves; the record's headers stay writable, as
-   * Java's mock leaves them.
+   * the returned Promise resolves, and a Promise it returns is awaited, its
+   * rejection rejecting the send; the record's headers stay writable, as
+   * Java's mock leaves them. An error a callback's Promise rejected with
+   * after `completeNext()` or `errorNext()` rejects the next send, once.
    */
   send(options: {
     /** The record to send. */
@@ -361,6 +347,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
   // send()'s body: a throw is the returned Promise's rejection.
   #send(options: unknown, count: number): Promise<KafkaFuture<RecordMetadata>> {
     SEND_FORMS.match(options, count);
+    // The oldest error a callback's Promise rejected with, which no call
+    // raised yet.
+    const kept = this.#takeCallbackError();
+    if (kept !== null) throw kept.error;
     const record = SEND_FORMS.value(options, 'record');
     if (record === null) throw new TypeError('record must not be null');
     if (!(record instanceof ProducerRecord)) throw new TypeError('record must be a ProducerRecord');
@@ -429,7 +419,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
       if (userCallback !== null) {
         try {
           returned = userCallback({ metadata, exception: error });
-          if (returned !== undefined) return completeWhenSettled(returned, future, metadata, error);
+          if (returned !== undefined) return this.#awaitCallback(returned, future, metadata, error);
         } catch (thrown) {
           // Java's mock calls onCompletion with no try: the completing call
           // throws it (#rethrowCallback), and nothing logs it.
@@ -444,19 +434,71 @@ export class MockProducer<K, V> implements Producer<K, V> {
     // Java's offsets. history() returns the app's own record.
     const { topic, timestamp } = record;
     this.#callbackThrown = null;
+    const started: Array<Promise<{ readonly error: unknown } | null>> = [];
+    this.#sendStarted = started;
     try {
-      native.mockProducerSend(this.#handle, topic, -1, timestamp ?? -1n, record, onHandover, onComplete);
-    } catch (thrown) {
-      this.#pending.delete(onComplete);
-      throw thrown;
+      try {
+        native.mockProducerSend(this.#handle, topic, -1, timestamp ?? -1n, record, onHandover, onComplete);
+      } catch (thrown) {
+        this.#pending.delete(onComplete);
+        throw thrown;
+      } finally {
+        inCall = false;
+      }
+      native.producerPump(this.#handle);
     } finally {
-      inCall = false;
+      this.#sendStarted = null;
     }
-    native.producerPump(this.#handle);
     const thrown = this.#takeCallbackThrown();
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the user's callback threw, whatever it is (typed unknown by catch)
     if (thrown !== null) return Promise.reject(thrown.error);
-    return accepted;
+    if (started.length === 0) return accepted;
+    // An auto-completed send's callback returned a Promise: send() settles
+    // once it did, and rejects with its rejection, as with a throw.
+    return Promise.all(started).then((failures) => {
+      for (const failure of failures) if (failure !== null) throw failure.error;
+      return accepted;
+    });
+  }
+
+  // A callback's Promise, awaited as a throw would be: its rejection is the
+  // callback's error, never logged. The send() that auto-completed the record
+  // rejects with it; otherwise it is kept, oldest first, for the next send(),
+  // flush() or close() (#callbackErrors). flush() and close() wait for it
+  // (#running). The record's future completes once it settled, whatever the
+  // outcome (the recorded deviation of a throw). The returned Promise, for
+  // the addon to report by, never rejects.
+  #awaitCallback(
+    returned: unknown,
+    future: KafkaFuture<RecordMetadata>,
+    metadata: RecordMetadata,
+    error: Error | null,
+  ): Promise<undefined> {
+    const outcome: Promise<{ readonly error: unknown } | null> = Promise.resolve(returned).then(
+      () => null,
+      (reason: unknown) => ({ error: reason }),
+    );
+    const own = this.#sendStarted;
+    if (own !== null) own.push(outcome);
+    const tracked: Promise<void> = outcome.then((failure) => {
+      this.#running.delete(tracked);
+      if (failure !== null && own === null) this.#callbackErrors.push(failure.error);
+    });
+    this.#running.add(tracked);
+    return tracked.then(() => {
+      completeRecord(future, metadata, error, undefined);
+      return undefined;
+    });
+  }
+
+  // Waits for every callback Promise started, those started meanwhile too.
+  async #awaitCallbacks(): Promise<void> {
+    while (this.#running.size > 0) await Promise.all([...this.#running]);
+  }
+
+  // The oldest kept callback error, taken, or null.
+  #takeCallbackError(): { readonly error: unknown } | null {
+    return this.#callbackErrors.length > 0 ? { error: this.#callbackErrors.shift() } : null;
   }
 
   // What a callback threw during the completing call, taken, or null.
@@ -508,7 +550,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * callback that throws rejects it, after every waiting record completed
    * *(deviation: Java's stops at the first throw. Why: the core's mock
    * completes them all in one call. Goes when: the core's mock stops at the
-   * first throw)*.
+   * first throw)*. It settles once every callback Promise already started
+   * has, those `completeNext()` and `errorNext()` started included; a throw,
+   * else the oldest error a callback's Promise rejected with, is then the
+   * rejection, the others kept for later calls.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {
@@ -518,16 +563,22 @@ export class MockProducer<K, V> implements Producer<K, V> {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the check threw: an Error of the client's (typed unknown by catch)
       return Promise.reject(error);
     }
+    const kept = this.#takeCallbackError();
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what a callback's Promise rejected with, whatever it is
+    if (kept !== null) return Promise.reject(kept.error);
     this.#callbackThrown = null;
     return new Promise<void>((resolve, reject) => {
       native.producerFlush(this.#handle, (error) => {
         // A callback the flush completed threw: Java's flush() throws it.
         const thrown = this.#takeCallbackThrown();
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built, or what a callback threw (typed unknown)
-        if (thrown !== null) reject(thrown.error);
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-        else if (error !== null) reject(error);
-        else resolve();
+        // Settles once every callback Promise already started has, its own
+        // and those completeNext() and errorNext() started.
+        void this.#awaitCallbacks().then(() => {
+          const failure = thrown ?? (error !== null ? { error } : this.#takeCallbackError());
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what a callback threw or its Promise rejected with, or the error the core reported (typed unknown)
+          if (failure !== null) reject(failure.error);
+          else resolve();
+        });
       });
     });
   }
@@ -618,7 +669,9 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
    * @remarks The error set with `setCloseException` rejects it as it is,
-   * and the mock stays open. Once closed, the mock no longer holds Node.
+   * and the mock stays open. Once closed, the mock no longer holds Node. It
+   * settles once every callback Promise already started has, then rejects
+   * with the oldest error one rejected with that no call raised yet.
    */
   close(): Promise<void>;
   /**
@@ -655,8 +708,15 @@ export class MockProducer<K, V> implements Producer<K, V> {
     return new Promise<void>((resolve, reject) => {
       native.producerClose(this.#handle, timeoutMs, (error) => {
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-        if (error !== null) reject(error);
-        else resolve();
+        if (error !== null) return reject(error);
+        // Once every callback Promise already started settled, the oldest
+        // error one rejected with that no call raised yet.
+        void this.#awaitCallbacks().then(() => {
+          const failure = this.#takeCallbackError();
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what a callback's Promise rejected with, whatever it is
+          if (failure !== null) reject(failure.error);
+          else resolve();
+        });
       });
     });
   }
@@ -737,7 +797,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    *   propagate
    *
    * @remarks The record's callback runs inside the call, and its future is
-   * done when it returns.
+   * done when it returns. A Promise the callback returns is not awaited: its
+   * rejection is kept for the next `send()`, `flush()` or `close()`.
    */
   completeNext(): boolean;
   completeNext(options?: unknown): boolean {
