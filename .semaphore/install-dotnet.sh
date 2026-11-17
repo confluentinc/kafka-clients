@@ -71,8 +71,8 @@ retry "${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET
 # This script INSTALLS only -- it deliberately does NOT export DOTNET_ROOT/PATH.
 # Semaphore runs a job's prologue + job `commands:` in ONE persistent shell
 # session, but this script executes in a child subshell, so any `export` here
-# would die on return and never reach the later `make verify-dotnet` /
-# `make verify-dotnet-macos-docker` command. The SDK env is therefore set by
+# would die on return and never reach the later `make -C dotnet verify` /
+# `make -C dotnet verify-macos` command. The SDK env is therefore set by
 # top-level `export` commands in each verify-dotnet job's own `commands:`
 # (`.semaphore/semaphore.yml`, right after this script runs), which mutate
 # that shared session directly. This matches the

@@ -33,7 +33,7 @@
 #
 # -RustProfile release (the default) is the package's library: `--features ffi --release`.
 # -RustProfile debug is the library the Linux and macOS binding tests link: the debug
-# all-features build of the root's devel-build-rust-all-features, for verify-dotnet-windows.ps1.
+# all-features build of rust/Makefile's devel-build-all-features, for verify-dotnet-windows.ps1.
 
 param(
     [Parameter(Mandatory = $true)]

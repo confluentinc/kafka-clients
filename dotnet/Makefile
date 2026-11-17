@@ -1,5 +1,6 @@
-# .NET binding targets. Invoked by the repository root's cross-language
-# Makefile (`make -C dotnet $(ROOTS) <target>`), or directly from this directory.
+# .NET binding targets: `make -C dotnet <target>` from the repository root, or
+# `make <target>` from this directory. A target that needs the Rust library
+# builds it first (rust-lib, or pack's release build).
 # REPO_ROOT / RUST_PROJECT_ROOT follow python/Makefile and c/Makefile:
 # RUST_PROJECT_ROOT is the Rust workspace (rust/), NOT the repository root.
 #
@@ -169,8 +170,7 @@ rust-lib:
 # the one the Rust tests and the other bindings' tests build, so it compiles
 # nothing after them; $(CARGO_PROFILE_PROP) makes the .NET build copy it, with
 # the .NET configuration left at $(DOTNET_CONFIG). It runs in
-# $(RUST_PROJECT_ROOT) (see the header), so it works whether this Makefile is
-# invoked here or via the root Makefile.
+# $(RUST_PROJECT_ROOT) (see the header), so it works from any directory.
 #
 # The `dotnet build` compiles the full TFM matrix: the library
 # (net462;netstandard2.0;net8.0;net10.0), the unit-test project (net462;net8.0;net10.0)
@@ -374,7 +374,7 @@ test-grpc-server-dotnet: build-dotnet
 
 # ---------------------------------------------------------------------------
 # Performance suite. Kept OUT of the solution (like grpc-server), so
-# `test-dotnet`/`verify-dotnet` never drag it into the functional gate — the
+# `test-dotnet` never drags it into the functional gate — the
 # p99 budgets must not fail under the unit suite's contention. Invoked by path.
 #
 # It holds the v3 exe (PerfV3, our binding), the v2 exe (PerfV2, the
@@ -453,12 +453,12 @@ consumer-perf-test-dotnet:
 # reusing the running test's config+TFM), then run the smoke on net10.0 ONLY. The
 # perf gate is a p99-latency check, not TFM coverage: net8.0 stays covered
 # functionally by test-dotnet (both TFMs); net10.0 is the designated execution gate
-# (PerfV3.csproj still builds for all TFMs). Wired into verify-dotnet (mirroring
-# verify-python's perf stage).
+# (PerfV3.csproj still builds for all TFMs). Wired into `verify` (mirroring
+# python/'s perf stage).
 #
 # PERF_REQUIRE_DOCKER=True makes a missing/broken Docker or a
 # broker that will not start a FAILURE here, not a skip: this target is what
-# verify-dotnet reaches, so a green tick from it has to mean the budget was
+# `verify` reaches, so a green tick from it has to mean the budget was
 # actually measured. A bare `dotnet test` (no Makefile) leaves it unset, and a
 # Docker-less dev box then gets a real, visible `Skipped` instead. The value must
 # be the case-sensitive "True" — the suite-wide Python-compatible convention; =1

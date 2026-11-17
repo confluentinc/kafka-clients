@@ -52,7 +52,7 @@ source "$HOME/.cargo/env"
 retry git submodule update --init --depth=1 kafka
 
 # MACOS_INSTALL_GRPC_CPP=true installs the build dependencies of the native C++
-# gRPC server (make build-grpc-native-c): the grpc++ and protobuf headers and
+# gRPC server (make -C c grpc-native): the grpc++ and protobuf headers and
 # libraries, protoc, grpc_cpp_plugin, and pkg-config. Homebrew provides prebuilt
 # bottles for this agent's macOS version, so no source build is required. Only
 # the job that needs these packages sets this variable.
@@ -62,7 +62,7 @@ if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
 fi
 
 # MACOS_ENSURE_ROSETTA=true installs Rosetta 2 if it is missing. Building the
-# native .NET gRPC server (make build-grpc-native-dotnet) runs Grpc.Tools'
+# native .NET gRPC server (make -C dotnet grpc-native) runs Grpc.Tools'
 # protoc, and Grpc.Tools ships no macOS arm64 protoc, so on this arm64 agent it
 # runs the macosx_x64 one under Rosetta 2. The check runs an x86_64 slice of
 # /usr/bin/true and skips the install when that already works. Only the job that

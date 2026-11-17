@@ -24,8 +24,8 @@
 //! backend label is easy to grep for in `cargo test` output.
 //!
 //! Every backend that runs in a container behind gRPC shares the `__grpc_`
-//! infix, so a single `--skip __grpc` excludes all of them — `make
-//! test-rust-all-features` relies on this. That makes the exclusion
+//! infix, so a single `--skip __grpc` excludes all of them — `make -C
+//! rust test-all-features` relies on this. That makes the exclusion
 //! **fail-safe**: a new gRPC backend is left out of the Rust-only run by
 //! default and is opted in by adding its own target, rather than silently
 //! joining a job that has no image for it. `__rust` deliberately lacks the

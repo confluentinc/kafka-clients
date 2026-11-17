@@ -56,12 +56,14 @@ Makefile                # Targets the repository root's Makefile delegates to
 ## Where commands run
 
 Run the commands below **from this directory**. The Unity submodule must be
-checked out: `git submodule update --init --recursive` (the root's
-`make submodules` / `make init` do this).
+checked out: `git submodule update --init c/tests/unity` from the repository
+root (`make build` below does it, as do the root's `make submodules` and
+`make init`).
 
 ## Prerequisites
 
-Build the Rust library with the C API first:
+The C binding links the Rust library with the C API. `make build` below builds
+it first; by hand:
 
 ```bash
 make -C ../rust devel-build-all-features   # debug, what the tests link
@@ -95,16 +97,19 @@ and runs it (Linux only, Docker required).
 
 ## Make targets
 
-`Makefile` wraps the commands above with the native `CFLAGS` CI uses. The
-repository root's Makefile delegates to it (building the Rust library first);
-it can also be run directly:
+`Makefile` wraps the commands above with the native `CFLAGS` CI uses, and builds
+the Rust library (of `RUST_PROFILE`, debug by default) and the Unity submodule
+first. Run it here, or as `make -C c <target>` from the repository root:
 
 ```bash
 make build                # cmake configure + build into build/
 make test                 # test-unit, then test-integration
 make test-unit            # ctest only
 make test-integration     # gRPC image + the __grpc_c arm (Linux, Docker)
-make producer-perf-test   # env-driven benchmark (needs a broker)
+make test-integration-ssl # the same over SSL (also -sasl-ssl)
+make test-integration-native  # the __grpc_c arm with a host-built server
+make verify               # what CI runs on Linux; verify-macos on macOS
+make producer-perf-test   # env-driven benchmark on the release library (needs a broker)
 make grpc-image
 make clean
 ```

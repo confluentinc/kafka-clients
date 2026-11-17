@@ -44,7 +44,7 @@ mod perf_cloud;
 /// `rerun-if-env-changed` on one of them (`ring` does on `CARGO_MANIFEST_DIR`) then sees it
 /// change each time the build switches between a `cargo` run from the shell, where it is
 /// unset, and one run from here, where it names `xtask/`. The script reruns and everything
-/// above it is compiled again: `make verify-rust` compiled the crate's tests four times.
+/// above it is compiled again: `make -C rust verify` compiled the crate's tests four times.
 /// It runs first in `main`, before the xtask starts a thread.
 fn forget_cargo_run_environment() {
     let set_by_cargo_run: Vec<_> = env::vars_os()

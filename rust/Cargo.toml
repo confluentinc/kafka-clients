@@ -386,7 +386,7 @@ path = "tests/admin/main.rs"
 # Performance integration tests. `test = false` keeps them out of a plain
 # `cargo test` / `cargo test --all-features` (so CI's functional gate never
 # runs a latency budget under full-suite load); run them explicitly with
-# `cargo test --test performance` or `make test-integration-perf-rust`.
+# `cargo test --test performance` or `make -C rust test-integration-perf`.
 [[test]]
 name = "performance"
 path = "tests/performance/main.rs"

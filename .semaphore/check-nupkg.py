@@ -32,8 +32,8 @@
 #       Checks the package: its file name, the exact list of its entries and how they are stored,
 #       its nuspec, its assemblies, and each native library as `native` does.
 #
-# --dev is for a package built from a developer's or a CI job's own native (make
-# package-check-dotnet): the platform floors are not checked, since that native was not built for
+# --dev is for a package built from a developer's or a CI job's own native (make -C
+# dotnet package-check-dotnet): the platform floors are not checked, since that native was not built for
 # them. A release package is never checked with --dev.
 #
 # The checks read the files as NuGet and the dynamic loaders do, and refuse what those would read

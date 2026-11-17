@@ -22,7 +22,7 @@
 # IAdmin; the async image serves it over IAsyncAdmin, M15/P14 — see Program.cs);
 # it drives the binding's synchronous KafkaProducer<byte[],byte[]> /
 # KafkaConsumer<byte[],byte[]> and KafkaAdminClient over the C ABI. Requires
-# `make devel-build-rust-all-features` to have produced the LINUX
+# `make -C rust devel-build-all-features` to have produced the LINUX
 # libconfluent_kafka.so under rust/target/debug/ first (build-grpc-images), or
 # the release build with --build-arg RUST_PROFILE=release.
 

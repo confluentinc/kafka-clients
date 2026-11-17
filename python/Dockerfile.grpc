@@ -60,7 +60,7 @@ RUN cd /workspace/python && \
 
 # Generate proto stubs for both services (consumer imports producer, so
 # both are generated under the same -Iproto path). The gRPC pins are shared
-# with the native build (make build-grpc-native-python).
+# with the native build (make -C python grpc-native).
 COPY python/requirements-grpc.txt python/requirements-grpc-tools.txt /workspace/python/
 RUN pip install --no-cache-dir -r /workspace/python/requirements-grpc-tools.txt && \
     cd /workspace && \

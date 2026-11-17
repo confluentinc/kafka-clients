@@ -1008,9 +1008,10 @@ its own.
 
 ### Test commands
 
-`make verify` (repository root) runs
-`build format-check lint test check-bindings`. `build` and `test` cover the
-Rust, C and Python sides. For Rust only, use `make verify-rust`.
+`make verify` (repository root) runs `build`, the Rust checks
+(format-check, check-generated, lint), `test`, and the Python checks
+(`make -C python check`). `build` and `test` cover the Rust, C and Python
+sides. For Rust only, use `make -C rust verify`.
 
 The xtask subcommands are `format`, `format-check`, `check-generated`,
 `generate-error-codes`, `java-deprecated`, `lint`, `lint-custom`

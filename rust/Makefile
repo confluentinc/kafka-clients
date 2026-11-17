@@ -116,7 +116,7 @@ test: build
 # only, so without it a stale generator or xtask test (Critic 115 R1) stays red
 # without failing `verify`.
 #
-# Part of the root `verify` (through `test`) and `verify-rust`, and the CI
+# Part of the root `verify` (through `test`) and of `verify` below, and the CI
 # PLAINTEXT Rust job.
 # It builds nothing in release: no test runs a release artifact. The binding
 # test jobs reuse the same debug build (`devel-build-all-features`).
@@ -174,11 +174,10 @@ test-integration-sasl-ssl: build-integration-tests
 # `test = false` so it is never scheduled), but with the client connections
 # driven over the SSL / SASL_SSL listener via INTEGRATION_TEST_PROTOCOL.
 #
-# These are what the SSL / SASL_SSL CI jobs run (through the root
-# `test-rust-all-features-{ssl,sasl-ssl}`), so those jobs exercise the
+# These are what the SSL / SASL_SSL CI jobs run, so those jobs exercise the
 # entire suite over their listener rather than only the `integration` binary.
 # They deliberately OMIT format-check, clippy and the performance tail that
-# the root `verify-rust` wraps around `test-all-features`: those checks are
+# `verify` wraps around `test-all-features`: those checks are
 # protocol-independent, so running them once in the PLAINTEXT job is enough.
 # (The unit tests are protocol-independent too and so overlap the PLAINTEXT
 # run; they are kept here so a job failure points at one whole suite, not a
@@ -205,7 +204,7 @@ test-all-features-sasl-ssl:
 # `--skip __grpc_python_async`.
 #
 # The `__rust` arm is not a target here: it needs no gRPC image and already runs
-# as part of `test-all-features` / the root `verify-rust`.
+# as part of `test-all-features` / `verify`.
 #
 # These only run the tests: the binding's gRPC image must already be built,
 # which is what python/'s and c/'s `test-integration` do before calling them.
@@ -217,8 +216,8 @@ test-integration-grpc-c:
 
 # The same arms with each gRPC server run as a native host process instead of a
 # container (MULTILANG_BACKEND_MODE=native; see tests/common/backend_pool.rs).
-# The servers must already be built under target/grpc-native/, which the root
-# `build-grpc-native-{python,c}` do before calling these.
+# The servers must already be built under target/grpc-native/, which python/'s
+# and c/'s `test-integration-native` do before calling these.
 test-integration-grpc-python-native:
 	MULTILANG_BACKEND_MODE=native \
 		$(CARGO_TEST_GRPC_PYTHON) --all-features --test integration -- __grpc_python
@@ -231,8 +230,8 @@ test-integration-grpc-c-native:
 #
 # The same pair for the .NET binding: the container arm, run by dotnet/'s
 # `test-integration` after it builds the two .NET gRPC images, and the native
-# arm, run by the root `test-integration-dotnet-native` after the root
-# `build-grpc-native-dotnet` builds the server under target/grpc-native/dotnet.
+# arm, run by dotnet/'s `test-integration-native` after its `grpc-native` builds
+# the server under target/grpc-native/dotnet.
 #
 # The `__grpc_dotnet` filter matches both the sync (`__grpc_dotnet`) and async
 # (`__grpc_dotnet_async`) backends -- exactly as `__grpc_python` matches both

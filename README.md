@@ -73,11 +73,13 @@ make test      # every language's tests
 make verify    # build, format and lint checks, and every test suite
 ```
 
-Per-language targets exist too, e.g. `make build-c`, `make test-python`,
-`make verify-rust`. Each of them delegates to the language's own Makefile
-(`rust/Makefile`, `python/Makefile`, `c/Makefile`), which can also be run
-directly, e.g. `make -C rust test`. The root only orders the builds across
-languages and sets up what they share (submodules, git hooks, the Python venv).
+Each language has its own Makefile (`rust/Makefile`, `c/Makefile`,
+`python/Makefile`, `dotnet/Makefile`), run as `make -C <language> <target>`, for
+example `make -C rust test`, `make -C c test`, `make -C python verify` or
+`make -C dotnet test-dotnet`. Each builds what it needs first: the Rust library,
+the C binding its Unity submodule, the Python binding its venv. The root holds
+only what spans several languages or the whole repository (the combined builds
+and gates, submodules, git hooks, the version bump, the test selection).
 
 To work on one language directly, see its README:
 [rust/README.md](rust/README.md) (cargo: building, formatting, linting, tests,

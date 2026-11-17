@@ -53,7 +53,7 @@ name: build-test-release
 #      database, where a vulnerable dependency fails (audit).
 #   4. "Python additional checks (Linux amd64)" -- the Python checks that are
 #      not the test suite: mypy --strict over the package and the static checks
-#      of test/static (check-python).
+#      of test/static (`make -C python check`).
 #   5. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
 #      the test suite, one job each: dotnet format over the solution and the
 #      soak projects and the examples' build and format check (check-dotnet),
@@ -222,14 +222,14 @@ blocks:
     #     performance tests, which run only here.
     #   - SSL / SASL_SSL: the same suite over the broker's SSL listener (:9096)
     #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret).
-    # The protocol-independent checks of `make verify-rust` (format-check,
+    # The protocol-independent checks of `make -C rust verify` (format-check,
     # check-generated, lint) run in the lint and doc-check jobs of "Rust
     # additional checks (Linux amd64)", in parallel, so no test job waits for
     # them.
     #
     # Each binding runs across the same three protocols. Its jobs build the
     # Rust library themselves, the debug all-features build the Rust tests use
-    # (the root's devel-build-rust-all-features), which the Python and .NET
+    # (rust/Makefile's devel-build-all-features), which the Python and .NET
     # perf stages of the plaintext jobs reuse: like the Rust perf tests, they
     # are latency smoke runs at 100 records/s with a p99 budget. Sharing one build via a workflow artifact was tried and
     # reverted -- the tarball came to 8.9 GiB (target/debug is ~12x
@@ -238,7 +238,7 @@ blocks:
     # builds it replaced. The gRPC multilanguage container arm (__grpc_c /
     # __grpc_python / __grpc_dotnet) connects to the broker over the CONTAINER
     # listener for the active protocol:
-    #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
+    #   - PLAINTEXT: `make -C c verify` / `make -C python verify` / `make -C dotnet verify`
     #     — the binding's tests (ctest / pytest / dotnet test unit tests, the
     #     PLAINTEXT gRPC arm, and the Python and .NET perf suites). The Python
     #     and .NET checks that are not tests (mypy, the static checks, dotnet
@@ -347,7 +347,7 @@ blocks:
 
   - name: "Verify Rust and language bindings (macOS arm64)"
     # verify-rust runs the native Rust unit, integration and perf tests
-    # (`make verify-rust-macos-docker`). verify-c runs the C ctest suite;
+    # (`make -C rust verify-macos`). verify-c runs the C ctest suite;
     # verify-python runs pytest test/unit; verify-dotnet runs the .NET unit
     # tests. Each binding job then runs its binding's gRPC multilanguage arm
     # (__grpc_c / __grpc_python / __grpc_dotnet) with the gRPC server as a
@@ -501,12 +501,12 @@ blocks:
     # no execution_time_limit, so it has the pipeline's; the jobs that need a
     # tighter one set their own.
     #
-    #   - doc-check: `make doc-check` runs `cargo doc` with `-D warnings` over
+    #   - doc-check: `make -C rust doc-check` runs `cargo doc` with `-D warnings` over
     #     the whole workspace (the doctests already run in "Verify Rust and language bindings" as part
     #     of `cargo test`), then the clippy pass over the default features,
     #     which the lint job leaves out of its lint (LINT_ARGS) so the two
     #     clippy passes run in parallel.
-    #   - lint: the protocol-independent checks of `make verify-rust`:
+    #   - lint: the protocol-independent checks of `make -C rust verify`:
     #     format-check, check-generated, and `cargo xtask lint` (the custom
     #     lint rules and the clippy pass over --all-features).
     #   - package-check: packages `confluent-kafka` as it would be published
@@ -526,7 +526,7 @@ blocks:
     #     shallow clone without tags, hence the fetch.
     #   - audit: checks rust/Cargo.lock, which covers every crate of the
     #     workspace and so every Rust crate the library, the C library and the
-    #     wheels link, against the RustSec advisory database (`make audit`,
+    #     wheels link, against the RustSec advisory database (`make -C rust audit`,
     #     cargo-audit). A vulnerable dependency fails the job and with it the
     #     pipeline; an unmaintained, unsound or yanked crate is only reported.
     #     cargo-audit fetches the database on each run, so a newly published
@@ -596,7 +596,7 @@ blocks:
     # applies: the checks run in full on every build. A new job here is also
     # listed in REQUIRED_CI_JOBS in create-release-tag.yml.
     #
-    # check-python (`make check-python`, python/Makefile's `check`) builds the
+    # check-python (`make -C python check`) builds the
     # extension against the debug all-features library, then runs mypy --strict
     # over the package and test/unit/test_typing.py, and the static checks of
     # test/static.
@@ -629,13 +629,13 @@ blocks:
     # create-release-tag.yml then refuses to tag. No test selection applies
     # here: the checks run in full, and coverage counts every unit test.
     #
-    # check-dotnet (`make check-dotnet`, see dotnet/Makefile) builds the
+    # check-dotnet (`make -C dotnet check-dotnet`) builds the
     # solution against the debug all-features library, then runs dotnet format
     # --verify-no-changes over the solution and the soak projects, and builds
     # and format-checks the examples.
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
-    # (`make coverage-dotnet`, see dotnet/Makefile), against the debug
+    # (`make -C dotnet coverage-dotnet`), against the debug
     # all-features library the binding tests link. It prints the summary in the
     # log and keeps the HTML report as the workflow artifact coverage/dotnet.tar.gz
     # (about 3 MB; extract it and open report/index.html). One archive, because

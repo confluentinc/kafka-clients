@@ -30,7 +30,7 @@
 # binding's asynchronous AsyncKafkaProducer<byte[],byte[]> /
 # AsyncKafkaConsumer<byte[],byte[]> and AsyncKafkaAdminClient over the C ABI.
 # Requires
-# `make devel-build-rust-all-features` to have produced the LINUX
+# `make -C rust devel-build-all-features` to have produced the LINUX
 # libconfluent_kafka.so under rust/target/debug/ first (build-grpc-images), or
 # the release build with --build-arg RUST_PROFILE=release.
 

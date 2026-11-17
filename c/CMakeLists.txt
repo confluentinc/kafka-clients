@@ -139,10 +139,10 @@ add_test(NAME abort_on_null COMMAND test_abort_on_null)
 # Mirrors tests/integration/producer_perf_test.rs. Drives two backends selected
 # by the CLIENT_VERSION env var: the Rust client C bindings (v3, default) and
 # librdkafka (v2, reference baseline). It needs a reachable broker and runs
-# long, so it builds but is launched manually, not under `ctest`/`make test-c`.
+# long, so it builds but is launched manually, not under `ctest`/`make -C c test`.
 #
 # librdkafka is an optional dependency: if it is not found the target is
-# skipped so the default `build-c` still succeeds on hosts without it.
+# skipped so the default `make -C c build` still succeeds on hosts without it.
 # ---------------------------------------------------------------------------
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
