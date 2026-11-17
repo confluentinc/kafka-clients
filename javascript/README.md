@@ -474,11 +474,17 @@ Promise already started, so no error is lost; with a kept error, `flush()`
 still completes the waiting records and waits for their callbacks before it
 rejects. Only a record's own `send()` gets its callback's error: a `send()`
 made inside a callback, or one that runs callbacks a pending `flush()`
-completed, leaves those errors to their own calls. A `close()` called
-inside one of the mock's callbacks before its first `await` does not wait
-for the callbacks, as Python's async mock; after that `await`, and a
-`flush()` there at all, wait for that same callback and never settle, as on
-`KafkaProducer`.
+completed, leaves those errors to their own calls. A `send()` made from a
+callback's synchronous part runs its own callback once that callback
+returns, and settles after it, rejecting with that callback's error, as
+Java's nested `send()` throws it; a `completeNext()` or `errorNext()` made
+there cannot wait, so the next record's callback runs once that callback
+returns and its throw comes out of the outer completing call. A `close()`
+called inside one of the mock's callbacks before its first `await` does not
+wait for the callbacks, as Python's async mock; after that `await`,
+`close()` waits for that callback, and a `flush()` from a callback always
+does, so a callback that awaits either never settles (`KafkaProducer`
+refuses a `flush()` made before the first `await`).
 Java's public error fields are
 setters, and each call throws the very error it was given:
 
