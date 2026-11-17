@@ -435,8 +435,8 @@ test('the number payloads: throttleTimeMs, the correlation ids, QuotaViolationEr
   );
   // The core gives the metric's name, the value and the bound
   // (native/error_payload.c): the KafkaMetric is built from the name and the
-  // error's value, the value Java's Sensor.checkQuotas measured, as the Python
-  // and .NET clients build it.
+  // error's value, the value Java's Sensor.checkQuotas measured, as the .NET
+  // client builds it (Python keeps the name and group only).
   const reported = fromNative({
     code: -26,
     message: '',

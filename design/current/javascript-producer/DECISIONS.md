@@ -237,10 +237,11 @@ rules and readings. Newest entries are at the end; dates are in IST.
 
 ## Nothing left blocked on the core (2026-11-17)
 
-26. **`QuotaViolationError.metric()` from the core** is built as the Python and .NET clients build it: a `KafkaMetric`
-    whose `MetricName` is the view's (`kafka_common_QuotaViolationError_metric_name`: name, group, description,
-    tags) and whose value is the error's `value`, the value Java's `Sensor.checkQuotas` measured. With no name from
-    the view it has an empty one, as .NET's. `metric()` is typed `KafkaMetric`. The items still left out match the
+26. **`QuotaViolationError.metric()` from the core** is built as the .NET client builds it: a `KafkaMetric` whose
+    `MetricName` is the view's (`kafka_common_QuotaViolationError_metric_name`: name, group, description, tags) and
+    whose value is the error's `value`, the value Java's `Sensor.checkQuotas` measured, measurable as Java's quota
+    metric always is. Python keeps only the name and the group, behind a value that is not measurable, so the JS
+    metric is the closer to Java's. With no name from the view it has an empty one, as .NET's. `metric()` is typed `KafkaMetric`. The items still left out match the
     other bindings: `setMockMetrics` is left out as in .NET, whose mock also wraps the FFI's, and
     `CorrelationIdMismatchError`'s ids are `-1` in all three. So nothing in the producer is blocked on the core; the
     worker cleanup hook stays a Future improvement.
