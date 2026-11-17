@@ -1197,3 +1197,54 @@ async function warmedProducer(what) {
   },
   120000,
 );
+
+(SKIP ? test.skip : test)(
+  "close() from inside a send callback closes at once as close({ timeout: 0 }), as Java's does",
+  async () => {
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    // Java's KafkaProducer#close: called from a Callback, it logs a warning and
+    // closes as close(0) instead of joining its own I/O thread; the records
+    // still in the accumulator fail with "Producer is closed forcefully.". Both
+    // forms, untimed and timed.
+    for (const timed of [false, true]) {
+      const topic = freshTopic(timed ? 'close-in-cb-timed' : 'close-in-cb');
+      // linger.ms holds the nested record in the accumulator well past the close.
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 10000 } });
+      await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('warm') }))).get();
+      /** @type {Promise<KafkaFuture<RecordMetadata>> | undefined} */
+      let nested;
+      /** @type {Promise<number> | undefined} */
+      let closing;
+      /** @type {Error | null | undefined} */
+      let nestedException;
+      const first = await producer.send({
+        record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('first') }),
+        callback: () => {
+          nested = producer.send({
+            record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('nested') }),
+            callback: ({ exception }) => {
+              nestedException = exception;
+            },
+          });
+          const start = Date.now();
+          closing = (timed ? producer.close({ timeout: 60000 }) : producer.close()).then(() => Date.now() - start);
+        },
+      });
+      await first.get();
+      assert.ok(closing && nested);
+      // It does not wait for the lingering record, nor for its own callback.
+      const elapsed = await closing;
+      assert.ok(elapsed < 5000, `close() inside the callback took ${elapsed} ms`);
+      const future = await nested;
+      await assert.rejects(future.get(), (e) => {
+        assert.ok(e instanceof ExecutionError);
+        assert.ok(e.cause instanceof KafkaError);
+        assert.equal(e.cause.message, 'Producer is closed forcefully.');
+        return true;
+      });
+      assert.ok(nestedException instanceof KafkaError);
+      assert.equal(nestedException.message, 'Producer is closed forcefully.');
+    }
+  },
+  120000,
+);
