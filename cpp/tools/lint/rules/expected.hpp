@@ -46,6 +46,9 @@ enum class FunctionKind : std::uint8_t {
 struct ExpectedParameter {
     std::string name;  ///< C++ name (§2.3)
     Mapping mapping;
+    /// Java's name, as decisions.txt writes the parameter; empty for a C++
+    /// convention's parameter (an enum's free function takes the enum).
+    std::string java_name;
 };
 
 struct ExpectedFunction {

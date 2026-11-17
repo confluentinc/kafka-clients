@@ -58,12 +58,17 @@ public:
     [[nodiscard]] const java::Type* by_cpp_name(std::string_view cpp_name) const;
     /// The expected shape of `type`, computed on first use.
     [[nodiscard]] const rules::ExpectedType& expected(const java::Type& type) const;
+    /// data/decisions.txt (§4.6) and data/baseline.txt (§1.4).
+    [[nodiscard]] const rules::DataFile& decisions() const { return decisions_; }
+    [[nodiscard]] const rules::DataFile& baseline() const { return baseline_; }
 
 private:
     explicit JavaSide(const Settings& settings);
 
     java::Model model_;
     rules::DataFile excluded_;
+    rules::DataFile decisions_;
+    rules::DataFile baseline_;
     rules::Scope scope_;
     std::map<std::string, std::string, std::less<>> by_cpp_name_;
     mutable std::mutex expected_lock_;

@@ -87,7 +87,8 @@ endif()
 set(CK_LINT_FFI_INCLUDE_DIR "${_ck_lint_ffi_default}" CACHE PATH "The directory of confluent_kafka_bindings.h")
 
 add_library(ConfluentKafkaTidy MODULE
-    tidy/module.cpp tidy/session.cpp tidy/class_checks.cpp tidy/header_check.cpp)
+    tidy/module.cpp tidy/session.cpp tidy/class_checks.cpp tidy/header_check.cpp tidy/type_reader.cpp
+    tidy/pairing.cpp tidy/member_checks.cpp)
 target_include_directories(ConfluentKafkaTidy SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 separate_arguments(_ck_llvm_definitions NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 target_compile_definitions(ConfluentKafkaTidy PRIVATE
@@ -144,6 +145,7 @@ if(BUILD_TESTING)
     add_test(NAME lint_plugin_loads
         COMMAND fixture_runner checks ${CK_CLANG_TIDY} $<TARGET_FILE:ConfluentKafkaTidy>
                 confluent-kafka-java-class confluent-kafka-java-inheritance confluent-kafka-java-enum
+                confluent-kafka-java-members confluent-kafka-java-signature confluent-kafka-surface
                 confluent-kafka-header)
     file(GLOB _ck_fixtures LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/*")
     foreach(_fixture IN LISTS _ck_fixtures)

@@ -276,9 +276,13 @@ TEST_F(TypesTest, NamesTheDecisionEachAlternativeNeeds) {
     EXPECT_EQ(s.shapes[1].type.to_string(), "std::optional<std::string_view>");
     EXPECT_EQ(s.shapes[1].decision, Decision::NULLABLE);
     const auto set = mapping("set", Position::RETURN);
-    ASSERT_EQ(set.shapes.size(), 2U);
+    ASSERT_EQ(set.shapes.size(), 4U);
     EXPECT_EQ(set.shapes[1].type.to_string(), "std::set<std::string>");
     EXPECT_EQ(set.shapes[1].decision, Decision::ORDERED);
+    // §4.7: a getter on a value type may return by const&, with the same decision.
+    EXPECT_EQ(set.shapes[2].type.to_string(), "const std::unordered_set<std::string>&");
+    EXPECT_EQ(set.shapes[3].type.to_string(), "const std::set<std::string>&");
+    EXPECT_EQ(set.shapes[3].decision, Decision::ORDERED);
     const auto collection = mapping("collection", Position::RETURN);
     EXPECT_EQ(collection.shapes[1].type.to_string(), "std::unordered_set<std::string>");
     EXPECT_EQ(collection.shapes[1].decision, Decision::SET);

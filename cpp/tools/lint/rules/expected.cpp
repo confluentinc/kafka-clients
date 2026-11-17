@@ -158,7 +158,8 @@ private:
             }
             out.push_back(ExpectedParameter{
                 names[i],
-                mapped(type, Position::PARAMETER, member_id(m) + " " + m.parameters[i].name, m.parameters[i].name)});
+                mapped(type, Position::PARAMETER, member_id(m) + " " + m.parameters[i].name, m.parameters[i].name),
+                m.parameters[i].name});
         }
         return out;
     }
@@ -358,7 +359,7 @@ private:
                 fn.note = "§2.4 a final field's getter";
             } else {
                 fn.parameters.push_back(
-                    ExpectedParameter{member_name(f.name), mapped(f.type, Position::PARAMETER, id)});
+                    ExpectedParameter{member_name(f.name), mapped(f.type, Position::PARAMETER, id), f.name});
                 TypeRef void_ref;
                 void_ref.kind = TypeRef::Kind::VOID;
                 void_ref.name = "void";
@@ -439,7 +440,7 @@ private:
             if (m.has(java::MOD_STATIC)) {
                 f.qualifier = statics;
             } else {
-                f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}});
+                f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}, {}});
             }
             for (auto& p : parameters(m)) {
                 f.parameters.push_back(std::move(p));
@@ -457,7 +458,7 @@ private:
                 ExpectedFunction f;
                 f.kind = FunctionKind::FREE_FUNCTION;
                 f.name = member_name(field.name);
-                f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}});
+                f.parameters.push_back(ExpectedParameter{self_name, Mapping{{Shape{self, Decision::NONE}}, {}}, {}});
                 f.returns = mapped(field.type, Position::RETURN, id);
                 f.java_member = id;
                 f.note = "§2.4 an enum's public field";

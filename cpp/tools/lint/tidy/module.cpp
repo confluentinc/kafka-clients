@@ -28,6 +28,9 @@ public:
         factories.registerCheck<JavaClassCheck>("confluent-kafka-java-class");
         factories.registerCheck<JavaInheritanceCheck>("confluent-kafka-java-inheritance");
         factories.registerCheck<JavaEnumCheck>("confluent-kafka-java-enum");
+        factories.registerCheck<JavaMembersCheck>("confluent-kafka-java-members");
+        factories.registerCheck<JavaSignatureCheck>("confluent-kafka-java-signature");
+        factories.registerCheck<SurfaceCheck>("confluent-kafka-surface");
         factories.registerCheck<HeaderCheck>("confluent-kafka-header");
     }
 };

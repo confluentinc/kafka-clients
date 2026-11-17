@@ -1,0 +1,5 @@
+# Parameters keep Java's names (§2.3).
+file: confluent/kafka/consumer/subscription_pattern.hpp
+replace: explicit SubscriptionPattern(std::string_view pattern)\n        : impl_(std::make_shared<const Impl>(Impl{std::string(pattern)})) {}
+with: explicit SubscriptionPattern(std::string_view regex)\n        : impl_(std::make_shared<const Impl>(Impl{std::string(regex)})) {}
+expect: confluent-kafka-java-signature is named pattern in Java

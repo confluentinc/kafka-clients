@@ -135,6 +135,8 @@ const JavaSide& JavaSide::get(const Settings& settings) {
 JavaSide::JavaSide(const Settings& settings)
     : model_(java::load_model(settings.java_root, std::max(1U, std::thread::hardware_concurrency()))),
       excluded_(rules::read_scope_excluded(settings.data_dir + "/scope-excluded.txt")),
+      decisions_(rules::read_decisions(settings.data_dir + "/decisions.txt")),
+      baseline_(rules::read_baseline(settings.data_dir + "/baseline.txt")),
       scope_(rules::compute_scope(model_, excluded_)) {
     for (const auto& [binary_name, type] : model_.types) {
         by_cpp_name_.emplace(rules::qualified_name(model_, type), binary_name);

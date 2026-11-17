@@ -425,8 +425,9 @@ Interfaces Java declares:
    and the core's translation named; one that uses the double only to make a call fail runs
    against an unreachable bootstrap address. A class Java ships without tests takes the Rust
    core's tests of it.
-2. Binding-specific tests: `tools/check_ffi_symbols.py` (CTest `ffi_symbols`: every `kafka_`
-   name in `include/` is declared in the C header and none is a `_cb` function); the error
+2. Binding-specific tests: the translation linter (`tools/lint/`, §12–13), whose
+   `confluent-kafka-java-members` check rejects any reference to a `_cb` function (the compiler
+   already rejects a `kafka_` name the C header does not declare); the error
    tests of §6.9; lifetime tests run under ASan and UBSan (`-DCONFLUENT_KAFKA_CPP_SANITIZE=ON`),
    once per `make verify`; an overload test per Java overload set; compile-fail tests (a private
    constructor, a copied client, a null where the type has none); serde test vectors against

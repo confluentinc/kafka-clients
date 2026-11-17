@@ -14,6 +14,7 @@
 
 #include "types.hpp"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <utility>
@@ -355,8 +356,46 @@ bool is_public_api(const java::Type& type) {
     return pkg.find(".internals.") == std::string::npos;
 }
 
+namespace {
+
+/// §4.7: out, a value type by value or, from a getter on a value type, by const&.
+Mapping with_const_ref_returns(Mapping m) {
+    if (!m.ok()) {
+        return m;
+    }
+    std::vector<Shape> out;
+    for (const auto& s : m.shapes) {
+        out.push_back(s);
+    }
+    for (const auto& s : m.shapes) {
+        if (s.type.ref == CppType::Ref::NONE && s.type.name != "void") {
+            Shape cref{const_ref(s.type), s.decision};
+            const bool present =
+                std::any_of(out.begin(), out.end(), [&](const Shape& o) { return o.type == cref.type; });
+            if (!present) {
+                out.push_back(std::move(cref));
+            }
+        }
+    }
+    m.shapes = std::move(out);
+    return m;
+}
+
+Mapping map_type_unadjusted(const java::Model& model, const java::TypeRef& ref, Position position,
+                            std::string_view parameter_name);
+
+}  // namespace
+
 Mapping map_type(const java::Model& model, const java::TypeRef& ref, Position position,
                  std::string_view parameter_name) {
+    auto m = map_type_unadjusted(model, ref, position, parameter_name);
+    return position == Position::RETURN ? with_const_ref_returns(std::move(m)) : m;
+}
+
+namespace {
+
+Mapping map_type_unadjusted(const java::Model& model, const java::TypeRef& ref, Position position,
+                            std::string_view parameter_name) {
     if (ref.dimensions > 0) {
         auto element = ref;
         element.dimensions -= 1;
@@ -396,4 +435,5 @@ Mapping map_type(const java::Model& model, const java::TypeRef& ref, Position po
     return unmapped("unreachable");
 }
 
+}  // namespace
 }  // namespace cklint::rules

@@ -281,7 +281,38 @@ Run run_checks_on(const std::string& clang_tidy, const std::string& plugin, cons
             }
         }
     }
-    const std::string config = "{Checks: '-*,confluent-kafka-*', CheckOptions: {ConfluentKafkaJavaRoot: '" + java_root +
+    // Diagnostics about the translation unit as a whole (the surface check) are
+    // placed at line 1 of the probe: <include-root>/../probe-expectations.txt
+    // lists them, one `<check> <text>` per line.
+    if (expected != nullptr) {
+        std::ifstream in(fs::path(include_root).parent_path() / "probe-expectations.txt");
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto space = line.find(' ');
+            if (line.empty() || line[0] == '#' || space == std::string::npos) {
+                continue;
+            }
+            expected->push_back(Expectation{canonical((work / "probe.cpp").string()), 1, line.substr(0, space),
+                                            line.substr(space + 1)});
+        }
+    }
+    // A fixture may name the checks it exercises in <include-root>/../checks.txt,
+    // one per line; its headers are wrong on purpose for those, not for others.
+    std::string checks = "confluent-kafka-*";
+    {
+        std::ifstream in(fs::path(include_root).parent_path() / "checks.txt");
+        std::string line;
+        std::string listed;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line[0] != '#') {
+                listed += (listed.empty() ? "" : ",") + line;
+            }
+        }
+        if (!listed.empty()) {
+            checks = listed;
+        }
+    }
+    const std::string config = "{Checks: '-*," + checks + "', CheckOptions: {ConfluentKafkaJavaRoot: '" + java_root +
                                "', ConfluentKafkaDataDir: '" + data_dir + "', ConfluentKafkaIncludeRoot: '" +
                                include_root + "'}}";
     std::string command = quote(clang_tidy) + " -load " + quote(plugin) + " --quiet -header-filter='.*' -config=\"" +

@@ -10,9 +10,8 @@ Updated 2026-11-17.
   (standalone; not yet part of `build-all`, `test` or `verify`).
 - `include/confluent/kafka/detail/ffi.hpp`: the single include of the C header, `UniqueHandle`,
   `ErrorHandle`, `ErrorSlot`.
-- Tests: GoogleTest harness (`confluent_kafka_cpp_unit_test`), `ffi_handle_test`, the
-  `ffi_symbols` check (`tools/check_ffi_symbols.py`: every `kafka_` name in `include/` is declared
-  in the header and none is a `_cb` function), the ABI probe library under `test/probe`.
+- Tests: GoogleTest harness (`confluent_kafka_cpp_unit_test`), `ffi_handle_test`, the ABI probe
+  library under `test/probe`.
 - `.clang-format`, `.clang-tidy` with the naming rules of CLAUDE.md §2.
 - `CLAUDE.md` with the rules derived from the kickstart questionnaire answers (Confluence page
   6364529292).
@@ -67,6 +66,21 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   nothing on the 10 headers; four mutations of real headers (`tools/lint/test/mutations`, run by
   `fixture_runner mutate`) are each reported. A module header of a nested module
   (`common/acl.hpp`) need not be in its parent's.
+
+- Step 5 done: `confluent-kafka-java-members`, `-java-signature` and `-surface`
+  (`tidy/pairing.cpp` pairs each Java overload with the C++ function of its group, qualifier, name
+  and arity that mismatches the fewest shapes, so the three checks agree on every pair; types are
+  read as written by `tidy/type_reader.cpp`). `data/baseline.txt` is written by the surface check
+  (`ConfluentKafkaWriteBaseline: 'true'`): 305 `missing-class` lines, the 310 in-scope types minus
+  the five translated. `tools/check_ffi_symbols.py` is gone: the members check rejects a `_cb`
+  reference, and the compiler a `kafka_` name the C header lacks. Readings the checks settled:
+  Java's implicit default constructor is C++'s implicit one; an override takes its types from
+  its base (`send(const int32_t&)` overrides `Producer<K, V>::send(const K&)`); a name a
+  using-declaration brings in is read as written (`std::exception_ptr`); a missing `Comparable`
+  operator is the inheritance check's finding only. Fixtures for the three checks, a fixture may
+  restrict itself to the checks it breaks on purpose (`checks.txt`), and the surface check's
+  translation-unit findings are expected through `probe-expectations.txt`; four more mutations
+  (a parameter type, a parameter name, a missing and an extra member).
 
 ## Next
 

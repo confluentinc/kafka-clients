@@ -1,0 +1,6 @@
+confluent-kafka-java-inheritance
+# The members and signature checks leave the Comparable findings to the
+# inheritance check, accept an implicit default constructor and take an
+# override's types from its base: none of them reports anything here.
+confluent-kafka-java-members
+confluent-kafka-java-signature

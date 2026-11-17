@@ -25,12 +25,3 @@ confluent_kafka_cpp_unit_test(topic_partition_test)
 confluent_kafka_cpp_unit_test(subscription_pattern_test)
 confluent_kafka_cpp_unit_test(acl_permission_type_test)
 confluent_kafka_cpp_unit_test(config_resource_test)
-
-# The sync-only, header-only contract (cpp/CLAUDE.md §11): every `kafka_`
-# name the headers use is declared in the C header, and none is a `_cb`
-# function.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME ffi_symbols
-    COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/check_ffi_symbols.py
-            --header ${_ck_include_dir}/confluent_kafka_bindings.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/../../include)

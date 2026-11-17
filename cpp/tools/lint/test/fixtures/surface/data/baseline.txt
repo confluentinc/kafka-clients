@@ -1,0 +1,4 @@
+# The fixture's baseline: KafkaProducer is listed, ProducerConfig is not.
+missing-class org.apache.kafka.clients.producer.KafkaProducer
+missing-class org.apache.kafka.clients.producer.Producer
+missing-class org.apache.kafka.clients.producer.Nothing

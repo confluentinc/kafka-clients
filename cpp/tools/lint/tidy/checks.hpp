@@ -64,6 +64,36 @@ public:
     void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
 };
 
+/// confluent-kafka-java-members: every public Java member has its C++
+/// translation and every public C++ member translates one (§1.4, §4.1); no
+/// public data member (§2.4, §12.3); Java's constants are constexpr; no _cb
+/// function is called (§1.3).
+class JavaMembersCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void registerMatchers(clang::ast_matchers::MatchFinder* finder) override;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
+/// confluent-kafka-java-signature: a translation's parameter and return types
+/// are shapes §5 allows, a non-default one with its decisions.txt line (§4.6);
+/// parameters keep Java's names (§2.3) and have no default (§4.1); static and
+/// virtual as Java's.
+class JavaSignatureCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
+/// confluent-kafka-surface: every in-scope Java class is translated or listed
+/// in baseline.txt; no data-file line is stale. With the option
+/// `ConfluentKafkaWriteBaseline: true` it writes baseline.txt instead.
+class SurfaceCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
 /// confluent-kafka-header: every public header has the Apache 2.0 header and
 /// `#pragma once`, reaches the C header only through detail/ffi.hpp, is
 /// included by its module header, and has no TODO, FIXME or silenced check.
