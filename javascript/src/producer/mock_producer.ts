@@ -181,20 +181,28 @@ function completeRecord(
  * the completing call. Why: those calls return before the Promise
  * settles)*. Only the record's own `send()` gets its callback's error: a
  * `send()` made inside a callback, or one whose drain runs callbacks a
- * pending `flush()` completed, leaves those errors to their own calls. A
- * `completeNext()` or `errorNext()` made from a callback's synchronous part
- * returns before the next record's callback runs, which runs once that
- * callback returns, its throw coming out of the outer completing call
- * *(deviation: Java's nested call throws it. Why: the callback queue does
- * not nest, and those calls cannot wait)*.
+ * pending `flush()` completed, leaves those errors to their own calls.
+ * With `autoComplete`, a `send()` made from a callback's synchronous part
+ * runs its own callback once that callback returns, and settles after it,
+ * rejecting with its error *(deviation: Java's runs it inside the nested
+ * `send()`. Why: the callback queue does not nest. Goes when: a drain
+ * started inside a drain runs the callbacks, where the addon's `cbq_drain`
+ * and the FFI's `CallbackQueue::execute` return at once)*. A
+ * `completeNext()` or `errorNext()` made there returns before the next
+ * record's callback runs, which runs once that callback returns, its throw
+ * coming out of the outer completing call *(deviation: Java's nested call
+ * throws it. Why: the callback queue does not nest, and those calls cannot
+ * wait. Goes when: the same)*.
  * `flush()` and `close()` wait for every callback Promise already started
  * before they settle; the record's future completes once the Promise
  * settled, as for a throw. A `close()` made from one of the mock's
  * callbacks before its first `await` does not wait for the callbacks, its
  * own among them, as Python's `AsyncMockProducer`; after that `await`,
  * `close()` waits for that callback, and a `flush()` made from a callback
- * always does, so a callback that awaits either never settles
- * (`KafkaProducer` refuses a `flush()` made before the first `await`).
+ * does too, unless an error is set with `setFlushException`, which it
+ * rejects with at once, as Java's; so a callback that awaits either
+ * otherwise never settles (`KafkaProducer` refuses a `flush()` made before
+ * the first `await`).
  */
 export class MockProducer<K, V> implements Producer<K, V> {
   #handle: ProducerHandle;
@@ -639,7 +647,9 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * a throw, else the oldest error a callback's Promise rejected with, is
    * then the rejection, the others kept for later calls. Made from one of the
    * mock's callbacks, it waits for that callback, so a callback that awaits
-   * it never settles; `KafkaProducer` refuses it before the first `await`.
+   * it never settles, unless an error is set with `setFlushException`, which
+   * it rejects with at once; `KafkaProducer` refuses it before the first
+   * `await`.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {
@@ -883,11 +893,15 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `IllegalArgumentError` when it is given an argument
    * @throws `TypeError` when it is given `undefined`
    * @throws what the record's callback threw, as Java's mock lets it
-   *   propagate
+   *   propagate, unless the call is made from a callback's synchronous part
    *
    * @remarks The record's callback runs inside the call, and its future is
    * done when it returns. A Promise the callback returns is not awaited: its
-   * rejection is kept for the next `send()`, `flush()` or `close()`.
+   * rejection is kept for the next `send()`, `flush()` or `close()`. Made
+   * from a callback's synchronous part, it returns before the record's
+   * callback runs, which runs once that callback returns, its throw coming
+   * out of the outer completing call *(deviation: Java's runs it inside the
+   * call. Why: the callback queue does not nest)*.
    */
   completeNext(): boolean;
   completeNext(options?: unknown): boolean {
@@ -908,12 +922,14 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` when `e` is neither an `Error` nor null, or
    *   `undefined`
    * @throws what the record's callback threw, as Java's mock lets it
-   *   propagate
+   *   propagate, unless the call is made from a callback's synchronous part
    *
    * @remarks The record's callback gets the very same error, and its future's
    * `get()` rejects with an `ExecutionError` whose `cause` it is. A null `e`
    * completes the call successfully, as Java's `completeNext()` is
-   * `errorNext(null)`.
+   * `errorNext(null)`. Made from a callback's synchronous part, it returns
+   * before the record's callback runs, as `completeNext()` does
+   * *(deviation)*.
    */
   errorNext(options: {
     /** The error to complete the call with. */
