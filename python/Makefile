@@ -2,8 +2,12 @@ REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 # The cargo profile directory of the Rust library every target links:
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE). The tests use the debug all-features
-# build; the root's build-python and Python benchmarks pass release.
+# build; the root's `build` passes release, and the benchmarks always link
+# release.
 PROFILE ?= debug
+# The rust/Makefile target that builds that library: the release or the debug
+# all-features build.
+RUST_BUILD_TARGET = $(if $(filter release,$(PROFILE)),build-all-features,devel-build-all-features)
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 # Native (non-container) gRPC server builds for the multilanguage harness,
@@ -29,23 +33,57 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 # toolchain and the `xtask` alias, from leaking into the rest of the recipe.
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
-# Every target runs in the Python environment the caller activated (the
-# repository root's Makefile activates its venv first) and, except
-# `check-static` and `test-soak`, expects the Rust library already built under
-# $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
+# Every target runs in the venv VENV_DIR, the repository's shared ../venv by
+# default, which `venv` creates: its bin/ comes first on PATH, so `pip` and
+# `python` below are the venv's. The interpreter that creates it is the one
+# found before that.
+VENV_DIR ?= $(REPO_ROOT)/venv
+SYSTEM_PYTHON := $(shell command -v python3)
+export VIRTUAL_ENV := $(VENV_DIR)
+export PATH := $(VENV_DIR)/bin:$(PATH)
+
+# The librdkafka venv of the benchmarks (venv-librdkafka below): the PyPI
+# confluent-kafka client for the CLIENT_VERSION=2 baseline and for the
+# librdkafka-backed helpers (topic recreation, end-of-run verification; see
+# test/performance/librdkafka_helpers.py). It is separate from VENV_DIR because
+# both packages install the top-level package `confluent_kafka`.
+LIBRDKAFKA_VENV ?= $(REPO_ROOT)/venv-librdkafka
+LIBRDKAFKA_PYTHON ?= $(LIBRDKAFKA_VENV)/bin/python
+
 # Exported so that every `pip install` below, `.[dev]` included, compiles the
-# extension against that library.
+# extension against the Rust library of $(PROFILE), which `build` builds first.
 export CONFLUENT_KAFKA_LIB_DIR = $(RUST_PROJECT_ROOT)/target/$(PROFILE)
 
-.PHONY: init build test test-unit check typecheck check-static docs test-soak test-verifiable-clients \
-	test-integration test-performance \
+.PHONY: venv venv-librdkafka rust-lib init build test test-unit check verify verify-macos typecheck \
+	check-static docs test-soak test-verifiable-clients test-integration test-integration-ssl \
+	test-integration-sasl-ssl test-integration-native test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
 
+# The second command is a one-time migration: master's `[dev]` extras once
+# installed the PyPI confluent-kafka (librdkafka) into venv/, and it shares the
+# top-level package `confluent_kafka` with this client. Leaving `[dev]` stops new
+# installs but does not remove it from an existing venv, where it shadows the
+# package (`cannot import name 'IllegalArgumentError' from 'confluent_kafka'`).
+venv:
+	[ -d $(VENV_DIR) ] || $(SYSTEM_PYTHON) -m venv $(VENV_DIR)
+	@if $(VENV_DIR)/bin/python -m pip show -q confluent-kafka >/dev/null 2>&1; then \
+	  echo "Removing PyPI confluent-kafka from $(VENV_DIR) (it shadows confluent_kafka)"; \
+	  $(VENV_DIR)/bin/python -m pip uninstall -y -q confluent-kafka; fi
+
+venv-librdkafka:
+	[ -d $(LIBRDKAFKA_VENV) ] || $(SYSTEM_PYTHON) -m venv $(LIBRDKAFKA_VENV)
+	$(LIBRDKAFKA_PYTHON) -m pip install -q -r test/performance/requirements-librdkafka.txt
+
+# The Rust library and its headers, built by rust/Makefile; a cargo no-op once
+# they are current.
+rust-lib:
+	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
+
 # Development dependencies, for a fresh clone (the root `init`).
-init:
+init: venv
 	pip install .[dev]
 
-build:
+build: venv rust-lib
 	CFLAGS="$(CFLAGS_EXTRA)" pip install -e .
 
 # The binding's tests; the checks that are not tests are `check` below.
@@ -60,6 +98,18 @@ test: build
 	$(MAKE) test-soak
 	$(MAKE) test-verifiable-clients
 	$(MAKE) test-integration
+
+# The Python gate CI runs on Linux ("verify-python (Linux amd64) — plaintext"):
+# the tests, then the latency smoke run. The checks that are not tests are
+# `check`, which CI runs in "check-python (Linux amd64)".
+verify: test
+	$(MAKE) test-performance
+
+# The macOS gate: the unit tests, then the gRPC multilanguage arm with the gRPC
+# server as a native host process, since the Linux container arm cannot run on
+# macOS.
+verify-macos: test-unit
+	$(MAKE) test-integration-native
 
 # Unit tests only (pytest test/unit). The gRPC multilanguage arm runs on Linux
 # only; this is what the macOS verify job runs.
@@ -82,9 +132,8 @@ check: build
 # `test/unit/test_typing.py` carries `typing.assert_type` assertions that
 # machine-verify the `@overload` stubs and the generics inference, so it is type
 # checked here too — a broken stub fails `make verify`. Like every target here it
-# runs in the venv the caller activated, where mypy and the built
-# `_confluentkafka` extension live.
-typecheck:
+# runs in the venv, where mypy and the built `_confluentkafka` extension live.
+typecheck: venv
 	$(call selected_run,--section python.typecheck -- python -m mypy --strict confluent_kafka test/unit/test_typing.py)
 
 # Static checks (test/static): the check that _confluentkafka.c reaches the C
@@ -96,7 +145,7 @@ typecheck:
 # path is unreachable from the test suite, so this defect class must be caught
 # statically. They read source files
 # only, so they need neither the Rust library nor the C extension built.
-check-static:
+check-static: venv
 	$(call selected_run,--section python.static --default test/static -- python -m pytest {} -v)
 
 # The API reference (docs/, the `docs` extra): Sphinx autodoc over this source
@@ -104,14 +153,14 @@ check-static:
 # C extension built. Signatures come from the stubs a type checker reads (a
 # module's .pyi, a class's `if TYPE_CHECKING:` branch).
 # -W fails the build on any warning, a signature showing MISSING included.
-docs:
+docs: venv
 	python -m sphinx -W --keep-going -b html docs docs/_build/html
 
 # Soak client unit tests (soak/test): the payload round-trip, the
 # duplicate/gap accounting and the startup config validation. Pure logic, no
 # broker and no container, so they belong in `test` above rather than alongside
 # the broker-backed suites.
-test-soak:
+test-soak: venv
 	$(call selected_run,--section python.soak --default soak/test -- python -m pytest {} -v)
 
 # The system-test tools' tests (verifiable_clients/test): the throttler, the
@@ -119,7 +168,7 @@ test-soak:
 # MockConsumer, and each script run against an unreachable broker. No broker
 # and no container; they need the built extension. The tools are type checked
 # as strictly as the package they use.
-test-verifiable-clients:
+test-verifiable-clients: venv
 	$(call selected_run,--section python.verifiable_clients -- python -m mypy --strict verifiable_clients)
 	$(call selected_run,--section python.verifiable_clients --default verifiable_clients/test -- python -m pytest {} -v)
 
@@ -136,8 +185,9 @@ test-verifiable-clients:
 # container arms passed, only that this host cannot build the Linux images.
 #
 # The image builds are invoked *inside* the recipe (rather than as
-# prerequisites) so the skip also short-circuits the Docker builds.
-test-integration:
+# prerequisites) so the skip also short-circuits the Docker builds. The images
+# build the binding themselves, so only the Rust library comes first.
+test-integration: rust-lib
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 		printf '\n========================================================================\n'; \
 		printf 'SKIP Python test-integration: host is %s, not Linux.\n' "$$(uname -s)"; \
@@ -147,7 +197,7 @@ test-integration:
 		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
-		printf 'Run it natively on this host with: %smake test-integration-python-native\n' \
+		printf 'Run it natively on this host with: %smake -C python test-integration-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
@@ -155,16 +205,27 @@ test-integration:
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-python; \
 	fi
 
-# Kept out of `test`: they assert latency budgets, so only meaningful on an
-# otherwise-idle machine. Run via `make test-integration-perf-python` at the root.
+# The same arms over the SSL / SASL_SSL CONTAINER listeners (CTLSONLY :9100 /
+# CSASLTLS :9101), which INTEGRATION_TEST_PROTOCOL selects
+# (rust/tests/common/test_context.rs); the harness passes the matching TLS and
+# SASL settings to the gRPC servers. They inherit the non-Linux skip.
+test-integration-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration
+test-integration-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration
+
+# The Python arms with the gRPC servers as host processes instead of containers
+# (MULTILANG_BACKEND_MODE=native, rust/tests/common/backend_pool.rs): only the
+# broker runs in Docker. Used on macOS; also works on Linux.
+test-integration-native: grpc-native
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-python-native
+
+# A latency smoke run at a fixed low rate (100 rps, p99 budget), like the Rust
+# perf tests, on the same library as the other tests. Kept out of `test`: it
+# asserts latency budgets, so it is only meaningful on an otherwise-idle machine.
 test-performance: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	$(call selected_run,--section python.performance --default test/performance -- python -m pytest {} -v)
-
-# The librdkafka venv's interpreter (the root's `init-venv-librdkafka`): the PyPI
-# confluent-kafka client shares the top-level package `confluent_kafka` with this
-# client, so it cannot live in the active venv.
-LIBRDKAFKA_PYTHON ?= $(REPO_ROOT)/venv-librdkafka/bin/python
 
 # Env-driven consumer end-to-end latency benchmark (standalone). Mirrors
 # rust/consumer-perf/compare/benchmark_e2e_latency.c. Needs a reachable broker
@@ -174,8 +235,10 @@ LIBRDKAFKA_PYTHON ?= $(REPO_ROOT)/venv-librdkafka/bin/python
 # baseline). Set ASYNC=True to drive the asyncio-native consumer of the
 # selected backend (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer)
 # instead of the sync one. CLIENT_VERSION=2 runs in the librdkafka venv; the
-# Rust run uses it only for CREATE_TOPIC.
-consumer-perf-test: build
+# Rust run uses it only for CREATE_TOPIC. The benchmarks link the release
+# library and need the librdkafka venv.
+consumer-perf-test producer-perf-test transactional-producer-perf-test: PROFILE = release
+consumer-perf-test: build venv-librdkafka
 	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
 	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/consumer_performance_test.py)
 
@@ -183,7 +246,7 @@ consumer-perf-test: build
 # contract as the Rust `producer-perf-test`; CLIENT_VERSION selects the backend
 # as for consumer-perf-test. CLIENT_VERSION=2 runs in the librdkafka venv; the
 # Rust run uses it only for CREATE_TOPIC / VERIFY_CONSUMED.
-producer-perf-test: build
+producer-perf-test: build venv-librdkafka
 	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
 	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/producer_performance_test.py)
 
@@ -193,13 +256,14 @@ producer-perf-test: build
 # TRANSACTIONAL_ID, TXN_MODE, SOURCE_TOPIC). CLIENT_VERSION selects the backend
 # as for producer-perf-test. Keep in sync with the other transactional producer
 # performance tests.
-transactional-producer-perf-test: build
+transactional-producer-perf-test: build venv-librdkafka
 	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
 	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/transactional_producer_performance_test.py)
 
 # Python gRPC server image for the multilang test harness. Context is the repo
-# root; requires libconfluent_kafka.so already built in rust/target/$(PROFILE)/.
-grpc-image:
+# root; it copies libconfluent_kafka.so from rust/target/$(PROFILE)/ and builds
+# the binding inside the image.
+grpc-image: rust-lib
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
 		--build-arg RUST_PROFILE=$(PROFILE) \
@@ -207,7 +271,7 @@ grpc-image:
 		$(REPO_ROOT)
 
 # Async variant of grpc-image; runs grpc_server_async.py.
-grpc-image-async:
+grpc-image-async: rust-lib
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		--build-arg RUST_PROFILE=$(PROFILE) \
@@ -215,9 +279,10 @@ grpc-image-async:
 		$(REPO_ROOT)
 
 # Generated gRPC stubs for the native (host-process) Python arm: installs the
-# gRPC packages into the active environment and runs protoc. The versions are
-# pinned in requirements-grpc{,-tools}.txt, shared with the Docker images.
-grpc-native:
+# gRPC packages into the venv and runs protoc. The versions are pinned in
+# requirements-grpc{,-tools}.txt, shared with the Docker images. The native
+# servers import the binding built here, hence `build`.
+grpc-native: build
 	pip install -r requirements-grpc-tools.txt
 	mkdir -p $(GRPC_NATIVE_DIR)/python
 	python -m grpc_tools.protoc -I$(GRPC_PROTO_DIR) \

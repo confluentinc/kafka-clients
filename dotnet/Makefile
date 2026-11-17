@@ -50,16 +50,17 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 # through `env`.
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
-.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	test-examples-dotnet pack-dotnet package-check-dotnet coverage-dotnet
+.PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
+	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
+	test-examples-dotnet test-dotnet-macos verify verify-macos pack-dotnet package-check-dotnet coverage-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
 # root (as for python/ and c/) so the Dockerfile can copy from
 # rust/target/$(RUST_PROFILE)/, dotnet/, and the rust/multilanguage-test-server/ proto
-# crate. Requires the Linux libconfluent_kafka.so in rust/target/$(RUST_PROFILE)/
-# first (the root's devel-build-rust-all-features).
-grpc-image:
+# crate. It copies the Linux libconfluent_kafka.so from rust/target/$(RUST_PROFILE)/,
+# which rust-lib builds first.
+grpc-image: rust-lib
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
 		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
@@ -72,7 +73,7 @@ grpc-image:
 # AsyncConsumerServiceImpl + AsyncAdminServiceImpl (AsyncKafkaProducer /
 # AsyncKafkaConsumer, and admin over IAsyncAdmin since M15/P14). Mirrors the
 # Python two-image shape (grpc-image-async).
-grpc-image-async:
+grpc-image-async: rust-lib
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
@@ -83,23 +84,22 @@ grpc-image-async:
 # (M17/P1): the net10.0 leg of grpc-server into rust/target/grpc-native/dotnet,
 # where rust/tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
 # brings the ASP.NET Core 10 runtime but no ASP.NET Core 8 one; the Docker images
-# publish the net8.0 leg instead. Invoked by the root `build-grpc-native-dotnet`,
-# which builds the debug all-features Rust library first.
+# publish the net8.0 leg instead. rust-lib builds the debug all-features Rust
+# library first.
 #
 # Confluent.Kafka.csproj's native-copy <Content> item copies
 # rust/target/$(CargoProfileDir)/libconfluent_kafka.* into the output, and
 # CargoProfileDir follows the configuration unless it is given: $(CARGO_PROFILE_PROP)
-# points it at the debug library the root builds, with the .NET configuration
+# points it at the debug library rust-lib builds, with the .NET configuration
 # pinned to Release.
-grpc-native:
+grpc-native: rust-lib
 	$(DOTNET) build -c Release $(CARGO_PROFILE_PROP) -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
 
 # The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
 # server images, then run the `__grpc_dotnet` tests of the Rust harness against
 # them (rust/Makefile's test-integration-grpc-dotnet; the filter also matches
-# `__grpc_dotnet_async`). Reached from the root's test-integration-dotnet and its
-# -ssl / -sasl-ssl variants, which select the broker listener through
-# INTEGRATION_TEST_PROTOCOL in the environment.
+# `__grpc_dotnet_async`). The -ssl / -sasl-ssl variants below select the broker
+# listener through INTEGRATION_TEST_PROTOCOL in the environment.
 #
 # Cross-arch guard: both Dockerfiles COPY the *host-built*
 # rust/target/$(RUST_PROFILE)/libconfluent_kafka.so straight into a Linux container. On a
@@ -108,8 +108,8 @@ grpc-native:
 # off Linux this SELF-SKIPS with a loud notice and exits 0. It is NOT skipped in
 # CI, whose amd64 Linux verify-dotnet jobs run it. The skip is honest -- it never
 # claims the container arms passed, only that this host cannot build the Linux
-# images. The non-Linux fallback is the native arm, the root
-# test-integration-dotnet-native, which the macOS CI verify-dotnet job runs.
+# images. The non-Linux fallback is the native arm, test-integration-native,
+# which the macOS CI verify-dotnet job runs.
 #
 # The images are built for linux/amd64 because Grpc.Tools' linux_arm64 protoc
 # SIGSEGVs during C# codegen inside an arm64 Linux container; local Apple-Silicon
@@ -119,7 +119,7 @@ grpc-native:
 #
 # The image builds are invoked *inside* the recipe (rather than as prerequisites)
 # so the skip also short-circuits the Docker builds.
-test-integration:
+test-integration: rust-lib
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 		printf '\n========================================================================\n'; \
 		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
@@ -129,13 +129,35 @@ test-integration:
 		printf 'into a Linux container. On this host that artifact is\n'; \
 		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
 		printf 'This container arm runs only in CI'"'"'s amd64 Linux verify-dotnet jobs.\n'; \
-		printf 'Run it natively on this host with: %smake test-integration-dotnet-native\n' \
+		printf 'Run it natively on this host with: %smake -C dotnet test-integration-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
 		$(call selected_run,--section dotnet.grpc -- $(MAKE) -C $(CURDIR) grpc-image grpc-image-async) && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet; \
 	fi
+
+# The same arms over the SSL / SASL_SSL CONTAINER listeners (CTLSONLY :9100 /
+# CSASLTLS :9101), which INTEGRATION_TEST_PROTOCOL selects
+# (rust/tests/common/test_context.rs); the harness passes the matching TLS and
+# SASL settings to the gRPC servers. They inherit the non-Linux skip.
+test-integration-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration
+test-integration-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration
+
+# The .NET arms with the gRPC server as a host process instead of a container
+# (MULTILANG_BACKEND_MODE=native, rust/tests/common/backend_pool.rs): only the
+# broker runs in Docker. Used on macOS; also works on Linux. Needs the .NET 10
+# SDK on PATH (grpc-native).
+test-integration-native: grpc-native
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet-native
+
+# The Rust library the .NET binding loads, built by rust/Makefile: the debug
+# all-features build, or the release one for RUST_PROFILE=release; a cargo
+# no-op once it is current.
+rust-lib:
+	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
 
 # Two-stage build (CLAUDE.md §7.1, firm order): the Rust core produces the
 # native cdylib + generated header FIRST, then `dotnet build` compiles the
@@ -157,8 +179,7 @@ test-integration:
 # Microsoft.NETFramework.ReferenceAssemblies, Decision 2a) but never RUN — net462
 # cannot execute on Linux; test execution is net8.0 + net10.0 only (see
 # test-dotnet).
-build-dotnet:
-	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
+build-dotnet: rust-lib
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOLUTION)
 
 # build + the solution's tests: the unit tests (Mock* tests, no broker) and the
@@ -173,7 +194,7 @@ build-dotnet:
 # install-dotnet.sh). net462 is build-verified by build-dotnet, not run here.
 #
 # DOTNET_TEST_FILTER, empty by default, is a `dotnet test --filter` expression for
-# both test lines. The root's test-dotnet-macos-docker sets it to leave the
+# both test lines. test-dotnet-macos below sets it to leave the
 # integration tests out, as Python's macOS job runs only its unit tests. The
 # test selection's `dotnet.solution` narrows it further. The build always runs.
 DOTNET_TEST_FILTER ?=
@@ -182,6 +203,26 @@ test-dotnet: build-dotnet
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOLUTION) {})
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOLUTION) {})
 	$(MAKE) test-soak-dotnet
+
+# test-dotnet without the integration tests (the unit and soak tests still run),
+# for macOS, where Python's job also runs only its unit tests, so the
+# broker-backed tests run on Linux only.
+test-dotnet-macos:
+	$(MAKE) DOTNET_TEST_FILTER='FullyQualifiedName!~Confluent.Kafka.IntegrationTests' test-dotnet
+
+# The .NET gate CI runs on Linux ("verify-dotnet (Linux amd64) — plaintext"):
+# the tests, the gRPC container arms, then the Docker-gated net10.0 p99 perf
+# stage. Recipe lines rather than prerequisites so each stage runs after the one
+# before. The checks that are not tests are check-dotnet, which CI runs in
+# "check-dotnet (Linux amd64)".
+verify: test-dotnet
+	$(MAKE) test-integration
+	$(MAKE) test-integration-perf-dotnet
+
+# The macOS gate: the unit and soak tests, then the gRPC multilanguage arm with
+# the gRPC server as a native host process. No perf stage.
+verify-macos: test-dotnet-macos
+	$(MAKE) test-integration-native
 
 # The checks that are not tests: `dotnet format --verify-no-changes`, which
 # enforces the checked-in .editorconfig, over the solution and over the soak

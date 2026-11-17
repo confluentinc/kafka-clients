@@ -1,5 +1,6 @@
-# Rust client targets. Invoked by the repository root's cross-language
-# Makefile (`make -C rust <target>`), or directly from this directory.
+# Rust client targets: `make -C rust <target>` from the repository root, or
+# `make <target>` from this directory. The root's cross-language targets call
+# them the same way.
 #
 # Every cargo command runs from this directory: rust-toolchain.toml and
 # .cargo/config.toml (the `xtask` alias) are looked up from the current
@@ -35,7 +36,7 @@ CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc -
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
-	test-integration-perf test-integration-perf-macos producer-perf-test \
+	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
 	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
@@ -260,6 +261,19 @@ test-integration-perf: build-tests-all-features
 # macOS variant; the perf tail uses MACOS_P99_LIMIT_MS.
 test-integration-perf-macos:
 	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf
+
+# The Rust gate: one debug all-features build of the tests (the one the binding
+# jobs also link), the checks, the tests, then the perf suite; nothing in
+# release, since no Rust test runs a release artifact. The build comes before
+# check-generated, which reads its generated code. CI runs the checks in their
+# own jobs ("Rust additional checks") and the tests and perf in
+# "verify-rust (Linux amd64) — plaintext".
+verify: build-tests-all-features format-check check-generated lint test-all-features
+	$(MAKE) test-integration-perf
+
+# The macOS gate, whose perf tail uses MACOS_P99_LIMIT_MS.
+verify-macos: build-tests-all-features format-check check-generated lint test-all-features
+	$(MAKE) test-integration-perf-macos
 
 # Env-driven producer performance benchmark. Configure via environment
 # variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
