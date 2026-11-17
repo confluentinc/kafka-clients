@@ -2,8 +2,8 @@
 set -euo pipefail
 #
 # Job-scoped .NET SDK provisioning, shared by the "verify-dotnet (Linux amd64)
-# — plaintext" job in the "Verify language bindings (Linux amd64)" CI block
-# (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)" job in "Verify
+# — plaintext" job in the "Verify Rust and language bindings (Linux amd64)" CI block
+# (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)" job in "Verify Rust and
 # language bindings (macOS arm64)". The Linux "verify-dotnet (Linux amd64) —
 # ssl" and "— sasl_ssl (plain)" jobs (M17/P1) do NOT run this script: they run
 # only the gRPC multilanguage arm, whose .NET server runs inside the gRPC Docker

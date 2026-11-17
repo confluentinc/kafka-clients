@@ -1,5 +1,9 @@
 REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
+# The cargo profile directory of the Rust library every target links:
+# $(RUST_PROJECT_ROOT)/target/$(RUST_PROFILE). The tests use the debug
+# all-features build; the root's build-c and producer-perf-test-c pass release.
+RUST_PROFILE ?= debug
 BUILD_DIR = build
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
 # Native (non-container) gRPC server builds for the multilanguage harness,
@@ -17,6 +21,14 @@ else
 endif
 CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 
+# `$(call selected_run,<options> -- <command>)` runs the command only when the
+# test selection (the file TEST_SELECTION names, see the root's
+# `select-tests`) selects its section, and always when none applies;
+# an argument `{}` stands for the selected tests. See `cargo xtask help`
+# (`selected-run`). The subshell keeps the `cd`, which cargo needs to find the
+# toolchain and the `xtask` alias, from leaking into the rest of the recipe.
+selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
+
 # Every target expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target: the repository root's Makefile orders that
 # (e.g. `build-c` depends on the Rust build); run standalone, build it first.
@@ -25,6 +37,7 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 build:
 	cmake -S . -B $(BUILD_DIR) \
 		-DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) \
+		-DRUST_PROFILE=$(RUST_PROFILE) \
 		-DCMAKE_C_FLAGS="$(CFLAGS_EXTRA)"
 	cmake --build $(BUILD_DIR)
 
@@ -35,13 +48,13 @@ devel-build: build
 test: test-unit test-integration
 
 test-unit: build
-	cd $(BUILD_DIR) && ctest --output-on-failure
+	$(call selected_run,--section c.unit --ctest -C $(CURDIR)/$(BUILD_DIR) -- ctest --output-on-failure {})
 
 # The C-backend arm of the multilanguage suite: build the gRPC server image,
 # then run the `__grpc_c` tests of the Rust harness against it.
 #
 # Cross-arch guard: Dockerfile.grpc COPYs the *host-built*
-# rust/target/release/libconfluent_kafka.a (+ confluent_kafka.h) straight into
+# rust/target/$(RUST_PROFILE)/libconfluent_kafka.a (+ confluent_kafka.h) straight into
 # a Linux container and links it with the container's GNU ld. On a non-Linux
 # host that artifact is the wrong object format (Mach-O on macOS), so the image
 # cannot build/link. Cross-compiling host->Linux is out of scope for a dev-box
@@ -57,7 +70,7 @@ test-integration:
 		printf 'SKIP C test-integration: host is %s, not Linux.\n' "$$(uname -s)"; \
 		printf '\n'; \
 		printf 'The C gRPC-server image COPYs the host-built\n'; \
-		printf '  rust/target/release/libconfluent_kafka.a\n'; \
+		printf '  rust/target/$(RUST_PROFILE)/libconfluent_kafka.a\n'; \
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
@@ -65,7 +78,7 @@ test-integration:
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
-		$(MAKE) grpc-image && \
+		$(call selected_run,--section c.integration -- $(MAKE) -C $(CURDIR) grpc-image) && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-c; \
 	fi
 
@@ -77,13 +90,14 @@ producer-perf-test: build
 	./$(BUILD_DIR)/producer_perf_test
 
 # C++ gRPC server image for the multilang test harness. Context is the repo
-# root; requires libconfluent_kafka.a already built in rust/target/release/.
-# Needs only the Rust release artifacts: the Dockerfile runs cmake on
+# root; requires libconfluent_kafka.a already built in rust/target/$(RUST_PROFILE)/.
+# Needs only the Rust artifacts: the Dockerfile runs cmake on
 # grpc_server/ inside the container, so the host-side `build` contributes
 # nothing the image consumes.
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
 		-f $(REPO_ROOT)/c/Dockerfile.grpc \
 		$(REPO_ROOT)
 
@@ -92,7 +106,7 @@ grpc-image:
 # packages (headers, protoc, grpc_cpp_plugin, pkg-config) on the host.
 grpc-native:
 	cmake -S grpc_server -B $(GRPC_NATIVE_DIR)/c-build -DCMAKE_BUILD_TYPE=Release \
-		-DRUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/release \
+		-DRUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(RUST_PROFILE) \
 		-DRUST_INCLUDE_DIR=$(RUST_PROJECT_ROOT)/target/include \
 		-DPROTO_DIR=$(GRPC_PROTO_DIR)
 	cmake --build $(GRPC_NATIVE_DIR)/c-build --parallel
