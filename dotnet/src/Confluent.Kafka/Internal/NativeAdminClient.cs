@@ -176,8 +176,8 @@ internal sealed partial class NativeAdminClient : IDisposable
         {
             if (partition.Topic() is null)
             {
-                throw new ArgumentException(
-                    "The partitions must not contain a topic partition with a null topic.", parameterName);
+                throw new ArgumentNullException(
+                    parameterName, parameterName + " must not contain a TopicPartition with a null topic");
             }
 
             AdminStrings.Validate(partition.Topic(), parameterName);
@@ -416,8 +416,7 @@ internal sealed partial class NativeAdminClient : IDisposable
     private static int ToNativeTimeoutMs(int? timeoutMs) =>
         timeoutMs is null ? UnsetTimeoutMs : Math.Max(0, timeoutMs.Value);
 
-    private static List<string> DistinctNames(
-        IReadOnlyCollection<string> names, string elementNoun, string parameterName)
+    private static List<string> DistinctNames(IReadOnlyCollection<string> names, string parameterName)
     {
         List<string> keys = new List<string>(names.Count);
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
@@ -425,8 +424,7 @@ internal sealed partial class NativeAdminClient : IDisposable
         {
             if (name is null)
             {
-                throw new ArgumentException(
-                    $"The {elementNoun} must not contain a null element.", parameterName);
+                throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
             AdminStrings.Validate(name, parameterName);
@@ -478,7 +476,7 @@ internal sealed partial class NativeAdminClient : IDisposable
         for (int i = 0; i < partitionSnapshot.Length; i++)
         {
             TopicPartitionInfo partition = partitions[i]
-                ?? throw new ArgumentException("The partitions must not contain a null element.", nameof(partitions));
+                ?? throw new ArgumentNullException(nameof(partitions), "partitions must not contain null");
             if (partition.Leader() is { } leader)
             {
                 ValidateNode(leader, nameof(partitions));
@@ -499,8 +497,7 @@ internal sealed partial class NativeAdminClient : IDisposable
             {
                 if (entry.Key is null || entry.Value is null)
                 {
-                    throw new ArgumentException(
-                        "The configs must not contain a null key or a null value.", nameof(configs));
+                    throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                 }
 
                 AdminStrings.Validate(entry.Key, nameof(configs));
@@ -600,7 +597,8 @@ internal sealed partial class NativeAdminClient : IDisposable
         {
             if (node is null)
             {
-                throw new ArgumentException("The partitions must not contain a null node.", parameterName);
+                throw new ArgumentNullException(
+                    parameterName, parameterName + " must not contain a TopicPartitionInfo with a null node");
             }
 
             ValidateNode(node, parameterName);
@@ -624,8 +622,8 @@ internal sealed partial class NativeAdminClient : IDisposable
         {
             if (entry.Key.Topic() is null)
             {
-                throw new ArgumentException(
-                    "The offsets map must not contain a topic partition with a null topic.", nameof(newOffsets));
+                throw new ArgumentNullException(
+                    nameof(newOffsets), "newOffsets must not contain a TopicPartition with a null topic");
             }
 
             AdminStrings.Validate(entry.Key.Topic(), nameof(newOffsets));

@@ -255,12 +255,12 @@ public sealed class PublicAdminAlterClientQuotasTests
             "entries",
             Assert.Throws<ArgumentNullException>(() => admin.AlterClientQuotas(null!)).ParamName);
 
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(
             () => admin.AlterClientQuotas(
                 new ClientQuotaAlteration?[] { Alteration("ok", 1d), null }!));
         Assert.Equal("entries", nullElement.ParamName);
         Assert.StartsWith(
-            "The client quota alterations must not contain a null element.",
+            "entries must not contain null",
             nullElement.Message,
             StringComparison.Ordinal);
 
@@ -283,7 +283,7 @@ public sealed class PublicAdminAlterClientQuotasTests
             Assert.Throws<ArgumentNullException>(
                 () => new ClientQuotaAlteration.Op(null!, 1d)).ParamName);
 
-        ArgumentException nullOp = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullOp = Assert.Throws<ArgumentNullException>(
             () => new ClientQuotaAlteration(
                 Entity("ops"), new ClientQuotaAlteration.Op?[] { null }!));
         Assert.Equal("ops", nullOp.ParamName);

@@ -242,7 +242,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(transactionalIds));
             }
 
-            List<string> keys = DistinctNames(transactionalIds, "transactional ids", nameof(transactionalIds));
+            List<string> keys = DistinctNames(transactionalIds, nameof(transactionalIds));
             SafeAdminResultHandle result = CallWithGroupIds(
                 keys,
                 () => NewDescribeTransactionsOptions(options),
@@ -324,9 +324,7 @@ internal sealed partial class NativeAdminClient
 
             if (spec.TopicPartition().Topic() is null)
             {
-                throw new ArgumentException(
-                    "The abort transaction spec must not carry a topic partition with a null topic.",
-                    nameof(spec));
+                throw new ArgumentNullException(nameof(spec), "spec must not have a TopicPartition with a null topic");
             }
 
             AdminStrings.Validate(spec.TopicPartition().Topic(), nameof(spec));
@@ -416,7 +414,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(transactionalIds));
             }
 
-            List<string> keys = DistinctNames(transactionalIds, "transactional ids", nameof(transactionalIds));
+            List<string> keys = DistinctNames(transactionalIds, nameof(transactionalIds));
             SafeAdminResultHandle result = CallWithGroupIds(
                 keys,
                 () => NewFenceProducersOptions(options),

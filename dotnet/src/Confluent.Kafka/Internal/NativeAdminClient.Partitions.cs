@@ -87,15 +87,13 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key is null)
                 {
-                    throw new ArgumentException(
-                        "The new-partitions map must not contain a null topic name.", nameof(newPartitions));
+                    throw new ArgumentNullException(nameof(newPartitions), "newPartitions must not contain null");
                 }
 
                 AdminStrings.Validate(entry.Key, nameof(newPartitions));
                 if (entry.Value is null)
                 {
-                    throw new ArgumentException(
-                        $"The new-partitions entry for topic '{entry.Key}' must not be null.", nameof(newPartitions));
+                    throw new ArgumentNullException(nameof(newPartitions), "newPartitions must not contain null");
                 }
 
                 if (seen.Add(entry.Key))
@@ -199,16 +197,14 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key.Topic() is null)
                 {
-                    throw new ArgumentException(
-                        "The records-to-delete map must not contain a topic partition with a null topic.",
-                        nameof(recordsToDelete));
+                    throw new ArgumentNullException(
+                        nameof(recordsToDelete), "recordsToDelete must not contain a TopicPartition with a null topic");
                 }
 
                 AdminStrings.Validate(entry.Key.Topic(), nameof(recordsToDelete));
                 if (entry.Value is null)
                 {
-                    throw new ArgumentException(
-                        $"The records-to-delete entry for '{entry.Key}' must not be null.", nameof(recordsToDelete));
+                    throw new ArgumentNullException(nameof(recordsToDelete), "recordsToDelete must not contain null");
                 }
 
                 if (seen.Add(entry.Key))
@@ -318,9 +314,9 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key.Topic() is null)
                 {
-                    throw new ArgumentException(
-                        "The offsets map must not contain a topic partition with a null topic.",
-                        nameof(topicPartitionOffsets));
+                    throw new ArgumentNullException(
+                        nameof(topicPartitionOffsets),
+                        "topicPartitionOffsets must not contain a TopicPartition with a null topic");
                 }
 
                 AdminStrings.Validate(entry.Key.Topic(), nameof(topicPartitionOffsets));

@@ -239,7 +239,7 @@ internal sealed partial class NativeAdminClient
         {
             if (entry.Key is null)
             {
-                throw new ArgumentException("The group specs must not contain a null group id.", nameof(groupSpecs));
+                throw new ArgumentNullException(nameof(groupSpecs), "groupSpecs must not contain null");
             }
 
             AdminStrings.Validate(entry.Key, nameof(groupSpecs));
@@ -251,7 +251,7 @@ internal sealed partial class NativeAdminClient
 
             if (entry.Value is null)
             {
-                throw new ArgumentException($"The spec for group id '{entry.Key}' must not be null.", nameof(groupSpecs));
+                throw new ArgumentNullException(nameof(groupSpecs), "groupSpecs must not contain null");
             }
 
             IReadOnlyCollection<TopicPartition>? selected = entry.Value.TopicPartitions();
@@ -261,9 +261,8 @@ internal sealed partial class NativeAdminClient
                 {
                     if (partition.Topic() is null)
                     {
-                        throw new ArgumentException(
-                            $"The spec for group id '{entry.Key}' must not select a topic partition with a null topic.",
-                            nameof(groupSpecs));
+                        throw new ArgumentNullException(
+                            nameof(groupSpecs), "groupSpecs must not contain a TopicPartition with a null topic");
                     }
 
                     AdminStrings.Validate(partition.Topic(), nameof(groupSpecs));
@@ -385,8 +384,8 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key.Topic() is null)
                 {
-                    throw new ArgumentException(
-                        "The offsets map must not contain a topic partition with a null topic.", nameof(offsets));
+                    throw new ArgumentNullException(
+                        nameof(offsets), "offsets must not contain a TopicPartition with a null topic");
                 }
 
                 if (entry.Value is null)
@@ -530,7 +529,7 @@ internal sealed partial class NativeAdminClient
     {
         if (partition.Topic() is null)
         {
-            throw new ArgumentException("The partition must not have a null topic.", nameof(partition));
+            throw new ArgumentNullException(nameof(partition), "partition must not have a null topic");
         }
 
         AdminStrings.Validate(partition.Topic(), nameof(partition));
@@ -560,9 +559,8 @@ internal sealed partial class NativeAdminClient
             {
                 if (partition.Topic() is null)
                 {
-                    throw new ArgumentException(
-                        "The partitions collection must not contain a topic partition with a null topic.",
-                        nameof(partitions));
+                    throw new ArgumentNullException(
+                        nameof(partitions), "partitions must not contain a TopicPartition with a null topic");
                 }
 
                 AdminStrings.Validate(partition.Topic(), nameof(partitions));
@@ -670,7 +668,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupIds));
             }
 
-            List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
+            List<string> keys = DistinctNames(groupIds, nameof(groupIds));
             SafeAdminResultHandle result = CallWithGroupIds(
                 keys,
                 () => NewDeleteConsumerGroupsOptions(options),

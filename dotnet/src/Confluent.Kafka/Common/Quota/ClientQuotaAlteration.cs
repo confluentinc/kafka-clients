@@ -31,9 +31,8 @@ public sealed class ClientQuotaAlteration
     /// <param name="entity">The entity whose configuration will be modified.</param>
     /// <param name="ops">The alterations to perform.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="entity"/> or <paramref name="ops"/> is null.
+    /// <paramref name="entity"/> or <paramref name="ops"/> is null, or <paramref name="ops"/> contains a null.
     /// </exception>
-    /// <exception cref="ArgumentException"><paramref name="ops"/> contains a null.</exception>
     public ClientQuotaAlteration(ClientQuotaEntity entity, IReadOnlyCollection<Op> ops)
     {
         _entity = entity ?? throw new ArgumentNullException(nameof(entity));
@@ -47,7 +46,7 @@ public sealed class ClientQuotaAlteration
         int i = 0;
         foreach (Op op in ops)
         {
-            _ops[i++] = op ?? throw new ArgumentException("ops must not contain null", nameof(ops));
+            _ops[i++] = op ?? throw new ArgumentNullException(nameof(ops), "ops must not contain null");
         }
     }
 

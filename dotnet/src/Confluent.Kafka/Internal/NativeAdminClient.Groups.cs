@@ -237,7 +237,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupIds));
             }
 
-            List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
+            List<string> keys = DistinctNames(groupIds, nameof(groupIds));
             SafeAdminResultHandle result = CallWithGroupIds(
                 keys,
                 () => NewDescribeConsumerGroupsOptions(options),
@@ -298,7 +298,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupIds));
             }
 
-            List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
+            List<string> keys = DistinctNames(groupIds, nameof(groupIds));
             SafeAdminResultHandle result = CallWithGroupIds(
                 keys,
                 () => NewDescribeClassicGroupsOptions(options),

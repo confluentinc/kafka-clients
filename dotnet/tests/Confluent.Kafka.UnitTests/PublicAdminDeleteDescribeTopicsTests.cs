@@ -238,10 +238,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             nullDescribe.Message);
         Assert.Null(nullDescribe.ParamName);
 
-        ArgumentException nullName = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullName = Assert.Throws<ArgumentNullException>(
             () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "alpha", null! })));
         Assert.StartsWith(
-            "The topic names must not contain a null element.", nullName.Message, StringComparison.Ordinal);
+            "topics must not contain null", nullName.Message, StringComparison.Ordinal);
         Assert.Equal("topics", nullName.ParamName);
 
         Assert.Null(Record.Exception(

@@ -109,16 +109,16 @@ internal sealed partial class NativeAdminClient
             {
                 if (options.Renewers() is null)
                 {
-                    throw new ArgumentException(
-                        "CreateDelegationTokenOptions.Renewers must not be null; use an empty list.", nameof(options));
+                    throw new ArgumentNullException(
+                        nameof(options), "CreateDelegationTokenOptions.Renewers must not be null");
                 }
 
                 foreach (KafkaPrincipal renewer in options.Renewers())
                 {
                     if (renewer is null)
                     {
-                        throw new ArgumentException(
-                            "CreateDelegationTokenOptions.Renewers must not contain a null element.", nameof(options));
+                        throw new ArgumentNullException(
+                            nameof(options), "CreateDelegationTokenOptions.Renewers must not contain null");
                     }
 
                     ValidatePrincipal(renewer, nameof(options));
@@ -202,8 +202,8 @@ internal sealed partial class NativeAdminClient
                 {
                     if (owner is null)
                     {
-                        throw new ArgumentException(
-                            "DescribeDelegationTokenOptions.Owners must not contain a null element.", nameof(options));
+                        throw new ArgumentNullException(
+                            nameof(options), "DescribeDelegationTokenOptions.Owners must not contain null");
                     }
 
                     ValidatePrincipal(owner, nameof(options));

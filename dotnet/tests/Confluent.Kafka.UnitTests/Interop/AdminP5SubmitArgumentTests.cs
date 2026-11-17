@@ -182,11 +182,11 @@ public sealed class AdminP5SubmitArgumentTests
     [Fact]
     public void ListGroupsOptions_ANullProtocolType_IsRejectedBySetter()
     {
-        ArgumentException failure = Assert.Throws<ArgumentException>(
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(
             () => new ListGroupsOptions().WithProtocolTypes(new[] { "consumer", null! }));
 
         Assert.Equal("protocolTypes", failure.ParamName);
-        Assert.StartsWith("A protocol type must not be null", failure.Message, StringComparison.Ordinal);
+        Assert.StartsWith("protocolTypes must not contain null", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -283,9 +283,9 @@ public sealed class AdminP5SubmitArgumentTests
 
         Assert.Equal("groupIds", Assert.Throws<ArgumentNullException>(() => describe(null!)).ParamName);
 
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(() => describe(new[] { "g", null! }));
+        ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(() => describe(new[] { "g", null! }));
         Assert.Equal("groupIds", nullElement.ParamName);
-        Assert.StartsWith("The group ids must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
+        Assert.StartsWith("groupIds must not contain null", nullElement.Message, StringComparison.Ordinal);
 
         ArgumentException nul = Assert.Throws<ArgumentException>(() => describe(new[] { "g\0" }));
         Assert.Equal("groupIds", nul.ParamName);
@@ -696,33 +696,34 @@ public sealed class AdminP5SubmitArgumentTests
             () => admin.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!, new ListConsumerGroupOffsetsOptions()));
         Assert.Equal("groupSpecs", missing.ParamName);
 
-        AssertRejected(
+        AssertRejected<ArgumentNullException>(
             admin,
             new GroupSpecEntries(new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(null!, new ListConsumerGroupOffsetsSpec())),
-            "The group specs must not contain a null group id.");
-        AssertRejected(
+            "groupSpecs must not contain null");
+        AssertRejected<ArgumentException>(
             admin,
             new GroupSpecEntries(
                 new KeyValuePair<string, ListConsumerGroupOffsetsSpec>("g1", new ListConsumerGroupOffsetsSpec()),
                 new KeyValuePair<string, ListConsumerGroupOffsetsSpec>("g1", new ListConsumerGroupOffsetsSpec())),
             "The group specs must not contain the group id 'g1' more than once.");
-        AssertRejected(
+        AssertRejected<ArgumentNullException>(
             admin,
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal) { ["g1"] = null! },
-            "The spec for group id 'g1' must not be null.");
-        AssertRejected(
+            "groupSpecs must not contain null");
+        AssertRejected<ArgumentNullException>(
             admin,
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
                 ["g1"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { default(TopicPartition) }),
             },
-            "The spec for group id 'g1' must not select a topic partition with a null topic.");
+            "groupSpecs must not contain a TopicPartition with a null topic");
     }
 
-    private static void AssertRejected(
+    private static void AssertRejected<TException>(
         NativeAdminClient admin, IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs, string message)
+        where TException : ArgumentException
     {
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(groupSpecs, new ListConsumerGroupOffsetsOptions()));
+        TException rejected = Assert.Throws<TException>(() => admin.ListConsumerGroupOffsets(groupSpecs, new ListConsumerGroupOffsetsOptions()));
         Assert.Equal("groupSpecs", rejected.ParamName);
         Assert.StartsWith(message, rejected.Message, StringComparison.Ordinal);
     }

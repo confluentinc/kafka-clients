@@ -83,12 +83,12 @@ public sealed class AdminLogDirsSubmitArgumentTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException failure = Assert.Throws<ArgumentException>(
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(
             () => admin.AlterReplicaLogDirs(
                 new Dictionary<TopicPartitionReplica, string?> { [s_replica] = null }!, options: new AlterReplicaLogDirsOptions()));
 
         Assert.Equal("replicaAssignment", failure.ParamName);
-        Assert.Contains("logdir-topic-3-7", failure.Message, StringComparison.Ordinal);
+        Assert.StartsWith("replicaAssignment must not contain null", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -143,7 +143,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
             "replicas",
             Assert.Throws<ArgumentNullException>(() => admin.DescribeReplicaLogDirs(null!, options: new DescribeReplicaLogDirsOptions())).ParamName);
 
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(
             () => admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: new DescribeReplicaLogDirsOptions()));
         Assert.Equal("replicas", nullElement.ParamName);
     }

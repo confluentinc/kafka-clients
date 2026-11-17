@@ -184,15 +184,15 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key is null)
                 {
-                    throw new ArgumentException(
-                        "The replica assignment must not contain a null replica.", nameof(replicaAssignment));
+                    throw new ArgumentNullException(
+                        nameof(replicaAssignment), "replicaAssignment must not contain null");
                 }
 
                 AdminStrings.Validate(entry.Key.Topic(), nameof(replicaAssignment));
                 if (entry.Value is null)
                 {
-                    throw new ArgumentException(
-                        $"The log directory for '{entry.Key}' must not be null.", nameof(replicaAssignment));
+                    throw new ArgumentNullException(
+                        nameof(replicaAssignment), "replicaAssignment must not contain null");
                 }
 
                 AdminStrings.Validate(entry.Value, nameof(replicaAssignment));
@@ -294,7 +294,7 @@ internal sealed partial class NativeAdminClient
             {
                 if (replica is null)
                 {
-                    throw new ArgumentException("The replicas must not contain a null element.", nameof(replicas));
+                    throw new ArgumentNullException(nameof(replicas), "replicas must not contain null");
                 }
 
                 AdminStrings.Validate(replica.Topic(), nameof(replicas));

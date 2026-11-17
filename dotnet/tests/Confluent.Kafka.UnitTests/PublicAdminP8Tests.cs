@@ -57,7 +57,7 @@ public sealed class PublicAdminP8Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException error = Assert.Throws<ArgumentException>(
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(
             () => admin.AbortTransaction(new AbortTransactionSpec(default, 1L, 1, 1)));
 
         Assert.Equal("spec", error.ParamName);
@@ -216,7 +216,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Throws<ArgumentNullException>(() => admin.FenceProducers(null!));
 
-        ArgumentException element = Assert.Throws<ArgumentException>(
+        ArgumentNullException element = Assert.Throws<ArgumentNullException>(
             () => admin.FenceProducers(new[] { "txn-a", null! }));
         Assert.Equal("transactionalIds", element.ParamName);
     }
@@ -299,7 +299,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Throws<ArgumentNullException>(() => admin.DescribeTransactions(null!));
 
-        ArgumentException element = Assert.Throws<ArgumentException>(
+        ArgumentNullException element = Assert.Throws<ArgumentNullException>(
             () => admin.DescribeTransactions(new[] { "txn-a", null! }));
         Assert.Equal("transactionalIds", element.ParamName);
     }
@@ -402,7 +402,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Throws<ArgumentNullException>(() => admin.DescribeProducers(null!));
 
-        ArgumentException element = Assert.Throws<ArgumentException>(
+        ArgumentNullException element = Assert.Throws<ArgumentNullException>(
             () => admin.DescribeProducers(new[] { new TopicPartition("alpha", 0), default }));
         Assert.Equal("partitions", element.ParamName);
     }
