@@ -26,7 +26,7 @@
 //! over `IAsyncAdmin`. Until the M15/P14 split there was only `IAdmin`, so an async
 //! arm would have driven the same code twice and was left out (M15/P12 D1).
 //!
-//! The `__grpc_` infix is load-bearing: `make test-rust-all-features` excludes
+//! The `__grpc_` infix is load-bearing: `make -C rust test-all-features` excludes
 //! every container-backed arm across the producer, consumer and admin suites
 //! with a single `--skip __grpc`.
 //!
@@ -35,7 +35,7 @@
 //! "multilanguage-tests")]` and the macro itself is available with only
 //! `integration-tests`. That is what lets the committed admin integration tests
 //! be *converted* to scenarios rather than duplicated by them: under
-//! `integration-tests` alone (`make test-integration`, `verify-sandbox`) an
+//! `integration-tests` alone (`make test-integration`, `verify-commit`) an
 //! invocation still expands to the `__rust` arm, which drives the same
 //! production `Admin` trait against the same broker as the single-backend test
 //! it replaced — so converting costs no coverage at any feature level. The

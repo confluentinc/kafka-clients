@@ -16,7 +16,7 @@
 #
 #
 # Records the tested Confluent.Kafka NuGet package of a .NET release tag build as the release, for
-# the "Release (.NET): packaging" block of semaphore.yml. Nothing is published: the release is
+# the "Release (.NET): packaging" block of release.yml. Nothing is published: the release is
 # uploaded to nuget.org by hand, from the tag build's artifacts.
 #
 # Usage, from the repository root of a dotnet/v<version> tag build:

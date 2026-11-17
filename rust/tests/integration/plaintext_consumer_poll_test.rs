@@ -25,12 +25,9 @@
 //! # Methods classification
 //!
 //! The Java suite contains 20 `@ClusterTest` methods (10 CONSUMER + 10
-//! CLASSIC twins). 8 CONSUMER-arm methods are translated; 2 are SKIPped
-//! because they exercise `consumer.metrics()` per-partition `records-lead`
-//! / `records-lag` metric — the metrics module is deferred Milestone-8-wide
-//! per `consumer-threading.md` §20.
+//! CLASSIC twins). All 10 CONSUMER-arm methods are translated.
 //!
-//! Of the 8 translated, none is `#[ignore]`-gated any more. Issues are
+//! None is `#[ignore]`-gated any more. Issues are
 //! documented in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`:
 //!
 //!   - **Issue 8** (1 test): CLOSED by Phase 41. It was believed that a
@@ -52,11 +49,6 @@
 //!     fences the member during the first rebalance window before the
 //!     test can observe it.
 //!
-//! 3 of 8 pass green. Pass rate is below the 70% target due to Issue 9
-//! affecting most tests in this suite (they exercise the
-//! `max.poll.interval.ms` boundary which is the failure path for that
-//! production gap).
-//!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
 //! - `testAsyncConsumerMaxPollRecords`
@@ -69,27 +61,16 @@
 //!   → `test_async_consumer_max_poll_interval_ms_delay_in_assignment`
 //! - `testAsyncConsumerMaxPollIntervalMsShorterThanPollTimeout`
 //!   → `test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout`
+//! - `testAsyncConsumerPerPartitionLeadWithMaxPollRecords`
+//!   → `test_async_consumer_per_partition_lead_with_max_poll_records`
+//! - `testAsyncConsumerPerPartitionLagWithMaxPollRecords`
+//!   → `test_async_consumer_per_partition_lag_with_max_poll_records`
 //! - `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout`
 //!   → `test_async_consumer_poll_eventually_returns_records_with_zero_timeout`
 //! - `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero`
 //!   → `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
 //! - `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance`
 //!   → `test_async_consumer_recovery_on_poll_after_delayed_rebalance`
-//!
-//! ## SKIPped (CONSUMER-arm) — `consumer.metrics()` deferred Milestone-8-wide
-//!
-//! Both tests exercise the per-partition `records-lead` /
-//! `records-lag` `MetricName` lookup via `consumer.metrics()`. The metrics
-//! module is out-of-scope for Milestone 8 (see
-//! `consumer-threading.md` §20 — `consumer.metrics()` is not in the
-//! in-scope list). Translating the produce + poll setup without the
-//! metrics assertion would leave the test asserting nothing, so we SKIP
-//! the entire test rather than `#[ignore]` it.
-//!
-//! - SKIP: `testAsyncConsumerPerPartitionLeadWithMaxPollRecords`
-//!   — metrics-suite deferred.
-//! - SKIP: `testAsyncConsumerPerPartitionLagWithMaxPollRecords`
-//!   — metrics-suite deferred.
 //!
 //! ## SKIPped (classic-protocol-only — `consumer-threading.md` §20)
 //!
@@ -123,6 +104,7 @@
 //! - SKIP: `runCloseAsyncConsumerMultiConsumerSessionTimeoutTest` — multi-consumer harness deferred (Phase 13b)
 //! - SKIP: `runAsyncConsumerMultiConsumerSessionTimeoutTest` — multi-consumer harness deferred (Phase 13b)
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -134,6 +116,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use confluent_kafka::common::Error;
+use confluent_kafka::common::Metric;
+use confluent_kafka::common::MetricName;
+use confluent_kafka::common::MetricValue;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -1279,6 +1264,115 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
+/// Translates Java's `testAsyncConsumerPerPartitionLeadWithMaxPollRecords`.
+///
+/// Produces 1000 records, assigns the partition with `max.poll.records=10`
+/// and, after the first non-empty poll, asserts that the per-partition
+/// `records-lead` metric equals `max.poll.records`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_per_partition_lead_with_max_poll_records() {
+    let num_messages: usize = 1000;
+    let max_poll_records: usize = 10;
+    let client_id = "testPerPartitionLeadWithMaxPollRecords";
+
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic = ctx.topic("topic");
+    let group_id = ctx.group_id(client_id);
+    let tp = TopicPartition::new(topic.clone(), 0);
+    create_test_topic(&ctx, &topic, 2).await;
+
+    send_records_bytes(&ctx, &tp, num_messages, current_time_ms()).await;
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+        make_consumer_config_bytes(
+            &ctx,
+            &group_id,
+            &[
+                ("client.id", client_id),
+                ("max.poll.records", &max_poll_records.to_string()),
+            ],
+        ),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
+    )
+    .expect("KafkaConsumer::new should succeed");
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    await_non_empty_records_count(&mut consumer, &tp, Duration::from_millis(100), Duration::from_secs(60)).await;
+
+    let lead = partition_fetch_metric(&consumer, "records-lead", client_id, &tp);
+    assert_eq!(lead, max_poll_records as f64, "The lead should be {max_poll_records}");
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates Java's `testAsyncConsumerPerPartitionLagWithMaxPollRecords`.
+///
+/// Produces 1000 records, assigns the partition with `max.poll.records=10`
+/// and, after the first non-empty poll, asserts that the per-partition
+/// `records-lag` metric equals the records not yet returned.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_per_partition_lag_with_max_poll_records() {
+    let num_messages: usize = 1000;
+    let max_poll_records: usize = 10;
+    let client_id = "testPerPartitionLagWithMaxPollRecords";
+
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic = ctx.topic("topic");
+    let group_id = ctx.group_id(client_id);
+    let tp = TopicPartition::new(topic.clone(), 0);
+    create_test_topic(&ctx, &topic, 2).await;
+
+    send_records_bytes(&ctx, &tp, num_messages, current_time_ms()).await;
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+        make_consumer_config_bytes(
+            &ctx,
+            &group_id,
+            &[
+                ("client.id", client_id),
+                ("max.poll.records", &max_poll_records.to_string()),
+            ],
+        ),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
+    )
+    .expect("KafkaConsumer::new should succeed");
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    // Only `tp` is assigned, so the records on `tp` are the whole batch:
+    // Java's `records.count()`.
+    let record_count =
+        await_non_empty_records_count(&mut consumer, &tp, Duration::from_millis(100), Duration::from_secs(60)).await;
+
+    let lag = partition_fetch_metric(&consumer, "records-lag", client_id, &tp);
+    let expected = (num_messages - record_count) as f64;
+    assert!((expected - lag).abs() <= EPSILON, "The lag should be {expected}, got {lag}");
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Java's `consumer.metrics().get(new MetricName(name,
+/// "consumer-fetch-manager-metrics", "", tags)).metricValue()` for the
+/// per-partition tags `client-id`, `topic` and `partition`.
+fn partition_fetch_metric(
+    consumer: &KafkaConsumer<Vec<u8>, Vec<u8>>,
+    name: &str,
+    client_id: &str,
+    tp: &TopicPartition,
+) -> f64 {
+    let tags = BTreeMap::from([
+        ("client-id".to_string(), client_id.to_string()),
+        ("topic".to_string(), tp.topic().to_string()),
+        ("partition".to_string(), tp.partition().to_string()),
+    ]);
+    let metric_name = MetricName::new(name, "consumer-fetch-manager-metrics", "", tags);
+    let snapshot = consumer.metrics().snapshot();
+    let metric = snapshot
+        .get(&metric_name)
+        .unwrap_or_else(|| panic!("metric {metric_name} not registered"));
+    match metric.metric_value() {
+        MetricValue::Double(value) => value,
+        other => panic!("metric {metric_name} should be a Double, got {other:?}"),
+    }
+}
+
 /// Translates Java's
 /// `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout`.
 ///
@@ -1554,6 +1648,9 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 }
 
 // ── Topic provisioning helpers ────────────────────────────────────────
+
+/// Java `PlaintextConsumerPollTest#EPSILON`.
+const EPSILON: f64 = 0.1;
 
 /// Java `PlaintextConsumerPollTest#BROKER_COUNT`.
 const BROKER_COUNT: i16 = 3;

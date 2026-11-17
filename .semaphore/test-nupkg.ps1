@@ -16,7 +16,7 @@
 #
 # Tests the Confluent.Kafka NuGet package as a user receives it on one Windows platform: the
 # Windows counterpart of test-nupkg.sh, for the "Release (.NET): package verification
-# (Windows ...)" blocks of semaphore.yml. The smoke project (dotnet/tools/PackageSmoke), a copy
+# (Windows ...)" blocks of release.yml. The smoke project (dotnet/tools/PackageSmoke), a copy
 # outside the repository, references the package by its exact version from that one feed
 # (packageSourceMapping), with an empty NuGet cache, so nothing but the package can be used. It is
 # built for the platform and run in a process of it, on net8.0, net10.0 and the agent's .NET

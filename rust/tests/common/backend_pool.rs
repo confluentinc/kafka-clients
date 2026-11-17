@@ -184,8 +184,8 @@ impl BackendKind {
                     _ => "grpc_server_async.py",
                 };
                 let stubs = root.join("target/grpc-native/python");
-                require_native_artifact(self, &python, "build-grpc-native-python");
-                require_native_artifact(self, &stubs.join("admin_service_pb2.py"), "build-grpc-native-python");
+                require_native_artifact(self, &python, "-C python grpc-native");
+                require_native_artifact(self, &stubs.join("admin_service_pb2.py"), "-C python grpc-native");
 
                 let mut python_path = std::ffi::OsString::from(stubs);
                 if let Some(existing) = std::env::var_os("PYTHONPATH") {
@@ -194,14 +194,14 @@ impl BackendKind {
                 }
                 let mut command = Command::new(python);
                 command.arg(root.join("../python").join(script)).env("PYTHONPATH", python_path);
-                (command, "build-grpc-native-python")
+                (command, "-C python grpc-native")
             },
             BackendKind::C => {
                 let server = std::env::var_os("MULTILANG_C_GRPC_SERVER")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("target/grpc-native/c/kafka_grpc_server"));
-                require_native_artifact(self, &server, "build-grpc-native-c");
-                (Command::new(server), "build-grpc-native-c")
+                require_native_artifact(self, &server, "-C c grpc-native");
+                (Command::new(server), "-C c grpc-native")
             },
             BackendKind::Dotnet | BackendKind::DotnetAsync => {
                 let dotnet = std::env::var_os("MULTILANG_DOTNET")
@@ -210,14 +210,14 @@ impl BackendKind {
                 let server = std::env::var_os("MULTILANG_DOTNET_GRPC_SERVER")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("target/grpc-native/dotnet/Confluent.Kafka.GrpcServer.dll"));
-                require_native_artifact(self, &server, "build-grpc-native-dotnet");
+                require_native_artifact(self, &server, "-C dotnet grpc-native");
                 let flavor = match self {
                     BackendKind::DotnetAsync => "async",
                     _ => "sync",
                 };
                 let mut command = Command::new(dotnet);
                 command.arg(server).env("CONSUMER_FLAVOR", flavor);
-                (command, "build-grpc-native-dotnet")
+                (command, "-C dotnet grpc-native")
             },
         }
     }

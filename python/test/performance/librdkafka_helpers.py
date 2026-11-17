@@ -21,7 +21,7 @@ and the verifier are independent of the client under test.
 That package's top-level import name is ``confluent_kafka``, the same as this
 repo's package, so the two cannot share one venv: installing both into one
 ``site-packages`` leaves neither importable. The librdkafka side therefore lives
-in its own venv (``make init-venv-librdkafka``, ``venv-librdkafka/`` at the repo
+in its own venv (``make -C python venv-librdkafka``, ``venv-librdkafka/`` at the repo
 root), where the ``CLIENT_VERSION=2`` baseline runs too.
 
 :func:`call` runs a helper in-process when the running interpreter has the PyPI
@@ -293,7 +293,7 @@ def call(name, **kwargs):
     if not python or not os.path.exists(python):
         raise RuntimeError(
             f"{name} needs the PyPI confluent-kafka (librdkafka) client, which lives "
-            f"in its own venv: run `make init-venv-librdkafka` at the repo root and set "
+            f"in its own venv: run `make -C python venv-librdkafka` and set "
             f"{LIBRDKAFKA_PYTHON_ENV} to its python (the perf Makefile targets do both); "
             f"got {LIBRDKAFKA_PYTHON_ENV}={python!r}")
     args = {k: _to_json(v) for k, v in kwargs.items()}

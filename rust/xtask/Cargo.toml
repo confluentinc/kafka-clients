@@ -2,6 +2,18 @@
 name = "xtask"
 version = "1.0.0"
 edition = "2021"
+# `cargo xtask` (rust/.cargo/config.toml) runs this one; the package has a
+# second binary, `test-selection`.
+default-run = "xtask"
+
+# The test selection tasks on their own, for the Windows CI jobs, where the
+# xtask binary does not build (src/test_selection_main.rs). Not under src/bin/,
+# which the repository's .gitignore ignores. Its module's tests
+# run in the xtask binary's.
+[[bin]]
+name = "test-selection"
+path = "src/test_selection_main.rs"
+test = false
 
 [dependencies]
 anyhow = "1.0"
