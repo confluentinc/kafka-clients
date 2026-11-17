@@ -484,12 +484,15 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * serializes. Why: the binding keeps no state, and the conversion runs in
    * JavaScript before the call reaches the core.)*
    *
-   * Inside a callback, do not call `flush()` or `close()` of the same
-   * producer, run a transaction call, or await the future of a record sent
-   * later: each waits for the callback itself. Before the callback's first
-   * `await` the producer refuses them; after it they can hang. A callback
-   * Promise that never settles has no time limit: it holds its record's
-   * future, `flush()` and `close()`, `close({ timeout })` included.
+   * Inside a callback, before its first `await`, `flush()` of the same
+   * producer is refused, as Java's throws, and `close()` does not wait: it
+   * logs a warning and closes as `close({ timeout: 0 })`, as Java's does,
+   * failing the records still pending with "Producer is closed forcefully.".
+   * After the first `await`, `flush()` and `close()` wait for the callback
+   * itself and can hang, and so does awaiting the future of a record sent
+   * later. A callback Promise that never settles has no time limit: it holds
+   * its record's future, `flush()` and `close()`, `close({ timeout })`
+   * included.
    */
   send(options: {
     /** The record to send. */
@@ -852,6 +855,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * requests complete: Java's `close()`, which waits as
    * `close(Duration.ofMillis(Long.MAX_VALUE))` does, with no time limit.
    *
+   * **If `close()` is called from a `Callback`, a warning message will be
+   * logged and `close({ timeout: 0 })` will be called instead.** We do this
+   * because the producer would otherwise wait for the callback it is called
+   * from and block forever.
+   *
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `KafkaError` rejects with it if an unexpected error occurs while
@@ -870,8 +878,9 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * `close()` never exits on its own. Once closed, the producer holds Node
    * only while a call made on it waits for its answer, and its native client
    * is released when the producer is garbage collected. `await using` closes
-   * a producer at the end of its scope (`[Symbol.asyncDispose]`). Do not call
-   * it from a send callback: it waits for that callback.
+   * a producer at the end of its scope (`[Symbol.asyncDispose]`). From a send
+   * callback, that holds only before the callback's first `await`: after it,
+   * `close()` waits for that callback and hangs.
    */
   close(): Promise<void>;
   /**
@@ -880,6 +889,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * all requests before the timeout expires, this method will fail any unsent
    * and unacknowledged records immediately. A timeout of zero means do not
    * wait for pending send requests to complete.
+   *
+   * If invoked from within a `Callback` this method will not block and will
+   * be equivalent to `close({ timeout: 0 })`. This is done since no further
+   * sending will happen while the callback blocks the producer.
    *
    * @param options - the timeout
    * @throws `IllegalArgumentError` rejects with it if the `timeout` is
@@ -899,7 +912,8 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *
    * @remarks A negative `timeout` is rejected by the client, with Java's
    * error, and changes nothing. A callback Promise that never settles holds
-   * the close past its timeout.
+   * the close past its timeout. From within a callback, that holds only
+   * before its first `await`: after it, the close waits for the callback.
    */
   close(options: CloseArgs): Promise<void>;
   /**

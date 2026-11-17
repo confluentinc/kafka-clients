@@ -244,3 +244,11 @@ rules and readings. Newest entries are at the end; dates are in IST.
     other bindings: `setMockMetrics` is left out as in .NET, whose mock also wraps the FFI's, and
     `CorrelationIdMismatchError`'s ids are `-1` in all three. So nothing in the producer is blocked on the core; the
     worker cleanup hook stays a Future improvement.
+
+## Calls from inside a send callback (2026-11-17)
+
+27. **`close()` from inside a send callback** closes at once, as Java's `KafkaProducer.close` documents and the core
+    does (a logged warning, then `close(0)`, the records still pending failing with "Producer is closed
+    forcefully."); only `flush()` is refused there. Root Q46 says the core refuses these calls before the callback's
+    first `await`: a **(root conflict)** marked in `javascript/CLAUDE.md`, the docs following Java and the core
+    (entry 4's exception: the root text, read literally, misdescribes the client).

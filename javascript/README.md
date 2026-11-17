@@ -280,12 +280,14 @@ the client logs it, and it reaches no caller. Do not wait inside the
 callback's Promise for `flush()` or `close()` of the same producer: they wait
 for it.
 
-Inside a callback, do not call `flush()` or `close()` of the same producer,
-do not run a transaction call, and do not await the future of a record sent
-later: each waits for the callback itself. Before the callback's first
-`await` the producer refuses them; after it they can hang. A callback
-Promise that never settles has no time limit, as in Java: it holds its
-record's future, `flush()` and `close()`, `close({ timeout })` included.
+Inside a callback, before its first `await`, `flush()` of the same producer
+is refused, as Java's throws, and `close()` does not wait: as Java's, it logs
+a warning and closes as `close({ timeout: 0 })`, failing the records still
+pending with "Producer is closed forcefully.". After the first `await`,
+`flush()` and `close()` wait for the callback itself and can hang, and so
+does awaiting the future of a record sent later. A callback Promise that
+never settles has no time limit, as in Java: it holds its record's future,
+`flush()` and `close()`, `close({ timeout })` included.
 
 ### Parameters by name
 
