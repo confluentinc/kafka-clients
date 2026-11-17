@@ -50,7 +50,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
     /// <summary>
     /// Creates a broker-free mock consumer with the default reset strategy, <c>"latest"</c>: the three-argument
-    /// constructor with a <see langword="null"/> strategy.
+    /// constructor with <c>"latest"</c>.
     /// </summary>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
@@ -63,7 +63,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
     /// </exception>
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer)
-        : this(keyDeserializer, valueDeserializer, null)
+        : this(keyDeserializer, valueDeserializer, NativeConsumer.DefaultOffsetResetStrategy)
     {
     }
 
@@ -75,21 +75,22 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
     /// <param name="autoOffsetReset">
     /// The reset-strategy name (<c>"earliest"</c> / <c>"latest"</c> / <c>"none"</c> /
-    /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
-    /// (<c>"latest"</c>).
+    /// <c>"by_duration:&lt;ISO-8601&gt;"</c>).
     /// </param>
     /// <exception cref="ConfigException">
     /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
-    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// <paramref name="autoOffsetReset"/> is <see langword="null"/> ("Auto offset reset strategy is null", as
+    /// Java's <c>MockConsumer(String)</c>) or not a valid strategy; or a deserializer declares a public
+    /// <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not implement
+    /// <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
     /// </exception>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset)
+        string autoOffsetReset)
     {
         _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");

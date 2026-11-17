@@ -244,6 +244,27 @@ public sealed class PublicMockConsumerJavaHelpersTests
         Assert.True(disposed.Closed());
     }
 
+    // AutoOffsetResetStrategy.fromString's messages, which Java's MockConsumer(String) throws; Python's
+    // test_constructor_rejects_an_invalid_strategy, with Java's "null" where Python says "None".
+    [Theory]
+    [InlineData(null, "Auto offset reset strategy is null")]
+    [InlineData("by_duration", "<:duration> part is missing in by_duration auto offset reset strategy.")]
+    [InlineData("EARLIEST", "Unknown auto offset reset strategy: EARLIEST")]
+    [InlineData("by_duration:1H", "Unable to parse duration string in by_duration offset reset strategy.")]
+    [InlineData("by_duration:-PT1H", "Unable to parse duration string in by_duration offset reset strategy.")]
+    [InlineData("by_duration:PT", "Unable to parse duration string in by_duration offset reset strategy.")]
+    public void Constructor_RejectsAnInvalidStrategy(string? strategy, string message)
+    {
+        IDeserializer<byte[]> bytes = Serdes.ByteArray().Deserializer();
+
+        Assert.Equal(
+            message,
+            Assert.Throws<IllegalArgumentException>(() => new MockConsumer<byte[], byte[]>(bytes, bytes, strategy!)).Message);
+        Assert.Equal(
+            message,
+            Assert.Throws<IllegalArgumentException>(() => new AsyncMockConsumer<byte[], byte[]>(bytes, bytes, strategy!)).Message);
+    }
+
     [Fact]
     public void UpdateDurationOffsets_RefusesANullMapOrANullTopic()
     {

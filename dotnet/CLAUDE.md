@@ -543,7 +543,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     // path in isolation + forced by the bytes-only core ABI. Mock helpers are inherent, not on IAsyncConsumer.
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset);
+        string autoOffsetReset);           // null: IllegalArgumentException, as Java's MockConsumer(String)
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
     public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);    // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
     public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // lose_partitions_cb (ledger 48)
@@ -614,7 +614,7 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   //
 public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    // Java `MockConsumer`, synchronous
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset);          // deviation §7: takes deserializers (Java's mock doesn't)
+        string autoOffsetReset);           // deviation §7: takes deserializers (Java's mock doesn't); null as Java's
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
     public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);  // Java MockConsumer.rebalance — inherent (M9/P6)
     public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent

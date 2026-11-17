@@ -43,7 +43,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
-    private const string DefaultOffsetResetStrategy = "latest";
+    // The strategy the mock consumers' two-argument constructors pass.
+    internal const string DefaultOffsetResetStrategy = "latest";
 
     private const int LocalConcurrentModification = -2;
 
@@ -271,13 +272,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal static NativeConsumer CreateMock(string? autoOffsetReset = null, bool withPump = true)
+    // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
+    // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does.
+    internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr classPointer;
-        using (Utf8Marshal.PinnedUtf8String strategy = Utf8Marshal.Pin(autoOffsetReset ?? DefaultOffsetResetStrategy))
+        using (Utf8Marshal.PinnedUtf8String? strategy = autoOffsetReset is null ? null : Utf8Marshal.Pin(autoOffsetReset))
         {
-            classPointer = NativeMethods.MockConsumerNew(strategy.Pointer, ref outErr);
+            classPointer = NativeMethods.MockConsumerNew(strategy?.Pointer ?? IntPtr.Zero, ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
