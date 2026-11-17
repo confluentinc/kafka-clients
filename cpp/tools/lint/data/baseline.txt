@@ -230,7 +230,6 @@ missing-class org.apache.kafka.clients.producer.ProducerRecord
 missing-class org.apache.kafka.clients.producer.RecordMetadata
 missing-class org.apache.kafka.common.ClassicGroupState
 missing-class org.apache.kafka.common.Cluster
-missing-class org.apache.kafka.common.ClusterResource
 missing-class org.apache.kafka.common.Configurable
 missing-class org.apache.kafka.common.ElectionType
 missing-class org.apache.kafka.common.GroupState

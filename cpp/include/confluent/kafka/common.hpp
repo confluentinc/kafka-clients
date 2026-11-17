@@ -16,5 +16,6 @@
 
 // The module header of confluent::kafka::common (cpp/CLAUDE.md §3.1).
 
+#include <confluent/kafka/common/cluster_resource.hpp>
 #include <confluent/kafka/common/node.hpp>
 #include <confluent/kafka/common/topic_partition.hpp>
