@@ -616,9 +616,6 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
 
     /// Java: `ConsumerMembershipManager.invokeOnPartitionsRevokedOrLostToReleaseAssignment()`,
     /// reached through `signalMemberLeavingGroup()`.
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#invokeOnPartitionsRevokedOrLostToReleaseAssignment"
-    )]
     ///
     /// Choose between `onPartitionsRevoked` and `onPartitionsLost`
     /// based on the current member epoch. From Java:
@@ -638,6 +635,9 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
     /// is enqueued and its ack receiver returned, never awaited here.
     /// `Ok(None)` is Java's `completedFuture(null)`: no assignment to release,
     /// or no listener registered.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#invokeOnPartitionsRevokedOrLostToReleaseAssignment"
+    )]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalMemberLeavingGroup")]
     fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<Option<SignalAck>, Error> {
         // Snapshot the dropped partitions + epoch under short locks, one at
