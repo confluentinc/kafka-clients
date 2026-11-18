@@ -132,7 +132,17 @@ An asynchronous producer awaits such a serializer for the key and then for the v
 record enters the producer when both have completed, so records enter in the order their
 serialization completes. A caller that needs them in `Send` order awaits the first stage of one
 `Send` (`await producer.Send(record)`) before it calls the next. A serializer that fails, by
-throwing or through its `ValueTask`, fails that first stage and nothing is sent.
+throwing or through its `ValueTask`, fails that first stage and nothing is sent, except with an
+`ApiException` on an `AsyncKafkaProducer`: that fails the record through the future `Send` hands
+back, as a built-in serializer's does and as Java's `KafkaProducer.doSend`. A record whose token
+is cancelled, or whose producer is closed, while a serializer is awaited is not sent, although
+its headers are then already read-only.
+
+An asynchronous client disposes the serializers or deserializers it was given, through
+`IAsyncDisposable` when they have it and otherwise through `IDisposable`. Prefer `await using` or
+`DisposeAsync()` to `Dispose()`, which blocks its thread until the client is closed and its serdes
+are disposed. A serde's `DisposeAsync()` is always called with no synchronization context and with
+the default task scheduler current, so an `await` in it never needs the thread that waits.
 
 ### Reading a key or value without copying it
 

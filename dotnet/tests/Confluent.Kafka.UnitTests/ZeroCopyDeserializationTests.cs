@@ -126,12 +126,34 @@ public sealed class ZeroCopyDeserializationTests
         MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        WeakReference manager = PollOneManager(consumer);
+        (WeakReference manager, WeakReference batch) = PollOneManager(consumer);
         Collect();
 
         Assert.False(manager.IsAlive);
+        Assert.False(batch.IsAlive);
         consumer.AddRecord(Topic, 0, 1, null, Bytes("after"));
         AssertBytes("after", Assert.Single(consumer.Poll(s_pollTimeout)).Value()!.Value);
+    }
+
+    [Fact]
+    public void ARetainedBatch_ReportsTheBytesOfItsKeysAndValues_AsMemoryPressure()
+    {
+        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.AddRecord(Topic, 0, 0, Bytes("key-0"), Bytes("value-0"));
+        consumer.AddRecord(Topic, 0, 1, null, Bytes("second"));
+        consumer.AddRecord(Topic, 0, 2, Bytes("k2"), Array.Empty<byte>());
+
+        List<ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>> records =
+            consumer.Poll(s_pollTimeout).ToList();
+
+        Assert.Equal(3, records.Count);
+        Assert.True(MemoryMarshal.TryGetMemoryManager(records[0].Value()!.Value, out BytesMemoryManager? first));
+        Assert.True(MemoryMarshal.TryGetMemoryManager(records[1].Value()!.Value, out BytesMemoryManager? second));
+        Assert.True(MemoryMarshal.TryGetMemoryManager(records[2].Key()!.Value, out BytesMemoryManager? third));
+        Assert.Same(first!.Batch, second!.Batch);
+        Assert.Same(first.Batch, third!.Batch);
+        Assert.Equal("key-0".Length + "value-0".Length + "second".Length + "k2".Length, first.Batch.Pressure);
     }
 
     [Fact]
@@ -289,11 +311,14 @@ public sealed class ZeroCopyDeserializationTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference PollOneManager(MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer)
+    private static (WeakReference Manager, WeakReference Batch) PollOneManager(
+        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer)
     {
         ReadOnlyMemory<byte> value = PollOneValue(consumer, 0, "dropped");
         Assert.True(MemoryMarshal.TryGetMemoryManager(value, out BytesMemoryManager? manager));
-        return new WeakReference(manager);
+
+        // The batch's reference tracks resurrection, so it dies only after the finalizer that releases the batch.
+        return (new WeakReference(manager), new WeakReference(manager!.Batch, trackResurrection: true));
     }
 
     private static void Collect()
