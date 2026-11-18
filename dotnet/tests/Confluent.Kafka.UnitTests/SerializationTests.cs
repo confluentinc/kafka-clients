@@ -650,7 +650,7 @@ public sealed class SerializationTests
     public async Task AsyncMockConsumer_ATombstoneOfALongSerde_ReadsANullValue()
     {
         AsyncMockConsumer<string, long?> consumer =
-            new AsyncMockConsumer<string, long?>(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
+            new AsyncMockConsumer<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
@@ -693,7 +693,7 @@ public sealed class SerializationTests
     public async Task AsyncMockConsumer_AValueForAVoidDeserializer_ThrowsRecordDeserializationException()
     {
         AsyncMockConsumer<string, object?> consumer =
-            new AsyncMockConsumer<string, object?>(Serdes.String().Deserializer(), Serdes.Void().Deserializer());
+            new AsyncMockConsumer<string, object?>(new AsyncStringDeserializer(), new AsyncVoidDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);

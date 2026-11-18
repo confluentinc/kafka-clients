@@ -106,7 +106,7 @@ public sealed class TransactionsBrokerTests
         (string source, string sink) = await SeededRoundTripTopicsAsync();
         TopicPartition tp = new TopicPartition(source, 0);
         await using AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(
-            GroupConfigs("read_committed"), Serdes.String().Deserializer(), Serdes.String().Deserializer());
+            GroupConfigs("read_committed"), new AsyncStringDeserializer(), new AsyncStringDeserializer());
         await using AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
             TransactionalConfigs("dotnet-eos-txn"), Serdes.String().Serializer(), Serdes.String().Serializer());
 

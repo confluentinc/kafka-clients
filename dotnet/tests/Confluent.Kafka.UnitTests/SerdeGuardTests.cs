@@ -26,10 +26,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The eight clients that take a serializer or deserializer refuse, when they are built, one with a public method they
-/// would never call: a headers form, or a deserializer's memory form, without the interface that makes them call it,
-/// or, on the four that dispose their serdes, a <c>Close()</c> without <see cref="IDisposable"/>. Nothing is disposed on that refusal. A serde that
-/// implements the interface, or <see cref="IDisposable"/>, is taken.
+/// The clients that take a synchronous serializer or deserializer refuse, when they are built, one with a public
+/// method they would never call: a headers form, or a deserializer's memory form, without the interface that makes
+/// them call it, or, on those that dispose their serdes, a <c>Close()</c> without <see cref="IDisposable"/>. Nothing
+/// is disposed on that refusal. A serde that implements the interface, or <see cref="IDisposable"/>, is taken.
 /// </summary>
 public sealed class SerdeGuardTests
 {
@@ -53,7 +53,7 @@ public sealed class SerdeGuardTests
 
     private static readonly string[] s_producers = { "KafkaProducer", "AsyncKafkaProducer", "MockProducer", "AsyncMockProducer" };
 
-    private static readonly string[] s_consumers = { "KafkaConsumer", "AsyncKafkaConsumer", "MockConsumer", "AsyncMockConsumer" };
+    private static readonly string[] s_consumers = { "KafkaConsumer", "MockConsumer" };
 
     public static TheoryData<string, bool> Producers => Cases(s_producers);
 
@@ -61,11 +61,11 @@ public sealed class SerdeGuardTests
 
     public static TheoryData<string, bool> RealProducers => Cases(new[] { "KafkaProducer", "AsyncKafkaProducer" });
 
-    public static TheoryData<string, bool> RealConsumers => Cases(new[] { "KafkaConsumer", "AsyncKafkaConsumer" });
+    public static TheoryData<string, bool> RealConsumers => Cases(new[] { "KafkaConsumer" });
 
     public static TheoryData<string> MockProducers => new TheoryData<string> { "MockProducer", "AsyncMockProducer" };
 
-    public static TheoryData<string> MockConsumers => new TheoryData<string> { "MockConsumer", "AsyncMockConsumer" };
+    public static TheoryData<string> MockConsumers => new TheoryData<string> { "MockConsumer" };
 
     [Theory]
     [MemberData(nameof(Producers))]
@@ -219,9 +219,7 @@ public sealed class SerdeGuardTests
     private static object Consumer(string consumer, IDeserializer<string> key, IDeserializer<string> value) => consumer switch
     {
         "KafkaConsumer" => new KafkaConsumer<string, string>(ConsumerConfigs(), key, value),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), key, value),
-        "MockConsumer" => new MockConsumer<string, string>(key, value),
-        _ => new AsyncMockConsumer<string, string>(key, value),
+        _ => new MockConsumer<string, string>(key, value),
     };
 
     private static Task DisposeBounded(object client) =>

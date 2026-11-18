@@ -36,6 +36,8 @@ namespace Confluent.Kafka.Common.Serialization;
 /// Each built-in deserializer has a class of this interface, named <c>Async</c> and the deserializer's name
 /// (<see cref="AsyncStringDeserializer"/>). A deserializer of one's own that does not wait is given to an asynchronous
 /// consumer through a class of this interface that calls it and returns a completed <see cref="ValueTask{TResult}"/>.
+/// An asynchronous consumer calls a built-in class without awaiting, and awaits any other one record at a time, the
+/// key before the value, with the token its <c>Poll</c> was given.
 /// </remarks>
 /// <typeparam name="T">The type the bytes are decoded to.</typeparam>
 public interface IAsyncDeserializer<T>
@@ -48,9 +50,12 @@ public interface IAsyncDeserializer<T>
     /// <param name="data">The bytes, valid until the returned <see cref="ValueTask{TResult}"/> completes, so across
     /// an <see langword="await"/> inside the call. After that the memory, a slice of it and a span read from it must
     /// not be used: a value that outlives the call copies what it needs, unless the deserializer implements
-    /// <see cref="IAsyncDeserializerWithRetention{T}"/>. Where Java's <c>ByteBuffer</c> has a position and a limit, this
+    /// <see cref="IAsyncDeserializerWithRetention{T}"/>. A consumer revokes the memory when the call completes, after
+    /// which reading it or a slice of it throws <see cref="ObjectDisposedException"/>, while a pin taken during the
+    /// call stays valid until it is released. Where Java's <c>ByteBuffer</c> has a position and a limit, this
     /// is exactly the key or the value, from its first byte to its last.</param>
-    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <param name="cancellationToken">Cancels the call. A consumer passes the token of its <c>Poll</c>, which then
+    /// ends with <see cref="OperationCanceledException"/> and returns the batch's records again on the next one.</param>
     /// <returns>The decoded value; may be <see langword="null"/>. A consumer does not call the deserializer for an
     /// absent key or value: the record's field is then <see langword="default"/>.</returns>
     /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>. It is thrown by

@@ -46,17 +46,17 @@ namespace Confluent.Kafka.Consumer;
 public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue>
 {
     private readonly NativeConsumer _native;
-    private readonly IDeserializer<TKey> _keyDeserializer;
-    private readonly IDeserializer<TValue> _valueDeserializer;
-    private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
-    private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
+    private readonly AsyncDeserializerCall<TKey> _key;
+    private readonly AsyncDeserializerCall<TValue> _value;
 
     /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
-    /// <see cref="AddRecord"/> with the two deserializers.
+    /// <see cref="AddRecord"/> with the two asynchronous deserializers, which it never disposes.
     /// </summary>
-    /// <param name="keyDeserializer">Deserializer for record keys.</param>
-    /// <param name="valueDeserializer">Deserializer for record values.</param>
+    /// <param name="keyDeserializer">
+    /// Deserializer for record keys, called or awaited as <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does.
+    /// </param>
+    /// <param name="valueDeserializer">Deserializer for record values, as for keys.</param>
     /// <param name="autoOffsetReset">
     /// The reset-strategy name (<c>"earliest"</c> / <c>"latest"</c> / <c>"none"</c> /
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
@@ -64,32 +64,26 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </param>
     /// <exception cref="ConfigException">
     /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
-    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
-    /// </exception>
-    /// <exception cref="IllegalArgumentException">
-    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
-    /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public
-    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
-    /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>: the consumer would never call that method.
+    /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     public AsyncMockConsumer(
-        IDeserializer<TKey> keyDeserializer,
-        IDeserializer<TValue> valueDeserializer,
+        IAsyncDeserializer<TKey> keyDeserializer,
+        IAsyncDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null)
     {
-        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
-        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        SerdeGuard.Check(_keyDeserializer, DefaultMethodGuard.Consumer, disposes: false);
-        SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: false);
-        _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
-        _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
+        IAsyncDeserializer<TKey> key = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        IAsyncDeserializer<TValue> value = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
+        SerdeGuard.Check(key, DefaultMethodGuard.Consumer, disposes: false);
+        SerdeGuard.Check(value, DefaultMethodGuard.Consumer, disposes: false);
+        _key = new AsyncDeserializerCall<TKey>(key);
+        _value = new AsyncDeserializerCall<TValue>(value);
         _native = NativeConsumer.CreateMock(autoOffsetReset);
     }
 
     /// <inheritdoc/>
     public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _native.PollWithCallback(
-            timeout, _keyDeserializer, _keyWithHeaders, _valueDeserializer, _valueWithHeaders, cancellationToken);
+            timeout, _key, _value, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>

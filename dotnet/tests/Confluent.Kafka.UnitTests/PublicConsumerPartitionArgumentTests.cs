@@ -112,7 +112,7 @@ public sealed class PublicConsumerPartitionArgumentTests
         }
 
         AsyncMockConsumer<byte[], byte[]> asyncConsumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using (TestTimeout.Disposal(asyncConsumer))
         {
             await TestTimeout.Run(() => asyncConsumer.Assign(new[] { s_negative }), s_deadline);
@@ -146,7 +146,7 @@ public sealed class PublicConsumerPartitionArgumentTests
         }
 
         AsyncMockConsumer<byte[], byte[]> asyncConsumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using (TestTimeout.Disposal(asyncConsumer))
         {
             await AssertTaskNotAssigned(NoBeginning, asyncConsumer.BeginningOffsets(partitions));
@@ -263,8 +263,8 @@ public sealed class PublicConsumerPartitionArgumentTests
         : new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static IAsyncConsumer<byte[], byte[]> CreateAsync(string kind) => IsMock(kind)
-        ? new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer())
-        : new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        ? new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer())
+        : new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {

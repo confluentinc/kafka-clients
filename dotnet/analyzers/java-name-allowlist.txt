@@ -39,8 +39,9 @@ overload M:Confluent.Kafka.Common.Header.Headers.#ctor(System.Collections.Generi
 # C1: the mock consumer takes deserializers: it runs on the core's mock, which holds bytes (dotnet/CLAUDE.md §3).
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
 missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
-overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
 overload M:Confluent.Kafka.Consumer.MockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
+# The asynchronous mock takes the asynchronous deserializers, as AsyncKafkaConsumer does (M23/P7, ledger 539).
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`0},Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`1},System.String)
 
 # M9: AddRecord takes bytes, which the mock deserializes on Poll, for the same reason.
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)

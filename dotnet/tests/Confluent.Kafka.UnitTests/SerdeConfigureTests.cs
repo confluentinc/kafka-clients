@@ -465,7 +465,7 @@ public sealed class SerdeConfigureTests
     {
         List<string> log = new List<string>();
         AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(
-            ConsumerConfigs(), new ConfigurableDeserializer(log), new ConfigurableDeserializer(log));
+            ConsumerConfigs(), new ConfigurableDeserializer(log).AsAsync(), new ConfigurableDeserializer(log).AsAsync());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Empty(log);

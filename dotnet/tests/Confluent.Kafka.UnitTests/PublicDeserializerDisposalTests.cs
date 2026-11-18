@@ -237,7 +237,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         try
         {
             await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), Deadline);
@@ -572,7 +572,7 @@ public sealed class PublicDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableDeserializer key = new DisposableDeserializer("key", log);
         DisposableDeserializer value = new DisposableDeserializer("value", log);
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         DestroyLog destroys = WatchDestroy(consumer);
         Thread? drain = null;
         bool drainAliveAtDisposal = true;
@@ -859,12 +859,11 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Equal(new[] { "key", "value" }, log.ToArray());
     }
 
+    // The sync consumer only: the async one disposes its deserializers through IAsyncDisposable
+    // (AsyncDeserializerDisposalTests).
     [Theory]
     [InlineData(SyncFlavor, CloseHow)]
     [InlineData(SyncFlavor, DisposeHow)]
-    [InlineData(AsyncFlavor, CloseHow)]
-    [InlineData(AsyncFlavor, DisposeHow)]
-    [InlineData(AsyncFlavor, DisposeAsyncHow)]
     public async Task ADeserializerThatIsOnlyIAsyncDisposable_IsNotDisposed(string flavor, string how)
     {
         AsyncOnlyDeserializer key = new AsyncOnlyDeserializer();
@@ -925,12 +924,12 @@ public sealed class PublicDeserializerDisposalTests
         IDeserializer<byte[]> value) =>
         flavor == SyncFlavor
             ? new KafkaConsumer<byte[], byte[]>(configs, key, value)
-            : new AsyncKafkaConsumer<byte[], byte[]>(configs, key, value);
+            : new AsyncKafkaConsumer<byte[], byte[]>(configs, key.AsAsync(), value.AsAsync());
 
     private static IConsumerCommon Mock(string flavor, IDeserializer<byte[]> key, IDeserializer<byte[]> value) =>
         flavor == SyncFlavor
             ? new MockConsumer<byte[], byte[]>(key, value)
-            : new AsyncMockConsumer<byte[], byte[]>(key, value);
+            : new AsyncMockConsumer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
 
     // Only a mock returns records without a broker, so the mock's native consumer is given the SerdeDisposal the real
     // consumers give NativeConsumer.Create: its Poll and teardown then dispose them as a real consumer does.

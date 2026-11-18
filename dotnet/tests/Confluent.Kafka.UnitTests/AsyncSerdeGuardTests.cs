@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 
 using Xunit;
@@ -29,7 +30,8 @@ namespace Confluent.Kafka.UnitTests;
 /// The construction check of an asynchronous serializer or deserializer: a client that disposes its serdes refuses a
 /// public <c>DisposeAsync()</c>, <c>Dispose()</c> or <c>Close()</c> it would never call, since it disposes through
 /// <see cref="IAsyncDisposable"/> or else <see cref="IDisposable"/>; one that does not dispose them takes every shape,
-/// and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces.
+/// and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces. The asynchronous consumers
+/// make the check when they are built: the real one disposes its deserializers, the mock does not.
 /// </summary>
 public sealed class AsyncSerdeGuardTests
 {
@@ -109,6 +111,64 @@ public sealed class AsyncSerdeGuardTests
         SerdeGuard.Check(new AsyncReadOnlyMemorySerializer(), DefaultMethodGuard.Producer, disposes: true);
         SerdeGuard.Check(new AsyncReadOnlyMemoryDeserializer(), DefaultMethodGuard.Consumer, disposes: true);
     }
+
+    [Theory]
+    [MemberData(nameof(Refused))]
+    public void AnAsyncKafkaConsumer_RefusesACloseItWouldNeverCall_DisposingNothing(Type shape, string what)
+    {
+        foreach (bool asKey in new[] { true, false })
+        {
+            Serde serde = (Serde)Activator.CreateInstance(shape)!;
+            Disposable other = new Disposable();
+
+            IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+                () => new AsyncKafkaConsumer<string, string>(
+                    ConsumerConfigs(), asKey ? serde : other, asKey ? other : serde));
+
+            Assert.Equal(Prefix + shape.Name + " declares " + what + ", so the consumer would never call it.", e.Message);
+            Assert.Equal(0, serde.Disposals);
+            Assert.Equal(0, other.Disposals);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Refused))]
+    public async Task AnAsyncMockConsumer_TakesEveryShape_SinceItDisposesNothing(Type shape, string what)
+    {
+        Assert.NotEmpty(what);
+        Serde serde = (Serde)Activator.CreateInstance(shape)!;
+        Disposable other = new Disposable();
+
+        await TestTimeout.DisposeAsync(new AsyncMockConsumer<string, string>(serde, other));
+
+        Assert.Equal(0, serde.Disposals);
+        Assert.Equal(0, other.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(Accepted))]
+    public async Task AnAsyncKafkaConsumer_TakesASerdeItDisposesThroughAnInterface_AndDisposesItOnce(Type shape)
+    {
+        foreach (bool asKey in new[] { true, false })
+        {
+            Serde serde = (Serde)Activator.CreateInstance(shape)!;
+            Plain other = new Plain();
+
+            await TestTimeout.DisposeAsync(new AsyncKafkaConsumer<string, string>(
+                ConsumerConfigs(), asKey ? serde : other, asKey ? other : serde));
+
+            Assert.Equal(serde is IAsyncDisposable || serde is IDisposable ? 1 : 0, serde.Disposals);
+        }
+    }
+
+    private static Dictionary<string, object?> ConsumerConfigs() =>
+        new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:1",
+            ["group.protocol"] = "consumer",
+            ["group.id"] = "async-serde-guard-group",
+            ["enable.auto.commit"] = "false",
+        };
 
     /// <summary>An asynchronous serializer and deserializer of strings that does nothing, counting its disposals.</summary>
     private abstract class Serde : IAsyncSerializer<string>, IAsyncDeserializer<string>

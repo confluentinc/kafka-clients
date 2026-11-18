@@ -291,10 +291,10 @@ public sealed class PublicConsumerListenerLifetimeTests
         }
 
         private static AsyncKafkaConsumer<byte[], byte[]> Real() =>
-            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
         private static AsyncMockConsumer<byte[], byte[]> Mock() =>
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
         private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
         {

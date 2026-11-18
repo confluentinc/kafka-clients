@@ -337,7 +337,7 @@ public sealed class ChaosConsumerTests
         // The flavour's own real client, built the way its servicer builds it.
         ConfigException expected = flavour == ChaosFlavour.Async
             ? Assert.Throws<ConfigException>(
-                () => new AsyncKafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()))
+                () => new AsyncKafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()))
             : Assert.Throws<ConfigException>(
                 () => new KafkaConsumer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);

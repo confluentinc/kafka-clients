@@ -1957,6 +1957,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // The same for a close that runs asynchronously, which awaits an asynchronous deserializer's disposal.
+    private ValueTask ReleaseTheGateThenDisposeTheDeserializersAsync(bool destroyedBefore)
+    {
+        bool destroyedByThisCall = !destroyedBefore && _destroyed;
+        _closeGate.Release();
+        return destroyedByThisCall && !HandTheDeserializersToThePolls() && _serdes is not null
+            ? _serdes.DisposeOnceAsync()
+            : default;
+    }
+
     // A poll takes its records inside its use, and the destroy runs only once the uses have ended while new ones are
     // refused as closed, so after the destroy no poll takes records again and the count only falls: the teardown
     // and the last poll decide under one lock, and exactly one of them disposes.
@@ -1996,23 +2006,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         try
         {
-            if (!batch.HandedOut)
-            {
-                batch.Dispose();
-            }
-            else if (IsMock)
-            {
-                lock (_recordBytes)
-                {
-                    _recordsRetained++;
-                }
-
-                batch.Retain(_releaseRetainedRecords ??= ReleaseRetainedRecords);
-            }
-            else
-            {
-                batch.Retain(null);
-            }
+            ReleaseBatch(batch);
         }
         finally
         {
@@ -2020,7 +2014,70 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // The release of an asynchronous poll's records, by either rule above, which awaits the disposal of the
+    // deserializers when a close handed them to this poll.
+    private async ValueTask ReleaseRecordsAsync(IntPtr records, SafeConsumerRecordsHandle? batch)
+    {
+        try
+        {
+            if (batch is null)
+            {
+                ConsumerRecordsMarshal.Destroy(records);
+            }
+            else
+            {
+                ReleaseBatch(batch);
+            }
+        }
+        finally
+        {
+            if (EndRecordsHoldOnly() && _serdes is not null)
+            {
+                await _serdes.DisposeOnceAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    private void ReleaseBatch(SafeConsumerRecordsHandle batch)
+    {
+        if (!batch.HandedOut && !(IsMock && batch.Lent))
+        {
+            batch.Dispose();
+            return;
+        }
+
+        Action? released = null;
+        if (IsMock)
+        {
+            lock (_recordBytes)
+            {
+                _recordsRetained++;
+            }
+
+            released = _releaseRetainedRecords ??= ReleaseRetainedRecords;
+        }
+
+        if (batch.HandedOut)
+        {
+            batch.Retain(released);
+        }
+        else
+        {
+            // A pin taken on a lent memory defers the release past this poll, and the mock's record bytes with it.
+            batch.Dispose(released!);
+        }
+    }
+
     private void EndRecordsHold()
+    {
+        if (EndRecordsHoldOnly())
+        {
+            _serdes?.DisposeOnce();
+        }
+    }
+
+    // Ends a poll's hold and answers whether a close handed the deserializers to this poll to dispose.
+    private bool EndRecordsHoldOnly()
     {
         bool disposeTheDeserializers = false;
         lock (_recordBytes)
@@ -2038,10 +2095,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
         }
 
-        if (disposeTheDeserializers)
-        {
-            _serdes?.DisposeOnce();
-        }
+        return disposeTheDeserializers;
     }
 
     private void ReleaseRetainedRecords()

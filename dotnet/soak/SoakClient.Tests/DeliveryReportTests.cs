@@ -42,7 +42,7 @@ public sealed class DeliveryReportTests
             new ProcessResourceSampler(),
             new CancellationTokenSource(),
             producer,
-            new AsyncMockConsumer<byte[], SoakRecord>(Serdes.ByteArray().Deserializer(), new SoakRecordDeserializer()),
+            new AsyncMockConsumer<byte[], SoakRecord>(new AsyncByteArrayDeserializer(), new SoakRecordDeserializer()),
             "h",
             0,
             0);

@@ -161,7 +161,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     public async Task AsyncKafkaConsumer_Handle_IsReachableThroughIAsyncConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(Config("p8-async-handle"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncKafkaConsumer<byte[], byte[]>(Config("p8-async-handle"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await using (TestTimeout.AsyncDisposal(consumer))
         {
             using ConsumerHandle handle = HandleOf(consumer);
@@ -784,7 +784,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static Dictionary<string, object?> Config(string groupId) => new()
     {

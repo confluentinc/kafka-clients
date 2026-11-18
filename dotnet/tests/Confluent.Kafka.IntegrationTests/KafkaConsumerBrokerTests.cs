@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
@@ -78,7 +79,7 @@ public sealed class KafkaConsumerBrokerTests
         string group = "dotnet-dispose-in-listener-" + Guid.NewGuid().ToString("N").Substring(0, 12);
         SlowDeserializer value = new SlowDeserializer(s_deserializeDelay);
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            GroupConfigs(group), Serdes.ByteArray().Deserializer(), value);
+            GroupConfigs(group), new AsyncByteArrayDeserializer(), value);
         DisposingListener listener = new DisposingListener(consumer);
         using CancellationTokenSource stopOther = new CancellationTokenSource();
         Task? other = null;
@@ -184,7 +185,7 @@ public sealed class KafkaConsumerBrokerTests
     /// A deserializer that takes a while for each record and records whether it was disposed while one was still
     /// being deserialized.
     /// </summary>
-    private sealed class SlowDeserializer : IDeserializer<byte[]>, IDisposable
+    private sealed class SlowDeserializer : IAsyncDeserializer<byte[]>, IDisposable
     {
         private readonly TimeSpan _delay;
         private readonly ManualResetEventSlim _disposed = new ManualResetEventSlim(false);
@@ -203,7 +204,8 @@ public sealed class KafkaConsumerBrokerTests
 
         internal bool WaitDisposed(TimeSpan timeout) => _disposed.Wait(timeout);
 
-        public byte[] Deserialize(string topic, ReadOnlySpan<byte> data)
+        public ValueTask<byte[]?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             byte[] copy = data.ToArray();
             _ = Interlocked.Increment(ref _inside);
@@ -221,7 +223,7 @@ public sealed class KafkaConsumerBrokerTests
                 _ = Interlocked.Increment(ref _calls);
             }
 
-            return copy;
+            return new ValueTask<byte[]?>(copy);
         }
 
         public void Dispose()

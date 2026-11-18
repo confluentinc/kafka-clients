@@ -603,7 +603,7 @@ public sealed class PublicClientConfigTests
         KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
         AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
         KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
         KafkaAdminClientClient => IAdmin.Create(configs),
         AsyncKafkaAdminClientClient => IAsyncAdmin.Create(configs),
         _ => throw new ArgumentOutOfRangeException(nameof(client), client, null),

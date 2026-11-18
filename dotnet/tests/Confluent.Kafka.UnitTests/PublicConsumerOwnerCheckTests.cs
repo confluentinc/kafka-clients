@@ -361,7 +361,7 @@ public sealed class PublicConsumerOwnerCheckTests
         new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     /// <summary>A commit callback that runs the action it is given.</summary>
     private sealed class DelegateCallback : IOffsetCommitCallback

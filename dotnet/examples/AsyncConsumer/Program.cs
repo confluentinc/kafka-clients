@@ -59,7 +59,7 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 // The deserializers decode keys and values as UTF-8.
-await using (AsyncKafkaConsumer<string, string> consumer = new(conf, new StringDeserializer(), new StringDeserializer()))
+await using (AsyncKafkaConsumer<string, string> consumer = new(conf, new AsyncStringDeserializer(), new AsyncStringDeserializer()))
 {
     await consumer.Subscribe(topics, new PrintRebalance(consumer));
 

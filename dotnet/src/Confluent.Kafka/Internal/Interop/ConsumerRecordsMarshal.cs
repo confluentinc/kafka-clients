@@ -17,6 +17,8 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
@@ -147,6 +149,137 @@ internal static class ConsumerRecordsMarshal
         }
 
         return Build(byPartition, nextOffsets);
+    }
+
+    // The awaiting form of CopyOut, for a consumer one of whose deserializers is awaited: one record at a time, key
+    // then value, a built-in still called through its synchronous class. `copy.Batch` owns `records` from the moment
+    // it is set, also when this method throws. Once the token has fired the copy-out ends before the next record and
+    // gives no records, since the poll then ends canceled.
+    internal static async Task CopyOutAsync<TKey, TValue>(
+        IntPtr records,
+        AsyncDeserializerCall<TKey> key,
+        AsyncDeserializerCall<TValue> value,
+        AsyncCopyOut<TKey, TValue> copy,
+        CancellationToken cancellationToken)
+    {
+        if (records == IntPtr.Zero)
+        {
+            copy.Records = ConsumerRecords<TKey, TValue>.EMPTY;
+            return;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ConsumerRecordsCount(records, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets = NextOffsets(records);
+        if (count <= 0)
+        {
+            copy.Records = nextOffsets.Count == 0
+                ? ConsumerRecords<TKey, TValue>.EMPTY
+                : ConsumerRecords<TKey, TValue>.Owned(
+                    new List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>>(0),
+                    nextOffsets);
+            return;
+        }
+
+        SafeConsumerRecordsHandle batch = new SafeConsumerRecordsHandle(records);
+        copy.Batch = batch;
+
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition;
+        IntPtr partitions = NativeMethods.ConsumerRecordsPartitions(records, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            int partitionCount = Size(partitions);
+            byPartition =
+                new List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>>(partitionCount);
+            RecordReader reader = default;
+            for (int p = 0; p < partitionCount; p++)
+            {
+                IntPtr partition = Get(partitions, p);
+                string topic = reader.Topic(partition);
+                int partitionId = NativeMethods.TopicPartitionPartition(partition, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+
+                IntPtr partitionRecords = NativeMethods.ConsumerRecordsRecordsWithPartition(records, partition, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                try
+                {
+                    int size = Size(partitionRecords);
+                    List<ConsumerRecord<TKey, TValue>> list = new List<ConsumerRecord<TKey, TValue>>(size);
+                    for (int i = 0; i < size; i++)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            return;
+                        }
+
+                        IntPtr record = Get(partitionRecords, i);
+                        RecordFields fields = reader.Fields(record);
+                        Headers headers = CopyHeaders(record);
+                        batch.AddBytes((long)Length(fields.Key) + Length(fields.Value));
+
+                        TKey? deserializedKey = default;
+                        TValue? deserializedValue = default;
+                        Exception? cause = null;
+                        RecordDeserializationException.DeserializationExceptionOrigin origin =
+                            RecordDeserializationException.DeserializationExceptionOrigin.KEY;
+                        if (fields.Key != IntPtr.Zero)
+                        {
+                            try
+                            {
+                                deserializedKey = await DeserializeAsync(
+                                    key, batch, topic, headers, fields.Key, cancellationToken).ConfigureAwait(false);
+                            }
+                            catch (Exception thrown)
+                            {
+                                cause = thrown;
+                            }
+                        }
+
+                        if (cause is null && fields.Value != IntPtr.Zero)
+                        {
+                            origin = RecordDeserializationException.DeserializationExceptionOrigin.VALUE;
+                            try
+                            {
+                                deserializedValue = await DeserializeAsync(
+                                    value, batch, topic, headers, fields.Value, cancellationToken).ConfigureAwait(false);
+                            }
+                            catch (Exception thrown)
+                            {
+                                cause = thrown;
+                            }
+                        }
+
+                        if (cause is not null)
+                        {
+                            RecordDeserializationException error = NewError(
+                                origin, new TopicPartition(topic, partitionId), fields.Offset, fields.Timestamp,
+                                fields.TimestampType, fields.Key, fields.Value, headers, cause);
+                            copy.Error = error;
+                            copy.Rewind = Rewind(records, partitions, p, error);
+                            AddPartition(byPartition, topic, partitionId, list);
+                            copy.Records = Build(byPartition, Cut(nextOffsets, copy.Rewind, byPartition));
+                            return;
+                        }
+
+                        list.Add(NewRecord(record, topic, partitionId, fields, deserializedKey, deserializedValue, headers));
+                    }
+
+                    AddPartition(byPartition, topic, partitionId, list);
+                }
+                finally
+                {
+                    DestroyList(partitionRecords);
+                }
+            }
+        }
+        finally
+        {
+            DestroyList(partitions);
+        }
+
+        copy.Records = Build(byPartition, nextOffsets);
     }
 
     internal static IReadOnlyList<KeyValuePair<TopicPartition, long>> FirstPositions(IntPtr records)
@@ -417,6 +550,75 @@ internal static class ConsumerRecordsMarshal
         return withHeaders is null ? deserializer.Deserialize(topic, data) : withHeaders.Deserialize(topic, headers, data);
     }
 
+    // A deserializer that may keep its memory is given one over the batch; any other awaited one is lent a memory of
+    // its own, never shared with another call, which is revoked once its call has completed, so a memory it kept
+    // cannot read the bytes of a later record.
+    private static unsafe ValueTask<T?> DeserializeAsync<T>(
+        AsyncDeserializerCall<T> call,
+        SafeConsumerRecordsHandle batch,
+        string topic,
+        Headers headers,
+        IntPtr bytes,
+        CancellationToken cancellationToken)
+    {
+        if (call.Inner is not null)
+        {
+            return new ValueTask<T?>(Deserialize(
+                call.Inner, call.InnerWithHeaders, call.InnerWithMemory, batch, topic, headers, bytes));
+        }
+
+        KafkaBytes* view = (KafkaBytes*)bytes;
+        int length = Math.Max(view->Length, 0);
+        if (call.Retains)
+        {
+            return call.Deserializer.Deserialize(topic, headers, batch.HandOut(view->Data, length), cancellationToken);
+        }
+
+        BytesMemoryManager? lent = batch.Lend(view->Data, length);
+        return lent is null
+            ? call.Deserializer.Deserialize(topic, headers, ReadOnlyMemory<byte>.Empty, cancellationToken)
+            : DeserializeThenRevoke(call.Deserializer, lent, topic, headers, cancellationToken);
+    }
+
+    private static async ValueTask<T?> DeserializeThenRevoke<T>(
+        IAsyncDeserializer<T> deserializer,
+        BytesMemoryManager lent,
+        string topic,
+        Headers headers,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await deserializer.Deserialize(topic, headers, lent.ReadOnlyMemory, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            lent.Revoke();
+        }
+    }
+
+    private static ConsumerRecord<TKey, TValue> NewRecord<TKey, TValue>(
+        IntPtr record,
+        string topic,
+        int partition,
+        RecordFields fields,
+        TKey? key,
+        TValue? value,
+        Headers headers)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int serializedKeySize = NativeMethods.ConsumerRecordSerializedKeySize(record, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int serializedValueSize = NativeMethods.ConsumerRecordSerializedValueSize(record, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int leaderEpoch = NativeMethods.ConsumerRecordLeaderEpoch(record, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new ConsumerRecord<TKey, TValue>(
+            topic, partition, fields.Offset, fields.Timestamp, fields.TimestampType, serializedKeySize,
+            serializedValueSize, key, value, headers, leaderEpoch < 0 ? null : leaderEpoch);
+    }
+
     private static RecordDeserializationException NewError(
         RecordDeserializationException.DeserializationExceptionOrigin origin,
         TopicPartition partition,
@@ -449,6 +651,29 @@ internal static class ConsumerRecordsMarshal
         2 => TimestampType.LOG_APPEND_TIME,
         _ => TimestampType.NO_TIMESTAMP_TYPE,
     };
+
+    // What the awaiting copy-out reads of one record before it deserializes its key and value.
+    private readonly struct RecordFields
+    {
+        internal RecordFields(long offset, long timestamp, TimestampType timestampType, IntPtr key, IntPtr value)
+        {
+            Offset = offset;
+            Timestamp = timestamp;
+            TimestampType = timestampType;
+            Key = key;
+            Value = value;
+        }
+
+        internal long Offset { get; }
+
+        internal long Timestamp { get; }
+
+        internal TimestampType TimestampType { get; }
+
+        internal IntPtr Key { get; }
+
+        internal IntPtr Value { get; }
+    }
 
     // A topic decoded once per run of partitions of the same topic, and a timestamp type read once per singleton:
     // the batch is read partition by partition, so neither is decoded per record.
@@ -542,6 +767,21 @@ internal static class ConsumerRecordsMarshal
                 topic, partition, offset, timestamp, timestampType, serializedKeySize, serializedValueSize,
                 deserializedKey, deserializedValue, headers, leaderEpoch < 0 ? null : leaderEpoch));
             return null;
+        }
+
+        internal RecordFields Fields(IntPtr record)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            long offset = NativeMethods.ConsumerRecordOffset(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            long timestamp = NativeMethods.ConsumerRecordTimestamp(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            TimestampType timestampType = TimestampTypeOf(record);
+            IntPtr key = NativeMethods.ConsumerRecordKey(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return new RecordFields(offset, timestamp, timestampType, key, value);
         }
 
         private TimestampType TimestampTypeOf(IntPtr record)

@@ -212,7 +212,7 @@ public sealed class PublicAsyncConsumerCloseTests
 
     private static IAsyncConsumer<byte[], byte[]> Create(bool mock) => mock ? Mock() : Real();
 
-    private static AsyncMockConsumer<byte[], byte[]> Mock() => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+    private static AsyncMockConsumer<byte[], byte[]> Mock() => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static AsyncKafkaConsumer<byte[], byte[]> Real(string? groupId = null)
     {
@@ -226,6 +226,6 @@ public sealed class PublicAsyncConsumerCloseTests
             config["group.id"] = groupId;
         }
 
-        return new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        return new AsyncKafkaConsumer<byte[], byte[]>(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
     }
 }

@@ -567,7 +567,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static CommitCallbackRegistration? Registration(object consumer) =>
         ((NativeConsumer)consumer.GetType()

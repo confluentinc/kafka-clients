@@ -80,7 +80,9 @@ public interface IDeserializerWithHeaders<T> : IDeserializer<T>
 /// A deserializer that takes the bytes as a <see cref="ReadOnlyMemory{T}"/> it may keep or return, with the record's
 /// headers: it replaces Java's default <c>Deserializer.deserialize(String, Headers, ByteBuffer)</c>. A synchronous
 /// consumer calls this form for a deserializer that implements this interface, and no other form of it, as Java's
-/// consumer calls only the <c>ByteBuffer</c> overload; an asynchronous consumer does not call it.
+/// consumer calls only the <c>ByteBuffer</c> overload. An asynchronous consumer calls it on the synchronous class of
+/// a built-in asynchronous deserializer (<see cref="AsyncReadOnlyMemoryDeserializer"/>); a class of one's own keeps
+/// the memory it is given there by implementing <see cref="IAsyncDeserializerWithRetention{T}"/>.
 /// </summary>
 /// <remarks>
 /// <para>

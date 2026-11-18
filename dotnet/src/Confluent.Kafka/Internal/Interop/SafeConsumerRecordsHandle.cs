@@ -27,6 +27,7 @@ internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
     private long _bytes;
     private long _pressure;
     private bool _handedOut;
+    private bool _lent;
     private Action? _released;
 
     internal SafeConsumerRecordsHandle(IntPtr records)
@@ -36,6 +37,9 @@ internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
 
     // Whether a deserializer was given a memory over the batch, which it may have kept.
     internal bool HandedOut => _handedOut;
+
+    // Whether a deserializer was lent a memory over the batch, a pin of which may outlive its call.
+    internal bool Lent => _lent;
 
     internal long Pressure => _pressure;
 
@@ -51,6 +55,26 @@ internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
 
         _handedOut = true;
         return new BytesMemoryManager(this, data, length).ReadOnlyMemory;
+    }
+
+    // The manager of a memory valid only for one deserializer call, which the caller revokes when the call completes,
+    // or null for an empty key or value. Such a memory cannot be kept, so it does not count as handed out.
+    internal BytesMemoryManager? Lend(IntPtr data, int length)
+    {
+        if (length <= 0)
+        {
+            return null;
+        }
+
+        _lent = true;
+        return new BytesMemoryManager(this, data, length);
+    }
+
+    // Disposes the batch, whose release an open pin defers, and runs `released` at the release.
+    internal void Dispose(Action released)
+    {
+        _released = released;
+        Dispose();
     }
 
     // Leaves the batch to the garbage collector, which cannot see the native bytes it keeps: they are reported as

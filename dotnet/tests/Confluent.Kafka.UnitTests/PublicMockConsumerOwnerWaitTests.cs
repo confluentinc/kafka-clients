@@ -855,7 +855,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
     private static void Block(Func<Task> operation) => TestTimeout.Run(operation, s_deadline).GetAwaiter().GetResult();
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets() =>
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(1) };

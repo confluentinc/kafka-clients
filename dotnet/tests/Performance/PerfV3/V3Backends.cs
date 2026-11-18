@@ -18,6 +18,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -182,11 +183,16 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 /// Decodes a key or value to its length from the span over the fetched batch, copying nothing, as Python's Rust-core
 /// arm reads memoryviews over the batch. The binding passes a null key or value to no deserializer, so it reads as 0.
 /// </summary>
-internal sealed class ByteCountDeserializer : IDeserializer<int>
+internal sealed class ByteCountDeserializer : IDeserializer<int>, IAsyncDeserializer<int>
 {
     internal static readonly ByteCountDeserializer Instance = new ByteCountDeserializer();
 
     public int Deserialize(string topic, ReadOnlySpan<byte> data) => data.Length;
+
+    // The async consumer's form, over the memory it lends for the call.
+    public ValueTask<int> Deserialize(
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        new ValueTask<int>(data.Length);
 }
 
 /// <summary>

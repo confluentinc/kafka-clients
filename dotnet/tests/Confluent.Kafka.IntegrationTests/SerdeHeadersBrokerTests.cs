@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -122,7 +123,7 @@ public sealed class SerdeHeadersBrokerTests
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
         await using AsyncKafkaConsumer<string, string> consumer =
-            new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), Serdes.String().Deserializer(), deserializer);
+            new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), new AsyncStringDeserializer(), deserializer);
         await consumer.Assign(new[] { new TopicPartition(topic, 0) });
 
         RecordDeserializationException e = await PollFailureAsync(() => consumer.Poll(s_poll));
@@ -274,9 +275,9 @@ public sealed class SerdeHeadersBrokerTests
 
     /// <summary>
     /// A string deserializer whose headers form appends the value of a header (the schema id unless another is named)
-    /// and records the headers it was given, or throws after recording them.
+    /// and records the headers it was given, or throws after recording them. The async form does the same.
     /// </summary>
-    private sealed class HeaderReadingDeserializer : IDeserializerWithHeaders<string>
+    private sealed class HeaderReadingDeserializer : IDeserializerWithHeaders<string>, IAsyncDeserializer<string>
     {
         private readonly string _header;
 
@@ -305,5 +306,9 @@ public sealed class SerdeHeadersBrokerTests
             byte[]? id = headers.LastHeader(_header)?.Value();
             return text + "|" + (id is null ? "none" : Encoding.UTF8.GetString(id));
         }
+
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+            new ValueTask<string?>(Deserialize(topic, headers, data.Span));
     }
 }

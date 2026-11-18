@@ -224,7 +224,7 @@ public sealed class FromFfiErrorClassTests
     {
         var tp = new TopicPartition(Topic, 0);
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);

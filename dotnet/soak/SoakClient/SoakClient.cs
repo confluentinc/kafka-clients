@@ -259,7 +259,7 @@ internal sealed class SoakClient : IDisposable
 
             logger.Info("consumer: using group.id " + (cconf.TryGetValue("group.id", out string? groupId) ? groupId : "<unset>"));
             var consumer = new AsyncKafkaConsumer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(cconf), Serdes.ByteArray().Deserializer(), new SoakRecordDeserializer());
+                SoakConfig.ClientConfigs(cconf), new AsyncByteArrayDeserializer(), new SoakRecordDeserializer());
 
             var resources = new ProcessResourceSampler();
 

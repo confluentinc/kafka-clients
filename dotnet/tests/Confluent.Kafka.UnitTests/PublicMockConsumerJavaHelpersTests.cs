@@ -67,7 +67,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     public async Task TestDurationBasedOffsetReset_Async()
     {
         AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(Serdes.String().Deserializer(), Serdes.String().Deserializer(), "by_duration:PT1H");
+            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), new AsyncStringDeserializer(), "by_duration:PT1H");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Subscribe(new[] { "test" });
         await consumer.Rebalance(new[] { s_test0, s_test1 });
@@ -99,7 +99,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task ShouldReturnMaxPollRecords_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), Earliest);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Assign(new[] { s_test0 });
         consumer.UpdateBeginningOffset("test", 0, 0L);
@@ -151,7 +151,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task SetOffsetsException_IsThrownOnceByTheNextOffsetQuery_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset("test", 0, 5L);
         KafkaException injected = new KafkaException("offsets down");
@@ -186,7 +186,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task LastPollTimeout_IsNullBeforeThePoll_ThenThePollsTimeout_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), Earliest);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Assign(new[] { s_test0 });
         consumer.UpdateBeginningOffset("test", 0, 0L);
@@ -233,13 +233,13 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task Closed_IsTrueOnceClosedOrDisposed_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> closing = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> closing = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable closingDisposal = TestTimeout.Disposal(closing);
         Assert.False(closing.Closed());
         await TestTimeout.Run(() => closing.Close(), s_deadline);
         Assert.True(closing.Closed());
 
-        AsyncMockConsumer<byte[], byte[]> disposed = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> disposed = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.DisposeAsync(disposed);
         Assert.True(disposed.Closed());
     }

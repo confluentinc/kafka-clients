@@ -192,17 +192,17 @@ public sealed class PublicConsumerCommitCallbackLifetimeTests
         internal static Subject Create(string kind, bool withGroupId) => kind switch
         {
             "AsyncKafkaConsumer+async" => new Subject(
-                null, new AsyncKafkaConsumer<byte[], byte[]>(Config(withGroupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), false,
+                null, new AsyncKafkaConsumer<byte[], byte[]>(Config(withGroupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), false,
                 asyncCallbacks: true),
             "AsyncMockConsumer+async" => new Subject(
-                null, new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), true, asyncCallbacks: true),
+                null, new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), true, asyncCallbacks: true),
             "KafkaConsumer" => new Subject(
                 new KafkaConsumer<byte[], byte[]>(Config(withGroupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
             "MockConsumer" => new Subject(new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, true),
             "AsyncKafkaConsumer" => new Subject(
-                null, new AsyncKafkaConsumer<byte[], byte[]>(Config(withGroupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), false),
+                null, new AsyncKafkaConsumer<byte[], byte[]>(Config(withGroupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), false),
             "AsyncMockConsumer" => new Subject(
-                null, new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), true),
+                null, new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), true),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
 

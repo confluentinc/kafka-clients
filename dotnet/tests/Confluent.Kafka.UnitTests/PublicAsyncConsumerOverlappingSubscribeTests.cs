@@ -354,7 +354,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     {
         if (kind == Kind.AsyncMockConsumer)
         {
-            return new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            return new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         }
 
         Dictionary<string, object?> config = new Dictionary<string, object?>
@@ -367,7 +367,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
             config["group.id"] = "overlapping-subscribe-group";
         }
 
-        return new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        return new AsyncKafkaConsumer<byte[], byte[]>(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
     }
 
     private static NativeConsumer Native(object consumer) =>
