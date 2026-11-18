@@ -251,10 +251,11 @@ internal static class SoakConfig
         return conf;
     }
 
-    // Finds a field as the core's SaslConfigs::parse_jaas_option does, so the check and the client agree on
-    // whether it is present: a key counts only at an option start outside quotes, and a quoted value that a raw
-    // line break cuts short is absent. It returns the raw quoted content, escapes not decoded, unlike the core;
-    // the soak only checks that a field is present and never forwards it.
+    // A presence check, not a parser: the core parses the whole value with Java's JaasConfig grammar and refuses a
+    // malformed entry when the client is built. A key counts only at an option start outside quotes, as that
+    // grammar reads an option, and a quoted value that a raw line break cuts short is absent. It returns the raw
+    // quoted content, escapes not decoded, unlike the core; the soak only checks that a field is present and never
+    // forwards it.
     internal static string? JaasField(string jaasConfig, string name)
     {
         string s = jaasConfig;

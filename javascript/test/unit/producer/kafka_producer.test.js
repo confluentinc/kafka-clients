@@ -3282,10 +3282,14 @@ test("librdkafka and 1.x keys are inert: listed as unused, and linger.ms keeps J
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     process.on('warning', (w) => console.log('warning', w.name, w.message));
     const module = 'org.apache.kafka.common.security.plain.PlainLoginModule';
+    // Each a well-formed JAAS entry, as Java's JaasConfig reads one: the
+    // first is complete, the second's password option is misspelled and the
+    // third has no username, so those two fail at construction, the secret
+    // still in the value.
     const jaas = [
       module + ' required username="user" password="${JAAS_PASSWORD}";',
-      module + ' required username="user" password="${JAAS_PASSWORD};',
-      'password="${JAAS_PASSWORD}";',
+      module + ' required username="user" passwd="${JAAS_PASSWORD}";',
+      module + ' required password="${JAAS_PASSWORD}";',
     ];
     const print = (where, e) => {
       for (let x = e; x; x = x.cause) console.log(where, x.name, x.message, String(x), x.stack);
@@ -3333,6 +3337,10 @@ test("librdkafka and 1.x keys are inert: listed as unused, and linger.ms keeps J
     assert.ok(r.stdout.endsWith('done\n'), r.stdout);
     assert.ok(
       r.stdout.includes('construction ConfigError Failed to create channel builder: SASL PLAIN authentication requires a password'),
+      r.stdout,
+    );
+    assert.ok(
+      r.stdout.includes('construction ConfigError Failed to create channel builder: SASL PLAIN authentication requires a username'),
       r.stdout,
     );
     assert.ok(r.stdout.includes('send TimeoutError Topic t not present in metadata after 500 ms.'), r.stdout);
