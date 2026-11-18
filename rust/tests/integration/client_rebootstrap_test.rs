@@ -35,6 +35,13 @@
 //! - `testConsumerRebootstrap` → `test_consumer_rebootstrap`
 //! - `testConsumerRebootstrapDisabled` → `test_consumer_rebootstrap_disabled`
 //!
+//! Under `multilanguage-tests` the two producer tests run on every backend
+//! through [`multilanguage_test!`](crate::multilanguage_test): the admin client
+//! that creates the topic stays native (harness infrastructure, as Java's
+//! `clusterInstance.admin()`), and the producer under test comes from the
+//! backend's factory, bootstrapping against every broker's listener that its
+//! backend can reach. Without the feature they run on the native backend.
+//!
 //! ## SKIPped
 //!
 //! - `testClassicConsumerRebootstrap` / `testClassicConsumerRebootstrapDisabled`
@@ -50,6 +57,7 @@ use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySer
 use confluent_kafka::consumer::{ConsumerConfig, DynConsumer, KafkaConsumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
+use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
@@ -228,10 +236,41 @@ async fn wait_for_one_polled_record(consumer: &mut dyn DynConsumer<Vec<u8>, Vec<
     }
 }
 
+/// The PLAINTEXT bootstrap list, every broker, that `factory`'s backend can
+/// reach: a gRPC backend in a container needs the brokers' container listener.
+fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
+/// Java `clusterInstance.producer(overrides)` on `factory`'s backend.
+async fn backend_producer<F: ProducerBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    overrides: &[(&str, &str)],
+) -> F::Producer {
+    let mut props = HashMap::from([("bootstrap.servers".to_string(), bootstrap_for(factory, ctx))]);
+    props.extend(overrides.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    factory.create(props).await.expect("build producer")
+}
+
+/// `producer.send(record).get()` on any backend, returning the record's offset.
+async fn backend_send_and_get_offset<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, value: &str) -> i64 {
+    producer
+        .send(record(topic, value))
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("record acknowledged")
+        .offset()
+}
+
 /// Translated from `ClientRebootstrapTest#testProducerRebootstrap`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_producer_rebootstrap() {
-    let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
+async fn producer_rebootstrap_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
     {
@@ -243,9 +282,9 @@ async fn test_producer_rebootstrap() {
     // It's ok to shut the leader down, cause the reelection is small enough to the producer timeout.
     ctx.cluster().shutdown_broker(BROKER0).await;
 
-    let producer = producer(&bootstrap, &[]);
+    let producer = backend_producer(factory, ctx, &[]).await;
     // Only the broker 1 is available for the producer during the bootstrap.
-    assert_eq!(0, send_and_get_offset(&producer, &topic, "value 0").await);
+    assert_eq!(0, backend_send_and_get_offset(&producer, &topic, "value 0").await);
 
     ctx.cluster().shutdown_broker(BROKER1).await;
     ctx.cluster().start_broker(BROKER0).await;
@@ -253,14 +292,18 @@ async fn test_producer_rebootstrap() {
     // Current broker 1 is offline.
     // However, the broker 0 from the bootstrap list is online.
     // Should be able to produce records.
-    assert_eq!(0, send_and_get_offset(&producer, &topic, "value 1").await);
+    assert_eq!(0, backend_send_and_get_offset(&producer, &topic, "value 1").await);
     producer.close().await.expect("producer close");
 }
 
 /// Translated from `ClientRebootstrapTest#testProducerRebootstrapDisabled`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_producer_rebootstrap_disabled() {
-    let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
+///
+/// Java's `Future.get(5, SECONDS)` throws `java.util.concurrent.TimeoutException`.
+/// On the native backend its counterpart is `Error::LocalTimeout`
+/// (`FutureRecordMetadata::get_with_timeout`), with Java's message. A gRPC
+/// `Send` answers only once the record's future settles, so on a gRPC backend
+/// the same observation is that the send has not answered after the same 5 s.
+async fn producer_rebootstrap_disabled_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
     {
@@ -272,33 +315,66 @@ async fn test_producer_rebootstrap_disabled() {
     // It's ok to shut the leader down, cause the reelection is small enough to the producer timeout.
     ctx.cluster().shutdown_broker(BROKER0).await;
 
-    let producer = producer(&bootstrap, &[("metadata.recovery.strategy", "none")]);
+    let producer = backend_producer(factory, ctx, &[("metadata.recovery.strategy", "none")]).await;
 
     // Only the broker 1 is available for the producer during the bootstrap.
-    assert_eq!(0, send_and_get_offset(&producer, &topic, "value 0").await);
+    assert_eq!(0, backend_send_and_get_offset(&producer, &topic, "value 0").await);
 
     ctx.cluster().shutdown_broker(BROKER1).await;
     ctx.cluster().start_broker(BROKER0).await;
 
     // The broker 1, originally cached during the bootstrap, is offline.
     // As a result, the producer will throw a TimeoutException when trying to send a message.
-    //
-    // Java's `Future.get(5, SECONDS)` throws `java.util.concurrent.TimeoutException`,
-    // whose Rust counterpart is `Error::LocalTimeout` (see
-    // `FutureRecordMetadata::get_with_timeout`).
-    let future =
-        <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record(&topic, "value 1"))
-            .await
-            .expect("send");
-    match future.get_with_timeout(Duration::from_secs(5)).await {
-        Err(err @ Error::LocalTimeout(_)) => assert_eq!(
-            err.to_string(),
-            Error::local_timeout("Timeout after waiting for 5000 ms.").to_string()
-        ),
-        other => panic!("expected a local TimeoutException, got {other:?}"),
+    let get_timeout = Duration::from_secs(5);
+    if factory.name() == "rust" {
+        let future = producer.send(record(&topic, "value 1")).await.expect("send");
+        match future.get_with_timeout(get_timeout).await {
+            Err(err @ Error::LocalTimeout(_)) => assert_eq!(
+                err.to_string(),
+                Error::local_timeout("Timeout after waiting for 5000 ms.").to_string()
+            ),
+            other => panic!("expected a local TimeoutException, got {other:?}"),
+        }
+    } else {
+        let sent = tokio::time::timeout(get_timeout, async {
+            producer.send(record(&topic, "value 1")).await.expect("send").get().await
+        })
+        .await;
+        assert!(
+            sent.is_err(),
+            "{} backend: the record must not complete within {get_timeout:?}, got {sent:?}",
+            factory.name()
+        );
     }
     // Since the brokers cached during the bootstrap are offline, the producer needs to wait the default timeout for other threads.
     producer.close_with_timeout(Duration::ZERO).await.expect("producer close");
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_producer_rebootstrap,
+    producer_rebootstrap_inner,
+    rebootstrap_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_producer_rebootstrap_disabled,
+    producer_rebootstrap_disabled_inner,
+    rebootstrap_cluster_config()
+);
+
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_producer_rebootstrap() {
+    let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
+    producer_rebootstrap_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
+
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_producer_rebootstrap_disabled() {
+    let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
+    producer_rebootstrap_disabled_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
 
 /// Java `ClientRebootstrapTest#consumerRebootstrap`, called as

@@ -59,6 +59,27 @@ const TEST_ONLY = new Map([
         "a test-only registration: the counts of native/headers.c, which prove option 1's copies and views and the handles' lifetimes",
     },
   ],
+  [
+    'producerStats',
+    {
+      test: 'test/memory/native_counts.test.js',
+      reason: "a test-only registration: the counts of native/producer.c, which prove every producer handle's lifetime",
+    },
+  ],
+  [
+    'errorStats',
+    {
+      test: 'test/memory/native_counts.test.js',
+      reason: 'a test-only registration: the counts of native/error.c, which prove every owned error is freed or given once',
+    },
+  ],
+  [
+    'recordSpy',
+    {
+      test: 'test/memory/record_read_back.test.js',
+      reason: "a test-only registration: the record a send built, read back, which proves the key and value are the caller's memory",
+    },
+  ],
 ]);
 
 /** The module specifiers `sf` imports or requires, with their lines. */

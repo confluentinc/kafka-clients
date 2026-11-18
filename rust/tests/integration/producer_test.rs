@@ -2265,16 +2265,20 @@ async fn non_blocking_verify_send_success(future: &KafkaFuture<RecordMetadata>, 
 /// (`PlaintextProducerSendTest.scala:258-313`): requests are failed immediately
 /// without blocking if metadata is not available or the buffer is full.
 ///
-/// The buffer-exhaustion half runs on the native backend only: it needs the
-/// first record to sit in a lingering batch (`linger.ms=15000`) while the
-/// second send finds the buffer full, but the gRPC `Send` RPC blocks until
-/// delivery, so the first batch has already been sent — and its buffer freed —
-/// by the time the second send is issued. On every gRPC arm, the JS one
-/// included, "verify future was completed immediately" is vacuous too, since
-/// the harness hands back a future that is already complete
-/// (`MultilanguageProducer::send_with_callback`); only the `Timeout` class of
-/// the first half is shown there. Neither can be made non-vacuous while `Send`
-/// blocks.
+/// The buffer-exhaustion half needs the first record to sit in a lingering
+/// batch (`linger.ms=15000`) while the second send finds the buffer full. The
+/// gRPC `Send` RPC blocks until delivery, so on a gRPC arm the first send is
+/// left in flight instead: a send that has not answered within a second is
+/// queued (one failing on missing metadata answers at once), the second send
+/// is issued while it is pending, and it must answer well before the linger
+/// ends, which is the gRPC form of "verify future was completed immediately"
+/// (the harness hands back a future that is already complete,
+/// `MultilanguageProducer::send_with_callback`, so `is_done` shows nothing
+/// there). That runs on the native backend and on the JS gRPC server, which
+/// leaves the record to the client until the future settles
+/// (`javascript/grpc-server/grpc_server.js` `send`); the other gRPC servers
+/// keep returning after the first half until a run of their arm shows the
+/// same.
 ///
 /// Deviation: Java's topic `topic` is auto-created by the producer's first
 /// metadata request; here it is created with the admin client beforehand. The
@@ -2306,8 +2310,10 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
     non_blocking_verify_send_success(&future, &topic).await;
     producer.close().await.expect("close should succeed");
 
-    if factory.name() != "rust" {
-        return;
+    match factory.name() {
+        "rust" => {},
+        "js" => return non_blocking_producer_buffer_exhausted_over_grpc(factory, &bootstrap, &topic).await,
+        _ => return,
     }
 
     // Verify that send fails immediately without blocking when there is no space left in the buffer
@@ -2340,6 +2346,80 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
     }
     // previous batch should be completed and sent now
     non_blocking_verify_send_success(&future2, &topic).await;
+    producer2.close().await.expect("close should succeed");
+}
+
+/// The buffer-exhaustion half of [`non_blocking_producer_inner`] on a gRPC
+/// backend, whose `Send` RPC answers only once the record's future settles:
+/// the first send stays in flight while the second finds the buffer full.
+async fn non_blocking_producer_buffer_exhausted_over_grpc<F: ProducerBackendFactory>(
+    factory: &F,
+    bootstrap: &str,
+    topic: &str,
+) {
+    /// How long a send must stay unanswered to count as queued: a send that
+    /// finds no metadata (`max.block.ms=0`) answers at once.
+    const QUEUED_AFTER: Duration = Duration::from_secs(1);
+    /// The bound on the send that finds the buffer full, far below the
+    /// first batch's 15 s linger, after which the buffer would be free again.
+    const IMMEDIATE: Duration = Duration::from_secs(5);
+
+    let producer2 = factory
+        .create(send_test_producer_config(
+            bootstrap,
+            &SendTestProducerOpts {
+                max_block_ms: 0,
+                linger_ms: 15000,
+                batch_size: 1100,
+                buffer_size: 1500,
+                ..SendTestProducerOpts::default()
+            },
+        ))
+        .await
+        .expect("Failed to create producer");
+    // wait until metadata is available and one record is queued
+    let deadline = Instant::now() + Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS);
+    let mut queued = loop {
+        let mut first = Box::pin(non_blocking_send(&producer2, topic));
+        tokio::select! {
+            biased;
+            future = &mut first => {
+                let result = future.get().await;
+                assert!(
+                    matches!(result, Err(Error::Timeout(_))),
+                    "a send that answers at once must fail on missing metadata, got: {result:?}"
+                );
+                assert!(Instant::now() < deadline, "no send was queued within {}ms", test_utils::DEFAULT_MAX_WAIT_MS);
+                tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+            },
+            () = tokio::time::sleep(QUEUED_AFTER) => break first,
+        }
+    };
+    // should fail send since buffer is full (verifyBufferExhausted)
+    let started = Instant::now();
+    let (future, future2) = tokio::join!(
+        async {
+            let future = non_blocking_send(&producer2, topic).await;
+            assert!(
+                started.elapsed() < IMMEDIATE,
+                "verify future was completed immediately: {:?}",
+                started.elapsed()
+            );
+            future
+        },
+        &mut queued,
+    );
+    let err = future.get().await.expect_err("send with a full buffer should fail");
+    match &err {
+        Error::ProducerBufferExhausted(e) => assert!(
+            e.message().starts_with("Failed to allocate ") && e.message().contains("Total memory: 1500 bytes."),
+            "unexpected BufferExhausted message: {}",
+            e.message()
+        ),
+        _ => panic!("Expected BufferExhausted, got: {err:?}"),
+    }
+    // previous batch should be completed and sent now
+    non_blocking_verify_send_success(&future2, topic).await;
     producer2.close().await.expect("close should succeed");
 }
 

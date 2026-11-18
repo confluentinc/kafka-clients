@@ -159,12 +159,38 @@ typedef struct {
     napi_ref done;                             // JS (error | null, partitions | null) => void
 } PartitionsForCtx;
 
+// The counts producerStats() reads, for the memory tests (test/memory/):
+// each native object and unit made, and each freed or given back. Test-only.
+static atomic_long stat_producers_made;
+static atomic_long stat_producers_freed;
+static atomic_long stat_owner_units_taken;
+static atomic_long stat_owner_units_released;
+static atomic_long stat_contexts_made;
+static atomic_long stat_contexts_freed;
+static atomic_long stat_slots_taken;
+static atomic_long stat_slots_returned;
+static atomic_long stat_futures_held;
+static atomic_long stat_futures_destroyed;
+static atomic_long stat_waits_started;
+static atomic_long stat_waits_completed;
+static atomic_long stat_deferrals_made;
+static atomic_long stat_deferrals_reported;
+static atomic_long stat_deferrals_released;
+static atomic_long stat_buffer_refs_taken;
+static atomic_long stat_buffer_refs_released;
+static atomic_long stat_mock_records_made;
+static atomic_long stat_mock_records_freed;
+static atomic_long stat_injected_made;
+static atomic_long stat_injected_freed;
+
 static void producer_release(Producer* p) {
+    atomic_fetch_add(&stat_owner_units_released, 1);
     if (--p->owners != 0) return;
     cbq_dispose(&p->queue);
     free(p->slots);
     free(p->free_next);
     free(p);
+    atomic_fetch_add(&stat_producers_freed, 1);
 }
 
 // A free slot for `ctx`, growing the table when none is: its number, or -1
@@ -189,6 +215,7 @@ static int32_t slot_take(Producer* p, SendCtx* ctx) {
     int32_t i = p->free_head;
     p->free_head = p->free_next[i];
     p->slots[i] = ctx;
+    atomic_fetch_add(&stat_slots_taken, 1);
     return i;
 }
 
@@ -196,6 +223,7 @@ static void slot_give_back(Producer* p, int32_t i) {
     p->slots[i] = NULL;
     p->free_next[i] = p->free_head;
     p->free_head = i;
+    atomic_fetch_add(&stat_slots_returned, 1);
 }
 
 // ---- a mock's records and errors --------------------------------------------
@@ -217,6 +245,7 @@ struct MockRecord {
 static void mock_record_free(napi_env env, MockRecord* r) {
     delete_ref(env, &r->record);
     free(r);
+    atomic_fetch_add(&stat_mock_records_freed, 1);
 }
 
 static void mock_records_free(napi_env env, MockRecord** list) {
@@ -256,7 +285,10 @@ struct InjectedError {
 
 static void injected_error_release(void* opaque) {
     InjectedError* e = (InjectedError*)opaque;
-    if (atomic_fetch_sub(&e->owners, 1) == 1) free(e);
+    if (atomic_fetch_sub(&e->owners, 1) == 1) {
+        free(e);
+        atomic_fetch_add(&stat_injected_freed, 1);
+    }
 }
 
 static void injected_errors_release(napi_env env, Producer* p) {
@@ -354,6 +386,7 @@ static int is_function(napi_env env, napi_value v) {
 // record never handed over): the references on their Buffers are dropped,
 // once (delete_ref clears each).
 static void send_ctx_release_buffers(napi_env env, SendCtx* ctx) {
+    atomic_fetch_add(&stat_buffer_refs_released, (ctx->key_ref != NULL) + (ctx->value_ref != NULL));
     delete_ref(env, &ctx->key_ref);
     delete_ref(env, &ctx->value_ref);
 }
@@ -368,6 +401,7 @@ static void send_ctx_destroy_future(napi_env env, SendCtx* ctx) {
     if (ctx->future == NULL) return;
     kafka_common_Error_t* ffi_err = NULL;
     error_warn(env, !ctx->p->queue.finalizing, FFI_ERR(kafka_common_KafkaFuture_destroy_err(ctx->future, &ffi_err)));
+    atomic_fetch_add(&stat_futures_destroyed, 1);
     ctx->future = NULL;
 }
 
@@ -408,6 +442,7 @@ static void send_ctx_free(napi_env env, SendCtx* ctx) {
     if (ctx->future != NULL && ctx->js_holds && !ctx->js_settled) return;
     send_ctx_destroy_future(env, ctx);
     free(ctx);
+    atomic_fetch_add(&stat_contexts_freed, 1);
 }
 
 // Drops one owner; the last one frees the context unless it is an orphan,
@@ -447,6 +482,7 @@ typedef struct {
 // orders it before the close's completion, and no other wait is known to
 // stay pending past a completed close.
 static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
     FutureWait* w = (FutureWait*)opaque;
     Producer* p = w->p;
     SendCtx* ctx = w->ctx;
@@ -474,6 +510,7 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
     // The value is borrowed from the future until this returns: only now may
     // the last wait let the context destroy it.
     ctx->waits--;
+    atomic_fetch_add(&stat_waits_completed, 1);
     send_ctx_maybe_destroy_future(env, ctx);
     send_ctx_release(env, ctx);
     cbq_call_end(env, &p->queue);
@@ -532,6 +569,8 @@ napi_value js_record_future_get(napi_env env, napi_callback_info info) {
     ctx->refs++;
     ctx->waits++;
     p->owners++;
+    atomic_fetch_add(&stat_waits_started, 1);
+    atomic_fetch_add(&stat_owner_units_taken, 1);
     if (!w->timed) {
         cbq_call_begin(env, &p->queue);
         kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);
@@ -548,6 +587,7 @@ napi_value js_record_future_get(napi_env env, napi_callback_info info) {
 // future, is kept on the context, and JS gets the context's slot number to
 // wait on it with (the record's future section above).
 static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
     SendCtx* ctx = (SendCtx*)opaque;
     Producer* p = ctx->p;
     napi_env env = p->env;
@@ -559,6 +599,7 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
     // The context owns the record's future from now on (NULL for a refused
     // record).
     ctx->future = value;
+    if (value != NULL) atomic_fetch_add(&stat_futures_held, 1);
     send_ctx_release_buffers(env, ctx);
     if (!p->queue.finalizing && ctx->on_handover != NULL) {
         napi_value argv[2];
@@ -630,6 +671,7 @@ static kafka_common_Error_t* callback_error(const char* thrown) {
     kafka_common_Error_t* panic = FFI_SET(report, kafka_common_Error_local_callback_err(thrown, NULL, NULL, &ffi_err));
     if (report == NULL) return panic;
     error_discard(panic);
+    error_stat_made(report);
     return report;
 }
 
@@ -666,9 +708,11 @@ static void send_awaited_report(napi_env env, SendCtx* ctx, const char* thrown) 
     if (!ctx->awaiting) return;
     Producer* p = ctx->p;
     await_unlink(ctx);
+    atomic_fetch_add(&stat_deferrals_reported, 1);
     kafka_common_Error_t* report = thrown != NULL ? callback_error(thrown) : NULL;
     kafka_common_Error_t* ffi_err = NULL;
     if (!p->destroying && p->view != NULL) {
+        error_stat_given(report);
         error_warn(env, !p->queue.finalizing, FFI_ERR(kafka_producer_Producer__set_callback_result_err(p->view, ctx->callback_id, NULL, report, &ffi_err)));
     } else {
         error_discard(report);
@@ -725,6 +769,7 @@ static void send_on_settled_finalize(napi_env env, void* data, void* hint) {
     ctx->settle_ref = NULL;
     send_awaited_report(env, ctx, NULL);
     ctx->settle_fn = 0;
+    atomic_fetch_add(&stat_deferrals_released, 1);
     send_ctx_release(env, ctx);
     producer_release(p);
 }
@@ -760,6 +805,8 @@ static int send_defer(napi_env env, SendCtx* ctx, napi_value promise, int64_t ca
     ctx->callback_id = callback_id;
     ctx->settle_fn = 1;
     p->owners++;
+    atomic_fetch_add(&stat_owner_units_taken, 1);
+    atomic_fetch_add(&stat_deferrals_made, 1);
     ctx->awaiting = 1;
     ctx->await_prev = NULL;
     ctx->await_next = p->awaiting;
@@ -837,6 +884,8 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     // An awaited callback reports once its Promise settled (send_on_settled);
     // its function owns the context from now on.
     if (deferred) return;
+    // The report the core takes over, counted for errorStats() (test-only).
+    if (!p->destroying) error_stat_given(report);
     if (!p->destroying) {
         error_warn(env, !p->queue.finalizing, FFI_ERR(kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err)));
     } else {
@@ -903,6 +952,7 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
+    atomic_fetch_add(&stat_contexts_made, 1);
     ctx->p = p;
     ctx->refs = 2;
     ctx->slot = -1;
@@ -910,6 +960,7 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
         || js_bytes(env, argv[5], "value must be a Buffer, a Uint8Array, a string or null", &ctx->value)) {
         free(topic);
         free(ctx);
+        atomic_fetch_add(&stat_contexts_freed, 1);
         return NULL;
     }
     kafka_producer_ProducerRecord_t* record =
@@ -919,6 +970,7 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
         send_ctx_free(env, ctx);
         return NULL;
     }
+    record_spy_capture(env, record, argv[4], argv[5]);
     send_hand_over(env, p, ctx, record, argv[4], argv[5], argv[7], argv[8]);
     return NULL;
 }
@@ -935,10 +987,12 @@ static void send_hand_over(napi_env env, Producer* p, SendCtx* ctx, kafka_produc
     kafka_common_Error_t* ffi_err = NULL;
     // The core reads the key's and value's own memory until the hand-over:
     // a reference keeps each Buffer, and so its memory, alive until then.
-    if ((!ctx->key.is_null && napi_create_reference(env, key, 1, &ctx->key_ref) != napi_ok)
-        || (!ctx->value.is_null && napi_create_reference(env, value, 1, &ctx->value_ref) != napi_ok)
-        || napi_create_reference(env, on_handover, 1, &ctx->on_handover) != napi_ok
-        || napi_create_reference(env, on_complete, p->mock != NULL ? 0 : 1, &ctx->on_complete) != napi_ok) {
+    int failed = (!ctx->key.is_null && napi_create_reference(env, key, 1, &ctx->key_ref) != napi_ok)
+                 || (!ctx->value.is_null && napi_create_reference(env, value, 1, &ctx->value_ref) != napi_ok)
+                 || napi_create_reference(env, on_handover, 1, &ctx->on_handover) != napi_ok
+                 || napi_create_reference(env, on_complete, p->mock != NULL ? 0 : 1, &ctx->on_complete) != napi_ok;
+    atomic_fetch_add(&stat_buffer_refs_taken, (ctx->key_ref != NULL) + (ctx->value_ref != NULL));
+    if (failed) {
         error_warn(env, 1, FFI_ERR(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err)));
         send_ctx_free(env, ctx);
         js_throw_last_napi_error(env, "napi_create_reference");
@@ -965,6 +1019,7 @@ static void send_hand_over(napi_env env, Producer* p, SendCtx* ctx, kafka_produc
 // ---- flush ------------------------------------------------------------------
 
 static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
     FlushCtx* ctx = (FlushCtx*)opaque;
     Producer* p = ctx->p;
     napi_env env = p->env;
@@ -1131,6 +1186,7 @@ static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
 // `done(null, partitions)`, then the end of the call's count (a call made on a
 // closed producer holds Node until then).
 static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
     PartitionsForCtx* ctx = (PartitionsForCtx*)opaque;
     Producer* p = ctx->p;
     napi_env env = p->env;
@@ -1418,6 +1474,7 @@ static void producer_destroy(napi_env env, Producer* p) {
 // closedNow)`, closedNow true for the close that closed the producer, false
 // for a rejected one or a later close.
 static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
     CloseCtx* ctx = (CloseCtx*)opaque;
     Producer* p = ctx->p;
     napi_env env = p->env;
@@ -1642,6 +1699,7 @@ static napi_value producer_handle_new(napi_env env, kafka_producer_KafkaProducer
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
+    atomic_fetch_add(&stat_producers_made, 1);
     p->env = env;
     p->kp = kp;
     p->mock = mock;
@@ -1654,15 +1712,18 @@ static napi_value producer_handle_new(napi_env env, kafka_producer_KafkaProducer
                != 0) {
         class_destroy(env, kp, mock);
         free(p);
+        atomic_fetch_add(&stat_producers_freed, 1);
         return NULL;
     }
     if (err != NULL) {
         class_destroy(env, kp, mock);
         free(p);
+        atomic_fetch_add(&stat_producers_freed, 1);
         error_throw_owned(env, err);
         return NULL;
     }
     p->owners = 1;  // the tsfn
+    atomic_fetch_add(&stat_owner_units_taken, 1);
     napi_value result = NULL;
     int thrown = 0;
     if (napi_create_object(env, &result) != napi_ok || napi_wrap(env, result, p, producer_finalize, NULL, NULL) != napi_ok) {
@@ -1670,6 +1731,7 @@ static napi_value producer_handle_new(napi_env env, kafka_producer_KafkaProducer
         thrown = 1;
     } else {
         p->owners = 2;  // and the handle object
+        atomic_fetch_add(&stat_owner_units_taken, 1);
         if (cbq_attach(env, &p->queue, result) != 0) thrown = 1;
     }
     if (!thrown)
@@ -1786,6 +1848,8 @@ napi_value js_mock_producer_send(napi_env env, napi_callback_info info) {
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
+    atomic_fetch_add(&stat_contexts_made, 1);
+    atomic_fetch_add(&stat_mock_records_made, 1);
     ctx->p = p;
     ctx->refs = 2;
     ctx->slot = -1;
@@ -1795,6 +1859,8 @@ napi_value js_mock_producer_send(napi_env env, napi_callback_info info) {
         free(topic);
         free(ctx);
         free(kept);
+        atomic_fetch_add(&stat_contexts_freed, 1);
+        atomic_fetch_add(&stat_mock_records_freed, 1);
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
@@ -1933,6 +1999,8 @@ static int injected_error_new(napi_env env, Producer* p, napi_value value, kafka
     }
     e->next = p->injected;
     p->injected = e;
+    atomic_fetch_add(&stat_injected_made, 1);
+    error_stat_made(*out);
     return 0;
 }
 
@@ -1957,6 +2025,9 @@ napi_value js_mock_producer_set_error(napi_env env, napi_callback_info info) {
     }
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_Error_t* err = NULL;
+    if (strcmp(field, "send") == 0 || strcmp(field, "flush") == 0 || strcmp(field, "partitionsFor") == 0
+        || strcmp(field, "close") == 0)
+        error_stat_given(error);
     if (strcmp(field, "send") == 0) err = FFI_ERR(kafka_producer_MockProducer_set_send_error_err(p->mock, error, &ffi_err));
     else if (strcmp(field, "flush") == 0) err = FFI_ERR(kafka_producer_MockProducer_set_flush_error_err(p->mock, error, &ffi_err));
     else if (strcmp(field, "partitionsFor") == 0)
@@ -1990,6 +2061,7 @@ napi_value js_mock_producer_complete_next(napi_env env, napi_callback_info info)
     if (p == NULL || injected_error_new(env, p, argv[1], &error) != 0) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     int8_t completed = 0;
+    error_stat_given(error);
     kafka_common_Error_t* err = FFI_SET(completed, kafka_producer_MockProducer_error_next_err(p->mock, error, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
@@ -2034,4 +2106,47 @@ napi_value js_mock_producer_state(napi_env env, napi_callback_info info) {
     napi_value result;
     NAPI_CHECK(env, napi_get_boolean(env, state != 0, &result), NULL);
     return result;
+}
+
+// ---- the counts, for the tests ------------------------------------------------
+
+static int stat_put(napi_env env, napi_value obj, const char* name, atomic_long* count) {
+    napi_value v;
+    return napi_create_int64(env, (int64_t)atomic_load(count), &v) == napi_ok
+                   && napi_set_named_property(env, obj, name, v) == napi_ok
+               ? 0
+               : -1;
+}
+
+// producerStats(): the counts of the native producers, their units of
+// ownership, the send contexts, the future slots, the record futures, the
+// waits on them, the callback deferrals, the key and value Buffer
+// references, a mock's records and the errors JS gave a mock, each made and
+// freed. Test-only.
+napi_value js_producer_stats(napi_env env, napi_callback_info info) {
+    (void)info;
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (stat_put(env, obj, "producersMade", &stat_producers_made) || stat_put(env, obj, "producersFreed", &stat_producers_freed)
+        || stat_put(env, obj, "ownerUnitsTaken", &stat_owner_units_taken)
+        || stat_put(env, obj, "ownerUnitsReleased", &stat_owner_units_released)
+        || stat_put(env, obj, "contextsMade", &stat_contexts_made) || stat_put(env, obj, "contextsFreed", &stat_contexts_freed)
+        || stat_put(env, obj, "slotsTaken", &stat_slots_taken) || stat_put(env, obj, "slotsReturned", &stat_slots_returned)
+        || stat_put(env, obj, "futuresHeld", &stat_futures_held)
+        || stat_put(env, obj, "futuresDestroyed", &stat_futures_destroyed)
+        || stat_put(env, obj, "waitsStarted", &stat_waits_started)
+        || stat_put(env, obj, "waitsCompleted", &stat_waits_completed)
+        || stat_put(env, obj, "deferralsMade", &stat_deferrals_made)
+        || stat_put(env, obj, "deferralsReported", &stat_deferrals_reported)
+        || stat_put(env, obj, "deferralsReleased", &stat_deferrals_released)
+        || stat_put(env, obj, "bufferRefsTaken", &stat_buffer_refs_taken)
+        || stat_put(env, obj, "bufferRefsReleased", &stat_buffer_refs_released)
+        || stat_put(env, obj, "mockRecordsMade", &stat_mock_records_made)
+        || stat_put(env, obj, "mockRecordsFreed", &stat_mock_records_freed)
+        || stat_put(env, obj, "injectedMade", &stat_injected_made)
+        || stat_put(env, obj, "injectedFreed", &stat_injected_freed)) {
+        js_throw_last_napi_error(env, "producerStats");
+        return NULL;
+    }
+    return obj;
 }

@@ -163,6 +163,7 @@ static napi_value addon_init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
         {"setFactories", NULL, js_set_factories, NULL, NULL, NULL, napi_default, NULL},
+        {"errorStats", NULL, js_error_stats, NULL, NULL, NULL, napi_default, NULL},
         {"previewNoticeDue", NULL, js_preview_notice_due, NULL, NULL, NULL, napi_default, NULL},
         // producer.c
         {"producerCreate", NULL, js_producer_create, NULL, NULL, NULL, napi_default, NULL},
@@ -180,6 +181,7 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"mockProducerCompleteNext", NULL, js_mock_producer_complete_next, NULL, NULL, NULL, napi_default, NULL},
         {"mockProducerState", NULL, js_mock_producer_state, NULL, NULL, NULL, napi_default, NULL},
         {"recordFutureGet", NULL, js_record_future_get, NULL, NULL, NULL, napi_default, NULL},
+        {"producerStats", NULL, js_producer_stats, NULL, NULL, NULL, napi_default, NULL},
         // headers.c
         {"headersNew", NULL, js_headers_new, NULL, NULL, NULL, napi_default, NULL},
         {"headersCopy", NULL, js_headers_copy, NULL, NULL, NULL, napi_default, NULL},
@@ -196,6 +198,7 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"headerKey", NULL, js_header_key, NULL, NULL, NULL, napi_default, NULL},
         {"headerValue", NULL, js_header_value, NULL, NULL, NULL, napi_default, NULL},
         {"headerStats", NULL, js_header_stats, NULL, NULL, NULL, napi_default, NULL},
+        {"recordSpy", NULL, js_record_spy, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
     return exports;

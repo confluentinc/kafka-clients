@@ -57,6 +57,7 @@ producer for them.
    `send()` resolves once the producer has **accepted** the record, with a
    `KafkaFuture`, and `await future.get()` waits for **delivery**:
 
+   <!-- snippet: fragment -->
    ```js
    const future = await producer.send(record);   // accepted
    const metadata = await future.get();          // delivered, or rejects
@@ -77,6 +78,7 @@ producer for them.
    partition holds a key, breaks without an error. To keep the partitions of
    a KafkaJS-style producer, or of a Java one, set:
 
+   <!-- snippet: fragment -->
    ```js
    new KafkaProducer({ 'bootstrap.servers': 'broker:9092', 'partitioner.type': 'Murmur2RandomPartitioner' });
    ```
@@ -193,6 +195,7 @@ build that uses them with 4.x fails with `TS2307: Cannot find module` (or gets
 `any` types under `skipLibCheck`). Serializing by hand and sending the bytes
 keeps working with any release:
 
+<!-- snippet: fragment -->
 ```js
 const value = await serializer.serialize(topic, { fullName: 'John Doe' });
 await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), value }))).get();

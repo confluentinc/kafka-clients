@@ -26,8 +26,19 @@
 // timeout or not. `test.concurrent` refuses a timeout, which the light
 // runner does not apply to it. `test.failing` is refused whatever it is
 // given: the light runner runs it as a plain test, which would pass a test
-// Jest fails and fail one Jest passes. test/static/jest_setup.test.js runs
-// each of these through Jest and checks its outcome.
+// Jest fails and fail one Jest passes.
+//
+// An unhandled rejection or an uncaught exception fails the test running when
+// it arrives, at once, and one that arrives between tests fails the next
+// `afterEach`, or the file's `afterAll` (root CLAUDE.md, JavaScript Binding
+// Conventions, Tests, Q67: no unhandled rejection). Node runs the tests with
+// --unhandled-rejections=strict (test/jest_runner.mjs), so a rejection is
+// raised as an uncaught exception even when something listens for
+// `unhandledRejection`. A test that expects one opts out while it listens
+// itself: with a listener of its own for `uncaughtException`, or for
+// `unhandledRejection` when the error is a rejection, the error is its own.
+// test/static/jest_setup.test.js runs each of these through Jest and checks
+// its outcome.
 
 /**
  * A test or hook function, or a `test.each` row's: it takes the row's values,
@@ -145,9 +156,93 @@ function withTimeout(fn, timeout, rows) {
  */
 function timed(fn, timeout, rows = false) {
   if (typeof fn !== 'function') return fn;
-  if (timeout !== undefined) return withTimeout(fn, timeout, rows);
-  if (!rows && fn.length === 0) return fn;
-  return (...given) => call(fn, rows ? given : []);
+  if (timeout !== undefined) return guarded(withTimeout(fn, timeout, rows));
+  if (!rows && fn.length === 0) return guarded(fn);
+  return guarded((...given) => call(fn, rows ? given : []));
+}
+
+// --- Unhandled rejections and uncaught exceptions ---------------------------
+
+/** The errors that arrived while no test ran, for the next `afterEach` or `afterAll`. */
+/** @type {unknown[]} */
+const stray = [];
+/** The test or hook running, which an error that arrives fails at once. */
+/** @type {((error: unknown) => void) | null} */
+let failRunning = null;
+
+/**
+ * An error Node reports as uncaught or as an unhandled rejection: it fails the
+ * running test, or waits for the next hook, unless the test listens itself.
+ *
+ * @param {unknown} error the error, or the rejection's reason
+ * @param {string} origin `uncaughtException` or `unhandledRejection`
+ */
+function trip(error, origin) {
+  const mine = origin === 'unhandledRejection' ? 'unhandledRejection' : 'uncaughtException';
+  // This file's own listener is one of them.
+  if (process.listenerCount('uncaughtException') > 1 || process.listenerCount(mine) > 1) return;
+  const wrapped = new Error(`${origin === 'unhandledRejection' ? 'An unhandled rejection' : 'An uncaught exception'}: ${describe(error)}`, {
+    cause: error,
+  });
+  if (failRunning !== null) failRunning(wrapped);
+  else stray.push(wrapped);
+}
+
+/**
+ * The error's name and message, or the value as text.
+ *
+ * @param {unknown} error the error
+ * @returns {string} its description
+ */
+function describe(error) {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  try {
+    return String(error);
+  } catch {
+    return Object.prototype.toString.call(error);
+  }
+}
+
+// Under --unhandled-rejections=strict a rejection reaches the
+// `uncaughtException` listener, with the origin `unhandledRejection`, and then
+// `unhandledRejection`; without it, only `unhandledRejection`. Each error is
+// counted once.
+const STRICT = [...process.execArgv, ...(process.env.NODE_OPTIONS ?? '').split(/\s+/)].includes('--unhandled-rejections=strict');
+process.on('uncaughtException', (error, origin) => trip(error, origin));
+process.on('unhandledRejection', (reason) => {
+  if (!STRICT) trip(reason, 'unhandledRejection');
+});
+
+/**
+ * `fn`, failing at once when an error arrives while it runs. Arity 0: `fn` is
+ * one `timed` already made safe to call without `done`, or takes none.
+ *
+ * @param {TestFn} fn the test or hook function
+ * @returns {TestFn} the function the runner calls
+ */
+function guarded(fn) {
+  return async (...given) => {
+    /** @type {(error: unknown) => void} */
+    let fail = () => {};
+    const tripped = new Promise((_, reject) => {
+      fail = reject;
+    });
+    failRunning = fail;
+    try {
+      await Promise.race([Promise.resolve().then(() => fn(...given)), tripped]);
+    } finally {
+      if (failRunning === fail) failRunning = null;
+    }
+  };
+}
+
+/**
+ * Fails with the errors that arrived while no test ran, if any.
+ */
+function throwStray() {
+  if (stray.length === 0) return;
+  const errors = stray.splice(0);
+  throw errors.length === 1 ? errors[0] : new AggregateError(errors, `${errors.length} errors arrived between tests`);
 }
 
 /**
@@ -177,7 +272,7 @@ function timedForm(registerFn) {
 function refusingTimeout(member, label) {
   return (name, fn, timeout) => {
     if (timeout !== undefined) throw new Error(`${label}: test/jest_setup.js does not apply a timeout to it`);
-    return member(name, fn);
+    return member(name, timed(fn, undefined));
   };
 }
 
@@ -191,9 +286,56 @@ if (register.failing !== undefined) {
   test.failing = Object.assign(refused, { each: refused });
 }
 
-globals.test = test;
-globals.it = test;
-globals.fit = test.only;
 for (const [name, hook] of Object.entries(hooks)) {
   if (typeof hook === 'function') globals[name] = (fn, timeout) => hook(timed(fn, timeout));
+}
+// An error that arrived after a test ended fails the next afterEach, or the
+// file once its tests have run: a root afterEach and afterAll, registered by
+// the file's first registration, which is at its root. (The runner clears
+// what this file would register now, before it loads a test file.)
+let rootHooksRegistered = false;
+/** @type {WeakMap<Function, Function>} */
+const rootedMembers = new WeakMap();
+function registerRootHooks() {
+  if (rootHooksRegistered) return;
+  rootHooksRegistered = true;
+  const { afterEach, afterAll } = hooks;
+  if (typeof afterEach === 'function') afterEach(throwStray);
+  // One more turn of the timers first, for an error the last test left behind.
+  if (typeof afterAll === 'function') afterAll(guarded(() => new Promise((resolve) => setTimeout(resolve, 10)).then(throwStray)));
+}
+
+/**
+ * `member`, and its `only`, `skip` and `each`, registering the root hooks first.
+ *
+ * @template {Function} M
+ * @param {M} member a Jest member
+ * @returns {M} the member
+ */
+function rooted(member) {
+  const known = rootedMembers.get(member);
+  if (known !== undefined) return /** @type {M} */ (known);
+  const call = (/** @type {unknown[]} */ ...args) => {
+    registerRootHooks();
+    return member(...args);
+  };
+  // Jest's members refer to one another (a member's `only` can be itself).
+  rootedMembers.set(member, call);
+  for (const key of ['only', 'skip', 'each', 'concurrent', 'failing', 'todo']) {
+    const value = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (member))[key];
+    if (typeof value === 'function') /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (call))[key] = rooted(value);
+  }
+  return /** @type {M} */ (/** @type {unknown} */ (call));
+}
+
+globals.test = rooted(test);
+globals.it = globals.test;
+globals.fit = rooted(test.only);
+for (const name of ['describe', 'fdescribe', 'xdescribe', 'xit', 'xtest']) {
+  const member = globals[name];
+  if (typeof member === 'function') globals[name] = rooted(member);
+}
+for (const name of Object.keys(hooks)) {
+  const member = globals[name];
+  if (typeof member === 'function') globals[name] = rooted(member);
 }

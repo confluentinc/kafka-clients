@@ -76,10 +76,49 @@ test('another test is skipped', () => {});
   'failing.test.js': `test.failing('a failing test whose body passes', () => {});\n`,
   'failing_throws.test.js': `test.failing('a failing test whose body throws', () => { throw new Error('x'); });\n`,
   'concurrent.test.js': `test.concurrent('a concurrent test', async () => {}, 1000);\n`,
+  'tripwire.test.js': `${SLEEP}
+test('the test process runs with strict unhandled rejections', () => {
+  if (!process.execArgv.includes('--unhandled-rejections=strict')) throw new Error(process.execArgv.join(' '));
+});
+test('an unhandled rejection fails the test it arrives in', async () => {
+  Promise.reject(new Error('lost'));
+  await sleep(5000);
+});
+test('an uncaught exception fails the test it arrives in', async () => {
+  setTimeout(() => { throw new Error('thrown'); }, 10);
+  await sleep(5000);
+});
+describe('a hook', () => {
+  beforeEach(async () => { Promise.reject(new Error('in a hook')); await sleep(5000); });
+  test('after a hook that tripped', () => {});
+});
+test('a test after them passes', () => {});
+test('a test listening for unhandledRejection itself sees its rejection', async () => {
+  const seen = [];
+  const listener = (reason) => seen.push(reason.message);
+  process.on('unhandledRejection', listener);
+  Promise.reject(new Error('mine'));
+  await sleep(50);
+  process.off('unhandledRejection', listener);
+  if (seen.join() !== 'mine') throw new Error(\`seen: \${seen.join()}\`);
+});
+test('a test listening for uncaughtException itself sees its error', async () => {
+  const seen = [];
+  const listener = (error) => seen.push(error.message);
+  process.on('uncaughtException', listener);
+  setTimeout(() => { throw new Error('also mine'); }, 0);
+  await sleep(50);
+  process.off('uncaughtException', listener);
+  if (seen.join() !== 'also mine') throw new Error(\`seen: \${seen.join()}\`);
+});
+test('a test that leaves an error behind passes', () => {
+  setTimeout(() => { throw new Error('late'); }, 0);
+});
+`,
 };
 
 /** @typedef {{ ancestorTitles: string[], title: string, status: string, failureMessages: string[] }} Assertion */
-/** @typedef {{ name: string, status: string, message: string, assertionResults: Assertion[] }} FileResult */
+/** @typedef {{ name: string, status: string, message: string, startTime: number, endTime: number, assertionResults: Assertion[] }} FileResult */
 
 /**
  * The first project of jest.config.cjs, every `<rootDir>` in it replaced with
@@ -241,4 +280,33 @@ test('test.failing is refused whatever its body does, and test.concurrent refuse
   assert.ok(concurrent);
   assert.equal(concurrent.status, 'failed');
   assert.match(concurrent.message, /test\.concurrent: test\/jest_setup\.js does not apply a timeout to it/);
+});
+
+test('an unhandled rejection or an uncaught exception fails the test or hook it arrives in, at once', () => {
+  const tests = outcomes('tripwire.test.js');
+  assertOutcome(tests, 'the test process runs with strict unhandled rejections', 'passed');
+  assertOutcome(tests, 'an unhandled rejection fails the test it arrives in', 'failed', 'An unhandled rejection: Error: lost');
+  assertOutcome(tests, 'an uncaught exception fails the test it arrives in', 'failed', 'An uncaught exception: Error: thrown');
+  assertOutcome(tests, 'a test after them passes', 'passed');
+  const result = results.get('tripwire.test.js');
+  assert.ok(result);
+  const hook = result.assertionResults.find((a) => a.title === '(beforeEach)' && a.ancestorTitles[0] === 'a hook');
+  assert.ok(hook, 'no (beforeEach) entry');
+  assert.equal(hook.status, 'failed');
+  assert.match(hook.failureMessages.join('\n'), /An unhandled rejection: Error: in a hook/);
+  // Each failed at once, not at the end of its 5 s sleep.
+  assert.ok(result.endTime - result.startTime < 4000, `the file ran ${result.endTime - result.startTime} ms`);
+});
+
+test('a test listening itself opts out, and an error left behind fails the file', () => {
+  const tests = outcomes('tripwire.test.js');
+  assertOutcome(tests, 'a test listening for unhandledRejection itself sees its rejection', 'passed');
+  assertOutcome(tests, 'a test listening for uncaughtException itself sees its error', 'passed');
+  assertOutcome(tests, 'a test that leaves an error behind passes', 'passed');
+  const result = results.get('tripwire.test.js');
+  assert.ok(result);
+  const late = result.assertionResults.filter((a) => a.title === '(afterAll)' && a.ancestorTitles.length === 0);
+  assert.equal(late.length, 1, JSON.stringify(result.assertionResults.map((a) => a.title)));
+  assert.equal(late[0].status, 'failed');
+  assert.match(late[0].failureMessages.join('\n'), /An uncaught exception: Error: late/);
 });

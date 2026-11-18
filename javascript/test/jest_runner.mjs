@@ -19,7 +19,8 @@
 // copy of the package (whose error classes the addon then knows), reloads a
 // module or counts the process's threads. Each file gets a fresh process, as
 // it would on its own; at most `maxWorkers` run at once (one with
-// --runInBand).
+// --runInBand). Each runs with --unhandled-rejections=strict
+// (test/jest_setup.js).
 
 import Tinypool from 'tinypool';
 
@@ -71,6 +72,11 @@ export default class IsolatedLightRunner {
           // Tinypool's type has no undefined values; Node's environment has none either.
           env: /** @type {Record<string, string>} */ (process.env),
           trackUnmanagedFds: false,
+          // An unhandled rejection is raised as an uncaught exception even
+          // when something listens for `unhandledRejection`, so that
+          // test/jest_setup.js fails the test it arrives in. Only the test
+          // files' own processes: a child a test starts gets Node's default.
+          execArgv: [...process.execArgv, '--unhandled-rejections=strict'],
         });
         // The worker asks for its configuration once it starts
         // (jest-light-runner's protocol for a child process).
