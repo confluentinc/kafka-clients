@@ -332,6 +332,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <returns>The topic's partitions (empty on a <see cref="MockProducer{TKey, TValue}"/>).</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    /// <exception cref="ArgumentException"><paramref name="topic"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 

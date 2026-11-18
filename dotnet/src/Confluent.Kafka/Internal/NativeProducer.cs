@@ -222,6 +222,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         ThrowIfClosed();
+        AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
         cancellationToken.ThrowIfCancellationRequested();
         if (IsMock && _completion.IsCurrentThread)
         {
@@ -363,6 +364,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         ThrowIfClosed();
+        AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
         if (IsMock && _completion.IsCurrentThread)
         {
             return PartitionsForBlocking(topic);

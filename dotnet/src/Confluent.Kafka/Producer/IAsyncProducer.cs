@@ -417,6 +417,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="topic"/> contains a NUL character, which the native client
+    /// cannot receive unchanged (thrown synchronously).</exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
 
     /// <summary>
