@@ -1056,7 +1056,7 @@ do; ledger 105), `Wakeup()`, `Metrics()`
 `metrics()`; on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner check, as Java's
 takes no `acquire()`, and holds only the use that keeps the handle alive; the core answers it
 while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; the mocks wait, as Java's
-`synchronized` mock; after close it throws, the call-site list below §3's idiom map), `Register`/`UnregisterMetricForSubscription`, and
+`synchronized` mock; after close it throws, the call-site list below §3's idiom map), and
 `EnforceRebalance(string? reason
 = null)` (a no-op that only logs under KIP-848; one method collapses Java's two overloads). It
 makes no owner check and, once the consumer is closed, returns without calling the core, as Java's
@@ -1071,10 +1071,14 @@ concurrent-access null — the producer ABI documents none, it takes the core `M
 so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
 producer metrics only, none of Java's network-client metrics: no connection, request, I/O or
 authentication metrics, no per-node metrics and no `app-info` *(recorded gap; Python's binding
-returns the same set. Why: the core registers none of them. Goes when: the core does)*) and the two
-metric-subscription methods. `BeginTransaction` is not on this list: it waits while the core drains
+returns the same set. Why: the core registers none of them. Goes when: the core does)*).
+`BeginTransaction` is not on this list: it waits while the core drains
 the queued sends, so it is a `Task` on `IAsyncProducer` (§4 **Producer transactions**).
-Everything else is async.
+Everything else is async. Java's three KIP-714 members, `clientInstanceId(Duration)`,
+`registerMetricForSubscription(KafkaMetric)` and `unregisterMetricFromSubscription(KafkaMetric)`,
+are on neither the producer nor the consumer, sync or async *(recorded gap, as Python's, whose
+producer module lists the three as not generated. Why: the C ABI has no entry point for them. Goes
+when: it has)*.
 
 ⚠ **`Seek` / `CurrentLag` (M19/P1, decision 22, ledger 103).** Both block in Java (an
 `addAndGet` event round-trip). `IAsyncConsumer.Seek` returns a `Task` over `seek_*_cb`, as
