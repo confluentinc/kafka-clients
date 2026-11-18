@@ -55,15 +55,17 @@ use log::warn;
 use crate::common::Error;
 use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
 use crate::common::config::config_def::{
-    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, LambdaValidator, NonEmptyString, ParsedValue,
-    Range, Type, ValidList, ValidString, as_string, config_error,
+    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, NonEmptyString, ParsedValue, Range, Type,
+    ValidList, ValidString,
 };
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::errors::InvalidConfigurationError;
 use crate::common::requests::JoinGroupRequest;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::utils::Utils;
-use crate::consumer::internals::{AutoOffsetResetStrategy, auto_offset_reset_strategy};
+use crate::consumer::internals::{
+    AutoOffsetResetStrategy, auto_offset_reset_strategy, share_acknowledgement_mode, share_acquire_mode,
+};
 use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Process-wide counter for deriving a default `client.id`.
@@ -382,16 +384,16 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Importance::Low,
         )
         // Java validates the two share keys with `ShareAcknowledgementMode.Validator`
-        // and `ShareAcquireMode.Validator`, translated below. The share consumer
-        // is out of scope (`consumer-threading.md` §20), so a valid non-blank
-        // value is then rejected under either group protocol by
+        // and `ShareAcquireMode.Validator`. A `ConsumerConfig` rejects a valid
+        // non-blank value under either group protocol in
         // `checkUnsupportedConfigsPostProcess`, which skips a blank value: the
-        // validators are what reject a blank one, as in Java.
+        // validators are what reject a blank one, as in Java. A
+        // `ShareConsumerConfig` skips that check and accepts them.
         .define_with_validator(
             ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
             Type::String,
             "implicit",
-            share_acknowledgement_mode_validator(),
+            share_acknowledgement_mode::Validator,
             Importance::Medium,
         )
         // Java's `DEFAULT_SHARE_ACQUIRE_MODE` is `ShareAcquireMode.BATCH_OPTIMIZED.name()`,
@@ -400,60 +402,11 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
             Type::String,
             "BATCH_OPTIMIZED",
-            share_acquire_mode_validator(),
+            share_acquire_mode::Validator,
             Importance::Medium,
         )
     // Java ends the chain with `config.providers`; it is left undefined until config providers are translated.
 });
-
-/// Java's `ShareAcknowledgementMode.Validator`: the value must be one of
-/// `implicit` or `explicit`, matched exactly (`ShareAcknowledgementMode.fromString`
-/// checks it against `Utils.enumOptions`, the constants' lower-case
-/// `toString()`).
-fn share_acknowledgement_mode_validator() -> LambdaValidator {
-    LambdaValidator::with(
-        |name, value| {
-            let acknowledgement_mode = as_string(value)?;
-            if acknowledgement_mode.is_some_and(|mode| ["implicit", "explicit"].contains(&mode)) {
-                return Ok(());
-            }
-            Err(config_error(
-                name,
-                value,
-                format!(
-                    "Invalid value `{}` for configuration {name}. The value must either be 'implicit' or 'explicit'.",
-                    acknowledgement_mode.unwrap_or("null")
-                ),
-            ))
-        },
-        || "[implicit, explicit]".to_owned(),
-    )
-}
-
-/// Java's `ShareAcquireMode.Validator`: the value must name one of the
-/// `ShareAcquireMode` constants, case-insensitively (`ShareAcquireMode.of`
-/// upper-cases it before `valueOf`).
-fn share_acquire_mode_validator() -> LambdaValidator {
-    LambdaValidator::with(
-        |name, value| {
-            let acquire_mode = as_string(value)?;
-            if acquire_mode
-                .is_some_and(|mode| ["BATCH_OPTIMIZED", "RECORD_LIMIT"].contains(&mode.to_uppercase().as_str()))
-            {
-                return Ok(());
-            }
-            Err(config_error(
-                name,
-                value,
-                format!(
-                    "Invalid value `{}` for configuration {name}. The value must either be 'batch_optimized' or 'record_limit'.",
-                    acquire_mode.unwrap_or("null")
-                ),
-            ))
-        },
-        || "[batch_optimized, record_limit]".to_owned(),
-    )
-}
 
 /// The consumer configuration keys
 // Documentation for the underlying keys can be found in the Kafka

@@ -62,6 +62,16 @@ mod positions_validator;
 mod request_manager;
 mod request_managers;
 mod request_state;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+)]
+pub(crate) mod share_acknowledgement_mode;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+)]
+pub(crate) mod share_acquire_mode;
 pub(crate) mod subscription_state;
 mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
@@ -115,6 +125,10 @@ pub(crate) use positions_validator::PositionsValidator;
 pub(crate) use request_manager::RequestManager;
 pub(crate) use request_managers::RequestManagers;
 pub(crate) use request_state::RequestState;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+pub(crate) use share_acquire_mode::ShareAcquireMode;
 pub(crate) use subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
 pub(crate) use timed_request_state::TimedRequestState;
 pub(crate) use topic_metadata_request_manager::TopicMetadataRequestManager;
