@@ -57,8 +57,9 @@ Only five Java types in the closure are `@InterfaceAudience.Public`:
 `ShareConsumer`, `KafkaShareConsumer`, `MockShareConsumer`, `AcknowledgeType`,
 `AcknowledgementCommitCallback`. Everything else is crate-private, including
 `ShareConsumerConfig` (no annotation), `ShareAcknowledgementMode` and
-`ShareAcquireMode` (both in `consumer.internals`). `MockShareConsumer` stays
-public through `rust/xtask/public-audience-allowlist.txt`, like `MockConsumer`.
+`ShareAcquireMode` (both in `consumer.internals`). Like `MockConsumer`,
+`MockShareConsumer` is itself `@InterfaceAudience.Public` in 4.4, so it needs no
+test-jar exception (`TEST_JAR_CLASSES` in `rust/xtask/src/java_api.rs`).
 
 **Async vs sync per method.** A method is `async` when Java blocks in it, or
 when it runs the user's (async, §3) acknowledgement callback.
