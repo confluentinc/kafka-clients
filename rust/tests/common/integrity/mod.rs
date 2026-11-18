@@ -22,6 +22,8 @@
 //!   read-back, and the [`run`](workload::run) that drives them.
 //! - [`java`]: the final read-back done by Apache Kafka's Java console
 //!   consumer instead.
+//! - [`clients`]: the clients a run checks, the Rust client's or a binding's
+//!   through the gRPC multi-language test servers.
 //!
 //! Used by the `integrity_test` integration tests (seconds each, in CI) and by
 //! the long-running `integrity` target (`cargo xtask integrity-test`), against
@@ -33,6 +35,7 @@
 //! leave unfulfilled. Each target that uses it includes it by path.
 
 pub mod checker;
+pub mod clients;
 pub mod java;
 pub mod record;
 pub mod workload;

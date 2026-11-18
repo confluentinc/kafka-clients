@@ -28,7 +28,7 @@
 //!
 //! Every client connects with the same base properties (bootstrap servers and
 //! security), so a run works the same against a local cluster and an external
-//! one.
+//! one. The run's [`Clients`] create them: the Rust client's, or a binding's.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,15 +37,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
-use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
+use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::{Error, KafkaFuture, TopicPartition};
 use confluent_kafka::consumer::{
     Consumer, ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata,
 };
-use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, RecordMetadata};
+use confluent_kafka::producer::RecordMetadata;
 use tokio::task::JoinHandle;
 
 use super::checker::{Event, Ledger, Requirements, StreamKind, TxnOutcome, Verdict};
+use super::clients::{BoxConsumer, BoxProducer, Clients};
 use super::java::{JavaReader, java_final_read_back};
 use super::record::{
     Identity, PayloadProfile, RecordGenerator, RecordId, SplitMix64, TxnIntent, build_record, copy_record,
@@ -54,6 +55,9 @@ use crate::common::test_utils;
 
 /// Client properties.
 pub type Props = HashMap<String, String>;
+
+type Producer = dyn confluent_kafka::producer::DynProducer<Vec<u8>, Vec<u8>>;
+type Reader = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 /// Records a writer may have in flight before it waits for the oldest.
 const MAX_IN_FLIGHT: usize = 20_000;
@@ -311,6 +315,9 @@ pub struct RunSpec {
     /// When set, Apache Kafka's Java console consumer does the final
     /// read-back instead of the Rust consumer.
     pub java_reader: Option<JavaReader>,
+    /// The clients the writers, the live group, the copiers and the final
+    /// read-back use; the Rust client's by default.
+    pub clients: Clients,
     pub requirements: Requirements,
 }
 
@@ -329,6 +336,7 @@ impl RunSpec {
             watchdog: Duration::from_secs(120),
             status_every: None,
             java_reader: None,
+            clients: Clients::rust(),
             requirements: Requirements::default(),
         }
     }
@@ -452,11 +460,7 @@ const COMMIT_TIMEOUT_RETRIES: u32 = 5;
 /// outcome and the producer then accepts only the same call again (Java's
 /// `commitTransaction` contract: "the user can retry by calling
 /// commitTransaction again"), so a timeout is retried rather than aborted.
-async fn commit_transaction(
-    producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
-    who: &str,
-    ledger: &Ledger,
-) -> Result<(), Error> {
+async fn commit_transaction(producer: &Producer, who: &str, ledger: &Ledger) -> Result<(), Error> {
     let mut timeouts = 0;
     loop {
         match producer.commit_transaction().await {
@@ -474,13 +478,7 @@ async fn commit_transaction(
 
 /// Ends `txn` as it intends, or aborts it when one of its sends `failed`, and
 /// reports it. Returns `false` when the producer can no longer be used.
-async fn end_txn(
-    producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
-    txn: OpenTxn,
-    failed: bool,
-    spec: &WriterSpec,
-    ledger: &Ledger,
-) -> bool {
+async fn end_txn(producer: &Producer, txn: OpenTxn, failed: bool, spec: &WriterSpec, ledger: &Ledger) -> bool {
     let (outcome, healthy) = if txn.intent == TxnIntent::Abort || failed {
         // Send the records of a planned abort first, so the broker writes and
         // then aborts them and read_committed readers must skip them; an abort
@@ -522,11 +520,12 @@ async fn end_txn(
     healthy
 }
 
-fn create_producer(
+async fn create_producer(
+    clients: &Clients,
     base: &Props,
     spec: &WriterSpec,
     incarnation: u32,
-) -> Result<KafkaProducer<Vec<u8>, Vec<u8>>, Error> {
+) -> Result<BoxProducer, Error> {
     let mut layers = vec![
         ("client.id", format!("integrity-writer-{}-{incarnation}", spec.writer)),
         ("acks", "all".to_string()),
@@ -535,17 +534,13 @@ fn create_producer(
     if let Some(txn) = &spec.transactions {
         layers.push(("transactional.id", txn.transactional_id.clone()));
     }
-    let props = merged(base, &layers, &spec.props);
-    KafkaProducer::new(
-        ProducerConfig::new(&props)?,
-        ByteArraySerializer::default(),
-        ByteArraySerializer::default(),
-    )
+    clients.producer(merged(base, &layers, &spec.props)).await
 }
 
 /// One writer, until `stop` is set or it has written `spec.records`.
 async fn run_writer(
     spec: WriterSpec,
+    clients: Clients,
     base: Arc<Props>,
     ledger: Arc<Ledger>,
     generator: RecordGenerator,
@@ -561,7 +556,7 @@ async fn run_writer(
     let mut incarnation = 0u32;
     let finished = |written: u64| stop.load(Ordering::SeqCst) || spec.records.is_some_and(|n| written >= n);
     while !finished(written) {
-        let producer = match create_producer(&base, &spec, incarnation) {
+        let producer = match create_producer(&clients, &base, &spec, incarnation).await {
             Ok(producer) => producer,
             Err(e) => {
                 ledger.event(Event::ProducerError, format!("writer {} create: {e}", spec.writer));
@@ -614,7 +609,7 @@ async fn run_writer(
                 timestamp: now_ms(),
             };
             let record = build_record(&spec.topic, None, &identity, generator.generate(spec.writer, seq));
-            match Producer::send(&producer, record).await {
+            match producer.send(record).await {
                 Ok(future) => match txn.as_mut() {
                     Some(open) => open.futures.push((seq, future)),
                     None => in_flight.push_back((seq, future)),
@@ -624,7 +619,7 @@ async fn run_writer(
                     // The transaction can no longer commit (Java's producer is
                     // then in an abortable error), so end it now.
                     if let Some(open) = txn.take() {
-                        healthy = end_txn(&producer, open, true, &spec, &ledger).await;
+                        healthy = end_txn(&*producer, open, true, &spec, &ledger).await;
                     }
                 },
             }
@@ -642,11 +637,11 @@ async fn run_writer(
                     .as_ref()
                     .is_some_and(|t| t.futures.len() >= txn_spec.records_per_txn as usize)
             {
-                healthy = end_txn(&producer, txn.take().expect("open"), false, &spec, &ledger).await;
+                healthy = end_txn(&*producer, txn.take().expect("open"), false, &spec, &ledger).await;
             }
         }
         if let Some(open) = txn.take()
-            && !end_txn(&producer, open, false, &spec, &ledger).await
+            && !end_txn(&*producer, open, false, &spec, &ledger).await
         {
             healthy = false;
         }
@@ -738,13 +733,9 @@ impl ConsumerRebalanceListener for CommitOnRevoke {
     }
 }
 
-fn create_consumer(
-    base: &Props,
-    group_id: &str,
-    client_id: String,
-    extra: &Props,
-) -> Result<KafkaConsumer<Vec<u8>, Vec<u8>>, Error> {
-    let props = merged(
+/// The properties of a live-group member or a copier's consumer.
+fn consumer_props(base: &Props, group_id: &str, client_id: String, extra: &Props) -> Props {
+    merged(
         base,
         &[
             ("group.id", group_id.to_string()),
@@ -756,11 +747,6 @@ fn create_consumer(
             ("allow.auto.create.topics", "false".to_string()),
         ],
         extra,
-    );
-    KafkaConsumer::new(
-        ConsumerConfig::new(&props)?,
-        ByteArrayDeserializer::default(),
-        ByteArrayDeserializer::default(),
     )
 }
 
@@ -785,6 +771,7 @@ fn next_offsets<'a>(
 async fn run_member(
     member: usize,
     spec: GroupSpec,
+    clients: Clients,
     base: Arc<Props>,
     ledger: Arc<Ledger>,
     writers_stopped: Arc<AtomicBool>,
@@ -796,32 +783,19 @@ async fn run_member(
     while !stop.load(Ordering::SeqCst) {
         let client_id = format!("integrity-reader-{member}-{generation}");
         generation += 1;
-        let mut consumer = match create_consumer(&base, &spec.group_id, client_id, &spec.props) {
+        let pending = Pending::default();
+        let props = consumer_props(&base, &spec.group_id, client_id, &spec.props);
+        let listener = |handle| -> Arc<dyn ConsumerRebalanceListener> {
+            Arc::new(CommitOnRevoke { member, handle, pending: pending.clone(), ledger: ledger.clone() })
+        };
+        let mut consumer = match clients.subscribed_consumer(props, spec.topics.clone(), listener).await {
             Ok(consumer) => consumer,
             Err(e) => {
-                ledger.event(Event::ConsumerError, format!("member {member} create: {e}"));
+                ledger.event(Event::ConsumerError, format!("member {member} create or subscribe: {e}"));
                 tokio::time::sleep(RETRY_BACKOFF).await;
                 continue;
             },
         };
-        let pending = Pending::default();
-        let listener = CommitOnRevoke {
-            member,
-            handle: consumer.handle(),
-            pending: pending.clone(),
-            ledger: ledger.clone(),
-        };
-        if let Err(e) = consumer
-            .subscribe_with_topics_listener(spec.topics.clone(), Arc::new(listener))
-            .await
-        {
-            ledger.event(Event::ConsumerError, format!("member {member} subscribe: {e}"));
-            if let Err(e) = consumer.close().await {
-                ledger.event(Event::ConsumerError, format!("member {member} close: {e}"));
-            }
-            tokio::time::sleep(RETRY_BACKOFF).await;
-            continue;
-        }
         // Members restart in turn, not all at once.
         let deadline = spec.restart.as_ref().map(|r| {
             let stagger = if generation == 1 {
@@ -911,7 +885,7 @@ async fn run_member(
 /// returns those offsets: Apache Kafka's
 /// `TransactionalMessageCopier.resetToLastCommittedPositions`.
 async fn rewind(
-    consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut Reader,
     partitions: &[TopicPartition],
 ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
     let committed = consumer.committed(partitions).await?;
@@ -923,7 +897,7 @@ async fn rewind(
 }
 
 /// Whether the copier owns every input partition and has read each to its end.
-async fn copied_everything(consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>, input: &str) -> Result<bool, Error> {
+async fn copied_everything(consumer: &mut Reader, input: &str) -> Result<bool, Error> {
     let partitions = consumer.partitions_for(input).await?.len();
     let assigned: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
     if assigned.len() < partitions {
@@ -942,25 +916,17 @@ async fn copied_everything(consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>, input
 /// without one.
 async fn start_copier_consumer(
     spec: &CopierSpec,
+    clients: &Clients,
     base: &Props,
     ledger: &Ledger,
     stop: &AtomicBool,
-) -> Option<KafkaConsumer<Vec<u8>, Vec<u8>>> {
+) -> Option<BoxConsumer> {
     loop {
-        match create_consumer(base, &spec.group_id, "integrity-copier".to_string(), &spec.props) {
-            Ok(mut consumer) => match consumer
-                .subscribe_with_topics_listener(vec![spec.input.clone()], Arc::new(WaitForPoll))
-                .await
-            {
-                Ok(()) => return Some(consumer),
-                Err(e) => {
-                    ledger.event(Event::ConsumerError, format!("copier subscribe: {e}"));
-                    if let Err(e) = consumer.close().await {
-                        ledger.event(Event::ConsumerError, format!("copier consumer close: {e}"));
-                    }
-                },
-            },
-            Err(e) => ledger.event(Event::ConsumerError, format!("copier consumer create: {e}")),
+        let props = consumer_props(base, &spec.group_id, "integrity-copier".to_string(), &spec.props);
+        let listener = |_| -> Arc<dyn ConsumerRebalanceListener> { Arc::new(WaitForPoll) };
+        match clients.subscribed_consumer(props, vec![spec.input.clone()], listener).await {
+            Ok(consumer) => return Some(consumer),
+            Err(e) => ledger.event(Event::ConsumerError, format!("copier consumer create or subscribe: {e}")),
         }
         if stop.load(Ordering::SeqCst) {
             return None;
@@ -973,10 +939,11 @@ async fn start_copier_consumer(
 /// `None` once `stop` is set without one having started.
 async fn start_copier_producer(
     spec: &CopierSpec,
+    clients: &Clients,
     base: &Props,
     ledger: &Ledger,
     stop: &AtomicBool,
-) -> Option<KafkaProducer<Vec<u8>, Vec<u8>>> {
+) -> Option<BoxProducer> {
     let props = merged(
         base,
         &[
@@ -988,10 +955,7 @@ async fn start_copier_producer(
         &Props::new(),
     );
     loop {
-        let created = ProducerConfig::new(&props).and_then(|config| {
-            KafkaProducer::new(config, ByteArraySerializer::default(), ByteArraySerializer::default())
-        });
-        match created {
+        match clients.producer(props.clone()).await {
             Ok(producer) => match producer.init_transactions().await {
                 Ok(()) => return Some(producer),
                 Err(e) => {
@@ -1015,7 +979,7 @@ async fn start_copier_producer(
 /// `stop` is set. A partition it lost meanwhile is left to its new owner,
 /// which starts from the same committed offset.
 async fn rewind_owned(
-    consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>,
+    consumer: &mut Reader,
     partitions: &[TopicPartition],
     ledger: &Ledger,
     stop: &AtomicBool,
@@ -1041,6 +1005,7 @@ async fn rewind_owned(
 /// offsets, which then say which of the two happened.
 async fn run_copier(
     spec: CopierSpec,
+    clients: Clients,
     base: Arc<Props>,
     ledger: Arc<Ledger>,
     seed: u64,
@@ -1048,10 +1013,10 @@ async fn run_copier(
     stop: Arc<AtomicBool>,
 ) {
     let mut aborts = AbortPlan::new(spec.abort_one_in, seed ^ 0xC0_FFEE);
-    let Some(mut consumer) = start_copier_consumer(&spec, &base, &ledger, &stop).await else {
+    let Some(mut consumer) = start_copier_consumer(&spec, &clients, &base, &ledger, &stop).await else {
         return;
     };
-    let mut producer = start_copier_producer(&spec, &base, &ledger, &stop).await;
+    let mut producer = start_copier_producer(&spec, &clients, &base, &ledger, &stop).await;
     // The offsets the copier committed, as far as it knows; the group's
     // committed offsets must match them (a partition missing here holds its
     // seeded 0).
@@ -1070,7 +1035,7 @@ async fn run_copier(
         };
         if records.is_empty() {
             if writers_done.load(Ordering::SeqCst) {
-                match copied_everything(&mut consumer, &spec.input).await {
+                match copied_everything(&mut *consumer, &spec.input).await {
                     Ok(true) => break,
                     Ok(false) => {},
                     Err(e) => ledger.event(Event::ConsumerError, format!("copier progress: {e}")),
@@ -1091,7 +1056,7 @@ async fn run_copier(
             Ok(()) => {
                 let mut failed = None;
                 for record in &records {
-                    match Producer::send(active, copy_record(record, &spec.output)).await {
+                    match active.send(copy_record(record, &spec.output)).await {
                         Ok(future) => futures.push((record.partition(), record.offset(), future)),
                         Err(e) => failed = Some(e),
                     }
@@ -1111,7 +1076,7 @@ async fn run_copier(
                 }
                 let committed = failed.is_none()
                     && !planned_abort
-                    && match commit_transaction(active, "copier", &ledger).await {
+                    && match commit_transaction(&**active, "copier", &ledger).await {
                         Ok(()) => true,
                         Err(e) => {
                             failed = Some(e);
@@ -1152,7 +1117,7 @@ async fn run_copier(
             {
                 ledger.event(Event::ProducerError, format!("copier close: {e}"));
             }
-            producer = start_copier_producer(&spec, &base, &ledger, &stop).await;
+            producer = start_copier_producer(&spec, &clients, &base, &ledger, &stop).await;
         }
         if committed {
             expected.extend(offsets.iter().map(|(tp, o)| (tp.clone(), o.offset())));
@@ -1163,7 +1128,7 @@ async fn run_copier(
                     Err(e) => ledger.event(Event::ConsumerError, format!("copier committed: {e}")),
                 }
             }
-        } else if let Some(read) = rewind_owned(&mut consumer, &partitions, &ledger, &stop).await {
+        } else if let Some(read) = rewind_owned(&mut *consumer, &partitions, &ledger, &stop).await {
             if outcome == TxnOutcome::Aborted {
                 // A planned abort leaves the offsets where the last commit put
                 // them.
@@ -1193,7 +1158,13 @@ async fn run_copier(
 /// consumer (no group) and reports each record. Returns whether it reached the
 /// end of every partition; it gives up once `timeout` passes without moving
 /// forward.
-pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger, timeout: Duration) -> bool {
+pub async fn final_read_back(
+    clients: &Clients,
+    base: &Props,
+    topics: &[TopicSpec],
+    ledger: &Ledger,
+    timeout: Duration,
+) -> bool {
     let props = merged(
         base,
         &[
@@ -1208,14 +1179,7 @@ pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger
     );
     let deadline = Instant::now() + timeout;
     let mut consumer = loop {
-        let created = ConsumerConfig::new(&props).and_then(|config| {
-            KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-                config,
-                ByteArrayDeserializer::default(),
-                ByteArrayDeserializer::default(),
-            )
-        });
-        match created {
+        match clients.consumer(props.clone()).await {
             Ok(consumer) => break consumer,
             Err(e) => {
                 ledger.event(Event::ConsumerError, format!("final read-back create: {e}"));
@@ -1288,7 +1252,7 @@ pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger
     remaining.is_empty()
 }
 
-async fn close_final_read_back(mut consumer: KafkaConsumer<Vec<u8>, Vec<u8>>, ledger: &Ledger) {
+async fn close_final_read_back(mut consumer: BoxConsumer, ledger: &Ledger) {
     if let Err(e) = consumer.close().await {
         ledger.event(Event::ConsumerError, format!("final read-back close: {e}"));
     }
@@ -1325,6 +1289,10 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
         spec.run_id, spec.seed
     );
     let base = Arc::new(base);
+    // The clients under test may reach the brokers at other addresses than
+    // the run's own setup clients.
+    let client_base = spec.clients.base(&base);
+    eprintln!("integrity: clients {}", spec.clients.name());
     let ledger = Arc::new(Ledger::new(spec.run_id, spec.seed));
     for topic in &spec.topics {
         ledger.register_topic(&topic.name, topic.partitions, topic.kind.clone());
@@ -1344,7 +1312,8 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
             readers.push(tokio::spawn(run_member(
                 member,
                 group.clone(),
-                base.clone(),
+                spec.clients.clone(),
+                client_base.clone(),
                 ledger.clone(),
                 stop_writers.clone(),
                 stop_readers.clone(),
@@ -1357,7 +1326,8 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
         seed_group_offsets(&base, &copier.group_id, &input).await;
         copiers.push(tokio::spawn(run_copier(
             copier.clone(),
-            base.clone(),
+            spec.clients.clone(),
+            client_base.clone(),
             ledger.clone(),
             spec.seed,
             writers_done.clone(),
@@ -1371,7 +1341,8 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
             let generator = ledger.register_writer(writer.writer, writer.profile.clone());
             tokio::spawn(run_writer(
                 writer.clone(),
-                base.clone(),
+                spec.clients.clone(),
+                client_base.clone(),
                 ledger.clone(),
                 generator,
                 spec.seed,
@@ -1453,7 +1424,7 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
     eprintln!("integrity: final read-back");
     let complete = match &spec.java_reader {
         Some(reader) => java_final_read_back(reader, &spec.topics, &ledger).await,
-        None => final_read_back(&base, &spec.topics, &ledger, spec.final_timeout).await,
+        None => final_read_back(&spec.clients, &client_base, &spec.topics, &ledger, spec.final_timeout).await,
     };
     let mut verdict = ledger.verdict(spec.group.is_some(), complete, &spec.requirements);
     verdict.aborted = aborted;
