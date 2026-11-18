@@ -1301,6 +1301,80 @@ mod tests {
         );
     }
 
+    /// Rust-only (R3): with a rack configured on the production-built
+    /// managers, `HeartbeatState#buildRequestData` sends the RackId on the
+    /// first heartbeat only ("only sent the first time, because it does not
+    /// change"), and again after an error response resets the sent fields
+    /// (`resetHeartbeatState` at the top of Java's `onErrorResponse`).
+    #[tokio::test]
+    async fn test_rack_id_sent_once_and_again_after_reset() {
+        let f = Fixture::new();
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&f.time) as Arc<dyn Time>));
+        let metadata = Arc::new(Metadata::new(100, 1_000, 300_000, ClusterResourceListeners::new()));
+        let mm = Arc::new(ShareMembershipManager::new(
+            DEFAULT_GROUP_ID,
+            Some("rack-1".to_string()),
+            Arc::clone(&f.subs),
+            metadata,
+            Arc::clone(&f.time) as Arc<dyn Time>,
+            &metrics,
+        ));
+        force_state(&mm, MemberState::Stable);
+        force_member(&mm, "member-1", 1);
+        let mut mgr = ShareHeartbeatRequestManager::new(
+            f.now(),
+            &config(),
+            Arc::clone(&f.coord),
+            Arc::clone(&f.subs),
+            Arc::clone(&mm),
+            Arc::clone(&f.beh),
+            &metrics,
+        );
+        mgr.reset_poll_timer(f.now());
+
+        fn rack_id_sent(result: &mut PollResult) -> Option<String> {
+            assert_eq!(1, result.unsent_requests.len());
+            let builder = result.unsent_requests[0].request_builder_mut().expect("a request builder");
+            let version = builder.latest_allowed_version();
+            match builder.build_version(version).expect("build") {
+                AbstractRequest::ShareGroupHeartbeat(request) => request.data().rack_id.clone(),
+                other => panic!("expected a ShareGroupHeartbeatRequest, got {other:?}"),
+            }
+        }
+
+        async fn complete(mgr: &ShareHeartbeatRequestManager, result: &PollResult, error: Errors, now: i64) {
+            result.unsent_requests[0].handler().on_complete(create_heartbeat_response(
+                error,
+                DEFAULT_HEARTBEAT_INTERVAL_MS,
+                now,
+            ));
+            for _ in 0..10_000 {
+                if !mgr.inner.pending_completion_rx.is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("the forwarder did not queue the response");
+        }
+
+        // First heartbeat: the rack is sent.
+        let mut first = mgr.poll(f.now());
+        assert_eq!(Some("rack-1".to_string()), rack_id_sent(&mut first));
+        complete(&mgr, &first, Errors::None, f.now()).await;
+
+        // Next heartbeat: unchanged, so not sent.
+        f.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let mut second = mgr.poll(f.now());
+        assert_eq!(None, rack_id_sent(&mut second));
+        complete(&mgr, &second, Errors::CoordinatorLoadInProgress, f.now()).await;
+
+        // The error response resets the sent fields: the rack goes out again.
+        let _ = mgr.poll(f.now());
+        f.sleep(DEFAULT_RETRY_BACKOFF_MAX_MS);
+        let mut third = mgr.poll(f.now());
+        assert_eq!(Some("rack-1".to_string()), rack_id_sent(&mut third));
+    }
+
     /// Rust-only, as the consumer's test of the same name: the response
     /// forwarder wakes the bg task once it has queued the completion.
     #[tokio::test]

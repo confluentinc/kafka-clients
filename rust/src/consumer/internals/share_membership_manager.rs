@@ -1181,8 +1181,11 @@ mod tests {
     fn assert_fence_is_no_op(fx: &Fixture) {
         assert_ne!(0, fx.mgr.member_epoch());
         // verify(subscriptionState, never()).rebalanceListener()
-        // Deviation: the share manager never reads a rebalance listener; the
-        // observable "no release" is that the subscription was not touched.
+        // Deviation: the share manager never reads a rebalance listener, so
+        // Java's check is vacuous here, and so is this one: the preceding
+        // leave already unsubscribed, so a fence that did release would not
+        // call `assign_from_subscribed` either. The epoch check above and the
+        // caller's state and leave-future checks carry the test.
         assert_eq!(0, fx.assign_from_subscribed_calls());
     }
 
@@ -2025,6 +2028,10 @@ mod tests {
         fx.poll();
 
         verify_reconciliation_triggered_and_completed(&fx, &[]);
+        // Java's verify(subscriptionState).assignFromSubscribedAwaitingCallback(emptySet, any())
+        // (times(1)): the empty set alone is trivially true here, since nothing
+        // was assigned before.
+        assert_eq!(1, fx.assign_from_subscribed_calls());
 
         fx.heartbeat_request_generated();
 
