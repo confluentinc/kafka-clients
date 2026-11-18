@@ -488,9 +488,9 @@ mock.setSendException(new Error('broker down')); // send() now rejects with this
 await mock.close();
 ```
 
-A mock keeps Node running until it is closed, as a producer does; once
-closed and unreferenced it is collected, sends still waiting included. Left
-out:
+A mock keeps Node running until it is closed, as a producer does, and a call
+made on a closed mock keeps Node running until that call settles; once closed
+and unreferenced it is collected, sends still waiting included. Left out:
 Java's constructor taking a `Cluster` (the mock's cluster is always empty, so
 the partitioner is never called), the transaction calls, `setMockMetrics`, and
 the telemetry and metric-subscription calls (the producer package's
@@ -626,11 +626,14 @@ garbage collected; a call made on a closed producer keeps Node running until
 that call settles, as Java's call returns. A call made after `close()` goes to
 the client, which answers as Java's does: `send()` rejects with
 `IllegalStateError` "Cannot perform operation after producer has been
-closed", and `flush()` and a second `close()` resolve. A `process.exit()`
-runs no cleanup: the process ends at once and the unsent records are lost,
-as Java's daemon I/O thread loses unsent records at JVM exit. The preview
-doesn't support clients in worker threads. Create clients in the main
-thread, and send plain data to and from workers (Limitations, below).
+closed", `flush()` and a second `close()` resolve, and `partitionsFor()`
+answers from the metadata the producer holds, or rejects with `KafkaError`
+"Requested metadata update after close" for a topic it holds none for. A
+`process.exit()` runs no cleanup: the process ends at once and the unsent
+records are lost, as Java's daemon I/O thread loses unsent records at JVM
+exit. The preview doesn't support clients in worker threads. Create clients
+in the main thread, and send plain data to and from workers (Limitations,
+below).
 
 `examples/producer.js` produces one record, awaiting its hand-over and then
 its delivery, and prints its metadata:

@@ -115,7 +115,9 @@ newer.
   set, which it rejects with at once, so a callback that awaits either
   otherwise never settles. A serializer's error, an
   `ApiError` or a `TypeError` included, rejects the mock's `send()` as it is,
-  as Java's mock serializes with no `try`. A closed mock nothing
+  as Java's mock serializes with no `try`. A mock keeps Node running until
+  it is closed, and a call made on a closed mock until that call settles, as
+  on a producer. A closed mock nothing
   references is collected with its native mock, sends still waiting
   included, and a refused record or an error given to the mock is released
   as soon as the core is done with it. `partitionsFor(null)` rejects with the
@@ -363,8 +365,9 @@ newer.
 - Two `close()` calls at once on an open producer both settle: one of them
   used to be lost the same way. Every call made on a producer now keeps Node
   running until its answer, as Java's call returns: a send's hand-over,
-  `flush()`, `close()` and the waits of a record's future, whose answers may
-  come after the close's.
+  `flush()`, `partitionsFor()`, `close()` and the waits of a record's future,
+  whose answers may come after the close's, on a `MockProducer` as on a
+  `KafkaProducer`.
 
 ### Known limitations
 

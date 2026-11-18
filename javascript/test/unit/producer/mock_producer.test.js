@@ -58,22 +58,6 @@ function buildMockProducer(autoComplete) {
   return new MockProducer({ autoComplete, partitioner: null, keySerializer: mockSerializer(), valueSerializer: mockSerializer() });
 }
 
-// A call made once the mock is closed completes through a closed mock, which
-// no longer keeps the event loop alive: something must, until it settles.
-/**
- * @template T
- * @param {() => Promise<T>} body
- * @returns {Promise<T>}
- */
-async function holdingTheLoop(body) {
-  const hold = setInterval(() => {}, 1000);
-  try {
-    return await body();
-  } finally {
-    clearInterval(hold);
-  }
-}
-
 /** @param {MockProducer<unknown, unknown>} producer */
 async function cleanup(producer) {
   if (!producer.closed()) await producer.close();
@@ -134,9 +118,7 @@ test('shouldThrowOnSendIfProducerIsClosed', async () => {
   // Java sends a null record, which its closed check reports first; a null
   // record is the binding's TypeError, checked before the call reaches the
   // core, so a record is sent.
-  await holdingTheLoop(() =>
-    assert.rejects(producer.send(record1), { constructor: IllegalStateError, message: 'MockProducer is already closed.' }),
-  );
+  await assert.rejects(producer.send(record1), { constructor: IllegalStateError, message: 'MockProducer is already closed.' });
 });
 
 // Java's form of shouldThrowOnSendIfProducerIsClosed: send(null) on a closed
@@ -149,18 +131,14 @@ test('shouldThrowOnSendIfProducerIsClosed', async () => {
 test("shouldThrowOnSendIfProducerIsClosed, Java's null record: the null check comes first (deviation)", async () => {
   const producer = buildMockProducer(true);
   await producer.close();
-  await holdingTheLoop(() =>
-    // @ts-expect-error a null record: Java's test sends one, the binding's null check throws TypeError
-    assert.rejects(producer.send(null), { constructor: TypeError, message: 'record must not be null' }),
-  );
+  // @ts-expect-error a null record: Java's test sends one, the binding's null check throws TypeError
+  await assert.rejects(producer.send(null), { constructor: TypeError, message: 'record must not be null' });
 });
 
 test('shouldThrowOnFlushProducerIfProducerIsClosed', async () => {
   const producer = buildMockProducer(true);
   await producer.close();
-  await holdingTheLoop(() =>
-    assert.rejects(producer.flush(), { constructor: IllegalStateError, message: 'MockProducer is already closed.' }),
-  );
+  await assert.rejects(producer.flush(), { constructor: IllegalStateError, message: 'MockProducer is already closed.' });
 });
 
 test('shouldThrowClassCastException', async () => {
@@ -1124,4 +1102,72 @@ test('an open mock releases a refused record at once, and an injected error once
   const [records, errors] = r.stdout.trim().split(' ').map(Number);
   assert.equal(records, 20, r.stdout);
   assert.equal(errors, 20, r.stdout);
+});
+
+// A call made on a closed mock holds Node until it settles, as Java's call
+// returns, and so does a second close() made while the first runs
+// (javascript/CLAUDE.md, "Threads and liveness"): the mock's calls are the
+// producer's counted _cb calls, through the same view. Each child below has
+// nothing else holding Node, prints a line once the call settled, and exits
+// with 0. Java 4.4.0's MockProducer answers are the expected ones.
+
+// One child per call: a call that never settled would end the child there.
+const MOCK_AFTER_CLOSE = [
+  // Java's close(), close(Duration) and try-with-resources' close() return.
+  { call: 'm.close()', outcome: 'resolved' },
+  { call: 'm.close(5)', outcome: 'resolved' },
+  { call: 'm[Symbol.asyncDispose]()', outcome: 'resolved' },
+  // Java's flush() and send() check that the mock is open.
+  { call: 'm.flush()', outcome: 'IllegalStateError: MockProducer is already closed.' },
+  // Answered inside the call.
+  {
+    call: "m.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') }))",
+    outcome: 'IllegalStateError: MockProducer is already closed.',
+  },
+  // Java's partitionsFor() reads the mock's cluster, Cluster.empty().
+  { call: "m.partitionsFor('t')", outcome: 'resolved with []' },
+];
+
+for (const { call, outcome } of MOCK_AFTER_CLOSE) {
+  test(`${call} on a closed mock settles with Java's answer while nothing else holds Node`, () => {
+    const r = runNode(`
+      const { IllegalStateError } = require('@confluentinc/kafka-javascript');
+      const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+      const m = new MockProducer();
+      (async () => {
+        await m.close();
+        const outcome = await ${call}.then(
+          (value) => (value === undefined ? 'resolved' : 'resolved with ' + JSON.stringify(value)),
+          (e) => (e.constructor === IllegalStateError ? 'IllegalStateError' : 'another class, ' + e.constructor.name) + ': ' + e.message,
+        );
+        console.log('after the call:', outcome);
+      })();
+    `);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `after the call: ${outcome}\n`);
+  });
+}
+
+// Two closes at once, awaited together: the second is answered after the
+// first's completion, which only the hold of a waiting call covers. Each
+// round's mock stays reachable until its calls settled (`kept`): one
+// collected with a call pending is the root conventions' Future improvements
+// entry (Q49), not this test's subject.
+test('two close() calls at once on an open mock both settle, in each of 25 rounds', () => {
+  const r = runNode(`
+    const { MockProducer } = require('@confluentinc/kafka-javascript/producer');
+    let kept;
+    (async () => {
+      const outcomes = new Set();
+      for (let round = 0; round < 25; round++) {
+        const m = new MockProducer();
+        for (const o of await Promise.allSettled([m.close(), m.close()])) outcomes.add(o.status);
+        kept = m;
+      }
+      console.log('all settled:', [...outcomes].join(', '));
+    })();
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  // Java's close() returns, both times.
+  assert.equal(r.stdout, 'all settled: fulfilled\n');
 });

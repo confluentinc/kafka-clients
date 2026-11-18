@@ -21,8 +21,8 @@ rules and readings. Newest entries are at the end; dates are in IST.
    A **blocker** is only something that needs a C FFI or Rust core change.
 4. **A conflict between two root rules** is implemented as the root text reads, then marked **(root conflict)** in
    `javascript/CLAUDE.md` for the rule owner. The exception is text that, read literally, breaks the client (see
-   decision 16) or misdescribes what the client does (see decision 27): there the code and docs follow Java and the
-   core, and the mark stays.
+   decisions 16 and 33) or misdescribes what the client does (see decision 27): there the code and docs follow Java and
+   the core, and the mark stays.
 
 ## Structure
 
@@ -353,3 +353,28 @@ rules and readings. Newest entries are at the end; dates are in IST.
     `native_types.ts` (Q4), the class modules and their form tables generated. These stay hand-written, and Phase C,
     the plan's generators for them, is not built (`PLAN-producer-completion.md` §4). `javascript/CLAUDE.md`
     ("Generated files") records it as a permanent deviation from the root's wording.
+
+## A call made on a closed client (2026-11-18)
+
+33. **A call made on a closed client holds Node until its answer.** The root conventions' Lifetime rule says the binding
+    "calls `napi_unref_threadsafe_function` once `close()` has closed the client, so nothing is counted". Read
+    literally, Node may exit from the first close completion on, so an answer the core queues after it is lost when
+    nothing else holds Node: an awaited `close()`, `close(timeout)`, `[Symbol.asyncDispose]()`, `flush()` or
+    `partitionsFor()` on a closed `KafkaProducer` or `MockProducer` never settled, the code after its `await` never
+    ran and Node exited with code 0, and of two `close()` calls at once one was lost. That breaks the client: the
+    rule's own reason ("this way no pending send or poll is cut off"), the root's "an async one rejects with it", and
+    Java 4.4.0, whose calls all return there with the answers the core already gives. So the code follows the rule's
+    intent, under entry 4's exception for text that, read literally, breaks the client:
+    - the callback queue counts the client's `_cb` calls whose completion has not run yet, and `cbq_hold_update`
+      holds Node while the client is open or a call waits (Node-API counts neither the reference nor the
+      unreference, so the count is the binding's own);
+    - every `_cb` call is counted, the sends' hand-overs, `partitions_for_cb` and the waits of a record's future
+      included, and a `MockProducer` makes the same calls through the same view, so it needs nothing of its own;
+    - `check-tsfn-lifetime` checks each count's begin and end, and the tests run each call in a child process with
+      nothing else holding Node.
+
+    No answer changes. It is marked **(root conflict)** in `javascript/CLAUDE.md` ("Threads and liveness"), with the
+    wording proposed to the rules' owner: "…calls `napi_unref_threadsafe_function` once `close()` has closed the
+    client and every call made on it has had its answer." The fix and its plan came with PR #312
+    (`PLAN-close-liveness.md`); a closed client kept reachable while a call is pending stays the root's Future
+    improvement (Q49).

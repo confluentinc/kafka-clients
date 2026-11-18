@@ -162,7 +162,8 @@ function completeRecord(
  * comes out of that call, as in Java. `history()` returns the app's own
  * records; the mock holds each until `clear()` or its native client is
  * released. Like a producer, a mock keeps Node running until `close()`
- * closes it, so close every mock. The mock's cluster is always empty: Java's
+ * closes it, so close every mock, and a call made on a closed mock keeps Node
+ * running until that call settles. The mock's cluster is always empty: Java's
  * constructor taking a `Cluster` is left out (Cluster is not translated), so
  * the partitioner is never called and every record goes to partition 0, as
  * in Java. A callback's throw leaves the record's future completed
@@ -763,7 +764,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
    * @remarks The error set with `setCloseException` rejects it as it is,
-   * and the mock stays open. Once closed, the mock no longer holds Node. It
+   * and the mock stays open. Once closed, the mock holds Node only while a
+   * call made on it waits for its answer. It
    * settles once every callback Promise already started has, then rejects
    * with the oldest error one rejected with that no call raised yet. Made
    * from one of the mock's callbacks before its first `await`, it does not

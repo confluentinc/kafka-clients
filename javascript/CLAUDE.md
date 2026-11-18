@@ -16,8 +16,11 @@ list under "Not decided yet" is marked **(not decided yet in the root
 conventions)** here: the text records the current choice, and nobody treats it
 as settled. A **(root conflict)** mark names a place where the root
 conventions disagree with themselves or with a reviewed fact; the code follows
-the root text literally, as the owner chose, and the mark records the
-conflict. Root `CLAUDE.md` still applies
+the root text literally, as the owner chose, except where that text, read
+literally, breaks the client or misdescribes what it does: there the code and
+docs follow Java and the core
+(`design/current/javascript-producer/DECISIONS.md`, entry 4). Either way the
+mark records the conflict for the rules' owner. Root `CLAUDE.md` still applies
 wherever both are silent. The approved design is
 `design/current/javascript-producer/PLAN.md`.
 
@@ -286,9 +289,9 @@ The rules are the root conventions' (Threads and callbacks, Lifetime). In this
 binding:
 
 - Every callback the core queues (delivery callbacks, hand-over completions,
-  `flush` / `close` completions, the waits on a record's future) runs on the
-  JS thread that owns the client,
-  inside the drain, so JS values are created there directly.
+  `flush` / `partitionsFor` / `close` completions, the waits on a record's
+  future) runs on the JS thread that owns the client, inside the drain, so JS
+  values are created there directly.
 - A producer keeps Node running from its creation until `close()` closes it
   (root conventions, Lifetime), and a call made on it keeps Node running
   until that call settles, closed or not, as Java's call returns. The
@@ -306,9 +309,14 @@ binding:
   is being released. Neither appears anywhere else: a delivery callback ends
   no count. Every `_cb` call is counted: a send's hand-over
   (`send_with_callback_cb`, ended in `send_on_handover`), `flush_cb`,
-  `close_cb` and `close_with_timeout_cb` (ended in `close_on_complete`, after
-  the JS callback), and the waits on a record's future (`get_cb`,
-  `get_with_timeout_cb`, ended in `future_on_wait`). A second close made while
+  `partitions_for_cb` (ended in `partitions_for_on_complete`), `close_cb` and
+  `close_with_timeout_cb` (ended in `close_on_complete`, after the JS
+  callback), and the waits on a record's future (`get_cb`,
+  `get_with_timeout_cb`, ended in `future_on_wait`). A `MockProducer` makes
+  the same calls through the same view and sites, so its calls are counted
+  the same way; the mock's own calls (`history`, `clear`, `completeNext`,
+  `errorNext`, the error setters) are answered inside the call and have no
+  completion to count. A second close made while
   the first runs is answered after the first close's completion; the
   hand-overs and the waits have been answered before it in every scenario
   found, so their counts are guarded by `check-tsfn-lifetime` and by the test
@@ -319,24 +327,26 @@ binding:
   threadsafe function is not released then: the completions of calls made
   after the close still run, and each such call holds Node until it has. A
   script that never calls `close()` never exits on its own.
-- That is how this binding reads the Lifetime rule: the hold lasts while a
-  call waits. Read literally, the rule's "calls
-  `napi_unref_threadsafe_function` once `close()` has closed the client, so
-  nothing is counted" lets Node go at the first close completion, so a
-  completion the core queues after it is lost when nothing else holds Node:
-  an awaited `close()`, `close(timeout)`, `[Symbol.asyncDispose]()` or
-  `flush()` on a closed producer never settles, the code after its `await`
-  never runs, Node exits with code 0, and of two `close()` calls at once one
-  is lost. That breaks the rule's own reason ("this way no pending send or
-  poll is cut off"), the root conventions' "an async one rejects with it"
-  (Implementation over the FFI: an async call after `close()` settles with
-  the core's answer), and Java parity, where each of those calls returns. So
-  the code follows the rule's intent: a closed client holds Node only while a
-  call made on it is still waiting for its answer
-  (`design/current/javascript-producer/PLAN-close-liveness.md`). The wording
-  proposed to the rules' owner: "…calls `napi_unref_threadsafe_function` once
-  `close()` has closed the client and every call made on it has had its
-  answer."
+- **(root conflict)** The root conventions' Lifetime rule says the binding
+  "calls `napi_unref_threadsafe_function` once `close()` has closed the
+  client, so nothing is counted". Read literally, that lets Node go at the
+  first close completion, so a completion the core queues after it is lost
+  when nothing else holds Node: an awaited `close()`, `close(timeout)`,
+  `[Symbol.asyncDispose]()`, `flush()` or `partitionsFor()` on a closed
+  `KafkaProducer` or `MockProducer` never settles, the code after its
+  `await` never runs, Node exits with code 0, and of two `close()` calls at
+  once one is lost. That reading breaks the client, and with it the rule's
+  own reason ("this way no pending send or poll is cut off"), the root
+  conventions' "an async one rejects with it" (Implementation over the FFI:
+  an async call after `close()` settles with the core's answer), and Java
+  parity, where each of those calls returns. So the code follows the rule's
+  intent, the hold lasting while a call waits: a closed client holds Node
+  only while a call made on it is still waiting for its answer
+  (`DECISIONS.md`, entries 4 and 33;
+  `design/current/javascript-producer/PLAN-close-liveness.md`). The root
+  wording needs its owner; the wording proposed: "…calls
+  `napi_unref_threadsafe_function` once `close()` has closed the client and
+  every call made on it has had its answer."
 - The handle object is held by a strong reference from its creation until
   the close (`cbq_attach` / `cbq_closed`), so garbage collection never
   finalizes an open producer, even once the `KafkaProducer` object is
@@ -805,7 +815,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   producer's `_cb` twins and drain, with the same lifetime rules (rules 3, 5,
   6, 10: no closed flag, `close()` keeps the handle, the finalizer destroys
   only a closed mock, which `MockProducer_closed` decides, as a close that
-  threw `closeException` leaves Java's mock open). Its constructors are
+  threw `closeException` leaves Java's mock open), each `_cb` call counted as
+  a producer's, so a call made on a closed mock holds Node until its answer
+  ("Threads and liveness"). Its constructors are
   Java's `()` and `{ autoComplete, partitioner, keySerializer,
   valueSerializer }`, `partitioner` typed `Partitioner | null`, the
   placeholder (Scope, Q30), and never called, as the cluster is empty; the
