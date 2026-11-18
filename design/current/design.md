@@ -1401,12 +1401,15 @@ multilanguage tests, and `soak/` holds the long-running soak client.
 
 ### Multilanguage test harness
 
-`rust/multilanguage-test-server/` (a Rust gRPC server with `admin`, `consumer`
-and `producer` services), `c/grpc_server/` (the C backend) and the Python
-servers above let the same producer, consumer and admin scenarios run against
-three targets: the native Rust client, the Python binding and the C binding.
-The harness is enabled by the `multilanguage-tests` feature, which implies
-`integration-tests`, and driven by `cargo xtask test-multilanguage`.
+The same producer, consumer and admin scenarios run on six arms: the native
+Rust client and, through gRPC, the Python binding (sync and asyncio), the C
+binding and the .NET binding (sync and async). Each binding has a small test
+server in its own Docker image (`python/grpc_server.py`,
+`python/grpc_server_async.py`, `c/grpc_server/`, `dotnet/grpc-server/`).
+`rust/multilanguage-test-server/` holds the gRPC protocol they share. The
+`multilanguage-tests` feature, which implies `integration-tests`, generates the
+five gRPC arms. See [multilanguage-tests.md](multilanguage-tests.md) for how the
+harness works.
 
 ### Benchmark harness
 

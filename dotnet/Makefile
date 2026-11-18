@@ -10,8 +10,11 @@
 # directory, so `cargo --manifest-path rust/Cargo.toml` from here would lose both.
 REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
-GRPC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:dev
-GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:dev
+# The tag of the gRPC images; rust/tests/common/backend_pool.rs reads the same
+# variable. Override it per worktree so concurrent sessions do not share images.
+MULTILANG_IMAGE_TAG ?= dev
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:$(MULTILANG_IMAGE_TAG)
+GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:$(MULTILANG_IMAGE_TAG)
 # Native (non-container) gRPC server build for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for it in MULTILANG_BACKEND_MODE=native (rust/target/grpc-native/dotnet).
@@ -53,7 +56,8 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 
 .PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
 	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-macos pack-dotnet package-check-dotnet coverage-dotnet
+	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
+	pack-dotnet package-check-dotnet coverage-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -210,13 +214,19 @@ test-dotnet: build-dotnet
 test-dotnet-macos:
 	$(MAKE) DOTNET_TEST_FILTER='FullyQualifiedName!~Confluent.Kafka.IntegrationTests' test-dotnet
 
-# The .NET gate CI runs on Linux ("verify-dotnet (Linux amd64) — plaintext"):
-# the tests, the gRPC container arms, then the Docker-gated net10.0 p99 perf
-# stage. Recipe lines rather than prerequisites so each stage runs after the one
-# before. The checks that are not tests are check-dotnet, which CI runs in
-# "check-dotnet (Linux amd64)".
+# The .NET gate (dotnet/CLAUDE.md §7.5): the tests, the gRPC container arms,
+# then the Docker-gated net10.0 p99 perf stage. Recipe lines rather than
+# prerequisites so each stage runs after the one before. The checks that are not
+# tests are check-dotnet, which CI runs in "check-dotnet (Linux amd64)".
 verify: test-dotnet
 	$(MAKE) test-integration
+	$(MAKE) test-integration-perf-dotnet
+
+# `verify` without the gRPC container arms: the CI job "verify-dotnet (Linux
+# amd64) — plaintext". CI runs the arms in "verify-dotnet (Linux amd64) —
+# plaintext gRPC arm" (`test-integration`), as it does for C and Python and as
+# it runs the ssl / sasl_ssl arms.
+verify-except-grpc-arm: test-dotnet
 	$(MAKE) test-integration-perf-dotnet
 
 # The macOS gate: the unit and soak tests, then the gRPC multilanguage arm with

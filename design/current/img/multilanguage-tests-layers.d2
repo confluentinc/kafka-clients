@@ -1,0 +1,78 @@
+# Every client in the repository reaches the same Rust core.
+#
+# Source of truth for design/current/img/multilanguage-tests-layers.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the C, Python and .NET bindings are thin layers on
+# the C FFI, which calls the same Rust core the Rust API calls, so one scenario
+# run on every client holds every binding to the same behaviour. Colours are
+# shared with the other multilanguage-tests diagrams: teal is the Rust core,
+# grey an ordinary part, grey arrows calls inside one process.
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 24
+  }
+}
+
+classes: {
+  part: {
+    style: {
+      fill: "#eef2f6"
+      stroke: "#9aa7b4"
+      border-radius: 8
+      font-color: "#16202a"
+      font-size: 15
+    }
+  }
+  core: {
+    style: {
+      fill: "#dcf0ec"
+      stroke: "#0d7368"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#0b4f47"
+      font-size: 16
+    }
+  }
+  call: {
+    style: {
+      stroke: "#586675"
+      stroke-width: 2
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+}
+
+direction: down
+
+rust: "Rust API\nrust/src" {class: part; width: 220}
+c: "C binding\nconfluent_kafka.h" {class: part; width: 220}
+py: "Python binding\nconfluent_kafka" {class: part; width: 220}
+net: ".NET binding\nConfluent.Kafka" {class: part; width: 220}
+
+# The Rust API's arrow runs through this bar, which sits in the FFI's layer, so
+# the layout keeps the Rust API on the top row beside the bindings.
+rust_bypass: "" {
+  width: 1
+  height: 76
+  style.fill: "#586675"
+  style.stroke: "#586675"
+  style.stroke-width: 1
+}
+
+ffi: "C FFI\nrust/src/ffi: kafka_<package>_<Class>_<method>(…)" {class: part; width: 712}
+
+core: "Rust core: the Kafka client\nbroker connections · consumer group protocol · batching · retries · metadata" {
+  class: core
+  width: 960
+}
+
+rust -- rust_bypass {class: call}
+rust_bypass -> core: "Rust calls" {class: call}
+c -> ffi: "C calls" {class: call}
+py -> ffi: "C extension" {class: call}
+net -> ffi: "P/Invoke" {class: call}
+ffi -> core: "Rust calls" {class: call}

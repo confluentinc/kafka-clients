@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
@@ -327,5 +328,154 @@ public sealed class ConsumerServiceTests
         Proto.TopicPartitionListRequest request = new Proto.TopicPartitionListRequest { ConsumerId = consumerId, TimeoutMs = timeoutMs };
         request.Partitions.Add(partition);
         return request;
+    }
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task SetListenerAction_RunsItsScriptFromInsideTheListener(string flavour)
+    {
+        using ConsumerServer server = ConsumerServer.Create(flavour);
+        ulong consumerId = await server.CreateMockConsumer();
+        Proto.ListenerActionRequest action = new Proto.ListenerActionRequest
+        {
+            ConsumerId = consumerId,
+            OnAssigned = new Proto.ListenerScript { Trigger = Proto.ListenerTriggerKind.ListenerTriggerAlways },
+        };
+        action.OnAssigned.Steps.Add(new Proto.ListenerStep { Kind = Proto.ListenerStepKind.ListenerStepAssignment });
+        action.OnAssigned.Steps.Add(new Proto.ListenerStep { Kind = Proto.ListenerStepKind.ListenerStepFail, Message = "boom" });
+        action.OnAssigned.Steps.Add(new Proto.ListenerStep { Kind = Proto.ListenerStepKind.ListenerStepAssignment });
+
+        Proto.StatusResponse set = await server.Service.SetListenerAction(action, server.Context);
+        await Subscribe(server, consumerId);
+        Exception thrown = await Assert.ThrowsAnyAsync<Exception>(
+            () => server.Rebalance(consumerId, new[] { new TopicPartition("t", 1), new TopicPartition("t", 0) }));
+
+        Assert.Null(set.Error);
+        Assert.Equal("boom", thrown.Message);
+        Proto.CallbackLogResponse log = await server.Service.GetCallbackLog(
+            new Proto.CallbackLogRequest { ConsumerId = consumerId }, server.Context);
+        Assert.Equal(3, log.Entries.Count);
+        Assert.Equal("assigned", log.Entries[0].Kind);
+        Proto.CallbackLogEntry assignment = log.Entries[1];
+        Assert.Equal(("listener_action", "assigned", "ASSIGNMENT"), (assignment.Kind, assignment.Method, assignment.Step));
+        Assert.Equal(new[] { 0, 1 }, new[] { assignment.ResultPartitions[0].Partition, assignment.ResultPartitions[1].Partition });
+        Proto.CallbackLogEntry fail = log.Entries[2];
+        Assert.Equal(("FAIL", "boom", -3), (fail.Step, fail.Error, fail.ErrorCode));
+    }
+
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task SetListenerAction_FirstNCalls_RunsOnlyTheFirstInvocations(string flavour)
+    {
+        using ConsumerServer server = ConsumerServer.Create(flavour);
+        ulong consumerId = await server.CreateMockConsumer();
+        Proto.ListenerActionRequest action = new Proto.ListenerActionRequest
+        {
+            ConsumerId = consumerId,
+            OnAssigned = new Proto.ListenerScript { Trigger = Proto.ListenerTriggerKind.ListenerTriggerFirstNCalls, FirstNCalls = 1 },
+        };
+        action.OnAssigned.Steps.Add(new Proto.ListenerStep { Kind = Proto.ListenerStepKind.ListenerStepAssignment });
+
+        await server.Service.SetListenerAction(action, server.Context);
+        await Subscribe(server, consumerId);
+        await server.Rebalance(consumerId, new[] { new TopicPartition("t", 0) });
+        await server.Rebalance(consumerId, new[] { new TopicPartition("t", 1) });
+
+        Proto.CallbackLogResponse log = await server.Service.GetCallbackLog(
+            new Proto.CallbackLogRequest { ConsumerId = consumerId }, server.Context);
+        Assert.Single(log.Entries, e => e.Kind == "listener_action");
+    }
+
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task SetListenerAction_WithAnUnspecifiedTrigger_IsAnIllegalArgument(string flavour)
+    {
+        using ConsumerServer server = ConsumerServer.Create(flavour);
+        ulong consumerId = await server.CreateMockConsumer();
+
+        Proto.StatusResponse response = await server.Service.SetListenerAction(
+            new Proto.ListenerActionRequest { ConsumerId = consumerId, OnRevoked = new Proto.ListenerScript() }, server.Context);
+
+        Assert.Equal((-3, "unknown listener trigger 0"), (response.Error.Code, response.Error.Message));
+    }
+
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task SetListenerAction_OnAnUnknownConsumer_IsTheUnknownConsumerError(string flavour)
+    {
+        using ConsumerServer server = ConsumerServer.Create(flavour);
+
+        Proto.StatusResponse response = await server.Service.SetListenerAction(
+            new Proto.ListenerActionRequest { ConsumerId = 99 }, server.Context);
+
+        Assert.Equal((-4, "unknown consumer_id 99"), (response.Error.Code, response.Error.Message));
+    }
+
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task SetListenerAction_WithNoScript_ClearsAPendingOne(string flavour)
+    {
+        using ConsumerServer server = ConsumerServer.Create(flavour);
+        ulong consumerId = await server.CreateMockConsumer();
+        Proto.ListenerActionRequest action = new Proto.ListenerActionRequest
+        {
+            ConsumerId = consumerId,
+            OnAssigned = new Proto.ListenerScript { Trigger = Proto.ListenerTriggerKind.ListenerTriggerAlways },
+        };
+        action.OnAssigned.Steps.Add(new Proto.ListenerStep { Kind = Proto.ListenerStepKind.ListenerStepAssignment });
+
+        await server.Service.SetListenerAction(action, server.Context);
+        await server.Service.SetListenerAction(new Proto.ListenerActionRequest { ConsumerId = consumerId }, server.Context);
+        await Subscribe(server, consumerId);
+        await server.Rebalance(consumerId, new[] { new TopicPartition("t", 0) });
+
+        Proto.CallbackLogResponse log = await server.Service.GetCallbackLog(
+            new Proto.CallbackLogRequest { ConsumerId = consumerId }, server.Context);
+        Proto.CallbackLogEntry entry = Assert.Single(log.Entries);
+        Assert.Equal("assigned", entry.Kind);
+    }
+
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task SetListenerAction_CommitSyncPositionWithNoPosition_LogsTheIllegalState(string flavour)
+    {
+        using ConsumerServer server = ConsumerServer.Create(flavour);
+        ulong consumerId = await server.CreateMockConsumer();
+        Proto.ListenerActionRequest action = new Proto.ListenerActionRequest
+        {
+            ConsumerId = consumerId,
+            OnAssigned = new Proto.ListenerScript { Trigger = Proto.ListenerTriggerKind.ListenerTriggerAlways },
+        };
+        action.OnAssigned.Steps.Add(new Proto.ListenerStep
+        {
+            Kind = Proto.ListenerStepKind.ListenerStepCommitSyncPosition,
+            Partition = new Proto.TopicPartition { Topic = "t", Partition = 0 },
+        });
+
+        await server.Service.SetListenerAction(action, server.Context);
+        await Subscribe(server, consumerId);
+        await server.Rebalance(consumerId, new[] { new TopicPartition("t", 0) });
+
+        Proto.CallbackLogResponse log = await server.Service.GetCallbackLog(
+            new Proto.CallbackLogRequest { ConsumerId = consumerId }, server.Context);
+        Proto.CallbackLogEntry step = log.Entries[1];
+        Assert.Equal(2, log.Entries.Count);
+        Assert.Equal("COMMIT_SYNC_POSITION", step.Step);
+        Assert.Equal((-4, "no position was read for t-0 before COMMIT_SYNC_POSITION"), (step.ErrorCode, step.Error));
+        Assert.Equal(-4, step.ErrorDetail.Code);
+        Assert.Empty(step.Offsets);
+    }
+
+    private static async Task Subscribe(ConsumerServer server, ulong consumerId)
+    {
+        Proto.SubscribeRequest subscribe = new Proto.SubscribeRequest { ConsumerId = consumerId, WithListener = true };
+        subscribe.Topics.Add("t");
+        Proto.StatusResponse response = await server.Service.Subscribe(subscribe, server.Context);
+        Assert.Null(response.Error);
     }
 }
