@@ -97,6 +97,30 @@ public sealed class ZeroCopyDeserializationTests
     }
 
     [Fact]
+    public void TheValuesOfOnePoll_StayReadable_HeldAsAListWithoutTheirRecords()
+    {
+        string[] expected = { "first-of-three", "second-of-three", "third-of-three" };
+        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        List<ReadOnlyMemory<byte>> values;
+        using (TestTimeout.Disposal(consumer))
+        {
+            values = PollValues(consumer, expected);
+            Collect();
+            AssertBytes("after-them", PollOneValue(consumer, expected.Length, "after-them"));
+        }
+
+        Collect();
+
+        Assert.Equal(expected.Length, values.Count);
+        for (int i = 0; i < expected.Length; i++)
+        {
+            AssertBytes(expected[i], values[i]);
+            Assert.True(MemoryMarshal.TryGetMemoryManager(values[i], out BytesMemoryManager? manager));
+            Assert.NotNull(manager);
+        }
+    }
+
+    [Fact]
     public void ABatchNoMemoryReaches_IsCollected_WhileTheConsumerLives()
     {
         MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
@@ -249,6 +273,19 @@ public sealed class ZeroCopyDeserializationTests
     {
         consumer.AddRecord(Topic, 0, offset, Bytes("key"), Bytes(value));
         return Assert.Single(consumer.Poll(s_pollTimeout)).Value()!.Value;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static List<ReadOnlyMemory<byte>> PollValues(
+        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer, string[] values)
+    {
+        for (int i = 0; i < values.Length; i++)
+        {
+            consumer.AddRecord(Topic, 0, i, Bytes("key"), Bytes(values[i]));
+        }
+
+        ConsumerRecords<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> records = consumer.Poll(s_pollTimeout);
+        return records.Select(r => r.Value()!.Value).ToList();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

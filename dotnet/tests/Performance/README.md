@@ -47,6 +47,13 @@ settings apply to no arm. The tests and batches are in `tools/perf-cloud/`.
   `BATCH_SIZE` below 16 KiB. An explicit `BUFFER_MEMORY_ALLOCATION_STRATEGY` wins. The transactional workload
   runs `full`. The harness prints the effective strategy and writes it to `results.json`
   (`buffer_memory_allocation_strategy`); the report shows it per client.
+- **Serializers and deserializers (PerfV3).** Both producer arms send `byte[]` keys and values through the
+  built-in byte-array serializers. The async arm passes their `Async` classes, which the producer calls inside
+  `Send` without awaiting, so both arms serialize the same way. Both consumer arms decode each key and value to
+  its length without copying it (`ByteCountDeserializer`). The sync consumer gives it a span over the batch. The
+  async consumer takes it as an `IAsyncDeserializer<T>` that is not a built-in, so the async arm measures the
+  awaited path: the consumer awaits the call for each key and value and lends it a memory valid for that call,
+  which costs one 40-byte memory manager per key and per value that has bytes.
 - The transactional workload forces idempotence and `acks=all`.
 - **The consumer** takes the client defaults for every setting the test leaves out: the driver passes
   `USE_DEFAULTS=True`. Run outside the driver, without `USE_DEFAULTS`, the harnesses tune the fetch settings
