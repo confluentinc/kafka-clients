@@ -236,9 +236,9 @@ against `rust/src`. "Plan?" says whether PLAN §4 already names it.
 |---|---|---|---|---|
 | G1 | `RequestManagers` share fields + `entries()` order + the share `RequestManagers#supplier(...)` overload (second `supplier`, takes `ShareAcknowledgementEventHandler`, `ShareConsumerMetadata`, `ShareFetchBuffer`, `ShareFetchMetricsManager`) | consumer-only | P6 | yes |
 | G2 | `ApplicationEventProcessor` share arms: 8 `process(Share…Event)` overloads (`SharePollEvent`, `ShareFetchEvent`, `ShareAcknowledgeSyncEvent`, `ShareAcknowledgeAsyncEvent`, `ShareSubscriptionChangeEvent`, `ShareUnsubscribeEvent`, `ShareAcknowledgeOnCloseEvent`, `ShareAcknowledgementCommitCallbackRegistrationEvent`), plus the `ApplicationEvent.Type` share values | `application_event.rs` module doc: "Share-consumer (KIP-932) variants are NOT translated" | P6 | yes |
-| G3 | `metrics/RebalanceMetricsManager` abstract base (`ShareRebalanceMetricsManager extends` it) | **folded into** `consumer_rebalance_metrics_manager.rs` (module doc: "A `RebalanceMetricsManager` trait can be extracted … if/when Share/Streams are translated") | P4 — extract the trait in its own behaviour-neutral commit | **no** |
+| G3 | `metrics/RebalanceMetricsManager` abstract base (`ShareRebalanceMetricsManager extends` it) | **done in P4a**: crate-private trait `metrics/rebalance_metrics_manager.rs:RebalanceMetricsManager`; `MembershipInner::metrics_manager` holds `Arc<dyn RebalanceMetricsManager>` | P4a (done) — P4b implements it for `ShareRebalanceMetricsManager` | **no** |
 | G4 | `ConsumerUtils#createShareFetchMetricsManager(Metrics)` | listed as skipped in `consumer_utils.rs` module doc ("metrics framework is deferred"); the two share group-name constants exist | P3b (with `ShareFetchMetricsManager`) | **no** |
-| G5 | `TopicIdPartitionSet` (used by `ShareMembershipManager#signalPartitionsAssigned` and `AbstractMembershipManager`) | no type; `AbstractMembershipManager::find_resolvable_assignment_and_trigger_metadata_update` returns `Vec<(Uuid, String, Vec<i32>)>` | P4 — decide whether the share override can take the existing shape (likely), or translate the class | **no** |
+| G5 | `TopicIdPartitionSet` (used by `ShareMembershipManager#signalPartitionsAssigned` and `AbstractMembershipManager`) | **decided in P4a: not translated.** Both Java subclasses read only `topicPartitions()` from it; `MembershipManagerHooks::signal_partitions_assigned` receives that `Vec<TopicPartition>` (plus the added set), and the reconcile chain keeps its `Vec<(Uuid, String, Vec<i32>)>` | P4a (done) | **no** |
 | G6 | `SubscriptionState#subscribeToShareGroup` and `SubscriptionType.AUTO_TOPICS_SHARE` (incl. the share branches in `fetchablePartitions` / `hasAutoAssignedPartitions`) | **already exists**: `subscription_state.rs::subscribe_to_share_group`, `SubscriptionType::AutoTopicsShare` | P6 verifies only | plan P6 lists it as new work — correction |
 | G7 | `WakeupTrigger#setShareFetchAction` / `ShareFetchAction` | no fetch-action concept in Rust (token + `select!`); nothing to add to `wakeup_trigger.rs`, but the share poll must `select!` the token while waiting on `ShareFetchBuffer` | P6/P7 | partial |
 | G8 | `GroupRebalanceConfig` with `ProtocolType.SHARE` (rack id, group id, etc.) | no `GroupRebalanceConfig` type; `async_kafka_consumer.rs` inlines the reads it needs | P7 (inline in `ShareConsumerImpl` the same way) | **no** |
@@ -254,7 +254,7 @@ against `rust/src`. "Plan?" says whether PLAN §4 already names it.
 
 Plan-vs-code notes for the parent: PLAN §4 P6 lists `SubscriptionState::subscribe_to_share_group`
 as work, but it already exists (G6). G3, G4, G5, G8, G9 and G12 are not in the plan; none changes a
-phase boundary, but G3 and G5 belong in the P4 behaviour-neutral refactor commit, and G12 adds ~6
+phase boundary, but G3 and G5 belong in the P4 behaviour-neutral refactor commit (both closed by P4a), and G12 adds ~6
 small wrappers to P1.
 
 The `rust/xtask/public-audience-allowlist.txt` file named in `admin-client.md` §9 and
