@@ -95,7 +95,7 @@ impl AbstractConfig {
             originals,
             do_log,
             "AbstractConfig",
-            |parsed| Ok(parsed),
+            Ok,
             |_| Ok(ConfigMap::new()),
         )
     }
@@ -824,7 +824,7 @@ mod tests {
             map(&[("a", "5".into())]),
             false,
             "TestConfig",
-            |parsed| Ok(parsed),
+            Ok,
             |config| {
                 let a = config.get_int("a")?.unwrap_or_default();
                 Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(a * 2)))]))
@@ -839,7 +839,7 @@ mod tests {
             ConfigMap::new(),
             false,
             "TestConfig",
-            |parsed| Ok(parsed),
+            Ok,
             |_| Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(-1)))])),
         )
         .unwrap_err();

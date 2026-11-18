@@ -420,7 +420,7 @@ mod tests {
             props,
             false,
             "TestConfig",
-            |parsed| Ok(parsed),
+            Ok,
             |config| {
                 CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
                 Ok(CommonClientConfigs::post_process_reconnect_backoff_configs(
