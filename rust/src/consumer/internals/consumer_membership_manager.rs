@@ -3849,7 +3849,7 @@ mod tests {
         // non-looping call). Capture the ack but do NOT complete it.
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("assigned event");
-        let _stuck_ack = match env.event {
+        let stuck_ack = match env.event {
             BackgroundEvent::PartitionsAssigned { ack, .. } => ack,
             other => panic!("unexpected event: {other:?}"),
         };
@@ -3878,6 +3878,12 @@ mod tests {
         // resolved_assignment; reconciliation is no longer in progress.
         assert_ne!(mgr.state(), MemberState::Acknowledging);
         assert!(!reconciliation_in_progress(&mgr));
+        // Java: `clearInvocations(subscriptionState)` after the fence.
+        mgr.abstract_mm
+            .subscriptions
+            .lock()
+            .unwrap()
+            .clear_pending_revocation_marks_for_test();
 
         // (b) of Issue 1: the fresh post-rejoin assignment (topic3-5) can be
         // reconciled — it is not gated on the abandoned stale reconcile.
@@ -3888,6 +3894,12 @@ mod tests {
             topic_partitions_awaiting_reconciliation(&mgr),
             HashMap::from([(topic3, vec![5])])
         );
+        // Java's `completeCallback`: the stale ack arrives after the rejoin
+        // (its reconcile was abandoned, so nothing receives it).
+        let _ = stuck_ack.send(Ok(()));
+        // assertInitialReconciliationDiscardedAfterRejoin:
+        // `verify(subscriptionState, never()).markPendingRevocation(any())`.
+        assert!(pending_revocation_marks(&mgr).is_empty());
         // The stale topic1 assignment was not applied.
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(!subs.assigned_partitions().contains(&tp("topic1", 1)));
@@ -3915,7 +3927,7 @@ mod tests {
         // non-looping call). First event: onPartitionsRevoked for {0}.
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("revoked event");
-        let _stuck_ack = match env.event {
+        let stuck_ack = match env.event {
             BackgroundEvent::PartitionsRemoved { method_name, ack, partitions, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
@@ -3944,6 +3956,12 @@ mod tests {
         // (a) of Issue 1.
         assert_ne!(mgr.state(), MemberState::Acknowledging);
         assert!(!reconciliation_in_progress(&mgr));
+        // Java: `clearInvocations(subscriptionState)` after the fence.
+        mgr.abstract_mm
+            .subscriptions
+            .lock()
+            .unwrap()
+            .clear_pending_revocation_marks_for_test();
 
         // (b) of Issue 1: fresh post-rejoin assignment reconciles.
         let topic3 = Uuid::random_uuid();
@@ -3953,6 +3971,12 @@ mod tests {
             topic_partitions_awaiting_reconciliation(&mgr),
             HashMap::from([(topic3, vec![5])])
         );
+        // Java's `completeCallback`: the stale onPartitionsRevoked ack
+        // arrives after the rejoin; its reconcile was abandoned.
+        let _ = stuck_ack.send(Ok(()));
+        // assertInitialReconciliationDiscardedAfterRejoin:
+        // `verify(subscriptionState, never()).markPendingRevocation(any())`.
+        assert!(pending_revocation_marks(&mgr).is_empty());
     }
 
     /// Translated from
@@ -4033,11 +4057,26 @@ mod tests {
             !has_pending_reconcile_for_test(&mgr),
             "the AwaitingCommit leg is abandoned by the fence"
         );
+        // Java: `clearInvocations(subscriptionState)` after the fence.
+        mgr.abstract_mm
+            .subscriptions
+            .lock()
+            .unwrap()
+            .clear_pending_revocation_marks_for_test();
 
         // New assignment after rejoin (topic3-5).
         let topic3 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
         receive_assignment(&mgr, topic3, vec![5]);
+
+        // Java: `commitResult.complete(null)` after the rejoin. The abandoned
+        // leg no longer listens, so completing the request changes nothing.
+        let offsets = commit_mgr.first_unsent_commit_offsets_for_test().expect("commit still unsent");
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(offsets));
+        tokio::task::yield_now().await;
+        // assertInitialReconciliationDiscardedAfterRejoin:
+        // `verify(subscriptionState, never()).markPendingRevocation(any())`.
+        assert!(pending_revocation_marks(&mgr).is_empty());
 
         // Discarded: the stale empty-target reconcile never advanced to
         // ACKNOWLEDGING (no ack sent), and the post-rejoin target (topic3-5) is
@@ -6037,6 +6076,44 @@ mod tests {
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 assert_eq!(got, HashSet::from([tp("topic1", 0), tp("topic1", 1)]));
                 assert!(ack_through_application_events);
+            },
+            other => panic!("expected PartitionsRemoved(ON_PARTITIONS_REVOKED), got {other:?}"),
+        }
+    }
+
+    /// Java-faithful consequence of the leave marking the released partitions
+    /// pending revocation: a partition with no position yet is no longer
+    /// initialized while `onPartitionsRevoked` runs
+    /// (`SubscriptionState$TopicPartitionState#shouldInitialize` is
+    /// `fetchState == INITIALIZING && !pendingRevocation`), so a `position()`
+    /// call from the callback finds nothing to fetch and waits until its
+    /// timeout (`AsyncKafkaConsumer#position`), as in Java.
+    #[tokio::test]
+    async fn leave_group_in_group_stops_initializing_released_partitions() {
+        let (mgr, mut rx) = create_member_in_stable_state(None).await;
+        subscribe_with_topics(&mgr, &["topic1"]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        assert!(
+            mgr.abstract_mm
+                .subscriptions
+                .lock()
+                .unwrap()
+                .initializing_partitions()
+                .contains(&tp("topic1", 0)),
+            "precondition: the owned partition has no position and needs initializing"
+        );
+
+        let _leave_result = mgr.leave_group(0).unwrap();
+
+        assert!(mgr.has_pending_leave_callback(), "onPartitionsRevoked is pending");
+        {
+            let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert!(!subs.initializing_partitions().contains(&tp("topic1", 0)));
+            assert!(subs.position(&tp("topic1", 0)).unwrap().is_none());
+        }
+        match rx.recv().await.expect("onPartitionsRevoked event").event {
+            BackgroundEvent::PartitionsRemoved { method_name, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
             },
             other => panic!("expected PartitionsRemoved(ON_PARTITIONS_REVOKED), got {other:?}"),
         }
