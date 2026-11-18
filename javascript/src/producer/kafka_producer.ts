@@ -257,8 +257,10 @@ export class KafkaProducer implements Producer {
    *    `ExecutionError` whose `cause` is the error the delivery failed with,
    *    as Java's `get()` throws. The callback, when given, runs first, on the
    *    JS thread, and receives the error itself; a callback that returns a
-   *    Promise is awaited before the future completes. A future whose `get()`
-   *    is never called raises no unhandled rejection.
+   *    Promise is awaited before the future completes. Callbacks run one at a
+   *    time, in the order their records complete, as Java's do: a later
+   *    record's callback waits until an earlier one's Promise settled. A
+   *    future whose `get()` is never called raises no unhandled rejection.
    *
    * Ordering is the caller's: records from code that awaits each `send()`
    * before the next reach the producer in that order (so records to one
@@ -300,10 +302,17 @@ export class KafkaProducer implements Producer {
    *
    * Inside a callback, do not call `flush()` or `close()` of the same
    * producer, run a transaction call, or await the future of a record sent
-   * later: each waits for the callback itself. Before the callback's first
-   * `await` the producer refuses them; after it they can hang. A callback
-   * Promise that never settles has no time limit: it holds its record's
-   * future, `flush()` and `close()`, `close({ timeout })` included.
+   * later: each waits for the callback itself. Before its first `await`, a
+   * callback that did not wait for its turn is guarded, as Java's are:
+   * `flush()` rejects and `close()` closes at once. A callback that waited
+   * for its turn behind an earlier callback's result is not, like a callback
+   * after its first `await`: an awaited `flush()` or `close()` there never
+   * settles (refusing them there is a planned improvement). Any result but
+   * `undefined` is awaited, `() => sent.push(id)`'s number included, so a
+   * callback that need not be awaited returns nothing. A callback Promise
+   * that never settles has no time limit: it holds its record's future, the
+   * callbacks of the records after it, `flush()` and `close()`,
+   * `close({ timeout })` included.
    */
   send(options: {
     /** The record to send. */
@@ -408,7 +417,8 @@ export class KafkaProducer implements Producer {
     // the delivery is recorded, and the Promise returned here settles, once
     // the thenable did, and the core's report waits for that
     // (native/producer.c, send_defer). A callback returning nothing allocates
-    // no Promise.
+    // no Promise. The addon calls this in the callback's turn: one callback at
+    // a time, in completion order (native/producer.c, send_on_completion).
     const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined | Promise<string | undefined> => {
       let failure: string | undefined;
       let returned: unknown;
@@ -470,9 +480,12 @@ export class KafkaProducer implements Producer {
    * had resolved before `flush()` was called: their futures are all done when
    * it resolves.
    *
-   * Calling it from inside a callback rejects, as Java's flush() throws there,
-   * until the callback's first `await`; after it, it waits for that callback,
-   * which waits for it: do not call it from a callback.
+   * Do not call it from a callback. From a callback that did not wait for its
+   * turn, before the callback's first `await`, it rejects, as Java's flush()
+   * throws there. After that `await`, or in a callback that waited for its
+   * turn behind an earlier callback's result, it is not refused: it waits for
+   * that callback, so awaited there it never settles (refusing it there is a
+   * planned improvement).
    *
    * @throws `IllegalArgumentError` rejects with it when it is given an
    *   argument: Java's flush() takes none
@@ -480,7 +493,8 @@ export class KafkaProducer implements Producer {
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `KafkaError` rejects with it if the method is invoked inside a
-   *   `send` callback
+   *   `send` callback that did not wait for its turn, before the callback's
+   *   first `await`
    *
    * @remarks A callback that returned a Promise counts as run once it
    * settled, so a callback's Promise must not wait for this flush. On a

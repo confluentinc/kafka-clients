@@ -41,7 +41,9 @@ import type { RecordMetadata } from './record_metadata';
  * producer logs it, as Java logs a throwing `onCompletion`, and it reaches no
  * caller. A callback's Promise must not wait for a `flush()` or `close()` of
  * its own producer, which wait for it; Java refuses `flush()` inside a
- * callback for the same reason.
+ * callback for the same reason. Callbacks run one at a time, in the order
+ * their records complete, as Java's run one after another on its I/O thread:
+ * a later record's callback starts only once an earlier one's Promise settled.
  */
 export type Callback = (options: {
   /**

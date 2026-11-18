@@ -184,6 +184,45 @@ These decide every question, in this order:
    destroys a closed producer, a callback Promise still pending is reported as
    returned (`send_report_awaiting`): no JS will settle it, and no report may
    follow the destroy.
+
+   **Callbacks run one at a time, in completion order** (the root conventions
+   leave this open; the owner decided it on 2026-11-18, for Java parity).
+   Java runs its callbacks one after another on the producer's I/O thread, so
+   a slow callback holds back the next; Python's `AsyncProducer` and the .NET
+   binding do the same. While a callback runs or its Promise is awaited
+   (`Producer.current`), a callback the core delivers waits at the end of the
+   run queue (`send_enqueue`) with the `RecordMetadata` and error it will
+   receive, made when the core delivered it (the core's are borrowed), and it
+   runs, and reports, once every callback before it has ended
+   (`send_run_queued`, from `js_send_on_settled` once the awaited Promise
+   settled; its loop runs the waiting ones in turn, and stops at the next one
+   that returns a Promise). So each record's future still completes only after
+   its own callback, and a `flush` or `close` covering a waiting callback
+   still waits for it; a later record's future completes only once the
+   earlier callback's Promise settled, so a callback's timed
+   `get({ timeout })` on it rejects with `TimeoutError`, as Java's
+   `get(timeout)` on the I/O thread throws `TimeoutException`. A Promise that
+   never settles holds the callbacks behind it too, and their records'
+   futures, which hold the handle object, keep the producer from being
+   collected, as an I/O thread stuck in a callback keeps Java's producer. The
+   destroy reports the callbacks still waiting as returned, after the awaited
+   one, running no JS (`send_report_queued`). The rest stays as it was: the
+   hand-overs and the cooperative pump and yield (rule 3).
+
+   A waiting callback runs after the drain, from `js_send_on_settled` (a
+   Promise reaction), and the core counts as inside a callback only its own
+   `__execute_callbacks` (`Client::in_callback`). So, as after a callback's
+   first `await`, its `flush()` is not refused and its `close()` is not
+   Java's `close(0)`: an awaited one waits for that same callback, one of the
+   anti-patterns inside a send callback (root conventions, Threads and
+   callbacks). Only a callback the drain runs keeps, until its first
+   `await`, the refusal of `flush()` and the `close(0)`. Refusing them in a
+   waiting callback too is the root conventions' Future improvement
+   (refusing a call made inside a callback after its first `await`), which
+   the owner kept as one: no core change and no binding-side mark. Any
+   result but `undefined` takes the Promise path (`send_defer`), an
+   expression-bodied arrow such as `() => seen.push(x)` included, so the
+   callbacks the same drain delivers after such a callback are waiting ones.
 7. **No binding-side send queue, buffer, cap or lock** (PLAN D8; root
    conventions, Threads and callbacks: no tracking and no async locks of the
    binding's own). The core does NOT serialise a caller that does not wait: a
@@ -196,7 +235,9 @@ These decide every question, in this order:
    FFI's "wait for the hand-over before the next send" contract. Sends not
    awaited one by one are concurrent, like Java sends on several threads; this
    is documented on `send`, in its compiled declaration and in the README. The
-   binding never holds records back itself.
+   binding never holds records back itself. The run queue of rule 6 is no
+   send queue: it holds the callbacks of records the core has already
+   delivered, waiting for their turn, as Python's does, and no record.
 8. **No copy of the app's key and value; strings encoded as Java encodes
    them.** The rule is the root conventions' (Serialization, and the FFI table
    of Implementation over the FFI): the binding doesn't copy a key or value

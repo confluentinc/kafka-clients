@@ -49,7 +49,10 @@
 // so the record's future, `flush` and `close` wait for it as for a callback
 // that returned. The callback id stays in C, on the context, meanwhile; the
 // context and the producer struct stay allocated until the function the
-// Promise calls back is finalized.
+// Promise calls back is finalized. Callbacks run one at a time, in completion
+// order, as Java's run one after another on its I/O thread: until an awaited
+// Promise settled, the callbacks of the records that completed after it wait
+// for their turn in the run queue (send_on_completion, send_run_queued).
 //
 // Closed state and teardown (javascript/CLAUDE.md, rules 1 and 10): the
 // binding keeps no closed flag and refuses no call; a call after close() goes
@@ -80,6 +83,10 @@ typedef struct {
     int destroying;                            // KafkaProducer_destroy_err began: no report from now on
     SendCtx* orphans;                          // contexts of sends that failed at hand-over
     SendCtx* awaiting;                         // contexts whose callback's Promise has not settled
+    SendCtx* current;                          // the context whose callback runs, or whose Promise is awaited
+    SendCtx* run_head;                         // the callbacks waiting for their turn, in completion order
+    SendCtx* run_tail;
+    int running_queue;                         // send_run_queued's loop runs
     int owners;                                // the handle object, the tsfn, each awaited callback's function
     // The send contexts whose record's future JS may wait on, by the slot
     // number JS holds (a small integer, so no object is made per record);
@@ -111,6 +118,10 @@ struct SendCtx {
     napi_ref settle_ref;                       // holds that function strongly until the report: no GC reports early
     SendCtx* await_prev;
     SendCtx* await_next;
+    napi_ref q_args;                           // a callback waiting for its turn: [RecordMetadata, error | null]
+    int queued;                                // on p->run_head's list
+    int turn;                                  // send_run_queued runs the callback in its turn
+    SendCtx* run_next;
     kafka_common_KafkaFuture_t* future;        // the record's future (owned), from the hand-over until destroyed
     int waits;                                 // the waits on `future` still pending (each one also holds a ref)
     int js_holds;                              // JS was handed the future's slot number (`slot`)
@@ -256,6 +267,7 @@ static void send_ctx_free(napi_env env, SendCtx* ctx) {
     send_ctx_release_buffers(env, ctx);
     delete_ref(env, &ctx->on_handover);
     delete_ref(env, &ctx->on_complete);
+    delete_ref(env, &ctx->q_args);
     // A future JS still holds and never recorded the delivery of (its
     // callback reached no JS: an environment teardown) stays readable through
     // the handle JS has, so its context is kept. A callback Promise the
@@ -452,8 +464,9 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
         // fire for it any more, so its JS function is dropped now, as
         // close_on_complete drops the others'. Its closure holds the
         // KafkaProducer, which would otherwise never be collected, nor the
-        // closed producer destroyed.
-        if (cbq_is_closed(&p->queue)) delete_ref(env, &ctx->on_complete);
+        // closed producer destroyed. One that fired and waits for its turn
+        // keeps it: it still runs.
+        if (cbq_is_closed(&p->queue) && !ctx->queued) delete_ref(env, &ctx->on_complete);
     } else if (ctx->handover_failed) {
         send_ctx_free(env, ctx);
     } else {
@@ -515,6 +528,9 @@ static void send_awaited_report(napi_env env, SendCtx* ctx, const char* thrown) 
     }
     ctx->delivered = 1;
     send_ctx_maybe_destroy_future(env, ctx);
+    // Its turn ends with its report: the callbacks waiting behind it may run
+    // (send_run_queued, which its caller runs).
+    if (p->current == ctx) p->current = NULL;
     // The function may be collected from now on; its finalizer releases.
     if (ctx->settle_ref != NULL) {
         napi_delete_reference(env, ctx->settle_ref);
@@ -537,16 +553,20 @@ static void send_report_awaiting(napi_env env, Producer* p) {
     }
 }
 
+static void send_run_queued(Producer* p);
+
 // The function a callback's Promise calls once settled, as both its handlers
 // (src/ resolves it with undefined, or with the text of what the callback
 // threw or rejected with; it never rejects, but a rejection, whatever its
-// reason, is still reported once, as a failure).
+// reason, is still reported once, as a failure). Then the callbacks that
+// waited behind it take their turn.
 static napi_value js_send_on_settled(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1] = {NULL};
     void* data = NULL;
     if (napi_get_cb_info(env, info, &argc, argv, NULL, &data) != napi_ok || data == NULL) return NULL;
     SendCtx* ctx = (SendCtx*)data;
+    Producer* p = ctx->p;
     // src/ recorded the delivery before its Promise called back.
     ctx->js_settled = 1;
     napi_valuetype type = napi_undefined;
@@ -558,6 +578,7 @@ static napi_value js_send_on_settled(napi_env env, napi_callback_info info) {
         send_awaited_report(env, ctx, thrown);
     }
     free(thrown);
+    send_run_queued(p);
     return NULL;
 }
 
@@ -622,10 +643,53 @@ static int send_defer(napi_env env, SendCtx* ctx, napi_value promise, int64_t ca
     return 0;
 }
 
+// Puts a delivered callback at the end of the run queue, with the
+// RecordMetadata and error it will receive (`argv`), kept in an array the
+// context references until it runs. Returns 0, or -1 when a Node-API call
+// failed (a JS exception may be pending).
+static int send_enqueue(napi_env env, SendCtx* ctx, napi_value* argv, int64_t callback_id) {
+    napi_value args;
+    if (napi_create_array_with_length(env, 2, &args) != napi_ok || napi_set_element(env, args, 0, argv[0]) != napi_ok
+        || napi_set_element(env, args, 1, argv[1]) != napi_ok
+        || napi_create_reference(env, args, 1, &ctx->q_args) != napi_ok)
+        return -1;
+    Producer* p = ctx->p;
+    ctx->callback_id = callback_id;
+    ctx->queued = 1;
+    ctx->run_next = NULL;
+    if (p->run_tail != NULL) p->run_tail->run_next = ctx;
+    else p->run_head = ctx;
+    p->run_tail = ctx;
+    return 0;
+}
+
+// The first callback waiting for its turn, taken off the run queue; the
+// values it was queued with stay on it (q_args) for its turn.
+static SendCtx* send_dequeue(Producer* p) {
+    SendCtx* ctx = p->run_head;
+    p->run_head = ctx->run_next;
+    if (p->run_head == NULL) p->run_tail = NULL;
+    ctx->run_next = NULL;
+    ctx->queued = 0;
+    return ctx;
+}
+
+// The RecordMetadata and error a callback was queued with, into `argv`, and
+// the reference on them dropped. Returns 1, or 0 when they cannot be read.
+static int send_queued_args(napi_env env, SendCtx* ctx, napi_value* argv) {
+    napi_value args;
+    int have = ctx->q_args != NULL && napi_get_reference_value(env, ctx->q_args, &args) == napi_ok && args != NULL
+               && napi_get_element(env, args, 0, &argv[0]) == napi_ok
+               && napi_get_element(env, args, 1, &argv[1]) == napi_ok;
+    delete_ref(env, &ctx->q_args);
+    return have;
+}
+
 // Java's Callback.onCompletion (kafka_producer_Callback_on_completion_fn_t),
 // run by the drain or by destroy on the JS thread. Both arguments are
-// BORROWED. Order (javascript/CLAUDE.md, rule 6): the JS side runs the user
-// callback and then completes the KafkaFuture; then the result is reported, once.
+// BORROWED: they are made into the callback's JS values here. Order
+// (javascript/CLAUDE.md, rule 6): the JS side runs the user callback and then
+// completes the KafkaFuture; then the result is reported, once.
 //
 // What runs inside the drain here (D8): the user's Java-style Callback, the
 // one piece of user code called synchronously, and the settling of the
@@ -637,10 +701,26 @@ static int send_defer(napi_env env, SendCtx* ctx, napi_value promise, int64_t ca
 // returned one: the future completes and the report is made once it settled,
 // send_defer).
 //
+// One callback at a time, in completion order, as Java runs them one after
+// another on its I/O thread: while another callback runs or its Promise is
+// awaited (p->current), or callbacks already wait for their turn, a callback
+// the core delivers waits at the end of the run queue (send_enqueue), with
+// its values, and send_run_queued calls this again for it once its turn
+// came (ctx->turn), with the values it was queued with; it reports then. So
+// a later record's callback starts only once an earlier callback's Promise
+// settled; the record's future still completes after its own callback, and a
+// flush() or close() covering it still waits for its report. This is no send
+// queue (rule 7): the core hands the records over and delivers them as
+// before; only the callbacks wait for their turn, as Python's AsyncProducer
+// keeps them. A callback the drain runs leaves none waiting behind it: the
+// core queues every delivery, and drains never nest, so none is delivered
+// while it runs. Those delivered during a turn (a send() whose pump runs the
+// core's queue) wait for send_run_queued's loop, which runs them next.
+//
 // `callback_id` (D13) stays in C: it is an int64_t the core may number past
 // 2^53, which a JS number cannot hold exactly, so it is never handed to JS. It
 // is used only here, in the one __set_callback_result report, or kept on the
-// context for an awaited callback's.
+// context for an awaited or queued callback's.
 static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_t* metadata,
                                const kafka_common_Error_t* error, int64_t callback_id) {
     SendCtx* ctx = (SendCtx*)self_;
@@ -649,12 +729,29 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_Error_t* report = NULL;
     int deferred = 0;
+    // In its turn (send_run_queued), it runs with the values it was queued with.
+    int turn = ctx->turn;
+    ctx->turn = 0;
     if (!p->queue.finalizing && ctx->on_complete != NULL) {
         napi_value argv[2];
-        argv[0] = metadata_to_js(env, metadata);
-        argv[1] = argv[0] != NULL ? error_to_js(env, error) : NULL;
-        char* thrown = NULL;
-        if (argv[0] != NULL && argv[1] != NULL) {
+        int have;
+        if (turn) {
+            have = send_queued_args(env, ctx, argv);
+        } else {
+            argv[0] = metadata_to_js(env, metadata);
+            argv[1] = argv[0] != NULL ? error_to_js(env, error) : NULL;
+            have = argv[0] != NULL && argv[1] != NULL;
+            if (have && (p->current != NULL || p->run_head != NULL)) {
+                // Not its turn: it waits behind the others. One that cannot
+                // wait is reported as returned.
+                if (send_enqueue(env, ctx, argv, callback_id) == 0) return;
+                have = 0;
+            }
+        }
+        if (have) {
+            char* thrown = NULL;
+            // Its turn: a callback the core delivers meanwhile waits behind it.
+            p->current = ctx;
             napi_value r = call_ref(env, ctx->on_complete, 2, argv, &thrown);
             napi_valuetype type = napi_undefined;
             if (r != NULL && napi_typeof(env, r, &type) != napi_ok) type = napi_undefined;
@@ -668,15 +765,20 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
             } else if (type == napi_object && send_defer(env, ctx, r, callback_id) == 0) {
                 deferred = 1;
             }
+            if (thrown != NULL) {
+                report = callback_error(thrown);
+                free(thrown);
+            }
+            // The turn ends with the callback, or, for an awaited one, with
+            // its report (send_awaited_report).
+            if (!deferred && p->current == ctx) p->current = NULL;
         } else {
             js_warn_thrown(env);
         }
-        if (thrown != NULL) {
-            report = callback_error(thrown);
-            free(thrown);
-        }
     }
     delete_ref(env, &ctx->on_complete);
+    // A turn that ran no JS (its function dropped) leaves its values unread.
+    delete_ref(env, &ctx->q_args);
     // An awaited callback reports once its Promise settled (send_on_settled);
     // its function owns the context from now on.
     if (deferred) return;
@@ -689,6 +791,36 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     ctx->delivered = 1;
     send_ctx_maybe_destroy_future(env, ctx);
     send_ctx_release(env, ctx);
+}
+
+// Runs the callbacks waiting for their turn, in completion order, while no
+// callback runs or is awaited: one that returns a Promise stops the run until
+// it settled (js_send_on_settled runs this again). Never while the handle
+// object is finalized or once the destroy began: send_report_queued reports
+// those callbacks then.
+static void send_run_queued(Producer* p) {
+    if (p->running_queue) return;
+    p->running_queue = 1;
+    while (p->current == NULL && p->run_head != NULL && !p->queue.finalizing && !p->destroying) {
+        SendCtx* ctx = send_dequeue(p);
+        ctx->turn = 1;
+        send_on_completion(ctx, NULL, NULL, ctx->callback_id);
+    }
+    p->running_queue = 0;
+}
+
+// Reports every callback still waiting for its turn as returned, before the
+// producer is destroyed (producer_destroy, after send_report_awaiting): the
+// finalizer runs no JS, so they never run, and destroy refuses a report once
+// it began. JS holds none of their futures any more, as for the awaited ones.
+static void send_report_queued(napi_env env, Producer* p) {
+    while (p->run_head != NULL) {
+        SendCtx* ctx = send_dequeue(p);
+        delete_ref(env, &ctx->q_args);
+        ctx->js_holds = 0;
+        ctx->turn = 1;
+        send_on_completion(ctx, NULL, NULL, ctx->callback_id);
+    }
 }
 
 static Producer* unwrap_producer(napi_env env, napi_value handle) {
@@ -860,7 +992,9 @@ static void producer_destroy(napi_env env, Producer* p) {
     p->queue.stopped = 1;
     // A callback's Promise still pending is reported as returned before
     // destroy begins, after which no report may be made: no JS will settle it.
+    // So are the callbacks waiting behind it for their turn, which never run.
     send_report_awaiting(env, p);
+    send_report_queued(env, p);
     p->destroying = 1;
     error_warn(env, !p->queue.finalizing, FFI_ERR(kafka_producer_KafkaProducer_destroy_err(p->kp, &ffi_err)));
     p->kp = NULL;
@@ -893,9 +1027,12 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     // The close completed every record the accumulator held, so no orphan's
     // delivery callback can fire any more: their JS functions, whose closures
     // hold the KafkaProducer, are dropped, so the closed producer can be
-    // collected and destroyed. Each context stays on the list until destroy.
+    // collected and destroyed. One whose callback fired and waits for its turn
+    // keeps its function: it still runs. Each context stays on the list until
+    // destroy.
     if (closed_now)
-        for (SendCtx* o = p->orphans; o != NULL; o = o->next) delete_ref(env, &o->on_complete);
+        for (SendCtx* o = p->orphans; o != NULL; o = o->next)
+            if (!o->queued) delete_ref(env, &o->on_complete);
     if (!p->queue.finalizing) {
         napi_value argv[2];
         argv[0] = error_take_to_js(env, error);
