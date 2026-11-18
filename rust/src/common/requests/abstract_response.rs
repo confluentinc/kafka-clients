@@ -83,6 +83,8 @@ use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
+use super::ShareAcknowledgeResponse;
+use super::ShareFetchResponse;
 use super::ShareGroupDescribeResponse;
 use super::ShareGroupHeartbeatResponse;
 use super::TxnOffsetCommitResponse;
@@ -233,6 +235,10 @@ pub enum ConcreteResponse {
     WriteTxnMarkers(WriteTxnMarkersResponse),
     /// A ListTransactions response.
     ListTransactions(ListTransactionsResponse),
+    /// A ShareAcknowledge response (KIP-932).
+    ShareAcknowledge(ShareAcknowledgeResponse),
+    /// A ShareFetch response (KIP-932).
+    ShareFetch(ShareFetchResponse),
     /// A ShareGroupDescribe response (KIP-932).
     ShareGroupDescribe(ShareGroupDescribeResponse),
     /// A ShareGroupHeartbeat response (KIP-932).
@@ -297,6 +303,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
             Self::ListTransactions(r) => r.api_key(),
+            Self::ShareAcknowledge(r) => r.api_key(),
+            Self::ShareFetch(r) => r.api_key(),
             Self::ShareGroupDescribe(r) => r.api_key(),
             Self::ShareGroupHeartbeat(r) => r.api_key(),
         }
@@ -368,6 +376,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::WriteTxnMarkers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareAcknowledge(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ShareGroupDescribe(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ShareGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
@@ -544,6 +554,12 @@ impl ConcreteResponse {
             Self::ListTransactions(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::ShareAcknowledge(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareFetch(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::ShareGroupDescribe(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -616,6 +632,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareAcknowledge(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareFetch(r) => Self::serialize_body(r.data_mut(), version),
             Self::ShareGroupDescribe(r) => Self::serialize_body(r.data_mut(), version),
             Self::ShareGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
         }
@@ -688,6 +706,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.error_counts(),
             Self::WriteTxnMarkers(r) => r.error_counts(),
             Self::ListTransactions(r) => r.error_counts(),
+            Self::ShareAcknowledge(r) => r.error_counts(),
+            Self::ShareFetch(r) => r.error_counts(),
             Self::ShareGroupDescribe(r) => r.error_counts(),
             Self::ShareGroupHeartbeat(r) => r.error_counts(),
         }
@@ -752,6 +772,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.throttle_time_ms(),
             Self::WriteTxnMarkers(r) => r.throttle_time_ms(),
             Self::ListTransactions(r) => r.throttle_time_ms(),
+            Self::ShareAcknowledge(r) => r.throttle_time_ms(),
+            Self::ShareFetch(r) => r.throttle_time_ms(),
             Self::ShareGroupDescribe(r) => r.throttle_time_ms(),
             Self::ShareGroupHeartbeat(r) => r.throttle_time_ms(),
         }
@@ -815,6 +837,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::WriteTxnMarkers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareAcknowledge(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ShareGroupDescribe(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ShareGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
@@ -885,6 +909,8 @@ impl ConcreteResponse {
             | Self::WriteTxnMarkers(_)
             | Self::ShareGroupHeartbeat(_)
             | Self::ShareGroupDescribe(_)
+            | Self::ShareFetch(_)
+            | Self::ShareAcknowledge(_)
             | Self::ListTransactions(_) => self.api_key().response_schema(version).get("throttle_time_ms").is_some(),
         }
     }
@@ -1162,6 +1188,10 @@ impl ConcreteResponse {
                 let response = ListTransactionsResponse::parse(readable, version)?;
                 Ok(Self::ListTransactions(response))
             },
+            ApiKeys::SHARE_ACKNOWLEDGE => {
+                Ok(Self::ShareAcknowledge(ShareAcknowledgeResponse::parse(readable, version)?))
+            },
+            ApiKeys::SHARE_FETCH => Ok(Self::ShareFetch(ShareFetchResponse::parse(readable, version)?)),
             ApiKeys::SHARE_GROUP_DESCRIBE => {
                 Ok(Self::ShareGroupDescribe(ShareGroupDescribeResponse::parse(readable, version)?))
             },
@@ -1235,6 +1265,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::DescribeTransactions(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
             Self::ListTransactions(r) => write!(f, "{r}"),
+            Self::ShareAcknowledge(r) => write!(f, "{r}"),
+            Self::ShareFetch(r) => write!(f, "{r}"),
             Self::ShareGroupDescribe(r) => write!(f, "{r}"),
             Self::ShareGroupHeartbeat(r) => write!(f, "{r}"),
         }
@@ -1368,6 +1400,8 @@ mod tests {
             (TXN_OFFSET_COMMIT, crate::TxnOffsetCommitResponseData),
             (WRITE_TXN_MARKERS, crate::WriteTxnMarkersResponseData),
             (LIST_TRANSACTIONS, crate::ListTransactionsResponseData),
+            (SHARE_ACKNOWLEDGE, crate::ShareAcknowledgeResponseData),
+            (SHARE_FETCH, crate::ShareFetchResponseData),
             (SHARE_GROUP_DESCRIBE, crate::ShareGroupDescribeResponseData),
             (SHARE_GROUP_HEARTBEAT, crate::ShareGroupHeartbeatResponseData),
         ];
