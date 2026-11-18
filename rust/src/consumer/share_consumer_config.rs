@@ -130,7 +130,9 @@ mod tests {
 
     /// Java's `verifyUnsupportedShareConsumerConfig`. Java passes the
     /// deserializer classes too; the Rust configuration has no class keys
-    /// (CLAUDE.md §2), and `bootstrap.servers` is required here.
+    /// (CLAUDE.md §2). `bootstrap.servers` is added so that, without the
+    /// pre-process check, the configuration would build and `unwrap_err`
+    /// would fail.
     fn verify_unsupported_share_consumer_config(extra_config: (&str, &str)) {
         let mut props = HashMap::from([
             (
