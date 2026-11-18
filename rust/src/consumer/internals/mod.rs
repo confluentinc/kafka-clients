@@ -22,17 +22,17 @@ mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3a on")
 )]
 mod acknowledgement_batch;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 mod acknowledgement_commit_callback_handler;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3a on")
 )]
 mod acknowledgements;
 mod async_kafka_consumer;
@@ -70,7 +70,7 @@ pub(crate) mod metrics;
 pub(crate) mod network_client_delegate;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
 )]
 mod node_acknowledgements;
 mod offset_and_timestamp_internal;
@@ -84,12 +84,12 @@ mod request_managers;
 mod request_state;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 pub(crate) mod share_acknowledgement_mode;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
 )]
 pub(crate) mod share_acquire_mode;
 pub(crate) mod subscription_state;
@@ -103,7 +103,7 @@ pub(crate) use abstract_heartbeat_request_manager::{
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
 pub(crate) use acknowledgement_batch::AcknowledgementBatch;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
 pub(crate) use acknowledgement_commit_callback_handler::AcknowledgementCommitCallbackHandler;
 pub(crate) use acknowledgements::Acknowledgements;
 pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
@@ -138,7 +138,7 @@ pub(crate) use heartbeat_request_state::HeartbeatRequestState;
 pub(crate) use member_state::MemberState;
 pub(crate) use member_state_listener::MemberStateListener;
 pub(crate) use network_client_delegate::{NetworkClientDelegate, PollResult, UnsentRequest};
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P5a on")]
 pub(crate) use node_acknowledgements::NodeAcknowledgements;
 pub(crate) use offset_and_timestamp_internal::OffsetAndTimestampInternal;
 pub(crate) use offset_commit_callback_invoker::{
@@ -151,9 +151,9 @@ pub(crate) use positions_validator::PositionsValidator;
 pub(crate) use request_manager::RequestManager;
 pub(crate) use request_managers::RequestManagers;
 pub(crate) use request_state::RequestState;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
 pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P5a on")]
 pub(crate) use share_acquire_mode::ShareAcquireMode;
 pub(crate) use subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
 pub(crate) use timed_request_state::TimedRequestState;

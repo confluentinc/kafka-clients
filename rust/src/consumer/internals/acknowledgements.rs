@@ -141,8 +141,8 @@ impl Acknowledgements {
     ///
     /// Translated from `Acknowledgements.isCompletedExceptionally`. The Rust
     /// name differs because CLAUDE.md §2 keeps the word "exception" out of
-    /// Rust identifiers, as `KafkaFutureImpl::complete_with_error` does.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.Acknowledgements#isCompleted")]
+    /// Rust identifiers.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.Acknowledgements#isCompletedExceptionally")]
     pub(crate) fn is_completed_with_error(&self) -> bool {
         self.acknowledge_error.is_some()
     }

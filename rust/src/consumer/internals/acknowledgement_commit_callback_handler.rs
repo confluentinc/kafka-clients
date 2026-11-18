@@ -49,7 +49,9 @@ impl AcknowledgementCommitCallbackHandler {
     // Java reads it in `ShareConsumerImpl#acquire` to reject consumer calls
     // from inside the callback; in Rust the consumer is mutably borrowed for
     // the whole call (`share-consumer.md` §3), so the flag is only observable
-    // as Java's `false` between calls.
+    // as Java's `false` between calls. That holds also when the `on_complete`
+    // future is dropped mid-callback: `ResetOnDrop` clears it, as Java's
+    // `finally` does.
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.AcknowledgementCommitCallbackHandler#hasEnteredCallback"
     )]
@@ -76,10 +78,14 @@ impl AcknowledgementCommitCallbackHandler {
                 let offsets_copy: HashSet<i64> = acknowledgements.acknowledgements_type_map().keys().copied().collect();
                 let offsets = HashMap::from([(partition.clone(), offsets_copy)]);
                 self.entered_callback = true;
+                // Java's `finally { enteredCallback = false; }`: the guard also
+                // runs when this future is dropped at the await (a cancelled
+                // `poll` / `commit_*` / `close`).
+                let entered_callback = ResetOnDrop(&mut self.entered_callback);
                 let result = AssertUnwindSafe(self.acknowledgement_commit_callback.on_complete(&offsets, error))
                     .catch_unwind()
                     .await;
-                self.entered_callback = false;
+                drop(entered_callback);
                 if let Err(payload) = result {
                     // Java: `LOG.error("Exception thrown by acknowledgement commit
                     // callback", e)`; "exception" is not used in Rust code
@@ -91,6 +97,18 @@ impl AcknowledgementCommitCallbackHandler {
                 }
             }
         }
+    }
+}
+
+/// Clears the flag it borrows when dropped: Java's `finally` block, which an
+/// `.await` that can be cancelled needs (translation-checklist R4).
+// A private helper inside `onComplete` (DoD §7): Java's `try/finally` has no
+// type.
+struct ResetOnDrop<'a>(&'a mut bool);
+
+impl Drop for ResetOnDrop<'_> {
+    fn drop(&mut self) {
+        *self.0 = false;
     }
 }
 
@@ -317,6 +335,30 @@ mod tests {
         let acknowledgements_map_list = [HashMap::from([(fixture.tip0.clone(), accept_reject())])];
         let future = fixture.handler.on_complete(&acknowledgements_map_list);
         assert_send(&future);
+    }
+
+    /// Java's `finally` resets `enteredCallback` on every exit; dropping the
+    /// future while the callback is pending (a cancelled `poll`) must clear it
+    /// too, or a later `ShareConsumerImpl#acquire` would reject every call.
+    #[tokio::test]
+    async fn test_dropped_future_resets_entered_callback() {
+        struct PendingCallback;
+
+        #[async_trait]
+        impl AcknowledgementCommitCallback for PendingCallback {
+            async fn on_complete(&self, _offsets: &HashMap<TopicIdPartition, HashSet<i64>>, _error: Option<&Error>) {
+                std::future::pending::<()>().await;
+            }
+        }
+
+        let fixture = setup();
+        let mut handler = AcknowledgementCommitCallbackHandler::new(Arc::new(PendingCallback));
+        let acknowledgements_map_list = [HashMap::from([(fixture.tip0.clone(), accept_reject())])];
+
+        // Polled once, so the callback is entered and pending, then dropped.
+        assert!(handler.on_complete(&acknowledgements_map_list).now_or_never().is_none());
+
+        assert!(!handler.has_entered_callback());
     }
 
     /// A panicking callback is logged and swallowed, and the remaining entries
