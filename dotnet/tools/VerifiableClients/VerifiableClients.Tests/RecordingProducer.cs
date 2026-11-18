@@ -46,7 +46,7 @@ internal sealed class RecordingProducer : IProducer<string, string>
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<string, string> record) => Recorded(record, Mock.Send(record));
 
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<string, string> record, ICallback callback) =>
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<string, string> record, ICallback? callback) =>
         Recorded(record, Mock.Send(record, callback));
 
     public void InitTransactions() => Mock.InitTransactions();
