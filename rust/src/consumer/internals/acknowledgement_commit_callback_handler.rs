@@ -307,6 +307,17 @@ mod tests {
         assert!(!fixture.handler.has_entered_callback());
     }
 
+    /// The future is `Send`: the share consumer awaits it inside its own
+    /// `Send` futures (`poll`, `commit_*`, `close`).
+    #[test]
+    fn test_on_complete_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let mut fixture = setup();
+        let acknowledgements_map_list = [HashMap::from([(fixture.tip0.clone(), accept_reject())])];
+        let future = fixture.handler.on_complete(&acknowledgements_map_list);
+        assert_send(&future);
+    }
+
     /// A panicking callback is logged and swallowed, and the remaining entries
     /// still get their call.
     #[tokio::test]
