@@ -291,6 +291,23 @@ Run from the worktree, before the step's commit:
 | 542 | D8 | Rule text R1–R5 | drafts below; applied only on the owner's explicit OK | Open |
 | 543 | D9 | Logistics | M23/P7, N=129, S0–S5, this branch; the Actor commits each step with `--no-verify` after the step's gates; one Critic loop at the end | Agreed |
 
+## Ledger rows added at close-out (2026-11-18, Proposed)
+
+Decisions taken during execution and review. None is confirmed by the owner yet; the details are in
+`COMMENTS.DONE.129.md` beside this plan.
+
+| # | Source | Topic | Decision | Status |
+|---|---|---|---|---|
+| 544 | S4 note 1; Critic B Q1, C Q3 | An awaited serializer's `ApiException` | on `AsyncKafkaProducer` it fails the record through the future `Send` hands back, as the built-in path and Java's `KafkaProducer.doSend` do; every other serializer failure fails `Send`'s first stage. Replaces the plan's sentence "A serializer failure faults the returned `ValueTask`" | Proposed |
+| 545 | S4 note 2; Critic B Q2 | A send cancelled, or whose producer is closed, during the awaited serialization | not sent; on `AsyncKafkaProducer` its headers are already read-only; documented in the README and on `IAsyncProducer` | Proposed |
+| 546 | S2 | `Configure` on the async interfaces | public `AsyncSerializerExtensions.Configure` / `AsyncDeserializerExtensions.Configure`, the shape of the sync ones; a class implementing a sync and an async interface must qualify the call | Proposed |
+| 547 | Critic B2 | No `Deserialize(string, Headers, ReadOnlyMemory<byte>)` extension on `IDeserializer<T>` | dropped: beside the span form it made a call with a `byte[]` ambiguous (CS0121) before C# 14 and with an `ArraySegment<byte>` always; the async built-ins call the span form | Proposed |
+| 548 | S3 note 1; Critic B1; round 2 Q1 | Disposing an async serde | `IAsyncDisposable` first, else `IDisposable`, once, on every path; a synchronous `Dispose()` and a failed constructor wait on the calling thread; a serde's `DisposeAsync()` is always started with no synchronization context and the default task scheduler current, on the awaited route too | Proposed |
+| 549 | S3 note 6 | Mock pin safety | `SafeConsumerRecordsHandle.Lent` and `Dispose(Action)`: a lent mock batch counts as retained until its real release, so a pin on call-scoped memory never points at freed memory | Proposed |
+| 550 | Critic A1 | Sync producer and a `MemoryManager`-backed key or value | the blocking send takes the manager's own pin for the native call; an array-backed memory takes none | Proposed |
+| 551 | Critic C Q1 | PerfV3's async consumer arm | it runs the awaited path (`ByteCountDeserializer` is a user class), so the A/B of the async built-in path has no consumer arm; A/B against master not run | Open |
+| 552 | Critic C Q2 | net462 | the library and the unit tests build for net462; no test of this phase ran on it on the development host | Open |
+
 ## Draft rule text (not applied)
 
 Each draft replaces the named text. Until it is applied, this plan wins where the two disagree.
