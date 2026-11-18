@@ -20,6 +20,21 @@
 mod abstract_fetch;
 mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+)]
+mod acknowledgement_batch;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+)]
+mod acknowledgement_commit_callback_handler;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+)]
+mod acknowledgements;
 mod async_kafka_consumer;
 pub(crate) mod auto_offset_reset_strategy;
 #[cfg(test)]
@@ -53,6 +68,11 @@ mod member_state;
 mod member_state_listener;
 pub(crate) mod metrics;
 pub(crate) mod network_client_delegate;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3 on")
+)]
+mod node_acknowledgements;
 mod offset_and_timestamp_internal;
 mod offset_commit_callback_invoker;
 pub(crate) mod offset_fetcher_utils;
@@ -82,6 +102,10 @@ pub(crate) use abstract_heartbeat_request_manager::{
     AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
+pub(crate) use acknowledgement_batch::AcknowledgementBatch;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+pub(crate) use acknowledgement_commit_callback_handler::AcknowledgementCommitCallbackHandler;
+pub(crate) use acknowledgements::Acknowledgements;
 pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
 // `ConsumerHandle` is public (tagged `rust-only`): `crate::consumer` re-exports it.
 pub use async_kafka_consumer::ConsumerHandle;
@@ -114,6 +138,8 @@ pub(crate) use heartbeat_request_state::HeartbeatRequestState;
 pub(crate) use member_state::MemberState;
 pub(crate) use member_state_listener::MemberStateListener;
 pub(crate) use network_client_delegate::{NetworkClientDelegate, PollResult, UnsentRequest};
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3 on")]
+pub(crate) use node_acknowledgements::NodeAcknowledgements;
 pub(crate) use offset_and_timestamp_internal::OffsetAndTimestampInternal;
 pub(crate) use offset_commit_callback_invoker::{
     AutoCommitInterceptorHook, OffsetCommitCallbackInvoker, OffsetCommitCallbackQueue,
