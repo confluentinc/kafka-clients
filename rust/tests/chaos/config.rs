@@ -425,29 +425,21 @@ impl ChaosConfig {
         }
 
         // `--security-protocol`: which broker listener every client uses. A
-        // gRPC backend whose server runs in a sibling container
-        // reaches the broker through its container-network listeners, which
-        // exist for PLAINTEXT, SSL and SASL_SSL but not SASL_PLAINTEXT. A
-        // natively launched server uses the host listeners like the Rust
-        // client, so every protocol is available to it.
+        // gRPC backend whose server runs in a sibling container reaches the
+        // broker through the container-network twin of that listener, which
+        // every protocol has; a natively launched server uses the host
+        // listeners like the Rust client.
         let security_protocol = {
             let raw = env_str(var, "CHAOS_SECURITY_PROTOCOL", "plaintext");
-            let protocol = SecurityProtocol::parse(&raw).ok_or_else(|| {
+            SecurityProtocol::parse(&raw).ok_or_else(|| {
                 format!("CHAOS_SECURITY_PROTOCOL must be plaintext, ssl, sasl_plaintext or sasl_ssl, got '{raw}'")
-            })?;
-            if let Some(spec) = workloads.iter().find(|w| w.backend.is_grpc())
-                && grpc_backends_use_containers(lookup)?
-                && protocol == SecurityProtocol::SaslPlaintext
-            {
-                return Err(format!(
-                    "--security-protocol sasl_plaintext is not supported for '{}' with \
-                     MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through \
-                     their container-network listeners, which exist for plaintext, ssl and sasl_ssl only",
-                    spec.label()
-                ));
-            }
-            protocol
+            })?
         };
+        // A gRPC workload's backend mode is checked up front, as
+        // `backend_pool` panics on a value it does not know.
+        if workloads.iter().any(|w| w.backend.is_grpc()) {
+            grpc_backends_use_containers(lookup)?;
+        }
 
         // Faults, librdkafka-style: broker rolling is implicit (default-on)
         // unless `--no-broker-roll`. Other faults are layered on via valued
@@ -1307,13 +1299,13 @@ mod tests {
     }
 
     /// A gRPC-backed workload takes the run's security protocol like a Rust
-    /// one. Only SASL_PLAINTEXT with a containerised server is rejected: the
-    /// brokers' container-network listeners cover PLAINTEXT, SSL and SASL_SSL.
+    /// one, in either backend mode: the brokers' container-network listeners
+    /// cover all four protocols, as the host ones do.
     #[test]
     fn grpc_workloads_accept_every_protocol_their_listeners_cover() {
         let workloads = ("CHAOS_WORKLOADS", "producer:python,consumer:c");
         for mode in ["container", "native"] {
-            for protocol in ["plaintext", "ssl", "sasl_ssl"] {
+            for protocol in ["plaintext", "ssl", "sasl_plaintext", "sasl_ssl"] {
                 let cfg = parse(&[
                     workloads,
                     ("CHAOS_SECURITY_PROTOCOL", protocol),
@@ -1323,25 +1315,6 @@ mod tests {
                 assert_eq!(cfg.security_protocol, SecurityProtocol::parse(protocol).unwrap());
             }
         }
-
-        let native = parse(&[
-            workloads,
-            ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-            ("MULTILANG_BACKEND_MODE", "native"),
-        ])
-        .expect("a host-process server uses the host SASL_PLAINTEXT listener");
-        assert_eq!(native.security_protocol, SecurityProtocol::SaslPlaintext);
-
-        assert_eq!(
-            parse_err(&[
-                workloads,
-                ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-                ("MULTILANG_BACKEND_MODE", "container"),
-            ]),
-            "--security-protocol sasl_plaintext is not supported for 'producer-python-1' with \
-             MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through their \
-             container-network listeners, which exist for plaintext, ssl and sasl_ssl only"
-        );
 
         // Rust-only runs never consult the backend mode.
         parse(&[
@@ -1372,35 +1345,21 @@ mod tests {
         );
     }
 
-    /// A containerised .NET server is rejected for SASL_PLAINTEXT like any
-    /// gRPC backend, and the error names the .NET workload; a native one uses
-    /// the host listener.
+    /// A .NET workload takes SASL_PLAINTEXT like the other gRPC ones, in
+    /// either backend mode: a containerised server uses the brokers'
+    /// container-network SASL_PLAINTEXT listener, a native one the host one.
     #[test]
-    fn dotnet_workloads_reject_sasl_plaintext_in_container_mode() {
-        for (workloads, label) in [
-            ("producer:rust,consumer:dotnet-async", "consumer-dotnet-async-1"),
-            ("producer:dotnet,consumer:rust", "producer-dotnet-1"),
-        ] {
-            let workloads = ("CHAOS_WORKLOADS", workloads);
-            assert_eq!(
-                parse_err(&[
-                    workloads,
+    fn dotnet_workloads_accept_sasl_plaintext_in_both_modes() {
+        for workloads in ["producer:rust,consumer:dotnet-async", "producer:dotnet,consumer:rust"] {
+            for mode in ["container", "native"] {
+                let cfg = parse(&[
+                    ("CHAOS_WORKLOADS", workloads),
                     ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-                    ("MULTILANG_BACKEND_MODE", "container"),
-                ]),
-                format!(
-                    "--security-protocol sasl_plaintext is not supported for '{label}' with \
-                     MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through \
-                     their container-network listeners, which exist for plaintext, ssl and sasl_ssl only"
-                )
-            );
-            let native = parse(&[
-                workloads,
-                ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-                ("MULTILANG_BACKEND_MODE", "native"),
-            ])
-            .expect("a natively launched .NET server uses the host SASL_PLAINTEXT listener");
-            assert_eq!(native.security_protocol, SecurityProtocol::SaslPlaintext);
+                    ("MULTILANG_BACKEND_MODE", mode),
+                ])
+                .unwrap_or_else(|e| panic!("{workloads} in {mode} mode should be accepted: {e}"));
+                assert_eq!(cfg.security_protocol, SecurityProtocol::SaslPlaintext);
+            }
         }
     }
 

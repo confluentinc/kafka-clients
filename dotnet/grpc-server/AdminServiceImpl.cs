@@ -96,7 +96,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         {
             if (request.HasTimeoutMs)
             {
-                admin.Close(TimeSpan.FromMilliseconds(request.TimeoutMs));
+                admin.Close(Translate.DurationOfMs(request.TimeoutMs));
             }
             else
             {

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -105,37 +106,53 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             return new Proto.SendResponse { Error = Translate.UnknownProducer(request.ProducerId) };
         }
 
-        Task<RecordMetadata>? send = null;
+        ProducerRecord<byte[], byte[]> record;
         try
         {
-            ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
+            record = Translate.ProducerRecordFromProto(request.Record);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.SendResponse { Error = Translate.ToProto(ex) };
+        }
 
-            // The delivery callback runs before the record's future completes, so its entry is
-            // logged before the await below resumes. The 120 s bound covers both stages of the
-            // send, so a stuck send fails the RPC instead of hanging the scenario.
-            send = Delivered(request.WithCallback
+        // The 120 s bound covers both stages of the send, where Python bounds only the future.
+        Stopwatch elapsed = Stopwatch.StartNew();
+        Task<AsyncKafkaFuture<RecordMetadata>>? handover = null;
+        AsyncKafkaFuture<RecordMetadata> future;
+        try
+        {
+            handover = (request.WithCallback
                 ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId))
-                : producer.Send(record));
+                : producer.Send(record)).AsTask();
+            future = await handover.WaitAsync(_sendTimeout).ConfigureAwait(false);
+        }
+        catch (System.TimeoutException) when (handover is { IsCompleted: false })
+        {
+            return new Proto.SendResponse { Error = Translate.SendTimedOut() };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.SendResponse { Error = Translate.ToProto(ex), RaisedBySend = true };
+        }
 
-            RecordMetadata metadata = await send.WaitAsync(_sendTimeout).ConfigureAwait(false);
+        Task<RecordMetadata> delivered = future.Get();
+        try
+        {
+            TimeSpan remaining = _sendTimeout - elapsed.Elapsed;
+            RecordMetadata metadata = await delivered.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
-        catch (System.TimeoutException) when (send is { IsCompleted: false })
+        catch (System.TimeoutException) when (!delivered.IsCompleted)
         {
-            // Only the server's own bound is code 7: a send that failed with a TimeoutException
-            // (the core's -5) is completed, and goes out through ToProto.
+            // Only the server's own bound is LOCAL_TIMEOUT: a send that failed with a TimeoutException is
+            // completed, and goes out through ToProto.
             return new Proto.SendResponse { Error = Translate.SendTimedOut() };
         }
         catch (Exception ex)
         {
             return new Proto.SendResponse { Error = Translate.ToProto(ex) };
         }
-    }
-
-    private static async Task<RecordMetadata> Delivered(ValueTask<AsyncKafkaFuture<RecordMetadata>> send)
-    {
-        AsyncKafkaFuture<RecordMetadata> future = await send.ConfigureAwait(false);
-        return await future.Get().ConfigureAwait(false);
     }
 
     public override async Task<Proto.StatusResponse> Flush(Proto.FlushRequest request, ServerCallContext context)
@@ -151,7 +168,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             await producer.Flush().ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -176,7 +193,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
             return response;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) };
         }
@@ -201,7 +218,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
             return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
         }
@@ -234,7 +251,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
                 .ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -250,7 +267,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         CloseProducer(request.ProducerId, null);
 
     public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
-        CloseProducer(request.ProducerId, TimeSpan.FromMilliseconds(request.TimeoutMs));
+        CloseProducer(request.ProducerId, Translate.DurationOfMs(request.TimeoutMs));
 
     private async Task<Proto.StatusResponse> Transaction(ulong producerId, Func<IAsyncProducer<byte[], byte[]>, Task> operation)
     {
@@ -265,7 +282,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             await operation(producer).ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -284,7 +301,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             await (timeout.HasValue ? producer.Close(timeout.Value) : producer.Close()).ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
