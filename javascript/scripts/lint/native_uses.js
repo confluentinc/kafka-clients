@@ -81,9 +81,16 @@ function nativeUses(ctx, node) {
 
 /** The body a declaration runs, if it is a src/ function, method, accessor or constructor with one. */
 function bodyOf(ts, d) {
-  if ((ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d) || ts.isGetAccessorDeclaration(d) ||
-       ts.isSetAccessorDeclaration(d) || ts.isConstructorDeclaration(d) || ts.isFunctionExpression(d) ||
-       ts.isArrowFunction(d)) && d.body) {
+  if (
+    (ts.isFunctionDeclaration(d) ||
+      ts.isMethodDeclaration(d) ||
+      ts.isGetAccessorDeclaration(d) ||
+      ts.isSetAccessorDeclaration(d) ||
+      ts.isConstructorDeclaration(d) ||
+      ts.isFunctionExpression(d) ||
+      ts.isArrowFunction(d)) &&
+    d.body
+  ) {
     return d;
   }
   if (ts.isVariableDeclaration(d) && d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) {

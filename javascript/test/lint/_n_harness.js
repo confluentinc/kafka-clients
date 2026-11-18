@@ -21,7 +21,14 @@ const { RULES } = require('../../scripts/lint_rules');
 const { TSCONFIG, project, lint } = require('./_project');
 const { FILES, LISTS, withLists } = require('./_c_fixture');
 
-/** The report of rule `name` over the fixture with `files` replacing its files, and `lists` its allowlists. */
+/**
+ * The report of rule `name` over the fixture with `files` replacing its files, and `lists` its allowlists.
+ *
+ * @param {string} name
+ * @param {Record<string, string | undefined>} [files]
+ * @param {Record<string, unknown>} [lists]
+ * @returns {import('./_project').Report}
+ */
 function runN(name, files = {}, lists = LISTS[name] || {}) {
   const rule = RULES.find((r) => r.name === name);
   return lint(project({ 'tsconfig.json': TSCONFIG, ...FILES, ...files }), [name], { rules: [withLists(rule, lists)] });

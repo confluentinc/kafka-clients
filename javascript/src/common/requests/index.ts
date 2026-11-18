@@ -18,6 +18,22 @@
 
 // `src/common/requests`: the generated modules of src/common/requests/.
 
+/**
+ * The classes of the Java package this client has, generated from the Java
+ * sources.
+ *
+ * What they leave out:
+ *
+ * - `CorrelationIdMismatchError`: An error the core reports has no payload for
+ *   `requestCorrelationId` (it is -1, a value Java's counter never assigns, as
+ *   the Python client reads it) and `responseCorrelationId` (it is -1, a value
+ *   Java's counter never assigns, as the Python client reads it) *(deviation:
+ *   Java's error carries it. Why: the C API has no view of the class at all.
+ *   Goes when: the C FFI gives a view of it)*.
+ *
+ * @packageDocumentation
+ */
+
 export { CorrelationIdMismatchError } from './correlation_id_mismatch_error';
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import

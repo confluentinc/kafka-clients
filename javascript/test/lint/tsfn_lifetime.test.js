@@ -16,18 +16,15 @@
 
 // check-tsfn-lifetime (scripts/lint/rules/tsfn_lifetime.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { project, lint, findings } = require('./_project');
 
 const RULE = 'check-tsfn-lifetime';
 
-const QUEUE =
-  'int cbq_closed(napi_env env, Q* q) {\n  if (q->tsfn_alive) napi_unref_threadsafe_function(env, q->tsfn);\n  return 1;\n}\n';
+const QUEUE = 'int cbq_closed(napi_env env, Q* q) {\n  if (q->tsfn_alive) napi_unref_threadsafe_function(env, q->tsfn);\n  return 1;\n}\n';
 
-const PRODUCER =
-  'static void close_on_complete(kafka_common_Error_t* error, void* opaque) {\n  cbq_closed(env, &p->queue);\n}\n';
+const PRODUCER = 'static void close_on_complete(kafka_common_Error_t* error, void* opaque) {\n  cbq_closed(env, &p->queue);\n}\n';
 
 test('the thread-safe function unreferenced only by cbq_closed, called by the close completion, passes', () => {
   const r = lint(project({ 'native/callback_queue.c': QUEUE, 'native/producer.c': PRODUCER }), [RULE]);
@@ -57,7 +54,9 @@ test('cbq_closed called before the core answered the close, outside the close co
   const r = lint(
     project({
       'native/callback_queue.c': QUEUE,
-      'native/producer.c': PRODUCER + 'napi_value js_producer_close(napi_env env, napi_callback_info info) {\n  cbq_closed(env, &p->queue);\n  return NULL;\n}\n',
+      'native/producer.c':
+        PRODUCER +
+        'napi_value js_producer_close(napi_env env, napi_callback_info info) {\n  cbq_closed(env, &p->queue);\n  return NULL;\n}\n',
     }),
     [RULE],
   );

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // A minimal Fetch (v4) client for the integration tests: reads back what the
@@ -22,6 +21,7 @@
 
 const net = require('node:net');
 
+/** @param {string} s */
 function writeString(s) {
   const b = Buffer.from(s, 'utf8');
   const len = Buffer.alloc(2);
@@ -29,12 +29,19 @@ function writeString(s) {
   return Buffer.concat([len, b]);
 }
 
+/** @param {number} v */
 function int32(v) {
   const b = Buffer.alloc(4);
   b.writeInt32BE(v);
   return b;
 }
 
+/**
+ * @param {number} correlationId
+ * @param {string} topic
+ * @param {number} partition
+ * @param {number} offset
+ */
 function fetchRequest(correlationId, topic, partition, offset) {
   const header = Buffer.concat([
     Buffer.from([0, 1, 0, 4]), // Fetch, v4
@@ -61,6 +68,7 @@ function fetchRequest(correlationId, topic, partition, offset) {
 }
 
 class Reader {
+  /** @param {Buffer} buf */
   constructor(buf) {
     this.buf = buf;
     this.pos = 0;
@@ -89,6 +97,7 @@ class Reader {
     this.pos += len;
     return s;
   }
+  /** @param {number} len */
   bytes(len) {
     const b = this.buf.subarray(this.pos, this.pos + len);
     this.pos += len;
@@ -116,6 +125,7 @@ class Reader {
 // UTF-8, and its raw bytes) and `timestamp` the batch's base
 // timestamp plus the record's delta (the record's CreateTime on a CreateTime
 // topic).
+/** @param {Buffer} buf */
 function parseRecords(buf) {
   const out = [];
   const r = new Reader(buf);
@@ -160,14 +170,29 @@ function parseRecords(buf) {
   return out;
 }
 
+/** @typedef {Record<string, (...args: unknown[]) => void>} Listeners */
+
 // A Promise over `socket`: `start(listeners, done)` adds its own listeners to
 // the socket and to `listeners` and calls `done(value)` to resolve; 'error'
 // rejects with the error, 'end' and 'close' with the message `closed()` gives.
 // Once it settles every listener in `listeners` is removed, so none piles up
 // across calls.
+/**
+ * @template [T=void]
+ * @param {import('node:net').Socket} socket
+ * @param {() => string} closed
+ * @param {(listeners: Listeners, done: (value: T) => void) => void} start
+ * @returns {Promise<T>}
+ */
 function settleOn(socket, closed, start) {
   return new Promise((resolve, reject) => {
+    /** @type {Listeners} */
     const listeners = {};
+    /**
+     * @template U
+     * @param {(value: U) => void} fn
+     * @param {U} value
+     */
     const settle = (fn, value) => {
       for (const [event, listener] of Object.entries(listeners)) socket.off(event, listener);
       fn(value);
@@ -183,6 +208,10 @@ function settleOn(socket, closed, start) {
 /**
  * Writes `request` and resolves to the response's body, once complete; rejects
  * when the socket fails, ends or closes first.
+ *
+ * @param {import('node:net').Socket} socket
+ * @param {Buffer} request
+ * @returns {Promise<Buffer>}
  */
 function roundTrip(socket, request) {
   let chunks = Buffer.alloc(0);
@@ -191,7 +220,8 @@ function roundTrip(socket, request) {
     () => `the connection closed after ${chunks.length} bytes of the response`,
     (listeners, done) => {
       listeners.data = (chunk) => {
-        chunks = Buffer.concat([chunks, chunk]);
+        // A 'data' listener on a socket without an encoding gets a Buffer.
+        chunks = Buffer.concat([chunks, /** @type {Buffer} */ (chunk)]);
         if (chunks.length >= 4 && chunks.length >= 4 + chunks.readInt32BE(0)) {
           done(chunks.subarray(4, 4 + chunks.readInt32BE(0)));
         }
@@ -202,7 +232,12 @@ function roundTrip(socket, request) {
   );
 }
 
-/** Connects to `host:port`; rejects when the socket fails or closes first. */
+/**
+ * Connects to `host:port`; rejects when the socket fails or closes first.
+ *
+ * @param {string} host
+ * @param {number} port
+ */
 async function connect(host, port) {
   const socket = net.connect({ host, port });
   await settleOn(
@@ -223,6 +258,10 @@ async function connect(host, port) {
  * Reads partition `partition` of `topic` from offset 0 up to its high
  * watermark: `{highWatermark, records: [{offset, timestamp, key, value,
  * headers}]}`.
+ *
+ * @param {string} bootstrap
+ * @param {string} topic
+ * @param {number} partition
  */
 async function fetchRecords(bootstrap, topic, partition) {
   const [host, port] = bootstrap.split(',')[0].split(':');

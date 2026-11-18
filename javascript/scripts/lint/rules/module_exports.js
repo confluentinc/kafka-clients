@@ -61,7 +61,7 @@ module.exports = {
   needs: ['program'],
   hint:
     'Make each index.ts re-export only the modules of its own folder, by name, with no namespace; the root ' +
-    'exports only Java\'s built-in errors and Duration, and each package is imported by its own path (root ' +
+    "exports only Java's built-in errors and Duration, and each package is imported by its own path (root " +
     'CLAUDE.md, JavaScript Binding Conventions, Layout and modules).',
   check(ctx) {
     const { ts, sourceFiles } = ctx.program();
@@ -92,7 +92,12 @@ module.exports = {
           continue;
         }
         if (st.moduleSpecifier === undefined || !ts.isStringLiteral(st.moduleSpecifier)) {
-          findings.push({ kind: 'index-declaration', subject: `${rel}:${line}`, at, message: 'exports what it declares: an index only re-exports the modules of its folder' });
+          findings.push({
+            kind: 'index-declaration',
+            subject: `${rel}:${line}`,
+            at,
+            message: 'exports what it declares: an index only re-exports the modules of its folder',
+          });
           continue;
         }
         const spec = st.moduleSpecifier.text;

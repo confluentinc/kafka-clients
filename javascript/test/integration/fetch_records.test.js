@@ -17,7 +17,6 @@
 // The integration tests' Fetch reader (_fetch_records.js) against a fake
 // server: no broker is needed, so these run whether or not one is set.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('node:net');
 
@@ -25,25 +24,37 @@ const { connect, roundTrip } = require('./_fetch_records');
 
 const EVENTS = ['data', 'error', 'end', 'close', 'connect'];
 
-/** A server answering each request with `respond(socket)`; resolves to {server, port}. */
+/**
+ * A server answering each request with `respond(socket)`; resolves to {server, port}.
+ *
+ * @param {(socket: net.Socket) => void} respond
+ */
 async function fakeServer(respond) {
   const server = net.createServer((socket) => socket.once('data', () => respond(socket)));
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { server, port: server.address().port };
+  await /** @type {Promise<void>} */ (new Promise((resolve) => server.listen(0, '127.0.0.1', resolve)));
+  // A server listening on TCP has an address of its own.
+  const address = server.address();
+  assert.ok(address !== null && typeof address === 'object');
+  return { server, port: address.port };
 }
 
-/** A framed response: its 4-byte size, then `body`. */
+/**
+ * A framed response: its 4-byte size, then `body`.
+ *
+ * @param {Buffer} body
+ */
 function frame(body) {
   const size = Buffer.alloc(4);
   size.writeInt32BE(body.length);
   return Buffer.concat([size, body]);
 }
 
+/** @param {net.Socket} socket */
 function listenerCounts(socket) {
   return Object.fromEntries(EVENTS.map((event) => [event, socket.listenerCount(event)]));
 }
 
-test('a round trip rejects promptly when the connection closes mid-response', { timeout: 10000 }, async () => {
+test('a round trip rejects promptly when the connection closes mid-response', async () => {
   // The size announces 100 bytes; 10 arrive, then the server closes.
   const { server, port } = await fakeServer((socket) => {
     socket.end(frame(Buffer.alloc(100)).subarray(0, 14));
@@ -59,7 +70,7 @@ test('a round trip rejects promptly when the connection closes mid-response', { 
     socket.destroy();
     server.close();
   }
-});
+}, 10000);
 
 test('a completed round trip removes every listener it added', async () => {
   const { server, port } = await fakeServer((socket) => {

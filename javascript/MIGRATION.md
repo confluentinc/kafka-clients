@@ -115,6 +115,10 @@ producer for them.
 | the delivery report `(err, report)`, run by `poll()` / `setPollInterval()` | the callback `({ metadata, exception }) => ...`, one object with Java's parameter names | It runs on the JavaScript thread, before the record's future completes, without any polling: delete `producer.poll()` and `setPollInterval()`. On failure `metadata` has Java's `-1` fields. It may return a Promise, which the producer awaits |
 | `dr_cb: true`, `dr_msg_cb` | the `callback` of each `send()` | Per send, not per client |
 | `acks`, `timeout`, `compression` per `send()` (KafkaJS) | the producer's `acks`, `delivery.timeout.ms` and `compression.type` configuration | Java sets them per producer |
+| `stats_cb` with `statistics.interval.ms` (librdkafka's JSON statistics, pushed on a timer) | `producer.metrics()`, read when you call it | Java's metrics: a `MetricNameMap<Metric>` keyed by `MetricName` (group, name and tags), each `metric.metricValue()` a snapshot taken by the call; `metrics().get(new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', id]]) }))`. `statistics.interval.ms` reaches the core as an unknown key |
+| `producer.getMetadata({ topic }, cb)` (node-rdkafka style), the KafkaJS admin's `fetchTopicMetadata` for a producer's topic | `await producer.partitionsFor(topic)` | Java's `partitionsFor`: a Promise of `PartitionInfo[]`, each with `topic()`, `partition()`, `leader()`, `replicas()`, `inSyncReplicas()` and `offlineReplicas()` (`Node`s), waiting up to `max.block.ms` for the topic's metadata |
+| a string key or value given as it is | `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()`, or `{ 'key.serializer': stringSerializer }` | `stringSerializer()` (`common/serialization`) writes a string as Java's `StringSerializer` does (UTF-8, or Java's standard charsets through `serializer.encoding`); without a serializer a key or value is bytes, and a string throws `TypeError` pointing to it (Section 5). A serializer is `{ serialize({ topic, headers, data }) }`, and may return a Promise |
+| a hand-written mock of the producer, `jest.mock(...)` | `new MockProducer()`, Java's mock (`producer`) | It implements `Producer` and is the core's own mock: `history()` returns the records sent, `completeNext()` / `errorNext(e)` complete them, `setSendException(e)` (and the flush, close and `partitionsFor` setters) makes a call throw `e`. Close every mock: it keeps Node running until closed |
 | `await producer.flush({ timeout })` / `flush(timeout, cb)` | `await producer.flush()` | Java's `flush()` takes no timeout: it waits until every record sent before it is delivered or failed |
 | `producer.transaction()`, `sendOffsets()`, `commit()`, `abort()` (KafkaJS) | `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()` and `abortTransaction()`, Java's names | Not in the preview yet (Section 3). When they come, they return Promises, `beginTransaction()` included. A send is part of the transaction once its `send()` Promise has resolved. `commitTransaction()` waits for its delivery, so there's no need to await `future.get()` first. A send whose Promise hasn't resolved yet may be left out |
 
@@ -123,8 +127,10 @@ producer for them.
 | 1.x / KafkaJS | 4.x | Note |
 |---|---|---|
 | `RecordMetadata[]` from `send()`: `{ topicName, partition, baseOffset, errorCode }` | `RecordMetadata` from `future.get()`: `metadata.topic`, `.partition`, `.offset`, `.hasOffset`, `.timestamp`, `.serializedKeySize`, ... | A **data object**: Java's getters are `readonly` fields, so they read without `()`. **Silent:** `offset` and `timestamp`, Java's `long`, are bigints (`metadata.offset === 0n`), where 1.x's callback API gives numbers and its KafkaJS-style API strings; `JSON.stringify` writes them as decimal strings |
-| other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()` | Only the data objects (`ProducerRecord`, `RecordMetadata`; on the consumer side the records and `TopicPartition`) read through fields. Without the `()` a read returns the function itself and raises no error |
+| other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()` | Only the data objects (`ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`; on the consumer side the records) read through fields. Without the `()` a read returns the function itself and raises no error |
 | `err.code`, `err.type`, `err.retriable`, `KafkaJSError` subclasses | Java's classes, `Exception` read as `Error`: `instanceof RetriableError`, `instanceof TopicAuthorizationError`, `err.name` as the fallback | An error has no `code` or `retriable` field; they read `undefined`. The classes follow Java's `extends` chain and are in their packages (`common/errors`, `producer`, ...) |
+| an error's details as fields (KafkaJS's `KafkaJSProtocolError.type`, 1.x's `err.message` parsed for the topics) | Java's payload getters, methods with `()`: `err.unauthorizedTopics()` (a `Set`), `err.recordTooLargePartitions()` (a `TopicPartitionMap<bigint>`, or `null`), `err.invalidTopics()`, `err.groupId()`, `err.throttleTimeMs()` | Each returns a new collection the caller may change. An error is built with them by name: `new TopicAuthorizationError({ unauthorizedTopics: ['t'] })` |
+| a map or set keyed by `'topic:partition'` strings, or by `{ topic, partition }` objects | `TopicPartitionMap` and `TopicPartitionSet` (`common`) | A `Map` compares object keys by identity, so a new `TopicPartition` would miss; these compare by topic and partition and keep the original `TopicPartition`s. Where Java takes a `Map<TopicPartition, V>` only a `TopicPartitionMap` is taken, and a `Map` throws `TypeError` with a hint |
 | a failed `await send()` rejected with the delivery error | `send()` rejects with what Java's `send()` throws (a closed producer, a metadata timeout); `future.get()` rejects with an `ExecutionError` whose `cause` is the delivery error | Only `get()` wraps the failure, as Java's `Future.get()` does; the callback's `exception` and `toCompletionStage()` give the error itself |
 | deep imports: `@confluentinc/kafka-javascript/types/kafkajs`, `.../lib/...` | each package from its own path: `@confluentinc/kafka-javascript/producer`, `/common`, `/common/errors`, `/common/header`, `/common/config`, ... | A deep import fails with Node's `ERR_PACKAGE_PATH_NOT_EXPORTED`. The package root exports only Java's built-in errors and the `Duration` type |
 
@@ -168,10 +174,16 @@ core checks it, throwing `ConfigError` with Java's message naming the key;
 keys of this client: like librdkafka's keys, they reach the core as unknown
 keys (their value, an object, written as `[object Object]`), which the core
 lists as unused and otherwise ignores, so a builder given there is silently
-not used. Java's `key.serializer` and `value.serializer` throw
-`ConfigError` too, whatever their value: a serializer is a constructor
-argument, never a configuration value. The preview has no serializers yet
-(Section 3): serialize keys and values yourself, then send the bytes.
+not used. A serializer is a constructor argument,
+`new KafkaProducer({ configs, keySerializer, valueSerializer })`, each an
+object `{ serialize({ topic, headers, data }) }` (or `null`), whose
+`serialize` may return a Promise, or it comes through Java's
+`key.serializer` and `value.serializer`, which take a synchronous function
+`({ configs, isKey }) => serializer`, such as `stringSerializer`, called once
+with the whole configuration in place of Java's class and its `configure()`.
+A class name, a serializer object or a function that returns a Promise
+there throws `ConfigError`. A constructor argument wins, and its config key
+is then ignored.
 
 **Schema Registry.** Keep `@confluentinc/schemaregistry`, its imports and its
 calls, and upgrade it to its release that supports 4.x, which ships its own
@@ -183,7 +195,7 @@ keeps working with any release:
 
 ```js
 const value = await serializer.serialize(topic, { fullName: 'John Doe' });
-await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get();
+await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), value }))).get();
 ```
 
 ### Calls and arguments
@@ -193,7 +205,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | positional arguments, `send(record, callback)` | one object of Java's names, `send({ record, callback })`, or the value on its own for a one-parameter form, `send(record)`, `close(5000)` | A second argument is refused with `IllegalArgumentError`, never dropped |
 | `undefined` for "not given" | leave the key or the argument out; `null` is Java's null | `undefined` as a value throws `TypeError` naming the parameter (`"value must not be undefined. Pass null for Java's null, which sends a tombstone."`), except in a configuration, where it leaves the key out |
 | timeouts in milliseconds, `-1` for "forever" | milliseconds or a `Temporal.Duration`; `Infinity` for no limit, `0` for "don't wait" | A negative timeout throws `IllegalArgumentError` |
-| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one) or a string | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
+| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one), or a string with `stringSerializer()` | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
 
 ## 2. Not offered, by design
 
@@ -202,7 +214,7 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | a KafkaJS-style API in the same package | 4.x has one API, Java's | the Java-shaped API of this guide |
 | `connect()`, `disconnect()`, `run()` helpers, events | a client is ready once constructed, as in Java; Java has no event emitter | construct it; `close()`; the callback and the futures |
 | a producer `poll()` / `setPollInterval()` | callbacks run on the JavaScript thread without polling | delete the call |
-| `error_cb`, `dr_cb`, `stats_cb`, `oauthbearer_token_refresh_cb`, `rebalance_cb`, `offset_commit_cb` config callbacks | no config value is a callback, as in Java | an operation's error rejects its call or fails its future; deliveries go to each `send()`'s callback; 1.x's `rebalance_cb` becomes a listener passed to `subscribe()`, and `offset_commit_cb` the commit call's callback (with the consumer). A custom OAuth token callback has no replacement until the core has a token hook |
+| `error_cb`, `dr_cb`, `stats_cb`, `oauthbearer_token_refresh_cb`, `rebalance_cb`, `offset_commit_cb` config callbacks | no config value is a callback, as in Java | an operation's error rejects its call or fails its future; deliveries go to each `send()`'s callback; `stats_cb`'s statistics are `metrics()`, read when called (Section 1); 1.x's `rebalance_cb` becomes a listener passed to `subscribe()`, and `offset_commit_cb` the commit call's callback (with the consumer). A custom OAuth token callback has no replacement until the core has a token hook |
 | a `logger` option | the core logs on its own | `RUST_LOG` for the core, `NODE_DEBUG=confluent_kafka` for the binding |
 | `producer.sendBatch()`, a producer queue length | the core batches and applies backpressure itself (`max.block.ms`) | `send()` in a loop, then `flush()` |
 | 1.x's `types/kafkajs` type definitions | the package ships the types of its own API | import the types from the package paths |
@@ -216,9 +228,8 @@ await (await producer.send(new ProducerRecord({ topic, key: 'k', value }))).get(
 | The consumer: `KafkaConsumer` with `poll()`, `subscribe()`, `assign()`, `commitSync()` and `commitAsync()` | the consumer |
 | The admin client: `Admin.create()`, its RPCs, `*Options` and `*Result` classes | the admin client |
 | Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
-| `partitionsFor()`, `metrics()` | not translated yet |
 | `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
-| Serializers: the `keySerializer` / `valueSerializer` constructor arguments and the built-in factories (`stringSerializer()`, ...) | the serdes |
+| The built-in serializer factories other than `stringSerializer()` | the serdes |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |
 | Musl (Alpine), Linux arm64 and Windows packages | later releases; build from source until then |
 
@@ -240,17 +251,19 @@ is decided for them already:
 - **A pattern is a `SubscriptionPattern`, not a `RegExp`**: the broker
   matches the whole topic name, so `/^orders-/` becomes
   `new SubscriptionPattern({ pattern: 'orders-.*' })`.
-- **A map keyed by partition is a `TopicPartitionMap`**, whose `keys()` are
-  `TopicPartition` objects (`tp.topic`, `tp.partition`), not a `Map` of
-  strings.
+- **A map keyed by partition is a `TopicPartitionMap`**, and a set of
+  partitions (`assignment()`) a `TopicPartitionSet`, both available today
+  (Section 1): their `keys()` are `TopicPartition` objects (`tp.topic`,
+  `tp.partition`), not strings.
 - **Every consumer sets `group.protocol: 'consumer'`** (KIP-848) until the
   core changes its default.
 - **The admin results and options are classes** (`new CreateTopicsOptions({
   timeoutMs: 5000 })`, `result.values()`), each RPC returning its `*Result` at
   once, with a `KafkaFuture` per key; and **`close()` has no time limit on the
   admin client either**.
-- **Serdes go in the constructor**, never in the configuration, and a string
-  key or value then needs `stringSerializer()`.
+- **Serdes go in the constructor, or in `key.serializer` / `value.serializer`
+  as a function `({ configs, isKey }) => serializer`**, never as a class
+  name, and a string key or value needs `stringSerializer()`.
 
 ## 4. Available here and not in 1.x or KafkaJS
 
@@ -268,6 +281,13 @@ is decided for them already:
   `SecurityConfig`) with Java's documentation strings.
 - A delivery callback that returns a Promise, which the producer awaits before
   the record's future completes.
+- Java's `MockProducer`, the client's own mock, for tests: `history()`,
+  `completeNext()`, `errorNext()` and an error to throw from each call.
+- Java's metrics, `producer.metrics()`, by `MetricName`; Java's
+  `partitionsFor()`.
+- Java's error payloads as getters (`err.unauthorizedTopics()`), and
+  `TopicPartitionMap` / `TopicPartitionSet` for maps and sets keyed by
+  partition.
 
 ## 5. Same code, different result
 
@@ -281,15 +301,18 @@ behaves otherwise.
 | A `Buffer` key or value changed after `send()` | the bytes at the call are sent: 1.x copies a plain Buffer inside `send()` (`RK_MSG_COPY`) | the client reads the Buffer after `send()` returns, until its Promise settles | A Buffer reused or written to before `send()` settles sends other bytes; await `send()` first, and have a serializer return a new Buffer for each record |
 | 64-bit values (`RecordMetadata.offset`, `.timestamp`) | numbers (callback API) or strings (KafkaJS-style API) | `bigint`s, Java's `long`, exact at every value | `offset === 0` is false for `0n`, and arithmetic mixing a `bigint` and a number throws `TypeError`; `JSON.stringify` writes them as decimal strings |
 | Keyless record → partition | round-robin or random | a sticky partition chosen by load (KIP-794) | Another distribution and batching |
+| A header read back from your own `Headers` before `send()` (`lastHeader`, `headers(key)`, `toArray()`, iteration) | the object you added | a copy of it, made by the client: equal (`equals()`), not the same object, and unchanged when the `Headers` changes later; after `send()` the headers are read-only and a header read from them is a view, with no copy | Compare headers with `equals()`, never `===`; a write to the bytes you gave a `Header` does not change it, as the header copied them |
 | A lone surrogate in a string key, value, header key or config value | written as U+FFFD (`Buffer.from`) | written as `?`, as Java's `String.getBytes(UTF_8)` writes it | Other bytes on the wire for a malformed string; well-formed strings encode the same |
 | `enable.idempotence` unset | off (librdkafka, KafkaJS) | on, as in Java, unless a conflicting setting turns it off | `acks` is `all` and retries keep each partition's order, as Java's producer does by default |
 | `close()` with no timeout | — | waits without a time limit for the records already sent, as Java's `close()` | Shut down with `close(timeout)` when the process must end in time |
-| A delivery callback that throws, or whose Promise rejects | — | the producer logs it, as Java's does, and it reaches no caller; the record's future still completes with its delivery result | Report errors from the callback yourself |
-| Inside a callback: `flush()`, `close()`, a transaction call, or awaiting a later record's future | — | each waits for the callback itself: the producer refuses them before the callback's first `await`, and after it they can hang | Do not wait on the same producer from inside its callback |
+| A delivery callback that throws, or whose Promise rejects | — | the producer logs it, as Java's does, and it reaches no caller; the record's future still completes with its delivery result. The exception is the callback a serializer's `ApiError` runs inside `send()`: its throw or rejection rejects `send()`, as Java's `onCompletion` throws out of `send()` there | Report errors from the callback yourself |
+| Inside a callback: `flush()`, `close()`, or awaiting the callback's own record's future | — | before the callback's first `await`, `flush()` is refused and `close()` closes at once as `close({ timeout: 0 })`, as Java's do, failing the records still pending with "Producer is closed forcefully."; after it, both wait for the callback itself and can hang; the callback's own record's future completes only once the callback's Promise settles, so awaiting it there waits for the callback too | Do not wait on the same producer from inside its callback |
 | A callback Promise that never settles | — | has no time limit, as in Java: it holds its record's future, `flush()` and `close()`, `close({ timeout })` included | Make every callback settle |
 | A Rust panic in the core | — | reaches the caller unchanged, as the error of the call it happened in | Close that client and create a new one |
 | `TimeoutError` | one class | two: the root's (Java's `java.util.concurrent.TimeoutException`), which a timed `future.get(timeout)` rejects with, and `common/errors`' Kafka `TimeoutError`, which a delivery or `max.block.ms` timeout fails a record with (the `cause` of `get()`'s `ExecutionError`, and the callback's `exception`) | Check the class you mean; neither is the `DOMException` of `AbortSignal.timeout()` |
-| String keys and values without a serializer | strings sent as UTF-8 | the preview encodes them as Java's `StringSerializer` does; with the serdes, a string will need `stringSerializer()` | Pass `Uint8Array`s, or plan for `stringSerializer()` (Section 3) |
+| A serializer that throws | the error is thrown or rejected as it is | as Java's `KafkaProducer`: an `ApiError` goes to the callback, with -1 metadata, and fails the future `send()` resolves to; a `TypeError` rejects as a `SerializationError` ("Can't convert key of class …"), the `TypeError` its `cause`; anything else rejects as it is | Check the callback or the future for an `ApiError` from a serializer, and `e.cause` for the `TypeError` |
+| A `MockProducer` callback whose Promise rejects | — | the callback's error, as a throw is: the record's own `send()` with `autoComplete`, and `flush()`, reject with it; after `completeNext()` / `errorNext()` the next `send()`, `flush()` or `close()` does, once, `flush()` still flushing first. A `close()` inside a callback, before its first `await`, does not wait for the callbacks; after it `close()` waits for that callback, and a `flush()` there does too, unless a flush error is set, which it rejects with at once, so a callback that awaits either otherwise never settles. With `autoComplete`, a `send()` from a callback's synchronous part settles after its own callback, which runs once the outer one returns | A test sees the callback's failure; await `flush()` or `close()` to collect it |
+| String keys and values without a serializer | strings sent as UTF-8 | a string key or value throws `TypeError` pointing to `stringSerializer()`, which encodes it as Java's `StringSerializer` does | Pass `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()` (or the config keys), or `Uint8Array`s |
 
 `README.md` is the reference for the rest of the producer's API, and
 `CHANGELOG.md` lists each change in the release where it lands.

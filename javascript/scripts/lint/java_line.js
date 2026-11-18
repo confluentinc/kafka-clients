@@ -86,9 +86,7 @@ function namesJavaFileOrClass(text) {
       if (span.includes('_') || span.includes('::')) return false;
       const name = span.slice(0, countWhile(span, /[\p{L}\p{N}.#]/u));
       return (
-        name.includes('#') ||
-        name.endsWith('Test') ||
-        name.split('.').some((segment) => /^[a-z]/.test(segment) && /[A-Z]/.test(segment))
+        name.includes('#') || name.endsWith('Test') || name.split('.').some((segment) => /^[a-z]/.test(segment) && /[A-Z]/.test(segment))
       );
     });
 }
@@ -210,8 +208,7 @@ function javaLineRefsRun(lines) {
     while (i + 1 < starts.length && starts[i + 1] <= at) i++;
     return i;
   };
-  const span = (first, last) =>
-    joined.slice(starts[first], last + 1 < starts.length ? starts[last + 1] - 1 : joined.length);
+  const span = (first, last) => joined.slice(starts[first], last + 1 < starts.length ? starts[last + 1] - 1 : joined.length);
   const rust = (text) => text.includes('.rs') || wordStarts(text, 'Rust').length > 0;
   const javaClass = namesJavaFileOrClass(joined);
   return javaLineHits(joined)

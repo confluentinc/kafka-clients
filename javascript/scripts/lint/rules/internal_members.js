@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 const { atNode } = require('../location');
@@ -68,7 +67,7 @@ module.exports = {
   needs: ['program'],
   hint:
     'Make a member only the library calls a public `@internal` member named `internal...`, called with dot ' +
-    'access; make a constructor users must not call `private`; keep an error\'s FFI id in `_ffiId` ' +
+    "access; make a constructor users must not call `private`; keep an error's FFI id in `_ffiId` " +
     '(javascript/CLAUDE.md "Files and layout"; root CLAUDE.md, JavaScript Binding Conventions, Errors).',
   check(ctx) {
     const { ts, sourceFiles } = ctx.program();
@@ -82,7 +81,12 @@ module.exports = {
       const rel = ctx.rel(sf.fileName);
       const line = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
       const push = (kind, cls, node, name, message) =>
-        findings.push({ kind, subject: `${rel}:${className(cls)}.${name}`, at: atNode(ctx, node), message: `${message} (line ${line(node)})` });
+        findings.push({
+          kind,
+          subject: `${rel}:${className(cls)}.${name}`,
+          at: atNode(ctx, node),
+          message: `${message} (line ${line(node)})`,
+        });
       const member = (cls, node, name, isPrivateName) => {
         checked += 1;
         const tagged = isInternal(ts, node);
@@ -92,14 +96,26 @@ module.exports = {
           return;
         }
         if (name.startsWith('_')) {
-          push('underscore', cls, node, name, `\`${name}\` is \`_\`-prefixed: a member only the library calls is \`@internal\` and named \`internal...\``);
+          push(
+            'underscore',
+            cls,
+            node,
+            name,
+            `\`${name}\` is \`_\`-prefixed: a member only the library calls is \`@internal\` and named \`internal...\``,
+          );
         } else if (INTERNAL_NAME.test(name) && !tagged) {
           push('not-tagged', cls, node, name, `\`${name}\` is named \`internal...\` but its TSDoc has no \`@internal\``);
         } else if (tagged && !INTERNAL_NAME.test(name)) {
           push('not-named', cls, node, name, `\`${name}\` is \`@internal\` but not named \`internal...\``);
         }
         if (tagged && (isPrivateName || isHidden(ts, node))) {
-          push('hidden', cls, node, name, `\`${name}\` is \`@internal\` and also hidden: an \`@internal\` member is public, called by the library with dot access`);
+          push(
+            'hidden',
+            cls,
+            node,
+            name,
+            `\`${name}\` is \`@internal\` and also hidden: an \`@internal\` member is public, called by the library with dot access`,
+          );
         }
       };
       const visit = (node) => {
@@ -109,7 +125,13 @@ module.exports = {
             if (ts.isConstructorDeclaration(m)) {
               checked += 1;
               if (isInternal(ts, m)) {
-                push('internal-constructor', node, m, 'constructor', '`constructor` is `@internal`: stripped, the class would declare none, which TypeScript reads as public; make it `private`');
+                push(
+                  'internal-constructor',
+                  node,
+                  m,
+                  'constructor',
+                  '`constructor` is `@internal`: stripped, the class would declare none, which TypeScript reads as public; make it `private`',
+                );
               }
               for (const p of m.parameters) {
                 const isProperty = ts.getEffectiveModifierFlags(p) & ts.ModifierFlags.ParameterPropertyModifier;

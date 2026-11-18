@@ -18,7 +18,6 @@
 // forms of scripts/lint/java_line.js, on the vectors of the Rust lint's own
 // tests (rust/xtask/src/lint_custom/api_docs.rs), which it ports.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { javaLineRefs, javaLineRefsRun } = require('../../scripts/lint/java_line');
@@ -27,6 +26,10 @@ const { TSCONFIG, project, lint, findings } = require('./_project');
 const RULE = 'check-java-line';
 
 /** The references of `text` with `context` the comment line before it. */
+/**
+ * @param {string} text
+ * @param {string} context
+ */
 const refsIn = (text, context) =>
   javaLineRefsRun([context, text])
     .filter(([line]) => line === 1)
@@ -59,20 +62,14 @@ test('the word forms', () => {
 });
 
 test('a reference wrapped across comment lines', () => {
-  assert.deepEqual(javaLineRefsRun(['// Update the position (Java line', '// 303-306). Java uses `seek`.']), [
-    [0, 'Java 303-306'],
+  assert.deepEqual(javaLineRefsRun(['// Update the position (Java line', '// 303-306). Java uses `seek`.']), [[0, 'Java 303-306']]);
+  assert.deepEqual(javaLineRefsRun(['/// of `ConsumerBounceTest` (lines', '/// 79-103) on a cluster']), [[0, 'line 79-103']]);
+  assert.deepEqual(javaLineRefsRun(['    // ends with `config.providers` (`ProducerConfig.java`', '    // 613-618);']), [
+    [0, 'ProducerConfig.java 613-618'],
   ]);
-  assert.deepEqual(javaLineRefsRun(['/// of `ConsumerBounceTest` (lines', '/// 79-103) on a cluster']), [
-    [0, 'line 79-103'],
+  assert.deepEqual(javaLineRefsRun(['/*', ' * Translated from `KafkaProducerTest.foo` (Java', ' * 1989-1993)', ' */']), [
+    [1, 'Java 1989-1993'],
   ]);
-  assert.deepEqual(
-    javaLineRefsRun(['    // ends with `config.providers` (`ProducerConfig.java`', '    // 613-618);']),
-    [[0, 'ProducerConfig.java 613-618']],
-  );
-  assert.deepEqual(
-    javaLineRefsRun(['/*', ' * Translated from `KafkaProducerTest.foo` (Java', ' * 1989-1993)', ' */']),
-    [[1, 'Java 1989-1993']],
-  );
   assert.deepEqual(javaLineRefsRun(['/// Translates `testFooBar`', '/// (line', '/// 278).']), [[1, 'line 278']]);
   assert.deepEqual(javaLineRefsRun(['/// `testFooBar` is in foo.rs (line', '/// 278).']), []);
   assert.deepEqual(javaLineRefsRun(['/// see the config file, line', '/// 12.']), []);
@@ -80,13 +77,8 @@ test('a reference wrapped across comment lines', () => {
 });
 
 test('the at forms', () => {
-  assert.deepEqual(
-    javaLineRefsRun(['/// for `testSplitBatchAndSend`, Java spells that out at 2373-2375 with']),
-    [[0, 'at 2373-2375']],
-  );
-  assert.deepEqual(javaLineRefsRun(['// `SenderTest#testFoo` covers it,', '// the call at', '// 12-14.']), [
-    [1, 'at 12-14'],
-  ]);
+  assert.deepEqual(javaLineRefsRun(['/// for `testSplitBatchAndSend`, Java spells that out at 2373-2375 with']), [[0, 'at 2373-2375']]);
+  assert.deepEqual(javaLineRefsRun(['// `SenderTest#testFoo` covers it,', '// the call at', '// 12-14.']), [[1, 'at 12-14']]);
   assert.deepEqual(javaLineRefs('and `assertNotNull(md)` at 727 does not close it'), ['at 727']);
   assert.deepEqual(javaLineRefs('`SenderTest.java` at 88'), ['at 88']);
   assert.deepEqual(javaLineRefs('`testFoo` stops at 10, where the first fetch leaves it'), []);
@@ -99,7 +91,7 @@ test('the at forms', () => {
 });
 
 /** `parts` joined: a reference split so this file's own comments and strings stay clean. */
-const j = (...parts) => parts.join('');
+const j = (/** @type {string[]} */ ...parts) => parts.join('');
 
 test('the rule: one finding per file, comments of TypeScript, JavaScript and C, never strings or regexes', () => {
   const root = project({
@@ -107,7 +99,7 @@ test('the rule: one finding per file, comments of TypeScript, JavaScript and C, 
     'src/a.ts': j('export const a = 1;\n// Java checks it (Producer', 'Record.java:69),\n// and Java 12-14.\n'),
     'src/clean.ts': j("export const s = 'Foo.java", ":12';\nexport const t = `Java 12-14`;\n"),
     'native/a.c': j('/*\n * see Sender', '.java:120\n */\nconst char* s = "Foo.java', ':1"; // Java 7\n'),
-    'test/t.test.js': j("const re = /\\/\\/ Foo.java", ":1/;\nconst x = 'a'; /* `:", "12` */\n"),
+    'test/t.test.js': j('const re = /\\/\\/ Foo.java', ":1/;\nconst x = 'a'; /* `:", '12` */\n'),
     'scripts/s.js': '// Java 4.4 is a version, not a line\n',
     'tools/x/y.js': j('/** Translated from `KafkaProducerTest.testFoo` (line\n * 73). */\n'),
     'examples/e.js': j('// Foo.java', ':1 is out of scope\n'),

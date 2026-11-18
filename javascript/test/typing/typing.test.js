@@ -26,7 +26,6 @@
 // tsc runs are skipped, with a visible message, when tsc (a devDependency,
 // `TSC`) cannot be run.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -39,8 +38,15 @@ if (SKIP) console.log(`skipping the typing tests: ${SKIP}`);
 const LIB = path.join(ROOT, 'src');
 const DIST = path.join(ROOT, 'dist');
 
-/** Every file under `dir`, relative to it with `/` separators, recursively. */
+/**
+ * Every file under `dir`, relative to it with `/` separators, recursively.
+ *
+ * @param {string} dir
+ * @param {string} [base]
+ * @returns {Array<string>}
+ */
 function walk(dir, base = dir) {
+  /** @type {Array<string>} */
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -50,7 +56,11 @@ function walk(dir, base = dir) {
   return out.sort();
 }
 
-/** Whether `rel` (relative to src/ or dist/) is a private module: under internal/. */
+/**
+ * Whether `rel` (relative to src/ or dist/) is a private module: under internal/.
+ *
+ * @param {string} rel
+ */
 const isPrivate = (rel) => rel.split('/')[0] === 'internal';
 
 test('every public module is declared, no private one is, and no declaration refers to a private module', () => {
@@ -81,15 +91,24 @@ test('every public module is declared, no private one is, and no declaration ref
 // class users never construct keeps its constructor as `private
 // constructor();`: a declaration with no constructor would let TypeScript
 // assume a public one.
-test('the declarations keep private constructors and leave out the library\'s own members', () => {
+test("the declarations keep private constructors and leave out the library's own members", () => {
   for (const [rel, cls] of [
-    ['producer/record_metadata.d.ts', 'RecordMetadata'],
     ['common/security/auth/security_protocol.d.ts', 'SecurityProtocol'],
     ['common/config/ssl_client_auth.d.ts', 'SslClientAuth'],
   ]) {
     const text = fs.readFileSync(path.join(DIST, rel), 'utf8');
-    assert.match(text, new RegExp(`export declare class ${cls}\\b[^]*\\n    private constructor\\(\\);\\n`), `dist/${rel}: ${cls} has no private constructor`);
+    assert.match(
+      text,
+      new RegExp(`export declare class ${cls}\\b[^]*\\n    private constructor\\(\\);\\n`),
+      `dist/${rel}: ${cls} has no private constructor`,
+    );
   }
+  // RecordMetadata has Java's public constructor only: the library's own
+  // construction is no declared signature.
+  const metadata = fs.readFileSync(path.join(DIST, 'producer/record_metadata.d.ts'), 'utf8');
+  assert.match(metadata, /\n    constructor\(options: \{\n[^]*?\n        topicPartition: TopicPartition;/);
+  assert.doesNotMatch(metadata, /private constructor/);
+  assert.doesNotMatch(metadata, /internal\?/);
   // KafkaFuture is abstract, as Java's, its constructor public for a
   // subclass; the client's own subclass is not declared.
   const future = fs.readFileSync(path.join(DIST, 'common/kafka_future.d.ts'), 'utf8');
@@ -99,17 +118,26 @@ test('the declarations keep private constructors and leave out the library\'s ow
     const text = fs.readFileSync(path.join(DIST, rel), 'utf8');
     for (const line of text.split('\n')) {
       if (/^\s*(?:\/\/|\*|\/\*)/.test(line)) continue;
-      assert.doesNotMatch(line, /^\s*(?:(?:static|readonly|private|protected)\s+)*(?:internal[A-Z]\w*|_\w+)\s*[(<:?]/, `dist/${rel} declares ${line.trim()}`);
+      assert.doesNotMatch(
+        line,
+        /^\s*(?:(?:static|readonly|private|protected)\s+)*(?:internal[A-Z]\w*|_\w+)\s*[(<:?]/,
+        `dist/${rel} declares ${line.trim()}`,
+      );
     }
   }
   // The internal members the sources do have, so the check above is not vacuous.
-  const sources = ['producer/producer_record.ts', 'producer/record_metadata.ts', 'common/kafka_future.ts'].map((rel) => fs.readFileSync(path.join(LIB, rel), 'utf8'));
+  const sources = ['producer/producer_record.ts', 'producer/record_metadata.ts', 'common/kafka_future.ts'].map((rel) =>
+    fs.readFileSync(path.join(LIB, rel), 'utf8'),
+  );
   for (const name of ['internalToNative', 'internalCreate', 'internalComplete']) {
-    assert.ok(sources.some((text) => ['', 'static ', 'abstract '].some((m) => text.includes(`@internal\n   */\n  ${m}${name}`))), `src/ has no @internal ${name}`);
+    assert.ok(
+      sources.some((text) => ['', 'static ', 'abstract '].some((m) => text.includes(`@internal\n   */\n  ${m}${name}`))),
+      `src/ has no @internal ${name}`,
+    );
   }
 });
 
-test('the declarations type-check under --strict', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check under --strict', () => {
   const config = writeConfig(path.join(ROOT, 'build', 'typing'), {
     compilerOptions: {
       strict: true,
@@ -129,7 +157,7 @@ test('the declarations type-check under --strict', { skip: SKIP }, () => {
 
 // The same declarations, resolved as a project on `nodenext` resolves them,
 // the setting the library itself builds with (tsconfig.json).
-test('the declarations type-check under --strict with "module": "nodenext"', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check under --strict with "module": "nodenext"', () => {
   const config = writeConfig(path.join(ROOT, 'build', 'typing-nodenext'), {
     compilerOptions: {
       strict: true,
@@ -147,7 +175,7 @@ test('the declarations type-check under --strict with "module": "nodenext"', { s
   assert.equal(r.status, 0, r.output);
 });
 
-test('the declarations type-check under "module": "commonjs" (node10 resolution, typesVersions)', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check under "module": "commonjs" (node10 resolution, typesVersions)', () => {
   // node10 ignores `exports` and has no self-reference: a consumer project
   // finds the package under its node_modules/, so the test builds one, with
   // the package linked in and a copy of usage.ts.
@@ -173,7 +201,7 @@ test('the declarations type-check under "module": "commonjs" (node10 resolution,
   assert.equal(r.status, 0, r.output);
 });
 
-test('the declarations type-check with no ambient types and an ES2020 lib', { skip: SKIP }, () => {
+(SKIP ? test.skip : test)('the declarations type-check with no ambient types and an ES2020 lib', () => {
   // `"types": []`: Buffer comes from the declarations' own reference to
   // @types/node; ES2020 predates Error.cause, which KafkaError declares.
   const config = writeConfig(path.join(ROOT, 'build', 'typing-es2020'), {
@@ -193,72 +221,79 @@ test('the declarations type-check with no ambient types and an ES2020 lib', { sk
   assert.equal(r.status, 0, r.output);
 });
 
-test('a default import fails to compile under esModuleInterop; named, namespace and Node ESM default imports compile', { skip: SKIP }, () => {
-  // tsc's CommonJS output sets `exports.__esModule`, so the interop helpers
-  // (TypeScript's esModuleInterop, Babel) read `module.exports.default`, which
-  // does not exist. Every index.ts declares `__esModule`, so TypeScript rejects
-  // that import (TS1192) instead of letting it crash at run time. Node's own
-  // ES module loader (an .mts) gives `module.exports` as the default.
-  const dir = path.join(ROOT, 'build', 'typing-interop');
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(path.join(dir, 'node_modules', '@confluentinc'), { recursive: true });
-  fs.symlinkSync(ROOT, path.join(dir, 'node_modules', '@confluentinc', 'kafka-javascript'), 'junction');
-  fs.writeFileSync(
-    path.join(dir, 'default.ts'),
-    "import producer from '@confluentinc/kafka-javascript/producer';\nvoid producer.KafkaProducer;\n",
-  );
-  fs.writeFileSync(
-    path.join(dir, 'forms.ts'),
-    [
-      "import * as kafka from '@confluentinc/kafka-javascript';",
-      "import { IllegalStateError } from '@confluentinc/kafka-javascript';",
-      "import * as producer from '@confluentinc/kafka-javascript/producer';",
-      "import { KafkaProducer } from '@confluentinc/kafka-javascript/producer';",
-      "import * as errors from '@confluentinc/kafka-javascript/common/errors';",
-      'const same: typeof KafkaProducer = producer.KafkaProducer;',
-      'const state: typeof IllegalStateError = kafka.IllegalStateError;',
-      'void [same, state, errors.SaslAuthenticationError];',
-      '',
-    ].join('\n'),
-  );
-  fs.writeFileSync(
-    path.join(dir, 'node.mts'),
-    "import producer from '@confluentinc/kafka-javascript/producer';\nconst p: typeof producer.KafkaProducer = producer.KafkaProducer;\nvoid p;\n",
-  );
-  const interop = (name, files) =>
-    writeConfig(path.join(dir, name), {
-      compilerOptions: {
-        strict: true,
-        noEmit: true,
-        target: 'es2022',
-        lib: ['es2022'],
-        module: 'commonjs',
-        esModuleInterop: true,
-        types: ['node'],
-        typeRoots: [typeRoots()],
-      },
-      files: files.map((f) => path.join(dir, f)),
-    });
-  const failed = runTsc(['-p', interop('default', ['default.ts'])]);
-  assert.notEqual(failed.status, 0, 'a default import compiled under esModuleInterop');
-  assert.match(failed.output, /default\.ts\(1,8\): error TS1192: Module '.*' has no default export\./);
-  const forms = runTsc(['-p', interop('forms', ['forms.ts'])]);
-  assert.equal(forms.status, 0, forms.output);
-  const node = runTsc([
-    '-p',
-    writeConfig(path.join(dir, 'node'), {
-      compilerOptions: {
-        strict: true,
-        noEmit: true,
-        target: 'es2022',
-        lib: ['es2022'],
-        module: 'node16',
-        moduleResolution: 'node16',
-        types: ['node'],
-        typeRoots: [typeRoots()],
-      },
-      files: [path.join(dir, 'node.mts')],
-    }),
-  ]);
-  assert.equal(node.status, 0, node.output);
-});
+(SKIP ? test.skip : test)(
+  'a default import fails to compile under esModuleInterop; named, namespace and Node ESM default imports compile',
+  () => {
+    // tsc's CommonJS output sets `exports.__esModule`, so the interop helpers
+    // (TypeScript's esModuleInterop, Babel) read `module.exports.default`, which
+    // does not exist. Every index.ts declares `__esModule`, so TypeScript rejects
+    // that import (TS1192) instead of letting it crash at run time. Node's own
+    // ES module loader (an .mts) gives `module.exports` as the default.
+    const dir = path.join(ROOT, 'build', 'typing-interop');
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(path.join(dir, 'node_modules', '@confluentinc'), { recursive: true });
+    fs.symlinkSync(ROOT, path.join(dir, 'node_modules', '@confluentinc', 'kafka-javascript'), 'junction');
+    fs.writeFileSync(
+      path.join(dir, 'default.ts'),
+      "import producer from '@confluentinc/kafka-javascript/producer';\nvoid producer.KafkaProducer;\n",
+    );
+    fs.writeFileSync(
+      path.join(dir, 'forms.ts'),
+      [
+        "import * as kafka from '@confluentinc/kafka-javascript';",
+        "import { IllegalStateError } from '@confluentinc/kafka-javascript';",
+        "import * as producer from '@confluentinc/kafka-javascript/producer';",
+        "import { KafkaProducer } from '@confluentinc/kafka-javascript/producer';",
+        "import * as errors from '@confluentinc/kafka-javascript/common/errors';",
+        'const same: typeof KafkaProducer = producer.KafkaProducer;',
+        'const state: typeof IllegalStateError = kafka.IllegalStateError;',
+        'void [same, state, errors.SaslAuthenticationError];',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'node.mts'),
+      "import producer from '@confluentinc/kafka-javascript/producer';\nconst p: typeof producer.KafkaProducer = producer.KafkaProducer;\nvoid p;\n",
+    );
+    /**
+     * @param {string} name
+     * @param {Array<string>} files
+     */
+    const interop = (name, files) =>
+      writeConfig(path.join(dir, name), {
+        compilerOptions: {
+          strict: true,
+          noEmit: true,
+          target: 'es2022',
+          lib: ['es2022'],
+          module: 'commonjs',
+          esModuleInterop: true,
+          types: ['node'],
+          typeRoots: [typeRoots()],
+        },
+        files: files.map((f) => path.join(dir, f)),
+      });
+    const failed = runTsc(['-p', interop('default', ['default.ts'])]);
+    assert.notEqual(failed.status, 0, 'a default import compiled under esModuleInterop');
+    assert.match(failed.output, /default\.ts\(1,8\): error TS1192: Module '.*' has no default export\./);
+    const forms = runTsc(['-p', interop('forms', ['forms.ts'])]);
+    assert.equal(forms.status, 0, forms.output);
+    const node = runTsc([
+      '-p',
+      writeConfig(path.join(dir, 'node'), {
+        compilerOptions: {
+          strict: true,
+          noEmit: true,
+          target: 'es2022',
+          lib: ['es2022'],
+          module: 'node16',
+          moduleResolution: 'node16',
+          types: ['node'],
+          typeRoots: [typeRoots()],
+        },
+        files: [path.join(dir, 'node.mts')],
+      }),
+    ]);
+    assert.equal(node.status, 0, node.output);
+  },
+);

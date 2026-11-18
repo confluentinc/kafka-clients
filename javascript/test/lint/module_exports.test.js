@@ -16,7 +16,6 @@
 
 // check-module-exports (scripts/lint/rules/module_exports.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
@@ -62,7 +61,8 @@ test('each finding kind, with its exact text', () => {
         "export * as common from './common';\nexport { KafkaError } from './common/kafka_error';\nexport * from './illegal_state_error';\n" +
         "export { Wrong } from './wrong';\nexport declare const __esModule: true;\n",
       'src/wrong.ts': 'export class Wrong {}\n',
-      'src/common/index.ts': "export { KafkaError } from './kafka_error';\nexport const VERSION = 1;\nexport { Rec } from '../producer/rec';\n",
+      'src/common/index.ts':
+        "export { KafkaError } from './kafka_error';\nexport const VERSION = 1;\nexport { Rec } from '../producer/rec';\n",
     }),
     [RULE],
   );

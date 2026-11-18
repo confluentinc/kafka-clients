@@ -16,12 +16,13 @@
 // python/confluent_kafka/_errors.py's from_ffi_error / class_for_ffi_id.
 //
 // The native layer reads a kafka_common_Error_t into a plain object {code,
-// message, apiError, cause} (native/error.c) and hands it to `fromNative`,
+// message, apiError, payload, cause} (native/error.c) and hands it to `fromNative`,
 // which builds the class of the error's FFI id (an unknown id builds the base
 // `KafkaError`; a bare KafkaException, reported as UNKNOWN_SERVER_ERROR
 // without being an ApiException, is a `KafkaError` too) with the core's
 // message and its cause chain as `cause`, whatever constructor forms the class
-// has (`throwable.create`). The FFI id is private, as Python's `_ffi_id`:
+// has (`throwable.create`), and the payload fields the FFI's view of its
+// class gives (native/error_payload.c). The FFI id is private, as Python's `_ffi_id`:
 // `errorFfiId` gives it to the gRPC server and the tests, the core's own id
 // when it differs from the class's (an unknown id). LOCAL_NULL_POINTER, the
 // core's Java `NullPointerException` for a NULL mandatory argument, has no
@@ -56,6 +57,8 @@ interface NativeError {
   code: number;
   message?: string | null;
   apiError?: unknown;
+  /** The payload the FFI's view of the class gives, by Java field name (native/error_payload.c). */
+  payload?: Readonly<Record<string, unknown>>;
   cause?: unknown;
 }
 
@@ -63,7 +66,11 @@ let classes: ErrorClass[] | null = null;
 let roots: ErrorClass[] | null = null;
 let byId: Map<number, ErrorClass> | null = null;
 
-/** Every generated error class, in registry order. */
+/**
+ * Every generated error class, in registry order.
+ *
+ * @returns the classes
+ */
 export function errorClasses(): ErrorClass[] {
   if (classes === null) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- the generated classes are loaded on first use, by the registry's module names: they import this module, so a static import would be a cycle
@@ -72,7 +79,11 @@ export function errorClasses(): ErrorClass[] {
   return classes;
 }
 
-/** The generated classes at the top of a chain: `KafkaError` and the Java built-ins. */
+/**
+ * The generated classes at the top of a chain: `KafkaError` and the Java built-ins.
+ *
+ * @returns the classes
+ */
 function rootClasses(): ErrorClass[] {
   if (roots === null) {
     const all = new Set<unknown>(errorClasses());
@@ -96,7 +107,12 @@ function table(): Map<number, ErrorClass> {
   return byId;
 }
 
-/** The class of an FFI id; the base `KafkaError` when the id is unknown. */
+/**
+ * The class of an FFI id; the base `KafkaError` when the id is unknown.
+ *
+ * @param id - the FFI id
+ * @returns its class
+ */
 export function classForFfiId(id: number): ErrorClass {
   return table().get(id) ?? KafkaError;
 }
@@ -106,6 +122,9 @@ export function classForFfiId(id: number): ErrorClass {
  * or of a subclass of one): the core's id for an error the core reported, its
  * class's (or nearest ancestor's) otherwise, `UNKNOWN_SERVER_ERROR` for a
  * class without one; `undefined` for any other value.
+ *
+ * @param error - the value to read
+ * @returns its FFI id, or undefined
  */
 export function errorFfiId(error: unknown): number | undefined {
   if (!(error instanceof Error) || !rootClasses().some((cls) => error instanceof cls)) return undefined;
@@ -115,6 +134,9 @@ export function errorFfiId(error: unknown): number | undefined {
 /**
  * The error for the plain object the native layer builds; anything else
  * (an `Error` already, `null`) is returned as it is.
+ *
+ * @param fields - what the native layer gave
+ * @returns the error, or the value as it is
  */
 export function fromNative(fields: unknown): unknown {
   if (fields instanceof Error || fields === null || typeof fields !== 'object') return fields;
@@ -126,15 +148,25 @@ export function fromNative(fields: unknown): unknown {
   }
   let cls = classForFfiId(reported.code);
   if (reported.code === UNKNOWN_SERVER_ERROR && reported.apiError !== true) cls = KafkaError;
-  return create(cls, reported.message ?? '', cause, reported.code);
+  return create(cls, reported.message ?? '', cause, reported.code, reported.payload);
 }
 
-/** A binding-side check where Java throws `IllegalArgumentException`. */
+/**
+ * A binding-side check where Java throws `IllegalArgumentException`.
+ *
+ * @param message - the error's message
+ * @returns the error
+ */
 export function illegalArgument(message: string): IllegalArgumentError {
   return create(IllegalArgumentError, message);
 }
 
-/** A binding-side check where Java throws `IllegalStateException`. */
+/**
+ * A binding-side check where Java throws `IllegalStateException`.
+ *
+ * @param message - the error's message
+ * @returns the error
+ */
 export function illegalState(message: string): IllegalStateError {
   return create(IllegalStateError, message);
 }

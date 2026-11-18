@@ -42,9 +42,7 @@ const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { scan, matching } = require('../c_source');
 
 /** The functions allowed to call `__execute_callbacks_err`: the queue's executors. */
-const EXECUTORS = [
-  { key: 'producer_execute', reason: "the producer's cbq_execute_fn, which cbq_drain alone calls (q->execute)" },
-];
+const EXECUTORS = [{ key: 'producer_execute', reason: "the producer's cbq_execute_fn, which cbq_drain alone calls (q->execute)" }];
 
 /** The functions allowed to call `cbq_drain`. */
 const DRAIN_CALLERS = [
@@ -56,7 +54,11 @@ const DRAIN_CALLERS = [
 const DESTROY_CALLERS = [
   {
     key: 'js_producer_create',
-    reason: 'the constructor\'s failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists',
+    reason: "the constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
+  },
+  {
+    key: 'js_mock_producer_create',
+    reason: "the mock's constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
   },
 ];
 
@@ -109,13 +111,21 @@ module.exports = {
           list: 'drain',
         });
       } else if (c.name === 'execute' && c.function !== 'cbq_drain') {
-        raw.push({ kind: 'executor-called', subject: `${c.file}:${c.line}`, message: `${c.function} calls a queue's execute outside cbq_drain` });
+        raw.push({
+          kind: 'executor-called',
+          subject: `${c.file}:${c.line}`,
+          message: `${c.function} calls a queue's execute outside cbq_drain`,
+        });
       }
     }
     // An executor is never called directly: only through q->execute.
     for (const e of this.EXECUTORS) {
       for (const c of calls.filter((x) => x.name === e.key && !x.directive)) {
-        raw.push({ kind: 'executor-called', subject: `${c.file}:${c.line}`, message: `${c.function} calls the executor ${e.key} directly` });
+        raw.push({
+          kind: 'executor-called',
+          subject: `${c.file}:${c.line}`,
+          message: `${c.function} calls the executor ${e.key} directly`,
+        });
       }
     }
     // The drain loop, whatever its form (`while`, `for`, `do`), read on the
@@ -127,7 +137,9 @@ module.exports = {
     if (loop === null) {
       raw.push({ kind: 'drain-missing', subject: 'cbq_drain', message: 'has no loop (while, for, do) the rule can read' });
     } else {
-      const open = loop[0].startsWith('do') ? loop.index + loop[0].length - 1 : code.indexOf('{', matching(code, code.indexOf('(', loop.index)));
+      const open = loop[0].startsWith('do')
+        ? loop.index + loop[0].length - 1
+        : code.indexOf('{', matching(code, code.indexOf('(', loop.index)));
       let depth = 0;
       let end = open;
       for (; end < code.length; end++) {
@@ -139,7 +151,11 @@ module.exports = {
       for (const c of calls.filter((x) => x.file === drain.file && x.start >= loopFrom && x.start < loopTo)) {
         checked += 1;
         if (/_destroy(_err)?$/.test(c.name) && header.has(c.name)) {
-          raw.push({ kind: 'destroy-in-drain', subject: `${c.file}:${c.line}`, message: `cbq_drain's loop calls ${c.name}: destroy after the loop` });
+          raw.push({
+            kind: 'destroy-in-drain',
+            subject: `${c.file}:${c.line}`,
+            message: `cbq_drain's loop calls ${c.name}: destroy after the loop`,
+          });
         } else if (resolve(c.name, c.file)) {
           loopCalls.push(c);
         }
@@ -155,8 +171,11 @@ module.exports = {
       const m = /^(kafka_\w+?)_(\w+?)_destroy(_err)?$/.exec(name);
       if (!m) continue;
       const [, prefix, cls] = m;
-      const views = [...header.keys()].filter((h) => h.startsWith(`${prefix}_${cls}__as_`)).map((h) => h.slice(`${prefix}_${cls}__as_`.length).replace(/_err$/, ''));
-      const executes = (iface) => header.has(`${prefix}_${iface}__execute_callbacks_err`) || header.has(`${prefix}_${iface}__execute_callbacks`);
+      const views = [...header.keys()]
+        .filter((h) => h.startsWith(`${prefix}_${cls}__as_`))
+        .map((h) => h.slice(`${prefix}_${cls}__as_`.length).replace(/_err$/, ''));
+      const executes = (iface) =>
+        header.has(`${prefix}_${iface}__execute_callbacks_err`) || header.has(`${prefix}_${iface}__execute_callbacks`);
       if (executes(cls) || views.some(executes)) clientDestroys.add(name);
     }
     // The call graph, by definition (`file:name`): a call reaches the
@@ -175,7 +194,8 @@ module.exports = {
       proto.params.forEach((p, i) => {
         const body = resolve(c.args[i], c.file);
         if (!body) return;
-        if (c.name.endsWith('_cb') || (/_new(_err)?$/.test(c.name) && /_fn_t$/.test(p.type))) roots.set(bodyKey(body), { body, via: c.name });
+        if (c.name.endsWith('_cb') || (/_new(_err)?$/.test(c.name) && /_fn_t$/.test(p.type)))
+          roots.set(bodyKey(body), { body, via: c.name });
       });
     }
     // The executor each client hands to cbq_init (its `cbq_execute_fn`
@@ -285,9 +305,21 @@ module.exports = {
         list: 'destroy',
       });
     }
-    const destroys = applyAllowlist(raw.filter((f) => f.list === 'destroy'), this.DESTROY_CALLERS, 'drain-unused-allowance');
-    const executors = applyAllowlist(raw.filter((f) => f.list === 'executors'), this.EXECUTORS, 'drain-unused-allowance');
-    const drains = applyAllowlist(raw.filter((f) => f.list === 'drain'), this.DRAIN_CALLERS, 'drain-unused-allowance');
+    const destroys = applyAllowlist(
+      raw.filter((f) => f.list === 'destroy'),
+      this.DESTROY_CALLERS,
+      'drain-unused-allowance',
+    );
+    const executors = applyAllowlist(
+      raw.filter((f) => f.list === 'executors'),
+      this.EXECUTORS,
+      'drain-unused-allowance',
+    );
+    const drains = applyAllowlist(
+      raw.filter((f) => f.list === 'drain'),
+      this.DRAIN_CALLERS,
+      'drain-unused-allowance',
+    );
     const other = raw.filter((f) => !f.list);
     const strip = (fs) => fs.map(({ list, allow, ...f }) => f);
     return {

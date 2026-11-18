@@ -51,16 +51,14 @@ TSC ?= node_modules/.bin/tsc
 TS_TYPE_ROOTS ?= node_modules/@types
 export TSC TS_TYPE_ROOTS
 
-# node --test takes files: the unit test directories up to four levels deep
-# (test/unit/common/security/auth/), as src/'s folders are.
-UNIT_TESTS = $(wildcard test/unit/*.test.js test/unit/*/*.test.js test/unit/*/*/*.test.js test/unit/*/*/*/*.test.js)
-STATIC_TESTS = test/static/*.test.js
-LINT_TESTS = test/lint/*.test.js
-TYPING_TESTS = test/typing/*.test.js
-INTEGRATION_TESTS = test/integration/*.test.js
-# The verifiable producer's, the chaos workload's and the producer soak's tests
-# (verifiable_clients/README.md): no broker.
-VERIFIABLE_CLIENTS_TESTS = verifiable_clients/test/*.test.js
+# The tests run on Jest (jest.config.cjs, one project per target below, run
+# by jest-light-runner in plain Node.js child processes). JEST_ARGS goes to
+# Jest before the project, so a test file (`JEST_ARGS=test/unit/x.test.js`)
+# runs only that file and `-t <name>` only the tests it names. The integration tests run in band, one file
+# at a time, so two files never share the broker at once.
+JEST ?= node_modules/.bin/jest
+JEST_ARGS ?=
+JEST_RUN = $(NODE) $(JEST) --ci $(JEST_ARGS) --selectProjects
 
 # The integration test's scratch broker (test-integration starts one unless
 # KAFKA_BOOTSTRAP_SERVERS is already set).
@@ -91,7 +89,7 @@ HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (pro
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
-	test-verifiable-clients check-api update-api
+	test-verifiable-clients check-api update-api docs format format-check typecheck-tests
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -122,12 +120,12 @@ build-ts:
 # test and the two never hold a broker at once. It self-skips off Linux (see
 # test-integration-grpc); the root `verify-javascript-macos-docker` runs the
 # native arm there instead.
-test: test-static test-unit test-typing check-api test-verifiable-clients test-integration
+test: test-static test-unit test-typing check-api typecheck-tests test-verifiable-clients test-integration
 	$(MAKE) test-integration-grpc
 
 # Header conformance and the package layout: no build needed.
 test-static:
-	$(NODE) --test $(STATIC_TESTS)
+	$(JEST_RUN) static
 
 # The rule linter (design/current/javascript-rule-linter/PLAN.md): the rules of
 # CLAUDE.md checked from the sources, as `cargo xtask lint-custom` checks the
@@ -155,20 +153,41 @@ lint-rules:
 	$(NODE) scripts/lint_rules.js $(LINT_RULES_ARGS) || status=1; \
 	exit $$status
 
+# The formatter (scripts/format.js, prettier.config.cjs; root conventions, Build,
+# packaging and release, Q74): Prettier over the client's TypeScript and
+# JavaScript, generated files left out. `format-check` fails on a file it
+# would change, and the root `lint-javascript` runs it; `format` rewrites them.
+format:
+	$(NODE) scripts/format.js write
+
+format-check:
+	$(NODE) scripts/format.js check
+
 # The rule linter's own tests: no build of the client.
 test-lint:
-	$(NODE) --test $(LINT_TESTS)
+	$(JEST_RUN) lint
 
 test-unit: build
-	$(NODE) --test $(UNIT_TESTS)
+	$(JEST_RUN) unit
 
 test-verifiable-clients: build
-	$(NODE) --test $(VERIFIABLE_CLIENTS_TESTS)
+	$(JEST_RUN) verifiable-clients
 
 # The compiled declarations (dist/) type-check under --strict in a consumer's
 # configurations; needs only the compiled library, not the addon.
 test-typing: build-ts
-	$(NODE) --test $(TYPING_TESTS)
+	$(JEST_RUN) typing
+
+# The type check of the tests (root conventions, Tests, Q67, and Build,
+# packaging and release, Q74; scripts/typecheck_tests.js): `tsc --strict` over
+# every test file, under test/ and verifiable_clients/test/
+# (test/tsconfig.json), the JavaScript tests through checkJs, against the
+# compiled declarations in dist/ as a user's code types against them. A
+# deliberate misuse is marked `// @ts-expect-error <why>`.
+# `test` and the root `test-javascript-unit` run it, beside the other targets
+# that read dist/ after the one build-ts.
+typecheck-tests: build-ts
+	$(NODE) scripts/typecheck_tests.js
 
 # The interface check (root conventions, Stability; scripts/api_report.js):
 # api-extractor's report of each import path's compiled declarations and the
@@ -181,11 +200,18 @@ check-api: build-ts
 update-api: build-ts
 	$(NODE) scripts/api_report.js update
 
+# The HTML reference (typedoc.config.cjs; root conventions, Documentation,
+# Q64): TypeDoc over src/, one module per import path, into build/docs/. Not
+# part of `verify`; test/static/docs.test.js checks that it builds.
+TYPEDOC ?= node_modules/.bin/typedoc
+docs:
+	$(NODE) $(TYPEDOC) --options typedoc.config.cjs
+
 # Against KAFKA_BOOTSTRAP_SERVERS when set; otherwise against a scratch broker
 # this target starts with `docker run` and removes afterwards.
 test-integration: build
 	@if [ -n "$$KAFKA_BOOTSTRAP_SERVERS" ]; then \
-	  $(NODE) --test $(INTEGRATION_TESTS); \
+	  $(JEST_RUN) integration --runInBand; \
 	else \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  docker run -d --rm --name $(KAFKA_CONTAINER) -p $(KAFKA_PORT):9092 \
@@ -199,7 +225,7 @@ test-integration: build
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) \
-	    $(NODE) --test $(INTEGRATION_TESTS) || status=$$?; \
+	    $(JEST_RUN) integration --runInBand || status=$$?; \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  exit $$status; \
 	fi
@@ -250,7 +276,16 @@ pack:
 	rm -rf $(PACK_DIR)
 	cd $(REPO_ROOT) && sh .semaphore/pack-npm.sh --dev $(PACK_DIR)
 
+# publint (root conventions, Build, packaging and release, Q74) lints each
+# tarball first: an error, a warning or a suggestion fails it.
+PUBLINT ?= node_modules/.bin/publint
 pack-check: pack
+	@for tarball in $(PACK_DIR)/*.tgz; do \
+	  out=$$($(NODE) $(PUBLINT) run --strict "$$tarball" 2>&1); status=$$?; \
+	  printf '%s\n' "$$out"; \
+	  [ $$status -eq 0 ] || exit 1; \
+	  case "$$out" in *Suggestions:*|*Warnings:*|*Errors:*) echo "publint: $$tarball has findings" >&2; exit 1;; esac; \
+	done
 	cd $(REPO_ROOT) && sh .semaphore/test-npm.sh $(PACK_DIR) $(HOST_PLATFORM)
 
 clean:

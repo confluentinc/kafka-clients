@@ -11,6 +11,7 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "type": "commonjs",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -48,6 +49,10 @@
       "types": "./dist/common/protocol/types/index.d.ts",
       "default": "./dist/common/protocol/types/index.js"
     },
+    "./common/record": {
+      "types": "./dist/common/record/index.d.ts",
+      "default": "./dist/common/record/index.js"
+    },
     "./common/requests": {
       "types": "./dist/common/requests/index.d.ts",
       "default": "./dist/common/requests/index.js"
@@ -59,6 +64,10 @@
     "./common/security/auth": {
       "types": "./dist/common/security/auth/index.d.ts",
       "default": "./dist/common/security/auth/index.js"
+    },
+    "./common/serialization": {
+      "types": "./dist/common/serialization/index.d.ts",
+      "default": "./dist/common/serialization/index.js"
     },
     "./consumer": {
       "types": "./dist/consumer/index.d.ts",
@@ -95,6 +104,9 @@
       "common/protocol/types": [
         "dist/common/protocol/types/index.d.ts"
       ],
+      "common/record": [
+        "dist/common/record/index.d.ts"
+      ],
       "common/requests": [
         "dist/common/requests/index.d.ts"
       ],
@@ -103,6 +115,9 @@
       ],
       "common/security/auth": [
         "dist/common/security/auth/index.d.ts"
+      ],
+      "common/serialization": [
+        "dist/common/serialization/index.d.ts"
       ],
       "consumer": [
         "dist/consumer/index.d.ts"
@@ -139,9 +154,17 @@
     "@grpc/proto-loader": "0.8.1",
     "@js-temporal/polyfill": "0.5.1",
     "@microsoft/api-extractor": "7.60.1",
+    "@types/jest": "30.0.0",
     "@types/node": "20.19.41",
     "eslint": "10.14.0",
+    "eslint-plugin-jsdoc": "65.4.7",
     "expect-type": "1.4.0",
+    "jest": "30.5.2",
+    "jest-light-runner": "0.8.2",
+    "prettier": "3.10.1",
+    "publint": "0.3.25",
+    "tinypool": "2.2.0",
+    "typedoc": "0.28.20",
     "typescript": "5.9.3",
     "typescript-eslint": "8.72.1"
   }

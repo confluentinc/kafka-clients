@@ -79,6 +79,49 @@ newer.
 
 - `KafkaProducer`, `ProducerRecord`, `RecordMetadata`, Java's `Callback` and,
   from `common`, `KafkaFuture` and `KafkaError`, over the Rust client's C FFI.
+- `send()` answers a serializer's error as Java's `KafkaProducer#doSend`
+  does: an `ApiError` runs the callback once, with Java's failure metadata
+  (the record's topic, its partition or -1, the rest -1), and `send()`
+  resolves to a done future failed with it; a `TypeError`, Java's
+  `ClassCastException`, rejects as a `SerializationError` "Can't convert key
+  of class <class> to class <serializer> specified in key.serializer", the
+  `TypeError` its `cause`, the classes named as JavaScript names them; any
+  other error rejects as it is.
+- `MockProducer`, Java's mock, over the Rust client's own mock through the
+  C FFI, implementing `Producer`: the constructors `()` and `{ autoComplete,
+  partitioner, keySerializer, valueSerializer }`, `send`, `flush`, `close`,
+  `partitionsFor`, `metrics`, `history()` (the app's own records),
+  `clear()`, `completeNext()`, `errorNext(e)`, `closed()` and `flushed()`,
+  and Java's public error fields as the setters `setSendException`,
+  `setFlushException`, `setPartitionsForException` and `setCloseException`,
+  whose calls throw the very error given. The serializers run on every send,
+  each with its own fresh empty `Headers`; every record goes to partition 0,
+  as with Java's empty-cluster mock; what a delivery callback throws comes
+  out of the call that completed the record, as in Java, the record's future
+  completing all the same (Java's stays incomplete), and `flush()`
+  completing every waiting record before it rejects with the first throw
+  (Java's stops at it). A callback's Promise that rejects is the callback's
+  error too, never logged: `send()` with `autoComplete` waits for it and
+  rejects with it, and `flush()` rejects with it; after `completeNext()` or
+  `errorNext()` it is kept, oldest first, and the next `send()`, `flush()` or
+  `close()` rejects with the oldest, once; `flush()` and `close()` wait for
+  every callback Promise already started, `flush()` completing the waiting
+  records first even with a kept error. Only a record's own `send()` gets its
+  callback's error, with `autoComplete` a `send()` made from a callback's
+  synchronous part settling after its own callback, which runs once the outer one returns. A
+  `close()` inside a callback, before its first `await`, does not wait for
+  the callbacks, as Python's async mock; after it, `close()` waits for that
+  callback, and a `flush()` from a callback does too, unless a flush error is
+  set, which it rejects with at once, so a callback that awaits either
+  otherwise never settles. A serializer's error, an
+  `ApiError` or a `TypeError` included, rejects the mock's `send()` as it is,
+  as Java's mock serializes with no `try`. A closed mock nothing
+  references is collected with its native mock, sends still waiting
+  included, and a refused record or an error given to the mock is released
+  as soon as the core is done with it. `partitionsFor(null)` rejects with the
+  C API's `TypeError`, where Java's mock answers `[]`. Its `Cluster`
+  constructor, transactions, `setMockMetrics` and the telemetry calls are
+  left out.
 - Java's `Producer` interface, a TypeScript interface that `KafkaProducer`
   implements. `KafkaFuture` is an abstract class, as Java's is: constructing
   it throws `TypeError`, and a subclass may be built. `DisconnectError` and
@@ -109,6 +152,24 @@ newer.
   `Headers` or an iterable of `Header`s. `send()` makes the record's headers read-only, as
   Java's does: a later `add` or `remove` throws `IllegalStateError`
   "RecordHeaders has been closed.".
+- `Header` and `Headers` wrap the client core's `RecordHeader` and
+  `RecordHeaders`: the core holds the headers and refuses a change once they
+  are read-only, and `send()` hands the record's own headers to the core
+  instead of rebuilding them. A `Header` copies its key and value when it is
+  made, and `value()` is a `Buffer` over its own bytes; `add(header)` and
+  `new Headers([...])` store copies. A header read back from a `Headers` that
+  can still change, such as your own before `send()`, is a copy, which stays
+  as it is when the `Headers` changes; one read from a read-only `Headers` is
+  a view, with no copy, which keeps it alive, and stays valid after a refused
+  `add` or `remove`. A header key holding a NUL now throws `TypeError` when
+  the header is made, not at `send()`, and so does one given to `add`,
+  `remove`, `lastHeader` or an iterated `headers(key)`, where Java takes the
+  key; `key()` reads a lone surrogate back as `?`. On read-only headers
+  `remove(null)` throws the client core's `IllegalArgumentError` "key cannot
+  be null.", where Java checks the read-only state first. Iterating a
+  `Headers` or `headers(key)` reads the headers when the iterator is made, so
+  a change during an iteration is not seen and throws nothing, where Java's
+  iterators throw `ConcurrentModificationException`.
 - A header value is bytes (`Uint8Array` or `null`), as in Java and Python: a
   string header value throws `TypeError` (encode it first,
   `Buffer.from(value, 'utf8')`), where development builds took a string.
@@ -116,10 +177,11 @@ newer.
   reads them after `send()` returns, so don't write to them, transfer them or
   resize them until the Promise from `send()` settles (awaiting `send()` is
   enough), and a serializer must return a new Buffer for each record. The
-  client holds a reference on each until then. A string key or value is encoded to
-  UTF-8 as Java's `StringSerializer` encodes it, a lone surrogate as `?` (Node
-  writes U+FFFD), and so are the header keys and the config keys and values;
-  topic names are not.
+  client holds a reference on each until then. A string key or value needs
+  `stringSerializer()`, which encodes it to UTF-8 as Java's `StringSerializer`
+  does, a lone surrogate as `?` (Node writes U+FFFD); without a serializer it
+  throws `TypeError` pointing to `stringSerializer()`. Header keys and config
+  keys and values are encoded the same way; topic names are not.
 - `send({ record, callback })` (or `send(record)`) resolves at hand-over with a
   `KafkaFuture` whose `get()` settles at delivery; `flush()` and `close()` /
   `close(timeout)`, a timeout being milliseconds or a `Temporal.Duration`
@@ -133,7 +195,9 @@ newer.
   `({ metadata, exception }) => ...`. A callback that returns a Promise is
   awaited (its result is wrapped with `Promise.resolve`): the record's future
   completes, and a `flush()` or `close()` covering the record returns, once
-  it settled; a rejection is logged as a throw is, and reaches no caller.
+  it settled; a rejection is logged as a throw is, and reaches no caller,
+  except from the callback a serializer's `ApiError` runs inside `send()`,
+  whose throw or rejection rejects `send()`, as Java's does.
 - `KafkaFuture` has Java's members: `completedFuture`, `allOf`,
   `toCompletionStage()` (a `Promise`), `thenApply`, `whenComplete`, `cancel`,
   `get()` and `get(timeout)`, `getNow`, `isCancelled`,
@@ -150,6 +214,70 @@ newer.
   no garbage collection closes one: a script that never calls `close()` never
   exits on its own. Once closed, a producer no longer holds Node, and its
   native client is released when it is garbage collected.
+- Serializers: `new KafkaProducer({ configs, keySerializer, valueSerializer })`
+  takes a `Serializer` (`common/serialization`) for each, or `null`: an
+  object `{ serialize({ topic, headers, data }), close?() }`, Java's two
+  `serialize` methods as one. They run in `send()`, key then value, are
+  called for a null key or value too, and may return a Promise, which
+  `send()` awaits (sends not awaited one by one may then reach the producer
+  out of call order); what they return is a `Uint8Array` or `null`, borrowed
+  like the app's bytes until `send()` settles. The producer's type arguments are inferred from them,
+  and a producer without them is a `KafkaProducer<Uint8Array, Uint8Array>`.
+  `close()` closes both; a failure there is a process warning. A function
+  given where a serializer goes throws `IllegalArgumentError` "... did you
+  forget '()'?". `ProducerRecord<K, V>` is generic: its key and value are
+  what the serializers take, checked at `send()` when there is no serializer.
+  An omitted or `null` key or value binds `never`, through a signature per
+  null combination, so `send()` takes the `ProducerRecord<K, V>` of the
+  producer's serializers.
+- `stringSerializer()` (`common/serialization`), Java's `StringSerializer`
+  byte for byte: a lone surrogate is written as `?`. It takes an optional
+  `{ configs, isKey }`, Java's `configure`, so `'key.serializer':
+  stringSerializer` works without `()`, and reads `key.serializer.encoding` /
+  `value.serializer.encoding`, then `serializer.encoding`. It writes Java's
+  six standard charsets byte for byte (`US-ASCII`, `ISO-8859-1`, `UTF-8`,
+  `UTF-16BE`, `UTF-16LE`, `UTF-16`, under Java's names and aliases, in any
+  case); another charset throws `SerializationError` "Unsupported encoding
+  <name>".
+- `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
+  in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
+  `Node` (a frozen data object) and `PartitionInfo` (Java's methods, its
+  public constructors taking any iterable of `Node` for Java's `Node[]`, and
+  `replicas()`, `inSyncReplicas()` and `offlineReplicas()` returning a new
+  array each call). The three have Java's `equals` and `hashCode`, and an
+  `int` argument beyond Java's `int` is a `RangeError`.
+- `KafkaProducer.partitionsFor(topic)`, Java's `partitionsFor`: a Promise
+  through the C API's `_cb` form, resolving to an array of `PartitionInfo`
+  (Java's `List`), and rejecting with the core's errors (a metadata timeout,
+  "topic cannot be null" as a `TypeError`). The gRPC server serves its
+  `PartitionsFor` RPC.
+- `KafkaProducer.metrics()`, Java's `metrics()`, synchronous: a
+  `MetricNameMap<Metric>` (`common`, *js-only*: a read-only map keyed as
+  `MetricName.equals` compares, by group, name and tags, with a `toJSON()`
+  of its entries by that key) of `KafkaMetric`
+  (`common/metrics`), the values read when `metrics()` runs, where Java's map
+  is a live view. `MetricName` (`common`) has Java's methods, its `tags()` a
+  `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public
+  constructor, its value provider, configuration and time Java types this
+  client does not translate (`MetricValueProvider`, `MetricConfig` and
+  `Measurable` are placeholder types) and Java's `config()` getter; the
+  setter `config(MetricConfig)` is left out (Q30). A long value is a
+  `bigint`. The gRPC
+  server serves its `Metrics` RPC.
+- `RecordMetadata` has Java's public constructor, `new RecordMetadata({
+  topicPartition, baseOffset, batchIndex, timestamp, serializedKeySize,
+  serializedValueSize })`, a `long` taking a bigint or a whole number; every
+  `RecordMetadata` is frozen.
+- `TopicPartitionMap` and `TopicPartitionSet` (`common`, *js-only*), Java's
+  `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns:
+  each keys its entries by `'<topic>:<partition>'` and keeps the original
+  `TopicPartition`s, which `keys()`, `entries()` and iteration return. Neither
+  extends `Map` or `Set`; `get()` returns `null` for a missing key, `size()`
+  is a method, `toString()` is Java's text and `toJSON()` writes a map by
+  the string key (a bigint as a decimal string) and a set as its array.
+  Their constructors, `get`, `has`, `add` and `delete` take the value on its
+  own or by name (`has({ key })`), as `MetricNameMap`'s do, and their types
+  declare both.
 
 ### Errors and security
 
@@ -165,6 +293,32 @@ newer.
 - An error's constructors are Java's forms with a message and a cause, by name
   or, with one parameter, the value on its own: `new KafkaError('boom')`,
   `new KafkaError({ message, cause })`, `new KafkaError(cause)`.
+- Java's constructors that take a payload, by Java's parameter names beside
+  `message` and `cause` and always by name
+  (`new TopicAuthorizationError({ unauthorizedTopics })`, with Java's
+  message), and Java's payload getters as methods (`unauthorizedTopics()` a
+  `Set`, `recordTooLargePartitions()` a `TopicPartitionMap<bigint>`,
+  `partitions()` a `TopicPartitionSet`, `groupId()`, `throttleTimeMs()`,
+  ...), each returning a new collection; `GroupAuthorizationError.forGroupId`
+  and `QuotaViolationError`'s `toString()` are Java's. A
+  `Map<TopicPartition, Long>` is taken as a `TopicPartitionMap` only. An
+  error the core reports carries its payload, read through the C API's view
+  of its class (an invalid topic's `InvalidTopicError` lists it); a field
+  the C API cannot give keeps its default, a recorded deviation
+  (`CorrelationIdMismatchError`'s ids `-1`). `QuotaViolationError`'s
+  `metric()` is a `KafkaMetric` with the metric's name and the error's value,
+  as the .NET client builds it (Python keeps the name and group only).
+  `RecordDeserializationError` has Java's full payload (`origin()`,
+  `topicPartition()`, `offset()`, `timestamp()`, `timestampType()`,
+  `keyBuffer()`, `valueBuffer()`, `headers()`) and its nested
+  `DeserializationExceptionOrigin`; `LogTruncationError` has Java's
+  constructors and `divergentOffsets()`, a `TopicPartitionMap<OffsetAndMetadata>`.
+- `TimestampType` (`common/record`), Java's enum, its `name` field read
+  through `toString()` (`'CreateTime'`; `forName` takes a string, a `null`
+  matching no constant as in Java), and `OffsetAndMetadata`
+  (`consumer`), a frozen data object with Java's constructors, `equals`,
+  `hashCode` and `toString`, `offset` a bigint and `leaderEpoch` a number
+  or null.
 - A `null` the client rejects as Java's `NullPointerException` throws
   `TypeError` "<param> must not be null" (`record`, `configs`, a
   `SecurityProtocol.forName` name); where Java throws its own message
@@ -178,10 +332,18 @@ newer.
   decimal, arrays joined with `,`, anything else by `String()`), `null` and
   `undefined` leave the key unset, and the core checks the keys and values
   with Java's messages naming the key. Unknown keys, a `kafkaJS` block
-  included, reach the core, which lists the ones it does not use;
-  `key.serializer` and `value.serializer` throw `ConfigError` pointing to the
-  constructor arguments. The `ProducerConfigs` type lists Java's producer keys
-  for autocompletion and takes any other string.
+  included, reach the core, which lists the ones it does not use.
+  `key.serializer` and `value.serializer` take a synchronous function
+  `({ configs, isKey }) => serializer`, which the producer calls once with the
+  whole configuration, in place of Java's class and its `configure()`; these
+  two keys don't reach the core, and neither do the keys the function reads
+  that the core doesn't know (a `schema.registry.url`), as Java's
+  `originals()` marks them used; a producer key it reads still does. The
+  function gets the configuration without Java's computed `client.id`, and
+  runs before the core checks the configuration. A class name, a serializer object or a
+  function that returns a Promise there throws `ConfigError`, and a
+  constructor argument wins. The `ProducerConfigs` type lists Java's producer
+  keys for autocompletion and takes any other string.
 - A second argument to an error constructor throws an `IllegalArgumentError`
   pointing to `{ message, cause }`. An error the client has nowhere else to
   report goes to `process.emitWarning`.
@@ -204,13 +366,6 @@ newer.
   Use `require`, named imports or `import * as`.
 - Of the SASL mechanisms, only `PLAIN` is supported. Keys and certificates must
   be PEM (no JKS or PKCS12).
-- The error classes take only Java's constructors with a message and a cause;
-  those with a payload are not translated, nor are Java's payload getters
-  (`TopicAuthorizationError`'s `unauthorizedTopics()`, `RecordTooLargeError`'s
-  `recordTooLargePartitions()`, ...) or
-  `RecordDeserializationError.DeserializationExceptionOrigin`. A class whose
-  every Java constructor takes a payload (`QuotaViolationError`,
-  `RecordDeserializationError`, ...) cannot be constructed yet.
 
 ### Package
 
@@ -222,3 +377,20 @@ newer.
   `require` loads and an ES module `import`s, with its `.d.ts` declarations
   and source maps).
 - Installing runs no build (`"gypfile": false`, no install scripts).
+- Every package declares `"type": "commonjs"`, and publint checks each
+  tarball.
+- The tests run on Jest, and `tsc --strict` type-checks them, the
+  verifiable clients' included (`make typecheck-tests`, through `checkJs`),
+  against the compiled declarations, each deliberate misuse marked
+  `@ts-expect-error`. A misuse `tsc` lets through carries none, such as
+  `KafkaFuture.completedFuture({ value: undefined })`, whose value type is
+  left unconstrained so that generic code can pass its value by name; the run
+  time refuses it.
+- The sources are formatted with Prettier, and
+  `make docs` builds the HTML reference with TypeDoc. A docs lint
+  (`eslint-plugin-jsdoc`) checks that each doc comment in `src/`, on a
+  function, a method, an overload signature, an abstract method or an
+  interface method, has a `@param` for each parameter (an options object as
+  one), written `@param name - text`, and a `@returns` unless the
+  declaration returns no value (`void`, `undefined` or `never`, alone or in a
+  `Promise`) or is an interface's setter. A member with no doc comment is not checked.

@@ -16,7 +16,6 @@
 
 // N3 check-notify-hook (scripts/lint/rules/notify_hook.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
@@ -39,10 +38,10 @@ test('a hook that only signals, and one that does nothing, pass', () => {
 
 test('each finding kind, with its exact text', () => {
   const r = runN(RULE, {
-    'native/callback_queue.c': QUEUE_C.replace(HOOK, '    cbq_drain(q);\n    napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_blocking);').replace(
-      '    pthread_mutex_lock(&q->notify_mtx);\n',
-      '',
-    ),
+    'native/callback_queue.c': QUEUE_C.replace(
+      HOOK,
+      '    cbq_drain(q);\n    napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_blocking);',
+    ).replace('    pthread_mutex_lock(&q->notify_mtx);\n', ''),
   });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
@@ -59,7 +58,9 @@ test('a negated guard is unguarded', () => {
 });
 
 test('a hook native/ does not define is a finding', () => {
-  const r = runN(RULE, { 'native/callback_queue.c': QUEUE_C.replace('void cbq_notify(void* opaque) {', 'void cbq_notified(void* opaque) {') });
+  const r = runN(RULE, {
+    'native/callback_queue.c': QUEUE_C.replace('void cbq_notify(void* opaque) {', 'void cbq_notified(void* opaque) {'),
+  });
   assert.deepEqual(findings(r), ['cbq_notify: is installed as a notify hook but defined in no native/*.c']);
 });
 
@@ -75,7 +76,7 @@ test('cannot run without the C sources', () => {
 
 test("two files' static hooks of one name are each checked, as their own file's", () => {
   const noop = 'static void noop_notify(void* opaque) {\n    (void)opaque;\n}\n\n';
-  const install = (name) =>
+  const install = (/** @type {string} */ name) =>
     `void ${name}(void* p) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_P__set_callbacks_notify_err(p, noop_notify, NULL, &ffi_err));\n}\n`;
   const r = runN(RULE, {
     'native/producer.c': PRODUCER_C.replace('void js_setup(void* p) {', `${noop}${install('js_teardown')}\nvoid js_setup(void* p) {`),
@@ -95,12 +96,21 @@ test('any statement besides the lock, the guarded call and the unlock is a findi
   const cases = [
     // A write to the queue before the lock, and one after the call: races with the JS thread.
     [QUEUE_C.replace(lock, `    q->pending += 1;\n${lock}`), 'native/callback_queue.c:12: cbq_notify runs `q->pending += 1;`'],
-    [QUEUE_C.replace(`${HOOK}\n`, `${HOOK}\n    q->notify_open = 0;\n`), 'native/callback_queue.c:14: cbq_notify runs `q->notify_open = 0;`'],
+    [
+      QUEUE_C.replace(`${HOOK}\n`, `${HOOK}\n    q->notify_open = 0;\n`),
+      'native/callback_queue.c:14: cbq_notify runs `q->notify_open = 0;`',
+    ],
     // A return between the lock and the unlock leaves notify_mtx held.
-    [QUEUE_C.replace(lock, `${lock}    if (q->stopped) return;\n`), 'native/callback_queue.c:13: cbq_notify runs `if (q->stopped) return;`'],
+    [
+      QUEUE_C.replace(lock, `${lock}    if (q->stopped) return;\n`),
+      'native/callback_queue.c:13: cbq_notify runs `if (q->stopped) return;`',
+    ],
     // A statement inside the guard's block.
     [
-      QUEUE_C.replace(HOOK, '    if (q->notify_open) {\n        q->pending = 0;\n        napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_nonblocking);\n    }'),
+      QUEUE_C.replace(
+        HOOK,
+        '    if (q->notify_open) {\n        q->pending = 0;\n        napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_nonblocking);\n    }',
+      ),
       'native/callback_queue.c:14: cbq_notify runs `q->pending = 0;`',
     ],
   ];
@@ -114,7 +124,10 @@ test('any statement besides the lock, the guarded call and the unlock is a findi
 
 test('the guarded call may be braced', () => {
   const r = runN(RULE, {
-    'native/callback_queue.c': QUEUE_C.replace(HOOK, '    if (q->notify_open) {\n        napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_nonblocking);\n    }'),
+    'native/callback_queue.c': QUEUE_C.replace(
+      HOOK,
+      '    if (q->notify_open) {\n        napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_nonblocking);\n    }',
+    ),
   });
   assert.equal(r.status, 0, r.text);
 });
