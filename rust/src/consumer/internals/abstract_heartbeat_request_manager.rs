@@ -39,8 +39,6 @@
 //! Metrics (`HeartbeatMetricsManager`) are dropped — no Rust metrics
 //! framework. `LogContext` is dropped — we use the `log` crate.
 
-#![expect(dead_code)]
-
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 

@@ -18,8 +18,7 @@
 //! every type here is `pub(crate)` (CLAUDE.md §2).
 //!
 //! Java's abstract `RebalanceMetricsManager` is the [`RebalanceMetricsManager`]
-//! trait, implemented by [`ConsumerRebalanceMetricsManager`] (and, from
-//! Milestone 18 P4, by the share consumer's `ShareRebalanceMetricsManager`).
+//! trait, implemented by [`ConsumerRebalanceMetricsManager`] and [`ShareRebalanceMetricsManager`].
 
 mod abstract_consumer_metrics_manager;
 mod async_consumer_metrics;
@@ -31,6 +30,11 @@ mod offset_commit_metrics_manager;
 mod rebalance_callback_metrics_manager;
 mod rebalance_metrics_manager;
 mod sensor_builder;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
+)]
+mod share_rebalance_metrics_manager;
 
 pub(crate) use abstract_consumer_metrics_manager::AbstractConsumerMetricsManager;
 pub(crate) use async_consumer_metrics::AsyncConsumerMetrics;
@@ -42,3 +46,4 @@ pub(crate) use offset_commit_metrics_manager::OffsetCommitMetricsManager;
 pub(crate) use rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
 pub(crate) use rebalance_metrics_manager::RebalanceMetricsManager;
 pub(crate) use sensor_builder::SensorBuilder;
+pub(crate) use share_rebalance_metrics_manager::ShareRebalanceMetricsManager;
