@@ -30,7 +30,8 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 /// <remarks>
 /// The copy-out runs on the calling thread, so the per-thread counter sees only this poll. Everything but the
-/// managers cancels in the subtraction of two polls of the same record count.
+/// managers and the mock's release callback cancels in the subtraction of two polls of the same record count, so
+/// the bound is exact: one more object per record, or one more per poll, fails it.
 /// </remarks>
 public sealed class PublicConsumerMemoryAllocationBudgetTests
 {
@@ -44,7 +45,10 @@ public sealed class PublicConsumerMemoryAllocationBudgetTests
     private const int LargeSize = 64 * 1024;
 
     // A manager holds a reference, a pointer, a length and a flag: 40 B on a 64-bit runtime.
-    private const long ManagerBudgetBytes = 64;
+    private const long ManagerBytes = 40;
+
+    // The mock makes its release callback, one delegate, at the first batch it retains; the empty poll retains none.
+    private const long ReleaseCallbackBytes = 64;
 
     [Fact]
     public void MemoryPoll_LargeKeyAndValue_AddNoAllocationOverSmallOnes()
@@ -70,13 +74,14 @@ public sealed class PublicConsumerMemoryAllocationBudgetTests
         long emptyBytes = MeasurePoll(RecordCount, 0);
         long filledBytes = MeasurePoll(RecordCount, SmallSize);
 
-        long managersPerRecord = (filledBytes - emptyBytes) / RecordCount;
+        long managers = filledBytes - emptyBytes;
+        long budget = (RecordCount * 2 * ManagerBytes) + ReleaseCallbackBytes;
 
         Assert.True(
-            managersPerRecord > 0 && managersPerRecord <= 2 * ManagerBudgetBytes,
-            $"A record with a key and a value cost {managersPerRecord} B more than one with both empty (budget " +
-            $"{2 * ManagerBudgetBytes} B for the two managers; empty={emptyBytes} B, filled={filledBytes} B over " +
-            $"{RecordCount} records).");
+            managers > 0 && managers <= budget,
+            $"{RecordCount} records with a key and a value cost {managers} B more than {RecordCount} with both empty " +
+            $"(budget {budget} B: two {ManagerBytes} B managers per record and the mock's one {ReleaseCallbackBytes} B " +
+            $"release callback; empty={emptyBytes} B, filled={filledBytes} B).");
     }
 
     private static void WarmUp()

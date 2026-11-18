@@ -13,7 +13,9 @@
 // limitations under the License.
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Common.Header;
 
@@ -40,36 +42,57 @@ internal static unsafe class ProducerSendMarshal
     {
         sent = false;
         RejectAlteredStrings(in record);
-        ReadOnlySpan<byte> key = record.Key.HasValue ? record.Key.GetValueOrDefault().Span : default;
-        ReadOnlySpan<byte> value = record.Value.HasValue ? record.Value.GetValueOrDefault().Span : default;
-        byte empty = 0;
-        fixed (byte* keyData = key)
-        fixed (byte* valueData = value)
+        MemoryHandle keyPin = default;
+        MemoryHandle valuePin = default;
+        try
         {
-            KafkaBytes keyBytes = new KafkaBytes(key.IsEmpty ? (IntPtr)(&empty) : (IntPtr)keyData, key.Length);
-            KafkaBytes valueBytes = new KafkaBytes(value.IsEmpty ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
-            IntPtr nativeRecord = BuildRecord(
-                in record,
-                record.Key.HasValue ? (IntPtr)(&keyBytes) : IntPtr.Zero,
-                record.Value.HasValue ? (IntPtr)(&valueBytes) : IntPtr.Zero,
-                ref outErr);
-            if (nativeRecord == IntPtr.Zero)
+            keyPin = PinIfOwned(record.Key);
+            valuePin = PinIfOwned(record.Value);
+            ReadOnlySpan<byte> key = record.Key.HasValue ? record.Key.GetValueOrDefault().Span : default;
+            ReadOnlySpan<byte> value = record.Value.HasValue ? record.Value.GetValueOrDefault().Span : default;
+            byte empty = 0;
+            fixed (byte* keyData = key)
+            fixed (byte* valueData = value)
             {
-                return IntPtr.Zero;
-            }
+                KafkaBytes keyBytes = new KafkaBytes(key.IsEmpty ? (IntPtr)(&empty) : (IntPtr)keyData, key.Length);
+                KafkaBytes valueBytes =
+                    new KafkaBytes(value.IsEmpty ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
+                IntPtr nativeRecord = BuildRecord(
+                    in record,
+                    record.Key.HasValue ? (IntPtr)(&keyBytes) : IntPtr.Zero,
+                    record.Value.HasValue ? (IntPtr)(&valueBytes) : IntPtr.Zero,
+                    ref outErr);
+                if (nativeRecord == IntPtr.Zero)
+                {
+                    return IntPtr.Zero;
+                }
 
-            try
-            {
-                IntPtr callback = state.Register();
-                sent = true;
-                return NativeMethods.ProducerSendWithCallback(producer, nativeRecord, callback, ref outErr);
-            }
-            finally
-            {
-                Destroy(nativeRecord);
+                try
+                {
+                    IntPtr callback = state.Register();
+                    sent = true;
+                    return NativeMethods.ProducerSendWithCallback(producer, nativeRecord, callback, ref outErr);
+                }
+                finally
+                {
+                    Destroy(nativeRecord);
+                }
             }
         }
+        finally
+        {
+            SendPins.Unpin(ref keyPin);
+            SendPins.Unpin(ref valuePin);
+        }
     }
+
+    // fixed pins an array but nothing of a MemoryManager's memory, so the blocking send holds the manager's own pin
+    // for the call: a fetched batch's bytes then stay valid although nothing else references the batch.
+    private static MemoryHandle PinIfOwned(ReadOnlyMemory<byte>? memory) =>
+        memory is ReadOnlyMemory<byte> bytes
+            && MemoryMarshal.TryGetMemoryManager<byte, MemoryManager<byte>>(bytes, out _)
+            ? bytes.Pin()
+            : default;
 
     internal static bool SendWithHandOver(
         SafeProducerHandle producer,

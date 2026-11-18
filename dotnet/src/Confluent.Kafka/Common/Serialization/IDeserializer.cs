@@ -50,7 +50,8 @@ public interface IDeserializer<T>
 /// A deserializer that reads or adds the record's headers: it replaces Java's default
 /// <c>Deserializer.deserialize(String, Headers, byte[])</c> and <c>deserialize(String, Headers, ByteBuffer)</c>, which call
 /// the form without headers. A consumer calls this form for a deserializer that implements this interface, and
-/// <see cref="IDeserializer{T}.Deserialize(string, ReadOnlySpan{byte})"/> otherwise.
+/// <see cref="IDeserializer{T}.Deserialize(string, ReadOnlySpan{byte})"/> otherwise, unless it also implements
+/// <see cref="IDeserializerWithReadOnlyMemory{T}"/>, whose form a consumer then calls instead.
 /// </summary>
 /// <remarks>
 /// Java's two overloads are one form here: the bytes are a <see cref="ReadOnlySpan{T}"/>, for Java's <c>byte[]</c> and
