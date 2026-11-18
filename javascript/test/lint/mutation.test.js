@@ -440,8 +440,9 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
-        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_producer_Producer_flush(p->view, &ffi_err));\n    }\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_producer_Producer_flush(p->view, &ffi_err));\n    }\n' +
+          '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
       ),
   },
   {
@@ -451,8 +452,9 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    if (!w->timed) kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);',
-        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_common_KafkaFuture_get(ctx->future, &ffi_err));\n    }\n    if (!w->timed) kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);',
+        '    if (!w->timed) {\n        cbq_call_begin(env, &p->queue);\n        kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_common_KafkaFuture_get(ctx->future, &ffi_err));\n    }\n' +
+          '    if (!w->timed) {\n        cbq_call_begin(env, &p->queue);\n        kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);',
       ),
   },
   {
@@ -463,8 +465,9 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
-        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FLUSH_VIEW(p->view);\n    }\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FLUSH_VIEW(p->view);\n    }\n' +
+          '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
       );
     },
   },
@@ -684,7 +687,12 @@ MUTATIONS.push(
     rule: 'check-single-drainer',
     what: 'the producer destroyed in its close completion',
     apply: (root) =>
-      edit(root, 'native/producer.c', '    delete_ref(env, &ctx->done);\n    free(ctx);\n}\n\n// producerClose', '    delete_ref(env, &ctx->done);\n    free(ctx);\n    producer_destroy(env, p);\n}\n\n// producerClose'),
+      edit(
+        root,
+        'native/producer.c',
+        '    delete_ref(env, &ctx->done);\n    free(ctx);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerClose',
+        '    delete_ref(env, &ctx->done);\n    free(ctx);\n    producer_destroy(env, p);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerClose',
+      ),
   },
   {
     rule: 'check-single-drainer',
@@ -716,8 +724,8 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);\n',
-        '    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);\n    producer_destroy(env, p);\n',
+        '        kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);\n    }\n',
+        '        kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);\n    }\n    producer_destroy(env, p);\n',
       ),
   },
   {
@@ -773,9 +781,106 @@ MUTATIONS.push(
   },
   {
     rule: 'check-tsfn-lifetime',
-    what: 'the thread-safe function referenced again when the drain starts',
+    what: 'the thread-safe function referenced outside the hold update, when the drain starts',
     apply: (root) =>
       edit(root, 'native/callback_queue.c', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n    napi_ref_threadsafe_function(env, q->tsfn);\n'),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: 'the thread-safe function unreferenced by cbq_closed itself, whatever call still waits',
+    apply: (root) =>
+      edit(
+        root,
+        'native/callback_queue.c',
+        '    q->self_strong = 0;\n',
+        '    q->self_strong = 0;\n    if (q->tsfn_alive) napi_unref_threadsafe_function(env, q->tsfn);\n',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: "flush's _cb call made without being counted",
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);\n',
+        '    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);\n',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: 'the close completion ending its count before its JS callback ran',
+    apply: (root) => {
+      edit(root, 'native/producer.c', '    delete_ref(env, &ctx->done);\n    free(ctx);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerClose', '    delete_ref(env, &ctx->done);\n    free(ctx);\n}\n\n// producerClose');
+      edit(
+        root,
+        'native/producer.c',
+        '    if (closed_now)\n        for (SendCtx* o',
+        '    cbq_call_end(env, &p->queue);\n    if (closed_now)\n        for (SendCtx* o',
+      );
+    },
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: "flush's _cb call counted twice, by a second cbq_call_begin",
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);\n',
+        '    cbq_call_begin(env, &p->queue);\n    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);\n',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: "flush's cbq_call_begin under a condition its call is not under",
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);\n',
+        '    if (p->owners > 2) cbq_call_begin(env, &p->queue);\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);\n',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: 'a cbq_call_begin in the pump, which makes no _cb call',
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n',
+        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n    cbq_call_begin(env, &p->queue);\n',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: 'a cbq_call_end in the delivery callback, which no _cb call is handed',
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        '    ctx->delivered = 1;\n    send_ctx_maybe_destroy_future(env, ctx);\n    send_ctx_release(env, ctx);\n}\n',
+        '    ctx->delivered = 1;\n    send_ctx_maybe_destroy_future(env, ctx);\n    send_ctx_release(env, ctx);\n    cbq_call_end(env, &p->queue);\n}\n',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: "a second cbq_call_end in flush's completion, through a helper it calls",
+    apply: (root) => {
+      edit(
+        root,
+        'native/producer.c',
+        'static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {\n',
+        'static void flush_count_end(Producer* p) {\n    cbq_call_end(p->env, &p->queue);\n}\n\nstatic void flush_on_complete(kafka_common_Error_t* error, void* opaque) {\n',
+      );
+      edit(
+        root,
+        'native/producer.c',
+        '    free(ctx);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerFlush',
+        '    free(ctx);\n    flush_count_end(p);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerFlush',
+      );
+    },
   },
   {
     rule: 'check-tsfn-lifetime',

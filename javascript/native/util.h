@@ -128,10 +128,12 @@ void error_warn(napi_env env, int js, kafka_common_Error_t* e);
 // (cbq_notify) only calls a threadsafe function; its call_js then runs the
 // drain on the JS thread, which calls the client's `__execute_callbacks`
 // while it returns > 0. Drains never nest. The queue also keeps Node running
-// and the client's handle object from garbage collection until the core
-// reports the client closed, and owns the threadsafe function's teardown
-// (javascript/CLAUDE.md, rules 2, 3 and 10). Each client embeds one and
-// passes its own `__execute_callbacks`.
+// while the client is open or one of its `_cb` calls waits for its
+// completion, keeps the client's handle object from garbage collection until
+// the core reports the client closed, and owns the threadsafe function's
+// teardown (javascript/CLAUDE.md, rules 2, 3 and 10, "Threads and
+// liveness"). Each client embeds one and passes its own
+// `__execute_callbacks`.
 
 // The client's `__execute_callbacks_err` over `client`: how many callbacks ran.
 typedef int32_t (*cbq_execute_fn)(void* client, kafka_common_Error_t** out_err);
@@ -149,15 +151,18 @@ typedef struct {
     int notify_open;                    // the hook may call the tsfn
     napi_ref self_ref;                  // the client's handle object; strong until the core reports it closed
     int self_strong;                    // self_ref is strong: no close the core reported yet
+    int pending;                        // the client's `_cb` calls whose completion has not run yet
+    int held;                           // the tsfn is referenced now (Node-API creates it referenced)
     int draining;                       // a drain loop is running
     int stopped;                        // the client's destroy began: no drain from now on
     int finalizing;                     // the handle object is being finalized: run no JS
 } CallbackQueue;
 
 // Creates the threadsafe function, referenced (the client keeps Node running
-// until it is closed), named `name`. Returns 0, or -1 with a JS exception
-// pending and nothing left to free. From then on the tsfn is one owner of
-// `client`: its finalizer calls `on_tsfn_finalize`.
+// while it is open or a call made on it waits for its answer), named `name`.
+// Returns 0, or -1 with a JS exception pending and nothing left to free. From
+// then on the tsfn is one owner of `client`: its finalizer calls
+// `on_tsfn_finalize`.
 int cbq_init(napi_env env, CallbackQueue* q, const char* name, void* client, cbq_execute_fn execute,
              cbq_client_fn on_tsfn_finalize);
 
@@ -172,12 +177,27 @@ int cbq_attach(napi_env env, CallbackQueue* q, napi_value handle);
 void cbq_notify(void* opaque);
 
 // The core reported the client closed (a close completion without error, or
-// with any error but a rejected timeout): unreferences the tsfn, which stays
-// alive for later completions, so Node may exit, and makes the reference on
-// the handle object weak, so its finalizer may destroy the client. Returns 1
-// the first time, 0 for a client already closed. JS thread. This records the
-// core's answer: no call is refused on it (javascript/CLAUDE.md, rule 1).
+// with any error but a rejected timeout): Node may exit once no call made on
+// the client waits for its answer (the tsfn stays alive for those answers),
+// and the reference on the handle object becomes weak, so its finalizer may
+// destroy the client. Returns 1 the first time, 0 for a client already
+// closed. JS thread. This records the core's answer: no call is refused on
+// it (javascript/CLAUDE.md, rule 1).
 int cbq_closed(napi_env env, CallbackQueue* q);
+
+// Counts one `_cb` call of the client, made right after this returns (after
+// every early return of the function making it): until its completion runs
+// cbq_call_end, the call holds Node, so a call made on a closed client gets
+// its answer. JS thread.
+void cbq_call_begin(napi_env env, CallbackQueue* q);
+
+// The last statement of the completion of a `_cb` call cbq_call_begin
+// counted, on every path: run by the drain, inline inside the call, or by the
+// destroy. Only the release of the client struct holding the queue, which may
+// free it, comes after. Once no call waits and the client is closed, Node may
+// exit: after the JS callback ran, so the code awaiting it runs first. JS
+// thread.
+void cbq_call_end(napi_env env, CallbackQueue* q);
 
 // Whether the core reported the client closed (cbq_closed ran): what the
 // handle object's finalizer asks before it destroys the client.

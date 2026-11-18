@@ -472,17 +472,15 @@ even an idle one, and no garbage collection closes a producer, even once
 nothing refers to it *(deviation: Java's client threads are daemon threads,
 so a program can exit with a client still open)*. Once closed, a producer no
 longer holds Node, and its native client is released when the producer is
-garbage collected. A call made after `close()` goes to the client, which
-answers as Java's does: `send()` rejects with `IllegalStateError` "Cannot
-perform operation after producer has been closed", and `flush()` and a second
-`close()` resolve. A call made after `close()` has completed settles only
-while something else keeps the event loop running: a closed producer no
-longer holds Node, so a script whose only pending work is such a call can
-exit before it settles. A `process.exit()` runs no
-cleanup: the process ends at once and the unsent records are lost, as Java's
-daemon I/O thread loses unsent records at JVM exit. The preview doesn't
-support clients in worker threads. Create clients in the main thread, and
-send plain data to and from workers (Limitations, below).
+garbage collected; a call made on a closed producer keeps Node running until
+that call settles, as Java's call returns. A call made after `close()` goes to
+the client, which answers as Java's does: `send()` rejects with
+`IllegalStateError` "Cannot perform operation after producer has been
+closed", and `flush()` and a second `close()` resolve. A `process.exit()`
+runs no cleanup: the process ends at once and the unsent records are lost,
+as Java's daemon I/O thread loses unsent records at JVM exit. The preview
+doesn't support clients in worker threads. Create clients in the main
+thread, and send plain data to and from workers (Limitations, below).
 
 `examples/producer.js` produces one record, awaiting its hand-over and then
 its delivery, and prints its metadata:

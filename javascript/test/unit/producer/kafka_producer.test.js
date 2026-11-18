@@ -55,21 +55,6 @@ function delivery(future) {
   });
 }
 
-/**
- * Runs `body` with the event loop held by a timer: a closed producer no longer
- * keeps Node running (javascript/CLAUDE.md, "Threads and liveness"), so a test
- * awaiting a call made after close() holds the loop itself, as an app's own
- * work would.
- */
-async function holdingTheLoop(body) {
-  const hold = setInterval(() => {}, 1000);
-  try {
-    return await body();
-  } finally {
-    clearInterval(hold);
-  }
-}
-
 const FLUSH_IN_CALLBACK =
   'KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.';
 
@@ -284,8 +269,9 @@ test('close() waits for a pending callback Promise, and [Symbol.asyncDispose] cl
   await closing;
   await assert.rejects(producer.send(new ProducerRecord({ topic: 't', value: 'v' })), { name: 'IllegalStateError', message: CLOSED_MESSAGE });
   // Disposing again resolves, as close() again does: the core's second
-  // close, whose completion a closed producer no longer holds Node for.
-  await holdingTheLoop(() => producer[Symbol.asyncDispose]());
+  // close, which holds Node until its answer, as any call made on a closed
+  // producer does (javascript/CLAUDE.md, "Threads and liveness").
+  await producer[Symbol.asyncDispose]();
 });
 
 test('flush inside a callback rejects with the core error', async () => {
@@ -358,26 +344,26 @@ test("after close every call goes to the core: send rejects with its closed erro
     assert.equal(e.message, CLOSED_MESSAGE);
     return true;
   };
-  await holdingTheLoop(async () => {
-    const producer = new KafkaProducer({ configs: UNREACHABLE });
-    const first = producer.close();
-    // A second close while the first runs is a close of its own, in the core.
-    const second = producer.close();
-    assert.notEqual(second, first);
-    await first;
-    // Sent once the close was awaited (callers await, javascript/CLAUDE.md):
-    // a send racing the close may get either of Java's outcomes.
-    const afterClose = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
-    assert.ok(afterClose instanceof Promise);
-    await assert.rejects(afterClose, closedError);
-    // Java's flush() has no closed check: the core's flush resolves.
-    await producer.flush();
-    await second;
-    await producer.close();
-    await producer.close({ timeout: 0 });
-    await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), closedError);
-    await producer.flush();
-  });
+  // Nothing else holds the event loop: each call made on the closed producer
+  // holds it until its answer (javascript/CLAUDE.md, "Threads and liveness").
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  const first = producer.close();
+  // A second close while the first runs is a close of its own, in the core.
+  const second = producer.close();
+  assert.notEqual(second, first);
+  await first;
+  // Sent once the close was awaited (callers await, javascript/CLAUDE.md):
+  // a send racing the close may get either of Java's outcomes.
+  const afterClose = producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) });
+  assert.ok(afterClose instanceof Promise);
+  await assert.rejects(afterClose, closedError);
+  // Java's flush() has no closed check: the core's flush resolves.
+  await producer.flush();
+  await second;
+  await producer.close();
+  await producer.close({ timeout: 0 });
+  await assert.rejects(producer.send({ record: new ProducerRecord({ topic: 't', value: 'v' }) }), closedError);
+  await producer.flush();
 });
 
 test('close checks its timeout, open or closed: the closed state is the core\'s', async () => {
@@ -427,15 +413,13 @@ test('close checks its timeout, open or closed: the closed state is the core\'s'
       return true;
     });
   };
-  await holdingTheLoop(async () => {
-    const producer = new KafkaProducer({ configs: UNREACHABLE });
-    await checks(producer);
-    // The producer is still open.
-    await producer.flush();
-    await producer.close();
-    // Closed: the same checks, the same errors.
-    await checks(producer);
-  });
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  await checks(producer);
+  // The producer is still open.
+  await producer.flush();
+  await producer.close();
+  // Closed: the same checks, the same errors.
+  await checks(producer);
   // Accepted: a whole or fractional number, Infinity, a Temporal.Duration, bare or named.
   for (const timeout of [{ timeout: 0 }, 1.5, Infinity, { timeout: Temporal.Duration.from({ seconds: 1 }) }, Temporal.Duration.from({ seconds: 1 })]) {
     await new KafkaProducer({ configs: UNREACHABLE }).close(timeout);
@@ -972,6 +956,187 @@ test('a pending send keeps the process alive until it completes and the producer
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'callback: Topic alive not present in metadata after 1500 ms.\n');
   assert.ok(r.ms >= 1400, `exited after ${r.ms} ms`);
+});
+
+// A call made on a closed producer holds Node until it settles, as Java's
+// call returns, and so does a second close() whose answer comes after the
+// first close's (javascript/CLAUDE.md, "Threads and liveness"): each child
+// below has nothing else holding Node, prints a line once the call settled,
+// and exits with 0. Java 4.4.0's answers are the expected ones.
+
+// One child per call: a call that never settled would end the child there.
+const AFTER_CLOSE = [
+  // Java's close(), close(Duration.ZERO) and try-with-resources' close() return.
+  { call: 'p.close()', outcome: 'resolved' },
+  { call: 'p.close(0)', outcome: 'resolved' },
+  { call: 'p[Symbol.asyncDispose]()', outcome: 'resolved' },
+  // Java's flush() has no closed check: it returns.
+  { call: 'p.flush()', outcome: 'resolved' },
+  // Answered inside the call, with Java's errors.
+  { call: 'p.close(-1)', outcome: 'IllegalArgumentError: The timeout cannot be negative.' },
+  { call: "p.send(new ProducerRecord({ topic: 't', value: 'v' }))", outcome: `IllegalStateError: ${CLOSED_MESSAGE}` },
+];
+
+for (const { call, outcome } of AFTER_CLOSE) {
+  test(`${call} after close() settles with Java's answer while nothing else holds Node`, () => {
+    const r = runNode(`
+      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+      const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+      (async () => {
+        await p.close();
+        const outcome = await ${call}.then(
+          (value) => (value === undefined ? 'resolved' : 'resolved with ' + String(value)),
+          (e) => e.constructor.name + ': ' + e.message,
+        );
+        console.log('after the call:', outcome);
+      })();
+    `);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `after the call: ${outcome}\n`);
+  });
+}
+
+test("a late close() and flush() settle while nothing else holds Node, after a record's callback ran", () => {
+  // The record's callback fires with the metadata timeout (Java's send()
+  // returns a failed future then: its TimeoutException is an ApiException),
+  // then the producer is closed, and the late calls must still hold Node
+  // until their answers: Java's close() and flush() return. A count ended by
+  // the record's callback as well as by its hand-over would let Node go
+  // before them. The lines are printed at the end: a write to stdout holds
+  // the event loop for a moment of its own.
+  const r = runNode(`
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': ${MAX_BLOCK_MS} } });
+    const outcome = (call) => call.then(() => 'resolved', (e) => e.constructor.name + ': ' + e.message);
+    const lines = [];
+    (async () => {
+      await p.send({
+        record: new ProducerRecord({ topic: 't', value: 'v' }),
+        // A block body: a callback that returns a value is awaited (rule 6).
+        callback: ({ exception }) => {
+          lines.push('callback: ' + exception.constructor.name + ': ' + exception.message);
+        },
+      });
+      await p.close();
+      lines.push('closed');
+      lines.push('late close: ' + (await outcome(p.close())));
+      lines.push('late flush: ' + (await outcome(p.flush())));
+      console.log(lines.join('\\n'));
+    })();
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    `callback: TimeoutError: ${TIMEOUT_MESSAGE('t')}\nclosed\nlate close: resolved\nlate flush: resolved\n`,
+  );
+});
+
+// Two calls at once, awaited together (javascript/CLAUDE.md, "How the client
+// is used"). The second close() is answered after the first close's
+// completion, which only the hold of a waiting call covers. In the flush
+// pairs flush has been answered first in every round run, so those two check
+// Java's answer and the exit. Each round's producer stays reachable until
+// its calls settled (`kept`): one collected with a call pending is the root
+// conventions' Future improvements entry (Q49), not these tests' subject.
+for (const pair of ['p.close(), p.close()', 'p.close(), p.close(0)', 'p.close(), p.flush()', 'p.flush(), p.close()']) {
+  test(`${pair} at once on an open producer both settle, in each of 25 rounds`, () => {
+    const r = runNode(
+      `
+      const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+      let kept;
+      (async () => {
+        const outcomes = new Set();
+        for (let round = 0; round < 25; round++) {
+          const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+          for (const o of await Promise.allSettled([${pair}])) outcomes.add(o.status);
+          kept = p;
+        }
+        console.log('all settled:', [...outcomes].join(', '));
+      })();
+    `,
+      60000,
+    );
+    assert.equal(r.status, 0, r.stderr);
+    // Java's close() and flush() both return.
+    assert.equal(r.stdout, 'all settled: fulfilled\n');
+  });
+}
+
+// The hold still ends: a closed producer with no call waiting lets the child
+// exit at once, the time from the last line to the process's exit event.
+for (const { what, body } of [
+  { what: 'a closed producer with no call waiting', body: 'await p.close();' },
+  {
+    what: 'a closed producer whose late calls settled',
+    body: "await p.close();\n        await p.flush();\n        await p.close();\n        await p.send(new ProducerRecord({ topic: 't', value: 'v' })).catch(() => {});",
+  },
+]) {
+  test(`${what} lets the process exit right after its last answer`, () => {
+    const r = runNode(`
+      const { performance } = require('node:perf_hooks');
+      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+      let mark;
+      process.on('exit', () => console.log('exited after', performance.now() - mark < 1000 ? 'less than 1s' : 'more'));
+      const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+      (async () => {
+        ${body}
+        mark = performance.now();
+        console.log('answered');
+      })();
+    `);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'answered\nexited after less than 1s\n');
+  });
+}
+
+test('an open producer keeps the process running after a call made on it settled', () => {
+  // The count of calls waiting ends; the open producer's hold does not.
+  const r = runNode(
+    `
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+    p.flush().then(() => console.log('flushed'));
+  `,
+    3000,
+  );
+  assert.equal(r.stdout, 'flushed\n');
+  assert.equal(r.signal, 'SIGTERM', `the process exited on its own: status ${r.status}`);
+});
+
+// A guard of Java's answer and of the exit: this call is answered before the
+// close's completion, while the open producer still holds Node, so it passes
+// without the count of waiting calls too.
+test('a send waiting for metadata across close(0) rejects with Java\'s error and the process exits, in each of 25 rounds', () => {
+  // The record waits for metadata in the core when close(0) comes. Java's
+  // doSend throws KafkaException("Producer closed while send in progress"),
+  // caused by "Requested metadata update after close". Each producer stays
+  // reachable until its calls settled, as above.
+  const r = runNode(
+    `
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const describe = (e) => e.constructor.name + ': ' + e.message + ', caused by ' + e.cause.constructor.name + ': ' + e.cause.message;
+    let kept;
+    (async () => {
+      const outcomes = new Set();
+      for (let round = 0; round < 25; round++) {
+        const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
+        const sent = p.send(new ProducerRecord({ topic: 't', value: 'v' })).then(() => 'resolved', describe);
+        // Long enough for the record to be waiting for metadata.
+        await new Promise((res) => setTimeout(res, 100));
+        await p.close(0);
+        outcomes.add(await sent);
+        kept = p;
+      }
+      console.log('all settled:', [...outcomes].join(', '));
+    })();
+  `,
+    60000,
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    'all settled: KafkaError: Producer closed while send in progress, caused by KafkaError: Requested metadata update after close\n',
+  );
 });
 
 test('terminating a worker with records in flight tears its producer down cleanly', () => {

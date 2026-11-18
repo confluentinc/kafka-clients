@@ -149,7 +149,9 @@ newer.
   idle or not, as KafkaJS and 1.x do from `connect()` to `disconnect()`, and
   no garbage collection closes one: a script that never calls `close()` never
   exits on its own. Once closed, a producer no longer holds Node, and its
-  native client is released when it is garbage collected.
+  native client is released when it is garbage collected; a call made on a
+  closed producer keeps Node running until it settles, as Java's call
+  returns.
 
 ### Errors and security
 
@@ -188,6 +190,19 @@ newer.
 - A topic, a header key, or a config key or value holding a NUL byte throws a
   `TypeError`: C would read the NUL as the end of the string. Keys, values and
   header values are bytes and may hold any.
+
+### Fixed
+
+- A call made on a closed producer settles even when nothing else keeps Node
+  running, with Java's answer. An awaited `close()`, `close(timeout)`,
+  `[Symbol.asyncDispose]()` (an `await using` disposal) or `flush()` on a
+  closed producer used to never settle: the code after its `await` never ran,
+  and Node exited with code 0.
+- Two `close()` calls at once on an open producer both settle: one of them
+  used to be lost the same way. Every call made on a producer now keeps Node
+  running until its answer, as Java's call returns: a send's hand-over,
+  `flush()`, `close()` and the waits of a record's future, whose answers may
+  come after the close's.
 
 ### Known limitations
 
