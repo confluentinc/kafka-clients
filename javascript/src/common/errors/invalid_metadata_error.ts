@@ -16,7 +16,7 @@
 // the Java source of `org.apache.kafka.common.errors.InvalidMetadataException`;
 // `cargo xtask check-generated` checks it is up to date.
 
-import { setForms } from '../../internal/throwable';
+import { isCreate, setForms } from '../../internal/throwable';
 import { RefreshRetriableError } from './refresh_retriable_error';
 
 /**
@@ -72,7 +72,7 @@ export abstract class InvalidMetadataError extends RefreshRetriableError {
    */
   constructor(cause: Error);
   constructor(...args: unknown[]) {
-    if (new.target === InvalidMetadataError) {
+    if (new.target === InvalidMetadataError && !isCreate(args)) {
       throw new TypeError('InvalidMetadataError is an abstract catch-only base; it is never thrown directly');
     }
     super(...(args as [{ message: string | null; cause: unknown; name?: never }]));

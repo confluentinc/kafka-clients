@@ -16,7 +16,6 @@
 
 // N7 check-zero-copy (scripts/lint/rules/zero_copy.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
@@ -36,7 +35,10 @@ test('bytes read into a kafka_Bytes_t, borrowed until the hand-over, and the lis
 
 test('each finding kind, with its exact text', () => {
   let r = runN(RULE, {
-    'native/record.c': RECORD_C.replace('    out->bytes.len = (int32_t)length;', '    out->bytes.len = (int32_t)length;\n    memcpy(out->copy, data, length);'),
+    'native/record.c': RECORD_C.replace(
+      '    out->bytes.len = (int32_t)length;',
+      '    out->bytes.len = (int32_t)length;\n    memcpy(out->copy, data, length);',
+    ),
     'native/producer.c': PRODUCER_C.replace(CTX, `${CTX}\n    void* buf = malloc(8);`),
   });
   assert.deepEqual(findings(r), [
@@ -76,21 +78,39 @@ test('the hand-over completion drops both references, itself or through a functi
 
 test('the hand-over completion drops the references unconditionally, and the delivery callback never does', () => {
   // Only on a failed hand-over: an accepted record would keep its Buffers.
-  let r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    release_buffers(NULL, opaque);\n', '    if (error != NULL) release_buffers(NULL, opaque);\n') });
+  let r = runN(RULE, {
+    'native/producer.c': PRODUCER_C.replace(
+      '    release_buffers(NULL, opaque);\n',
+      '    if (error != NULL) release_buffers(NULL, opaque);\n',
+    ),
+  });
   assert.deepEqual(findings(r), [
     'native/producer.c:34: on_handover does not always drop key_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
     'native/producer.c:34: on_handover does not always drop value_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
   ]);
   // In a block, or behind &&: conditional too.
-  r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    release_buffers(NULL, opaque);\n', '    error != NULL && release_buffers(NULL, opaque);\n') });
+  r = runN(RULE, {
+    'native/producer.c': PRODUCER_C.replace(
+      '    release_buffers(NULL, opaque);\n',
+      '    error != NULL && release_buffers(NULL, opaque);\n',
+    ),
+  });
   assert.equal(findings(r).length, 2, r.text);
-  r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('    delete_ref(env, &ctx->key_ref);\n', '    if (ctx) {\n        delete_ref(env, &ctx->key_ref);\n    }\n') });
+  r = runN(RULE, {
+    'native/producer.c': PRODUCER_C.replace(
+      '    delete_ref(env, &ctx->key_ref);\n',
+      '    if (ctx) {\n        delete_ref(env, &ctx->key_ref);\n    }\n',
+    ),
+  });
   assert.deepEqual(findings(r), [
     'native/producer.c:36: on_handover does not always drop key_ref: the FFI borrows the key and value only until the hand-over, taken or refused',
   ]);
   // The delivery callback releasing them holds an accepted record's Buffers until delivery.
   r = runN(RULE, {
-    'native/producer.c': PRODUCER_C.replace('    call_ref(self_, metadata, error);\n', '    call_ref(self_, metadata, error);\n    release_buffers(NULL, self_);\n').replace(
+    'native/producer.c': PRODUCER_C.replace(
+      '    call_ref(self_, metadata, error);\n',
+      '    call_ref(self_, metadata, error);\n    release_buffers(NULL, self_);\n',
+    ).replace(
       'static void send_on_completion(',
       'static void release_buffers(void* env, SendCtx* ctx);\n\nstatic void send_on_completion(',
     ),
@@ -125,13 +145,19 @@ test('an entry allows its one call site: a second calloc in the function is a fi
 });
 
 test('an allowlist entry that matches nothing is a finding', () => {
-  const r = runN(RULE, {}, {
-    ALLOWED: [
-      { key: 'native/producer.c:js_send:calloc#1', reason: "the send's context" },
-      { key: 'native/record.c:gone:malloc#1', reason: 'the test' },
-    ],
-  });
-  assert.deepEqual(findings(r), ['native/record.c:gone:malloc#1: is allowed as the test, but nothing matches it any more: delete the entry']);
+  const r = runN(
+    RULE,
+    {},
+    {
+      ALLOWED: [
+        { key: 'native/producer.c:js_send:calloc#1', reason: "the send's context" },
+        { key: 'native/record.c:gone:malloc#1', reason: 'the test' },
+      ],
+    },
+  );
+  assert.deepEqual(findings(r), [
+    'native/record.c:gone:malloc#1: is allowed as the test, but nothing matches it any more: delete the entry',
+  ]);
 });
 
 test('cannot run without the C sources', () => {
@@ -141,7 +167,7 @@ test('cannot run without the C sources', () => {
 
 test("src/ copies none of the caller's bytes; encoding a string is no copy", () => {
   const RECORD_TS = [
-    '// Node\'s Buffer, as @types/node declares the two calls used here.',
+    "// Node's Buffer, as @types/node declares the two calls used here.",
     'declare class Buffer extends Uint8Array {',
     '  static from(data: string | Uint8Array, encoding?: string): Buffer;',
     '  static alloc(size: number): Buffer;',
@@ -160,7 +186,7 @@ test("src/ copies none of the caller's bytes; encoding a string is no copy", () 
     '  const out = Buffer.alloc(key.length);',
     '  out.set(key);',
     '  key.copy(out);',
-    "  out.set([1, 2]);",
+    '  out.set([1, 2]);',
     '  return [Buffer.concat([key]), Buffer.concat(keys), out];',
     '}',
     'void copies;',

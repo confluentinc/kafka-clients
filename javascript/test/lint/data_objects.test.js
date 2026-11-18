@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // J8 check-data-objects (scripts/lint/rules/data_objects.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
@@ -48,6 +46,7 @@ const REC = `export class Rec {
     this.offset = 0;
     this.isOpen = true;
     this.hasKey = false;
+    Object.freeze(this);
   }
   getSize(): number { return 0; }
   close(): void {}
@@ -81,14 +80,30 @@ test('a data class with readonly fields, and classes with methods, pass', () => 
     withData(),
   );
   assert.equal(r.status, 0, r.text);
-  // Rec: UNKNOWN and its 4 getter fields; Proto.id; the one data class listed.
-  assert.ok(r.out.includes('✅ check-data-objects: 7 item(s) checked'), r.text);
+  // Rec: frozen, UNKNOWN and its 4 getter fields; Proto.id; the one data class listed.
+  assert.ok(r.out.includes('✅ check-data-objects: 8 item(s) checked'), r.text);
 });
 
-test("the shipped list names the producer data classes, not Header (the root's list does not)", () => {
+test('a data class whose constructor does not freeze the instance is a finding', () => {
+  for (const unfrozen of [
+    REC.replace('    Object.freeze(this);\n', ''),
+    // Under a condition, it may not run.
+    REC.replace('    Object.freeze(this);\n', '    if (topic) Object.freeze(this);\n'),
+  ]) {
+    const r = lint(project({ ...FILES, 'src/producer/rec.ts': unfrozen }), [RULE], withData());
+    assert.deepEqual(findings(r), [
+      'Rec: is a data class whose constructor does not run Object.freeze(this): its fields are set once, when it is built',
+    ]);
+  }
+});
+
+test("the shipped list names the data classes the client translates, not Header (the root's list does not)", () => {
   assert.deepEqual([...rule.DATA_CLASSES].sort(), [
+    'org.apache.kafka.clients.consumer.OffsetAndMetadata',
     'org.apache.kafka.clients.producer.ProducerRecord',
     'org.apache.kafka.clients.producer.RecordMetadata',
+    'org.apache.kafka.common.Node',
+    'org.apache.kafka.common.TopicPartition',
   ]);
 });
 
@@ -99,11 +114,14 @@ test('on a data class, a Java getter as a get accessor, a method or a mutable fi
     .replace('  readonly offset: number;\n', '  offset: number;\n')
     .replace('  readonly hasKey: boolean;\n', '')
     .replace('    this.hasKey = false;\n', '')
-    .replace('  close(): void {}\n', '  close(): void {}\n  hasKey(): boolean { return false; }\n  readonly extra: number = 1;\n  get size(): number { return 0; }\n');
+    .replace(
+      '  close(): void {}\n',
+      '  close(): void {}\n  hasKey(): boolean { return false; }\n  readonly extra: number = 1;\n  get size(): number { return 0; }\n',
+    );
   const r = lint(project({ ...FILES, 'src/producer/rec.ts': bad }), [RULE], withData());
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    "Rec.offset: is a public mutable field: make it readonly",
+    'Rec.offset: is a public mutable field: make it readonly',
     "Rec.topic: is a get accessor: on a data class, Java's topic() is a public readonly field",
     "Rec.hasKey: is a method: on a data class, Java's hasKey() is a public readonly field",
     'Rec.extra: is a readonly field translating no Java getter of the data class',
@@ -121,20 +139,25 @@ test('a class that is not a data class keeps methods: a get accessor or a readon
     'Rec.hasKey: is a readonly field of a class that is not a data class: make it a method',
   ]);
   r = lint(
-    project({ ...FILES, 'src/common/future.ts': FUTURE.replace('  isDone(): boolean { return false; }\n', '  get isDone(): boolean { return false; }\n') }),
+    project({
+      ...FILES,
+      'src/common/future.ts': FUTURE.replace('  isDone(): boolean { return false; }\n', '  get isDone(): boolean { return false; }\n'),
+    }),
     [RULE],
     withData(new Set()),
   );
   assert.deepEqual(findings(r), ['Future.isDone: is a get accessor: on a class that is not a data class, a Java getter is a method']);
 });
 
-test("a readonly field of a frozen object may translate a Java public final field, never a getter", () => {
+test('a readonly field of a frozen object may translate a Java public final field, never a getter', () => {
   const files = FILES;
   // Frozen: id (Java's public final field) passes.
   let r = lint(project({ ...files, 'src/producer/proto.ts': PROTO }), [RULE], withData(new Set()));
   assert.equal(r.status, 0, r.text);
   // name as a field: Java's name() is a method on a class that is not a data class.
-  const asField = PROTO.replace('  #name: string;\n', '  readonly name: string;\n').replace("this.#name = 'x';", "this.name = 'x';").replace('  name(): string { return this.#name; }\n', '');
+  const asField = PROTO.replace('  #name: string;\n', '  readonly name: string;\n')
+    .replace("this.#name = 'x';", "this.name = 'x';")
+    .replace('  name(): string { return this.#name; }\n', '');
   r = lint(project({ ...files, 'src/producer/proto.ts': asField }), [RULE], withData(new Set()));
   assert.deepEqual(findings(r), ['Proto.name: is a readonly field of a class that is not a data class: make it a method']);
   // Not frozen, or a freeze that may not run or runs on another `this`: id fails too.
@@ -143,7 +166,11 @@ test("a readonly field of a frozen object may translate a Java public final fiel
     '    if (this.id < 0) Object.freeze(this);\n',
     '    const lock = function (this: object): void { Object.freeze(this); };\n    void lock;\n',
   ]) {
-    r = lint(project({ ...files, 'src/producer/proto.ts': PROTO.replace('    Object.freeze(this);\n', freeze) }), [RULE], withData(new Set()));
+    r = lint(
+      project({ ...files, 'src/producer/proto.ts': PROTO.replace('    Object.freeze(this);\n', freeze) }),
+      [RULE],
+      withData(new Set()),
+    );
     assert.deepEqual(findings(r), ['Proto.id: is a readonly field of a class that is not a data class: make it a method']);
   }
   // A class with no Java class: no Java field to translate.
@@ -183,13 +210,14 @@ test('each other finding kind, with its exact text', () => {
 
 test('an error class keeps its fields, and no code or retriable flag', () => {
   const classes = [...CLASSES, javaClass('common.errors.BarException', { fields: [field('x')], overloads: [method('m')] })];
-  const run = (body) =>
+  const run = (/** @type {string} */ body) =>
     lint(
       project({
         'tsconfig.json': TSCONFIG,
         'java-index.json': javaIndex(classes),
         'src/common/errors/foo_error.ts': `export class FooError extends Error {\n${body}}\n`,
-        'src/internal/error_registry.ts': "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
+        'src/internal/error_registry.ts':
+          "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
       }),
       [RULE],
       withData(new Set()),

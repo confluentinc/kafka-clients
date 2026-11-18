@@ -16,7 +16,6 @@
 
 // check-commonjs-pin (scripts/lint/rules/commonjs_pin.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { project, lint, findings } = require('./_project');
@@ -24,6 +23,10 @@ const { project, lint, findings } = require('./_project');
 const RULE = 'check-commonjs-pin';
 
 const TSCONFIG = '// A comment, as the real one has.\n{ "compilerOptions": { "module": "nodenext", "moduleResolution": "NodeNext" } }\n';
+/**
+ * @param {Record<string, unknown>} [extra]
+ * @param {Record<string, unknown>} [exports]
+ */
 const PACKAGE = (extra = {}, exports = { '.': { types: './dist/index.d.ts', default: './dist/index.js' } }) =>
   JSON.stringify({ name: 'p', ...extra, exports }, null, 2);
 
@@ -38,11 +41,14 @@ test('a "type", another module setting and other export conditions are findings'
   const r = lint(
     project({
       'tsconfig.json': '{ "compilerOptions": { "module": "node16" } }\n',
-      'package.json': PACKAGE({ type: 'module' }, {
-        '.': { default: './dist/index.js', types: './dist/index.d.ts' },
-        './producer': { types: './dist/producer/index.d.ts', import: './x.mjs', default: './dist/producer/index.js' },
-        './common': './dist/common/index.js',
-      }),
+      'package.json': PACKAGE(
+        { type: 'module' },
+        {
+          '.': { default: './dist/index.js', types: './dist/index.d.ts' },
+          './producer': { types: './dist/producer/index.d.ts', import: './x.mjs', default: './dist/producer/index.js' },
+          './common': './dist/common/index.js',
+        },
+      ),
     }),
     [RULE],
   );

@@ -20,7 +20,6 @@
 // copy, makes exactly that rule fail. It catches a rule whose path through
 // the real sources is broken, which a fixture of the rule alone would miss.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -44,7 +43,17 @@ const LICENSE_END = 'limitations under the License.\n';
  */
 function realCopy() {
   const root = project({});
-  for (const rel of ['src', 'native', 'tsconfig.json', 'package.json', 'CLAUDE.md', 'lint-baseline.txt', 'eslint-baseline.txt', 'lint-mapping.json']) copy(ROOT, root, rel);
+  for (const rel of [
+    'src',
+    'native',
+    'tsconfig.json',
+    'package.json',
+    'CLAUDE.md',
+    'lint-baseline.txt',
+    'eslint-baseline.txt',
+    'lint-mapping.json',
+  ])
+    copy(ROOT, root, rel);
   // The test that calls the test-only registration probe (check-native-registry).
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
@@ -55,7 +64,14 @@ function realCopy() {
   return root;
 }
 
-/** Replaces `from` (which must occur) by `to` in root-relative file `rel`. */
+/**
+ * Replaces `from` (which must occur) by `to` in root-relative file `rel`.
+ *
+ * @param {string} root
+ * @param {string} rel
+ * @param {string} from
+ * @param {string} to
+ */
 function edit(root, rel, from, to) {
   const file = path.join(root, rel);
   const text = fs.readFileSync(file, 'utf8');
@@ -68,6 +84,11 @@ test('the unmutated copy passes every rule', () => {
   assert.equal(r.status, 0, r.text);
 });
 
+/**
+ * A mutation of the copy, and the rule (`rule`) or rules (`rules`) that must catch it.
+ *
+ * @type {{ rule?: string, rules?: string[], what: string, apply: (root: string) => void }[]}
+ */
 const MUTATIONS = [
   {
     rule: 'check-no-todo',
@@ -92,12 +113,14 @@ const MUTATIONS = [
   {
     rule: 'check-internal-members',
     what: 'a library-only member reached with bracket access',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'record.internalToNative()', "record['internalToNative']()"),
+    apply: (root) =>
+      edit(root, 'src/producer/kafka_producer.ts', 'record.internalToNative(key, value)', "record['internalToNative'](key, value)"),
   },
   {
     rule: 'check-internal-members',
     what: 'an `@internal` member made private',
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  abstract internalComplete(value: T', '  protected abstract internalComplete(value: T'),
+    apply: (root) =>
+      edit(root, 'src/common/kafka_future.ts', '  abstract internalComplete(value: T', '  protected abstract internalComplete(value: T'),
   },
   {
     rule: 'check-java-line',
@@ -107,7 +130,13 @@ const MUTATIONS = [
   },
 ];
 
-/** Appends `text` as a new public module `rel` of the copy. */
+/**
+ * Appends `text` as a new public module `rel` of the copy.
+ *
+ * @param {string} root
+ * @param {string} rel
+ * @param {string} text
+ */
 function add(root, rel, text) {
   fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
   fs.writeFileSync(path.join(root, rel), text);
@@ -132,7 +161,10 @@ MUTATIONS.push(
     apply: (root) => {
       const file = path.join(root, 'src/common/config/ssl_client_auth.ts');
       const text = fs.readFileSync(file, 'utf8');
-      const method = /  \/\*\*\n   \* The constant named exactly `name`, Java's `valueOf\(String\)`[^]*?\n  static valueOf\(options: unknown\): SslClientAuth \{\n[^]*?\n  \}\n/.exec(text);
+      const method =
+        /  \/\*\*\n   \* The constant named exactly `name`, Java's `valueOf\(String\)`[^]*?\n  static valueOf\(options: unknown\): SslClientAuth \{\n[^]*?\n  \}\n/.exec(
+          text,
+        );
       assert.ok(method, 'ssl_client_auth.ts has no valueOf()');
       fs.writeFileSync(file, text.replace(method[0], ''));
     },
@@ -152,7 +184,13 @@ MUTATIONS.push(
     // Its entry on the list of invented names then matches nothing.
     rules: ['check-java-completeness', 'check-invented-names'],
     what: 'SecurityProtocol.toJSON removed',
-    apply: (root) => edit(root, 'src/common/security/auth/security_protocol.ts', '  toJSON(key?: string): string {\n    void key;\n    return this.#name;\n  }\n', ''),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/security/auth/security_protocol.ts',
+        '  toJSON(key?: string): string {\n    void key;\n    return this.#name;\n  }\n',
+        '',
+      ),
   },
   {
     rule: 'check-data-objects',
@@ -183,7 +221,12 @@ MUTATIONS.push(
       const text = fs.readFileSync(file, 'utf8');
       const method = /  \/\*\*\n   \* The name of this constant[^]*?\n  name\(\): string \{\n[^]*?\n  \}\n/.exec(text);
       assert.ok(method, 'security_protocol.ts has no name()');
-      fs.writeFileSync(file, text.replace(method[0], '').replace('  #name: string;\n', "  /** Name of the security protocol. */\n  readonly name: string = '';\n  #name: string;\n"));
+      fs.writeFileSync(
+        file,
+        text
+          .replace(method[0], '')
+          .replace('  #name: string;\n', "  /** Name of the security protocol. */\n  readonly name: string = '';\n  #name: string;\n"),
+      );
     },
   },
   {
@@ -229,23 +272,30 @@ MUTATIONS.push(
     rules: ['check-java-members', 'check-java-completeness', 'check-data-objects'],
     what: 'an isX method turned into a property without its is',
     apply: (root) => {
-      edit(
-        root,
-        'src/common/kafka_future.ts',
-        '  abstract isDone(): boolean;\n',
-        '  abstract get done(): boolean;\n',
-      );
+      edit(root, 'src/common/kafka_future.ts', '  abstract isDone(): boolean;\n', '  abstract get done(): boolean;\n');
     },
   },
   {
     rule: 'check-waiting-call-promise',
     what: 'flush returning void',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', '  flush(): Promise<void>;\n  flush(options?: unknown): Promise<void> {', '  flush(): void;\n  flush(options?: unknown): void {'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/kafka_producer.ts',
+        '  flush(): Promise<void>;\n  flush(options?: unknown): Promise<void> {',
+        '  flush(): void;\n  flush(options?: unknown): void {',
+      ),
   },
   {
     rule: 'check-overload-shape',
     what: "a key renamed in one ProducerRecord constructor's signature",
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', '    key: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key', '    recordKey: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/producer_record.ts',
+        '    key: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key',
+        '    recordKey: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;\n  });\n  /**\n   * Create a record with no key',
+      ),
   },
   {
     rule: 'check-overload-shape',
@@ -254,7 +304,7 @@ MUTATIONS.push(
   },
   {
     rule: 'check-overload-shape',
-    what: 'close({timeoutMs}) instead of Java\'s timeout',
+    what: "close({timeoutMs}) instead of Java's timeout",
     apply: (root) => edit(root, 'src/producer/kafka_producer.ts', '  timeout: Duration;\n};', '  timeoutMs: Duration;\n};'),
   },
   {
@@ -266,8 +316,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;\n  });',
-        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n  });',
+        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;\n  });',
+        '    key?: never;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n  });',
       ),
   },
   {
@@ -278,15 +328,20 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        '    partition: number | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;',
-        '    partition: string | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: Data | null;\n    /** The record contents, or null (a tombstone). */\n    value: Data | null;\n    headers?: never;',
+        '    partition: number | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;',
+        '    partition: string | null;\n    timestamp?: never;\n    /** The key that will be included in the record, or null. */\n    key: K | null;\n    /** The record contents, or null (a tombstone). */\n    value: V | null;\n    headers?: never;',
       ),
   },
   {
     rule: 'check-type-mapping',
     what: "a wrong option type in forId's options signature",
     apply: (root) =>
-      edit(root, 'src/common/security/auth/security_protocol.ts', "    /** The protocol's id. */\n    id: number;", "    /** The protocol's id. */\n    id: string;"),
+      edit(
+        root,
+        'src/common/security/auth/security_protocol.ts',
+        "    /** The protocol's id. */\n    id: number;",
+        "    /** The protocol's id. */\n    id: string;",
+      ),
   },
   {
     // get() and get(long, TimeUnit), the TimeUnit merged into one Duration,
@@ -295,8 +350,18 @@ MUTATIONS.push(
     rules: ['check-overload-shape', 'check-type-mapping'],
     what: 'KafkaFuture.get taking a positional timeout',
     apply: (root) => {
-      edit(root, 'src/common/kafka_future.ts', '   * @param options - the timeout\n   * @returns resolving to the result value', '   * @param timeoutMs - the timeout\n   * @returns resolving to the result value');
-      edit(root, 'src/common/kafka_future.ts', '  abstract get(options: {\n    /**', '  abstract get(timeoutMs: number): Promise<T>;\n  abstract get(unused: {\n    /**');
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        '   * @param options - the timeout\n   * @returns resolving to the result value',
+        '   * @param timeoutMs - the timeout\n   * @returns resolving to the result value',
+      );
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        '  abstract get(options: {\n    /**',
+        '  abstract get(timeoutMs: number): Promise<T>;\n  abstract get(unused: {\n    /**',
+      );
     },
   },
   {
@@ -311,18 +376,28 @@ MUTATIONS.push(
     rule: 'check-native-registry',
     what: 'a second import of the loader',
     apply: (root) =>
-      edit(root, 'src/producer/kafka_producer.ts', "import native = require('../internal/native');", "import native = require('../internal/native');\nimport { ADDON_FILE } from '../internal/native_loader';\nvoid ADDON_FILE;"),
+      edit(
+        root,
+        'src/producer/kafka_producer.ts',
+        "import native = require('../internal/native');",
+        "import native = require('../internal/native');\nimport { ADDON_FILE } from '../internal/native_loader';\nvoid ADDON_FILE;",
+      ),
   },
   {
     rule: 'check-type-mapping',
-    what: 'a field of another type than Java\'s',
+    what: "a field of another type than Java's",
     apply: (root) => edit(root, 'src/producer/record_metadata.ts', 'readonly offset: bigint;', 'readonly offset: number;'),
   },
   {
     rule: 'check-waiting-call-promise',
     what: 'flush returning void, its native call in a module helper',
     apply: (root) => {
-      edit(root, 'src/producer/kafka_producer.ts', '  flush(): Promise<void>;\n  flush(options?: unknown): Promise<void> {', '  flush(): void {\n    flushVia(this.#handle);\n  }\n\n  private oldFlush(options?: unknown): Promise<void> {');
+      edit(
+        root,
+        'src/producer/kafka_producer.ts',
+        '  flush(): Promise<void>;\n  flush(options?: unknown): Promise<void> {',
+        '  flush(): void {\n    flushVia(this.#handle);\n  }\n\n  private oldFlush(options?: unknown): Promise<void> {',
+      );
       fs.appendFileSync(
         path.join(root, 'src/producer/kafka_producer.ts'),
         '\nfunction flushVia(handle: ProducerHandle): void {\n  native.producerFlush(handle, () => undefined);\n}\n',
@@ -359,7 +434,7 @@ MUTATIONS.push(
     // check: one named `check` of another type is an extra positional
     // parameter, which no Java form has.
     rule: 'check-overload-shape',
-    what: "get(timeout) with an extra rest parameter named check",
+    what: 'get(timeout) with an extra rest parameter named check',
     apply: (root) =>
       edit(
         root,
@@ -372,66 +447,122 @@ MUTATIONS.push(
     // A narrowing of a Java type variable is a mismatch, at the bare parameter too.
     rule: 'check-type-mapping',
     what: "completedFuture's bare value narrowed to U & string",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'static completedFuture<U>(value: U, ...check: BareCheck<U>): KafkaFuture<U>;', 'static completedFuture<U>(value: U & string, ...check: BareCheck<U>): KafkaFuture<U>;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'static completedFuture<U>(value: U, ...check: BareCheck<U>): KafkaFuture<U>;',
+        'static completedFuture<U>(value: U & string, ...check: BareCheck<U>): KafkaFuture<U>;',
+      ),
   },
   {
     // getNow's bare Bare<T | null> is read as Java's T, and only that.
     rule: 'check-type-mapping',
     what: "getNow's bare value typed for another value",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'getNow(valueIfAbsent: Bare<T | null>): T | null;', 'getNow(valueIfAbsent: Bare<string | null>): T | null;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'getNow(valueIfAbsent: Bare<T | null>): T | null;',
+        'getNow(valueIfAbsent: Bare<string | null>): T | null;',
+      ),
   },
   {
     // Bare<T> is read as T only at a bare parameter: elsewhere a narrowing of T is a mismatch.
     rule: 'check-type-mapping',
     what: "thenApply's function narrowed: BaseFunction<T & string, R>",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;', 'thenApply<R>(fn: KafkaFuture.BaseFunction<T & string, R>): KafkaFuture<R>;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<T & string, R>): KafkaFuture<R>;',
+      ),
   },
   {
     // An Extract of T is no T either.
     rule: 'check-type-mapping',
     what: "thenApply's function narrowed: BaseFunction<Extract<T, string>, R>",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;', 'thenApply<R>(fn: KafkaFuture.BaseFunction<Extract<T, string>, R>): KafkaFuture<R>;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<Extract<T, string>, R>): KafkaFuture<R>;',
+      ),
   },
   {
     // A return narrowed.
     rule: 'check-type-mapping',
     what: "thenApply's return narrowed: KafkaFuture<R & string>",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;', 'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R & string>;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R & string>;',
+      ),
   },
   {
     // A type argument narrowed.
     rule: 'check-type-mapping',
     what: "whenComplete's value narrowed: (T & number) | null",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;', 'whenComplete(action: KafkaFuture.BiConsumer<(T & number) | null, unknown>): KafkaFuture<T>;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'whenComplete(action: KafkaFuture.BiConsumer<T | null, unknown>): KafkaFuture<T>;',
+        'whenComplete(action: KafkaFuture.BiConsumer<(T & number) | null, unknown>): KafkaFuture<T>;',
+      ),
   },
   {
     // An option narrowed.
     rule: 'check-type-mapping',
     what: "getNow's option narrowed: (T & string) | null",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '    valueIfAbsent: T | null;\n  }): T | null;', '    valueIfAbsent: (T & string) | null;\n  }): T | null;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        '    valueIfAbsent: T | null;\n  }): T | null;',
+        '    valueIfAbsent: (T & string) | null;\n  }): T | null;',
+      ),
   },
   {
     // A return narrowed.
     rule: 'check-type-mapping',
     what: "getNow's return narrowed: (T & string) | null",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '    valueIfAbsent: T | null;\n  }): T | null;', '    valueIfAbsent: T | null;\n  }): (T & string) | null;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        '    valueIfAbsent: T | null;\n  }): T | null;',
+        '    valueIfAbsent: T | null;\n  }): (T & string) | null;',
+      ),
   },
   {
     // An option of a static member narrowed.
     rule: 'check-type-mapping',
     what: "completedFuture's option narrowed: U & string",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '    /** The value. */\n    value: U;', '    /** The value. */\n    value: U & string;'),
+    apply: (root) =>
+      edit(root, 'src/common/kafka_future.ts', '    /** The value. */\n    value: U;', '    /** The value. */\n    value: U & string;'),
   },
   {
     // And thenApply's function, BaseFunction<T, R>, takes the future's T.
     rule: 'check-type-mapping',
     what: "thenApply's function typed for another value",
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', 'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;', 'thenApply<R>(fn: KafkaFuture.BaseFunction<number, R>): KafkaFuture<R>;'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<T, R>): KafkaFuture<R>;',
+        'thenApply<R>(fn: KafkaFuture.BaseFunction<number, R>): KafkaFuture<R>;',
+      ),
   },
   {
     rule: 'check-type-mapping',
     what: 'a non-blocking method returning a Promise',
-    apply: (root) => edit(root, 'src/common/kafka_future.ts', '  abstract isCancelled(): boolean;\n', '  abstract isCancelled(): Promise<boolean>;\n'),
+    apply: (root) =>
+      edit(root, 'src/common/kafka_future.ts', '  abstract isCancelled(): boolean;\n', '  abstract isCancelled(): Promise<boolean>;\n'),
   },
   {
     rule: 'check-cb-twin-only',
@@ -461,7 +592,12 @@ MUTATIONS.push(
     rule: 'check-cb-twin-only',
     what: 'a blocking flush in a macro of util.h',
     apply: (root) => {
-      edit(root, 'native/util.h', '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n', '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n#define FLUSH_VIEW(view) FFI_DISCARD(kafka_producer_Producer_flush((view), &ffi_err))\n');
+      edit(
+        root,
+        'native/util.h',
+        '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n',
+        '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n#define FLUSH_VIEW(view) FFI_DISCARD(kafka_producer_Producer_flush((view), &ffi_err))\n',
+      );
       edit(
         root,
         'native/producer.c',
@@ -519,7 +655,12 @@ MUTATIONS.push(
     rule: 'check-notify-hook',
     what: 'a return between the lock and the unlock of cbq_notify',
     apply: (root) =>
-      edit(root, 'native/callback_queue.c', '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->notify_open)', '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->stopped) return;\n    if (q->notify_open)'),
+      edit(
+        root,
+        'native/callback_queue.c',
+        '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->notify_open)',
+        '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->stopped) return;\n    if (q->notify_open)',
+      ),
   },
   {
     rule: 'check-single-drainer',
@@ -528,15 +669,20 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    if (p->kp != NULL) cbq_drain(env, &p->queue);',
-        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err));',
+        '    if (producer_alive(p)) cbq_drain(env, &p->queue);',
+        '    if (producer_alive(p)) cbq_drain(env, &p->queue);\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err));',
       ),
   },
   {
     rule: 'check-completion-order',
     what: 'the delivery recorded before the user callback',
     apply: (root) => {
-      edit(root, 'src/producer/kafka_producer.ts', '      let failure: string | undefined;\n', '      let failure: string | undefined;\n      future.internalSetDelivery(metadata, error);\n');
+      edit(
+        root,
+        'src/producer/kafka_producer.ts',
+        '      let failure: string | undefined;\n',
+        '      let failure: string | undefined;\n      future.internalSetDelivery(metadata, error);\n',
+      );
     },
   },
   {
@@ -545,11 +691,17 @@ MUTATIONS.push(
     apply: (root) => {
       const file = path.join(root, 'src/producer/kafka_producer.ts');
       const text = fs.readFileSync(file, 'utf8');
-      const body = /    const onComplete = \(metadata: RecordMetadata, error: Error \| null\): string \| undefined \| Promise<string \| undefined> => \{\n[^]*?\n    \};\n/.exec(text);
+      const body =
+        /    const onComplete = \(metadata: RecordMetadata, error: Error \| null\): string \| undefined \| Promise<string \| undefined> => \{\n[^]*?\n    \};\n/.exec(
+          text,
+        );
       assert.ok(body, 'kafka_producer.ts has no onComplete');
       fs.writeFileSync(
         file,
-        text.replace(body[0], '    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined =>\n      deliver(future, userCallback, metadata, error);\n') +
+        text.replace(
+          body[0],
+          '    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined =>\n      deliver(future, userCallback, metadata, error);\n',
+        ) +
           '\nfunction deliver(future: KafkaFuture<RecordMetadata>, userCallback: Callback | null, metadata: RecordMetadata, error: Error | null): string | undefined {\n' +
           '  future.internalSetDelivery(metadata, error);\n  if (userCallback !== null) userCallback({ metadata, exception: error });\n  return undefined;\n}\n',
       );
@@ -570,7 +722,12 @@ MUTATIONS.push(
     rule: 'check-ownership',
     what: 'a configuration never destroyed',
     apply: (root) =>
-      edit(root, 'native/producer.c', '    if (config != NULL) error_warn(env, 1, FFI_ERR(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err)));\n', ''),
+      edit(
+        root,
+        'native/producer.c',
+        '    if (config != NULL) error_warn(env, 1, FFI_ERR(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err)));\n',
+        '',
+      ),
   },
   {
     rule: 'check-ownership',
@@ -587,18 +744,34 @@ MUTATIONS.push(
     rule: 'check-zero-copy',
     what: 'a memcpy of the key',
     apply: (root) =>
-      edit(root, 'native/record.c', '    out->bytes.len = (int32_t)length;', '    out->bytes.len = (int32_t)length;\n    memcpy((void*)out->bytes.data, data, length);'),
+      edit(
+        root,
+        'native/record.c',
+        '    out->bytes.len = (int32_t)length;',
+        '    out->bytes.len = (int32_t)length;\n    memcpy((void*)out->bytes.data, data, length);',
+      ),
   },
   {
     rule: 'check-zero-copy',
     what: 'a Uint8Array key copied by Buffer.from in src/',
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.from(value);'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/producer_record.ts',
+        '  if (isBytes(value)) return value;',
+        '  if (isBytes(value)) return Buffer.from(value);',
+      ),
   },
   {
     rule: 'check-zero-copy',
     what: "the key's Buffer released at delivery, not at the hand-over",
     apply: (root) =>
-      edit(root, 'native/producer.c', '    send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {', '    if (!p->queue.finalizing && ctx->on_handover != NULL) {'),
+      edit(
+        root,
+        'native/producer.c',
+        '    send_ctx_release_buffers(env, ctx);\n    if (!p->queue.finalizing && ctx->on_handover != NULL) {',
+        '    if (!p->queue.finalizing && ctx->on_handover != NULL) {',
+      ),
   },
   {
     rule: 'check-zero-copy',
@@ -627,12 +800,19 @@ MUTATIONS.push(
   {
     rule: 'check-zero-copy',
     what: "an accepted record's Buffers released by its delivery callback too",
-    apply: (root) => edit(root, 'native/producer.c', '    int deferred = 0;\n', '    int deferred = 0;\n    send_ctx_release_buffers(env, ctx);\n'),
+    apply: (root) =>
+      edit(root, 'native/producer.c', '    int deferred = 0;\n', '    int deferred = 0;\n    send_ctx_release_buffers(env, ctx);\n'),
   },
   {
     rule: 'check-zero-copy',
     what: 'a key copied with Buffer.concat in src/',
-    apply: (root) => edit(root, 'src/producer/producer_record.ts', 'encodeLikeJava(value) : value;', 'encodeLikeJava(value) : Buffer.concat([value]);'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/producer_record.ts',
+        'if (isBytes(value)) return value;',
+        'if (isBytes(value)) return Buffer.concat([value]);',
+      ),
   },
   {
     rule: 'check-zero-copy',
@@ -641,20 +821,31 @@ MUTATIONS.push(
       edit(
         root,
         'src/producer/producer_record.ts',
-        'encodeLikeJava(value) : value;',
-        'encodeLikeJava(value) : copyOf(value);\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
+        'if (isBytes(value)) return value;',
+        'if (isBytes(value)) return copyOf(value);\n  return null;\n}\n\nfunction copyOf(value: Uint8Array): Uint8Array {\n  const out = Buffer.alloc(value.length);\n  out.set(value);\n  return out;',
       ),
   },
   {
     rule: 'check-zero-copy',
     what: "the send's reference on the value's Buffer gone",
     apply: (root) =>
-      edit(root, 'native/producer.c', '        || (!ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)\n', ''),
+      edit(
+        root,
+        'native/producer.c',
+        '        || (!ctx->value.is_null && napi_create_reference(env, value, 1, &ctx->value_ref) != napi_ok)\n',
+        '',
+      ),
   },
   {
     rule: 'check-string-encoding',
     what: 'a config value encoded by Buffer.from outside encode.ts',
-    apply: (root) => edit(root, 'src/internal/config.ts', "    case 'string':\n      return value;", "    case 'string':\n      return Buffer.from(value, 'utf8').toString();"),
+    apply: (root) =>
+      edit(
+        root,
+        'src/internal/config.ts',
+        "    case 'string':\n      return value;",
+        "    case 'string':\n      return Buffer.from(value, 'utf8').toString();",
+      ),
   },
   {
     rule: 'check-string-encoding',
@@ -663,14 +854,20 @@ MUTATIONS.push(
       edit(
         root,
         'src/common/header/headers.ts',
-        'out[i] = [encodeLikeJava(Header.internalKeyOf(header)), Header.internalValueOf(header)];',
-        'out[i] = [new TextEncoder().encode(Header.internalKeyOf(header)), Header.internalValueOf(header)];',
+        "  if (typeof key !== 'string') throw new TypeError('key must be a string');\n  return encodeLikeJava(key);",
+        "  if (typeof key !== 'string') throw new TypeError('key must be a string');\n  return new TextEncoder().encode(key);",
       ),
   },
   {
     rule: 'check-no-binding-queue',
     what: 'a mutex in producer.c',
-    apply: (root) => edit(root, 'native/producer.c', 'typedef struct SendCtx SendCtx;', 'static pthread_mutex_t producer_lock = PTHREAD_MUTEX_INITIALIZER;\n\ntypedef struct SendCtx SendCtx;'),
+    apply: (root) =>
+      edit(
+        root,
+        'native/producer.c',
+        'typedef struct SendCtx SendCtx;',
+        'static pthread_mutex_t producer_lock = PTHREAD_MUTEX_INITIALIZER;\n\ntypedef struct SendCtx SendCtx;',
+      ),
   },
   {
     rule: 'check-no-binding-queue',
@@ -713,7 +910,7 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    int open = p->kp != NULL && !cbq_is_closed(&p->queue);\n    if (p->kp != NULL && cbq_is_closed(&p->queue)) producer_destroy(env, p);\n',
+        '    int open = producer_alive(p) && !cbq_is_closed(&p->queue);\n    if (producer_alive(p) && cbq_is_closed(&p->queue)) producer_destroy(env, p);\n',
         '    int open = 0;\n    if (p->kp != NULL) producer_destroy(env, p);\n',
       ),
   },
@@ -748,12 +945,24 @@ MUTATIONS.push(
   {
     rule: 'check-module-exports',
     what: "an index re-exporting another package's module",
-    apply: (root) => edit(root, 'src/producer/index.ts', "export { KafkaProducer } from './kafka_producer';\n", "export { KafkaProducer } from './kafka_producer';\nexport { KafkaFuture } from '../common/kafka_future';\n"),
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/index.ts',
+        "export { KafkaProducer } from './kafka_producer';\n",
+        "export { KafkaProducer } from './kafka_producer';\nexport { KafkaFuture } from '../common/kafka_future';\n",
+      ),
   },
   {
     rule: 'check-internal-members',
     what: 'an FFI id on a class that is no error',
-    apply: (root) => edit(root, 'src/common/header/headers.ts', 'export class Headers implements Iterable<Header> {\n', 'export class Headers implements Iterable<Header> {\n  private readonly _ffiId = 0;\n'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/header/headers.ts',
+        'export class Headers implements Iterable<Header> {\n',
+        'export class Headers implements Iterable<Header> {\n  private readonly _ffiId = 0;\n',
+      ),
   },
   {
     rule: 'check-string-encoding',
@@ -772,18 +981,30 @@ MUTATIONS.push(
   {
     rule: 'check-no-closed-flag',
     what: 'a closed flag on the producer',
-    apply: (root) => edit(root, 'src/producer/kafka_producer.ts', 'export class KafkaProducer implements Producer {\n', 'export class KafkaProducer implements Producer {\n  #closed = false;\n'),
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/kafka_producer.ts',
+        'export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {\n',
+        'export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {\n  #closed = false;\n',
+      ),
   },
   {
     rule: 'check-no-repeated-precondition',
     what: "Java's negative-timeout message in the duration helper",
-    apply: (root) => edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}export const NEGATIVE = 'The timeout cannot be negative.';\n`),
+    apply: (root) =>
+      edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}export const NEGATIVE = 'The timeout cannot be negative.';\n`),
   },
   {
     rule: 'check-tsfn-lifetime',
     what: 'the thread-safe function referenced outside the hold update, when the drain starts',
     apply: (root) =>
-      edit(root, 'native/callback_queue.c', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n', 'void cbq_drain(napi_env env, CallbackQueue* q) {\n    napi_ref_threadsafe_function(env, q->tsfn);\n'),
+      edit(
+        root,
+        'native/callback_queue.c',
+        'void cbq_drain(napi_env env, CallbackQueue* q) {\n',
+        'void cbq_drain(napi_env env, CallbackQueue* q) {\n    napi_ref_threadsafe_function(env, q->tsfn);\n',
+      ),
   },
   {
     rule: 'check-tsfn-lifetime',
@@ -811,7 +1032,12 @@ MUTATIONS.push(
     rule: 'check-tsfn-lifetime',
     what: 'the close completion ending its count before its JS callback ran',
     apply: (root) => {
-      edit(root, 'native/producer.c', '    delete_ref(env, &ctx->done);\n    free(ctx);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerClose', '    delete_ref(env, &ctx->done);\n    free(ctx);\n}\n\n// producerClose');
+      edit(
+        root,
+        'native/producer.c',
+        '    delete_ref(env, &ctx->done);\n    free(ctx);\n    cbq_call_end(env, &p->queue);\n}\n\n// producerClose',
+        '    delete_ref(env, &ctx->done);\n    free(ctx);\n}\n\n// producerClose',
+      );
       edit(
         root,
         'native/producer.c',
@@ -849,8 +1075,8 @@ MUTATIONS.push(
       edit(
         root,
         'native/producer.c',
-        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n',
-        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n    cbq_call_begin(env, &p->queue);\n',
+        '    if (producer_alive(p)) cbq_drain(env, &p->queue);\n',
+        '    if (producer_alive(p)) cbq_drain(env, &p->queue);\n    cbq_call_begin(env, &p->queue);\n',
       ),
   },
   {
@@ -902,30 +1128,51 @@ MUTATIONS.push(
     },
   },
   {
-    // An empty mock translates none of Java's members either.
-    rules: ['check-java-completeness', 'check-mock-native'],
-    what: 'a MockProducer translated in TypeScript, holding no native handle',
+    rule: 'check-mock-native',
+    what: 'a MockProducer whose constructor builds no FFI mock, holding no native handle',
     apply: (root) => {
-      const header = fs.readFileSync(path.join(root, 'src/producer/index.ts'), 'utf8').split(LICENSE_END)[0] + LICENSE_END;
-      add(root, 'src/producer/mock_producer.ts', `${header}\nexport class MockProducer {}\n`);
-      edit(root, 'src/producer/index.ts', "export { KafkaProducer } from './kafka_producer';\n", "export { KafkaProducer } from './kafka_producer';\nexport { MockProducer } from './mock_producer';\n");
+      edit(
+        root,
+        'src/producer/mock_producer.ts',
+        '    this.#handle = native.mockProducerCreate(autoComplete);\n',
+        '    void autoComplete;\n    this.#handle = {};\n',
+      );
+      // The addon's function is still used, outside the class.
+      edit(
+        root,
+        'src/producer/mock_producer.ts',
+        '/** The native producer handle',
+        'function nativeMock(): object {\n  return native.mockProducerCreate(false);\n}\nvoid nativeMock;\n\n/** The native producer handle',
+      );
     },
   },
   {
     rule: 'check-encode-callers',
     what: 'the duration helper turning a string into bytes through encodeLikeJava',
-    apply: (root) => edit(root, 'src/internal/duration.ts', LICENSE_END, `${LICENSE_END}import { encodeLikeJava } from './encode';\nvoid encodeLikeJava('x');\n`),
+    apply: (root) =>
+      edit(
+        root,
+        'src/internal/duration.ts',
+        LICENSE_END,
+        `${LICENSE_END}import { encodeLikeJava } from './encode';\nvoid encodeLikeJava('x');\n`,
+      ),
   },
   {
     rule: 'check-commonjs-pin',
     what: 'an exports entry with an import condition beside types and default',
     apply: (root) =>
-      edit(root, 'package.json', '"default": "./dist/producer/index.js"\n', '"default": "./dist/producer/index.js",\n      "import": "./dist/producer/index.mjs"\n'),
+      edit(
+        root,
+        'package.json',
+        '"default": "./dist/producer/index.js"\n',
+        '"default": "./dist/producer/index.js",\n      "import": "./dist/producer/index.mjs"\n',
+      ),
   },
 );
 
 for (const m of MUTATIONS) {
-  const rules = m.rules || [m.rule];
+  // Each mutation names its rule or its rules.
+  const rules = /** @type {string[]} */ (m.rules || [m.rule]);
   test(`${m.what} fails exactly ${rules.join(' and ')}`, () => {
     const root = realCopy();
     m.apply(root);

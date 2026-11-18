@@ -25,20 +25,35 @@
 // has `Object`'s identity equality, as a Java array does, and a hash code
 // that stays the same whatever is done to the object (`identityHashCode`).
 
-/** Java's `String.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the UTF-16 code units. */
+/**
+ * Java's `String.hashCode()`: `s[0]*31^(n-1) + ... + s[n-1]` over the UTF-16 code units.
+ *
+ * @param s - the string
+ * @returns its hash code
+ */
 export function stringHashCode(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   return h;
 }
 
-/** Java's `Long.hashCode(long)`: `(int) (value ^ (value >>> 32))`. */
+/**
+ * Java's `Long.hashCode(long)`: `(int) (value ^ (value >>> 32))`.
+ *
+ * @param value - the long
+ * @returns its hash code
+ */
 export function longHashCode(value: bigint): number {
   const v = BigInt.asUintN(64, value);
   return Number(BigInt.asIntN(32, v ^ (v >> 32n)));
 }
 
-/** Java's `Arrays.hashCode(byte[])`: 0 for null, else `31 * h + b` over the signed bytes, from 1. */
+/**
+ * Java's `Arrays.hashCode(byte[])`: 0 for null, else `31 * h + b` over the signed bytes, from 1.
+ *
+ * @param value - the bytes, or null
+ * @returns their hash code
+ */
 export function bytesHashCode(value: Uint8Array | null): number {
   if (value === null) return 0;
   let h = 1;
@@ -46,7 +61,13 @@ export function bytesHashCode(value: Uint8Array | null): number {
   return h;
 }
 
-/** Java's `Arrays.equals(byte[], byte[])`: the same array, both null, or the same bytes. */
+/**
+ * Java's `Arrays.equals(byte[], byte[])`: the same array, both null, or the same bytes.
+ *
+ * @param a - the first bytes, or null
+ * @param b - the second bytes, or null
+ * @returns whether they are equal
+ */
 export function bytesEquals(a: Uint8Array | null, b: Uint8Array | null): boolean {
   if (a === b) return true;
   if (a === null || b === null || a.length !== b.length) return false;
@@ -83,14 +104,25 @@ function identityHashCode(value: object): number {
   return 0;
 }
 
-/** Java's `Objects.equals(a, b)`: `a == b`, or `a != null && a.equals(b)`. */
+/**
+ * Java's `Objects.equals(a, b)`: `a == b`, or `a != null && a.equals(b)`.
+ *
+ * @param a - the first value
+ * @param b - the second value
+ * @returns whether they are equal
+ */
 export function objectsEquals(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || a === undefined || typeof a !== 'object') return false;
   return isJavaValue(a) ? a.equals(b) : false;
 }
 
-/** Java's `o != null ? o.hashCode() : 0` for a value standing for a Java object. */
+/**
+ * Java's `o != null ? o.hashCode() : 0` for a value standing for a Java object.
+ *
+ * @param value - the value, or null
+ * @returns its hash code
+ */
 export function objectHashCode(value: unknown): number {
   if (value === null || value === undefined) return 0;
   switch (typeof value) {
@@ -112,7 +144,13 @@ export function objectHashCode(value: unknown): number {
   }
 }
 
-/** Java's `getClass() == o.getClass()`: `o` is an object of exactly `self`'s class. */
+/**
+ * Java's `getClass() == o.getClass()`: `o` is an object of exactly `self`'s class.
+ *
+ * @param self - the object whose class is compared
+ * @param o - the other value
+ * @returns whether `o` has exactly `self`'s class
+ */
 export function sameClass(self: object, o: unknown): boolean {
   return typeof o === 'object' && o !== null && Object.getPrototypeOf(o) === Object.getPrototypeOf(self);
 }

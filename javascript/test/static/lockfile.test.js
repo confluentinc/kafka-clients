@@ -19,7 +19,6 @@
 // mirror's URL, which outside users and CI cannot reach; npm maps the public
 // host to whatever registry is configured, so public URLs work everywhere.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

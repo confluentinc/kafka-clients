@@ -27,6 +27,20 @@
 # skip on this machine anyway, and skips them as optional dependencies. The installed tree is
 # then checked to hold exactly the two packages, from the tarballs, byte for byte.
 #
+# In the installed project it then runs, from javascript/tools/package-smoke:
+#   - package-smoke.js, the CommonJS smoke program, and package-smoke.mjs, its ES module half,
+#     copied into the project (an ES module resolves a bare specifier from where it lies);
+#   - missing-platform.js: with the platform package's folder moved aside, requiring the client
+#     fails with the error naming it, the usual causes and both remedies;
+#   - the addon's exports, read with nm (`nm -D --defined-only` on Linux, Xcode's `nm -gU` on macOS):
+#     only Node-API's two registration symbols, beside check-npm.py's own reading of them;
+#   - typescript-smoke.js: `tsc --strict`, with skipLibCheck off, over a small consumer under
+#     module nodenext (ESM and CommonJS) and commonjs (node10), with the repository's TypeScript;
+#   - installed-suites.js: the unit and typing tests, against the installed packages.
+# The last two need the devDependencies (`npm ci` in javascript/); with TEST_NPM_DEV_CHECKS=0
+# they, and the nm check, are left out (.semaphore/test-npm-node.sh, which runs the smoke
+# programs on other Node.js versions and in other distributions, sets it).
+#
 # Usage, from the repository root:
 #   .semaphore/test-npm.sh <tarball-dir> <platform> [<checksum-file>]
 #       Tests the tarballs in <tarball-dir>, which must hold the main package and the platform
@@ -142,7 +156,10 @@ project, tarballs, platform = sys.argv[1:]
 lock = json.load(open(os.path.join(project, "package-lock.json")))
 names = {"node_modules/@confluentinc/kafka-javascript": "confluentinc-kafka-javascript-",
          f"node_modules/@confluentinc/kafka-javascript-{platform}": f"confluentinc-kafka-javascript-{platform}-"}
-packages = {key: value for key, value in lock["packages"].items() if key}
+# npm 11 (Node.js 24's) also lists an optional dependency it could not fetch, the platform
+# package of another machine, as {"optional": true} with nothing installed; npm 10 leaves it out.
+packages = {key: value for key, value in lock["packages"].items()
+            if key and not (value.get("optional") and not os.path.exists(os.path.join(project, key)))}
 if set(packages) != set(names):
     sys.exit(f"the project installed {sorted(packages)}, not {sorted(names)}")
 for key, entry in packages.items():
@@ -164,8 +181,38 @@ if scoped != sorted(key.split("/")[-1] for key in names):
 print(f"installed {', '.join(sorted(names))} from {tarballs}")
 PYTHON
 
+smoke=javascript/tools/package-smoke
 echo "== smoke test, Node.js $(node --version), on this machine =="
-node javascript/tools/package-smoke/package-smoke.js --platform "$platform" --version "$version" --project "$work/project"
+node "$smoke/package-smoke.js" --platform "$platform" --version "$version" --project "$work/project"
+echo "== the smoke test as an ES module =="
+cp "$smoke/package-smoke.mjs" "$work/project/package-smoke.mjs"
+node "$work/project/package-smoke.mjs" --version "$version"
+echo "== without the platform package =="
+node "$smoke/missing-platform.js" --project "$work/project" --platform "$platform"
+
+if [ "${TEST_NPM_DEV_CHECKS:-1}" != 0 ]; then
+    echo "== the addon's exports, read with nm =="
+    addon="$work/project/node_modules/@confluentinc/kafka-javascript-$platform/confluent-kafka-javascript.node"
+    case "$platform" in
+        # Xcode's nm: a GNU nm earlier on PATH lists Mach-O private externs as exported.
+        darwin-*) exported=$(/usr/bin/nm -gU "$addon" | awk '{ print $NF }' | sed 's/^_//') ;;
+        *) exported=$(nm -D --defined-only "$addon" | awk '{ print $NF }') ;;
+    esac
+    exported=$(printf '%s\n' "$exported" | LC_ALL=C sort -u)
+    expected=$(printf '%s\n' napi_register_module_v1 node_api_module_get_api_version_v1)
+    [ "$exported" = "$expected" ] || die "the addon exports, by nm:
+$exported
+not only:
+$expected"
+    echo "the addon exports only $(printf '%s' "$exported" | tr '\n' ' ')"
+
+    tsc=javascript/node_modules/typescript/lib/tsc.js
+    [ -f "$tsc" ] || die "$tsc is missing: run \`npm ci\` in javascript/ first, or set TEST_NPM_DEV_CHECKS=0"
+    echo "== a TypeScript consumer of the installed packages =="
+    node "$smoke/typescript-smoke.js" --project "$work/project" --tsc "$tsc" --type-roots javascript/node_modules/@types
+    echo "== the unit and typing tests against the installed packages =="
+    node "$smoke/installed-suites.js" --project "$work/project"
+fi
 
 if [ -n "$CHECKSUM_FILE" ]; then
     printf '%s\n' "$checksums" > "$CHECKSUM_FILE"

@@ -114,7 +114,7 @@ module.exports = {
       const callee = resolve(c.name, c.file);
       return callee !== undefined && destroyers.has(`${bodyKey(callee)}#${k}`);
     };
-    for (let grew = true; grew; ) {
+    for (let grew = true; grew;) {
       grew = false;
       for (const [key0, fn] of bodies) {
         fn.params.forEach((p, i) => {

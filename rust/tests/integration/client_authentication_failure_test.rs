@@ -27,6 +27,14 @@
 //! Java runs them against an in-process `NioEchoServer` with a SASL/PLAIN
 //! server authenticator. This client has no server side, so they run against
 //! the harness broker's SASL_PLAINTEXT listener, with Java's wrong password.
+//!
+//! Under `multilanguage-tests` the producer test runs on every backend through
+//! [`multilanguage_test!`](crate::multilanguage_test), the producer under test
+//! coming from the backend's factory. A gRPC backend in a container reaches the
+//! broker only through its container listeners, which have no SASL_PLAINTEXT
+//! twin, so it uses the container SASL_SSL listener with the same wrong
+//! password; the broker rejects it the same way. Without the feature it runs on
+//! the native backend.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -34,6 +42,7 @@ use std::time::Instant;
 
 use confluent_kafka::admin::AdminClient;
 use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::common::serialization::StringSerializer;
@@ -45,6 +54,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::kafka_cluster::SASL_USERNAME;
 use crate::common::test_context::TestContext;
 
@@ -105,33 +115,80 @@ async fn test_consumer_with_invalid_credentials() {
     ctx.cleanup().await;
 }
 
+/// [`invalid_credentials_props`] on a listener `factory`'s backend can reach:
+/// the container SASL_SSL listener for a gRPC backend in a container (see the
+/// module docs), the host SASL_PLAINTEXT listener otherwise.
+fn invalid_credentials_props_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
+    let mut props = invalid_credentials_props(ctx);
+    if factory.needs_container_bootstrap() {
+        props.extend([
+            (
+                "bootstrap.servers".to_string(),
+                ctx.cluster().container_sasl_ssl_bootstrap_servers().to_string(),
+            ),
+            ("security.protocol".to_string(), "SASL_SSL".to_string()),
+            ("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string()),
+        ]);
+    }
+    props
+}
+
 /// Translated from `ClientAuthenticationFailureTest.testProducerWithInvalidCredentials`:
-/// the record's future fails.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_producer_with_invalid_credentials() {
-    let mut ctx = TestContext::new(base_consumer_test::cluster_config()).await;
+/// the record's future fails with `SaslAuthenticationException`, an
+/// `AuthenticationException`, carrying the broker's message (the
+/// `SaslAuthenticateResponse` error message that
+/// `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator`
+/// passes on, from `org.apache.kafka.common.security.plain.internals.PlainSaslServer#evaluateResponse`).
+async fn producer_with_invalid_credentials_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("test");
-    let props = invalid_credentials_props(&ctx);
-    let producer = KafkaProducer::<String, String>::new(
-        ProducerConfig::new(&props).expect("valid producer config"),
-        StringSerializer::new(),
-        StringSerializer::new(),
-    )
-    .expect("producer constructs");
+    let producer = factory
+        .create(invalid_credentials_props_for(factory, ctx))
+        .await
+        .expect("producer constructs");
 
     // Java's `send` returns a failed future when the metadata wait fails; this
     // `send` may also return the error itself. Either way it is the same class.
-    let err = match producer.send(ProducerRecord::new(topic, Some("message".to_string()))).await {
-        Err(e) => e,
-        Ok(future) => future
-            .get_with_timeout(MAX_WAIT)
-            .await
-            .expect_err("the record must fail the authentication"),
+    let send = async {
+        match producer.send(ProducerRecord::new(topic, Some(b"message".to_vec()))).await {
+            Err(e) => e,
+            Ok(future) => future
+                .get_with_timeout(MAX_WAIT)
+                .await
+                .expect_err("the record must fail the authentication"),
+        }
     };
-    assert!(err.is_sasl_authentication_error(), "{err:?}");
+    // A gRPC `Send` answers only once the record's future settles.
+    let err = tokio::time::timeout(MAX_WAIT, send)
+        .await
+        .unwrap_or_else(|_| panic!("{} backend: no authentication failure within {MAX_WAIT:?}", factory.name()));
+    assert!(err.is_sasl_authentication_error(), "{} backend: {err:?}", factory.name());
+    assert!(err.is_authentication_error(), "{} backend: {err:?}", factory.name());
+    match &err {
+        Error::SaslAuthentication(e) => assert_eq!(
+            e.message(),
+            "Authentication failed: Invalid username or password",
+            "{} backend",
+            factory.name()
+        ),
+        other => panic!("{} backend: expected SaslAuthenticationError, got {other:?}", factory.name()),
+    }
 
     let _ = producer.close().await;
     ctx.cleanup().await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_producer_with_invalid_credentials,
+    producer_with_invalid_credentials_inner,
+    base_consumer_test::cluster_config()
+);
+
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_producer_with_invalid_credentials() {
+    let mut ctx = TestContext::new(base_consumer_test::cluster_config()).await;
+    producer_with_invalid_credentials_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
 
 /// Translated from `ClientAuthenticationFailureTest.testAdminClientWithInvalidCredentials`:

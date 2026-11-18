@@ -106,5 +106,4 @@ rules.baseline = {
   },
 };
 
-
 module.exports = { meta: { name: 'kafka' }, rules };

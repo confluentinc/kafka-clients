@@ -14,9 +14,11 @@
 
 'use strict';
 
-// A stand-in for Java's MockProducer, which the JavaScript binding does not
-// translate yet: the Python tests of the verifiable producer run over the
-// Python MockProducer, and these run over this one. It does what Java's
+// A stand-in for Java's MockProducer: the Python tests of the verifiable
+// producer run over the Python MockProducer, and these run over this one,
+// rather than the client's MockProducer, because they reach into its pending
+// completions (to complete them out of order), which the FFI's mock does not
+// expose. It does what Java's
 // MockProducer does for the calls the tool makes: send() checks the closed
 // state, then the injected send error, then records the record in history()
 // and, with autoComplete, completes it at once at the next offset of
@@ -26,11 +28,20 @@
 
 const { IllegalStateError } = require('@confluentinc/kafka-javascript');
 
+/** @typedef {import('@confluentinc/kafka-javascript/producer').ProducerRecord<unknown, unknown>} Record */
+/** @typedef {{ topic: string, partition: number, offset: number, timestamp?: number }} Metadata */
+/** @typedef {(result: { metadata: Metadata, exception: unknown }) => void} Callback */
+/** @typedef {{ record: Record, callback: Callback | null }} Completion */
+
 class MockProducer {
+  /** @param {{ autoComplete?: boolean }} [options] */
   constructor({ autoComplete = true } = {}) {
     this.autoComplete = autoComplete;
+    /** @type {unknown} */
     this.sendError = null;
+    /** @type {Record[]} */
     this.records = [];
+    /** @type {Completion[]} */
     this.pending = [];
     this.nextOffset = 0;
     this.isClosed = false;
@@ -46,11 +57,19 @@ class MockProducer {
     return this.isClosed;
   }
 
-  /** Java's MockProducer.sendException, thrown by the next sends. */
+  /**
+   * Java's MockProducer.sendException, thrown by the next sends.
+   *
+   * @param {unknown} error the error, or null for none
+   */
   setSendError(error) {
     this.sendError = error;
   }
 
+  /**
+   * @param {{ record: Record, callback?: Callback | null }} options
+   * @returns {Promise<null>}
+   */
   send({ record, callback = null }) {
     if (this.isClosed) return Promise.reject(new IllegalStateError('MockProducer is already closed.'));
     if (this.sendError !== null) return Promise.reject(this.sendError);
@@ -69,7 +88,12 @@ class MockProducer {
     return true;
   }
 
-  /** Java's MockProducer.errorNext(e): whether a record was pending. */
+  /**
+   * Java's MockProducer.errorNext(e): whether a record was pending.
+   *
+   * @param {unknown} error the record's error
+   * @returns {boolean}
+   */
   errorNext(error) {
     const completion = this.pending.shift();
     if (completion === undefined) return false;
@@ -81,6 +105,10 @@ class MockProducer {
     this.isClosed = true;
   }
 
+  /**
+   * @param {Completion} completion
+   * @param {unknown} error
+   */
   #complete({ record, callback }, error) {
     const metadata =
       error === null

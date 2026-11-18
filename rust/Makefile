@@ -36,7 +36,7 @@ CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc -
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
-	test-integration-grpc-js test-integration-grpc-js-native \
+	test-integration-grpc-js test-integration-grpc-js-native chaos-javascript \
 	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
 	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -259,7 +259,7 @@ test-integration-grpc-dotnet-native:
 # arm (the consumer and admin macros do not), and
 # javascript/grpc-server/grpc_server.js registers ProducerService alone.
 #
-# NINE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
+# THREE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
 # JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
 # __grpc_js, so no other backend loses coverage.
 #
@@ -271,18 +271,7 @@ test-integration-grpc-dotnet-native:
 # REMOVE these three when the JS producer implements transactions (and, for the
 # third, a JS consumer with a ConsumerService in grpc-server/grpc_server.js).
 #
-# The metrics tests. The JS producer has no metrics() yet, so the Metrics RPC is
-# left out. REMOVE test_produce_and_check_metrics and
-# test_metrics_follow_configuration_and_traffic when the JS producer implements
-# metrics() and grpc-server/grpc_server.js serves the Metrics RPC.
-#
-# The partitionsFor tests. The JS producer has no partitionsFor() yet, so the
-# PartitionsFor RPC is left out; test_produce_invalid_partition reads the
-# partition count back through it. REMOVE these four when the JS producer
-# implements partitionsFor() and grpc-server/grpc_server.js serves the
-# PartitionsFor RPC.
-#
-# With all nine gone, remove JS_GRPC_SKIPS (the definition below and its uses in
+# With all three gone, remove JS_GRPC_SKIPS (the definition below and its uses in
 # test-integration-grpc-js and test-integration-grpc-js-native).
 #
 # Plain `cargo test`, with the other arms' features: the test selection has no
@@ -290,13 +279,7 @@ test-integration-grpc-dotnet-native:
 # names.
 JS_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
 	--skip test_aborted_transaction_records_are_discarded \
-	--skip test_consume_transform_produce_with_offsets \
-	--skip test_produce_and_check_metrics \
-	--skip test_metrics_follow_configuration_and_traffic \
-	--skip test_produce_partitions_for \
-	--skip test_partitions_for_timeout_error_when_topic_does_not_exist \
-	--skip test_partitions_for_freshly_created_topic \
-	--skip test_produce_invalid_partition
+	--skip test_consume_transform_produce_with_offsets
 
 test-integration-grpc-js:
 	cargo test --all-features --test integration -- __grpc_js \
@@ -306,6 +289,34 @@ test-integration-grpc-js-native:
 	MULTILANG_BACKEND_MODE=native \
 		cargo test --all-features --test integration -- __grpc_js \
 		$(JS_GRPC_SKIPS)
+
+# ── Chaos runs of the JavaScript producer ─────────────────────────────────
+#
+# `cargo xtask chaos` (tests/chaos/README.md) with the Node.js producer
+# (`producer:javascript`, served by javascript/grpc-server/grpc_server.js) and
+# the Rust consumer, on the harness's dedicated three-broker cluster, each run
+# ending in the conservation verdict. Two runs:
+#
+#   - leader movement without broker restarts: a preferred-leader change and a
+#     partition reassignment every cycle, at replication factor 2 so the
+#     reassignment moves data onto the third broker (Java's producer retries
+#     the NOT_LEADER_OR_FOLLOWER errors it meets with a metadata refresh);
+#   - an unclean broker roll (SIGKILL) under the workload's idempotent producer
+#     (acks=all, enable.idempotence=true): every acknowledged record is read
+#     back once, in order, per partition.
+#
+# The JavaScript backend runs in its container (the root
+# `chaos-javascript`, after `build-grpc-images-javascript`) or as a host
+# process (the root `chaos-javascript-native`, MULTILANG_BACKEND_MODE=native,
+# after `build-grpc-native-javascript`). A long run, so neither is part of
+# `verify` or of a pull request's CI; .semaphore/chaos-javascript.yml runs the
+# container form as a scheduled task (service.yml).
+CHAOS_JAVASCRIPT_WORKLOADS = --workload producer:javascript --workload consumer:rust --reports
+
+chaos-javascript:
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --no-broker-roll --change-leader \
+		--reassign-partitions --replication-factor 2 --cycles 3
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --unclean --cycles 3
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138

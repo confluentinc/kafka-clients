@@ -19,7 +19,6 @@
 // change warns in a pre-release or a major release and fails in any other
 // release (root conventions, Stability). `make check-api` compares the build.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -61,8 +60,16 @@ test('a change warns before GA and in a major release, and fails in a minor or p
 });
 
 test('differences lists the changed, the new and the gone reports', () => {
-  const a = new Map([['x.api.md', '1'], ['y.api.md', '2'], ['exports.json', '{}']]);
-  const b = new Map([['x.api.md', '1'], ['y.api.md', '3'], ['z.api.md', '4']]);
+  const a = new Map([
+    ['x.api.md', '1'],
+    ['y.api.md', '2'],
+    ['exports.json', '{}'],
+  ]);
+  const b = new Map([
+    ['x.api.md', '1'],
+    ['y.api.md', '3'],
+    ['z.api.md', '4'],
+  ]);
   assert.deepEqual(differences(a, b), ['exports.json: gone', 'y.api.md: changed', 'z.api.md: new']);
   assert.deepEqual(differences(a, a), []);
 });

@@ -20,13 +20,18 @@
 // Python client's encoding writes ("replace": `?` for a lone surrogate); Node's
 // own Buffer.from writes U+FFFD (ef bf bd) instead.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { encodeLikeJava } = require('../../../dist/internal/encode');
-const { configEntries } = require('../../../dist/internal/config');
+const native = require('../../../dist/internal/native');
+const { configEntries: untypedEntries } = require('../../../dist/internal/config');
 const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+const { internalRecord } = require('../../_internal');
+
+// The compiled JavaScript carries no signature: configEntries is typed by its source's.
+const configEntries = /** @type {typeof import('../../../src/internal/config').configEntries} */ (untypedEntries);
 
 // [what, string, Java's StringSerializer bytes, as hex]
 const JAVA = [
@@ -50,7 +55,8 @@ test("strings are encoded as Java's StringSerializer encodes them, a lone surrog
   assert.equal(Buffer.from('a\uD800b', 'utf8').toString('hex'), '61efbfbd62');
 });
 
-test('a key, a value and a header key are encoded the Java way at send', () => {
+test('a key and a value through stringSerializer(), and a header key, are encoded the Java way', () => {
+  const serializer = stringSerializer();
   for (const [what, s, hex] of JAVA) {
     const record = new ProducerRecord({
       topic: 't',
@@ -59,11 +65,16 @@ test('a key, a value and a header key are encoded the Java way at send', () => {
       value: s,
       headers: [new Header({ key: s, value: null })],
     });
-    const [, , , key, value, headers] = record.internalToNative();
+    const key = serializer.serialize({ topic: 't', headers: record.headers, data: record.key });
+    const value = serializer.serialize({ topic: 't', headers: record.headers, data: record.value });
+    assert.ok(key instanceof Uint8Array && value instanceof Uint8Array, what);
+    const [, , , , , headers] = internalRecord(record).internalToNative(key, value);
     assert.equal(Buffer.from(key).toString('hex'), hex, `${what}: key`);
     assert.equal(Buffer.from(value).toString('hex'), hex, `${what}: value`);
-    // The header key crosses as its bytes, encodeLikeJava's.
-    assert.equal(Buffer.from(headers[0][0]).toString('hex'), hex, `${what}: header key`);
+    // The header key crosses as its bytes, encodeLikeJava's: the native
+    // RecordHeaders that crosses holds them.
+    const [crossed] = native.headersToArray(headers);
+    assert.equal(Buffer.from(native.headerKey(crossed), 'utf8').toString('hex'), hex, `${what}: header key`);
   }
 });
 

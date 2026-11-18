@@ -89,7 +89,11 @@ function format(results, context = {}) {
   }
   const total = errors + warnings;
   if (total === 0) return '';
-  lines.push('', `✖ ${total} problem${total === 1 ? '' : 's'} (${errors} error${errors === 1 ? '' : 's'}, ${warnings} warning${warnings === 1 ? '' : 's'})`, '');
+  lines.push(
+    '',
+    `✖ ${total} problem${total === 1 ? '' : 's'} (${errors} error${errors === 1 ? '' : 's'}, ${warnings} warning${warnings === 1 ? '' : 's'})`,
+    '',
+  );
   return lines.join('\n');
 }
 
