@@ -146,7 +146,7 @@ public sealed class SerdeHeadersTests
     {
         PlainSerializer key = new PlainSerializer();
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key, value);
+        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -181,7 +181,7 @@ public sealed class SerdeHeadersTests
     {
         HeaderAddingSerializer key = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key, value);
+        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -215,7 +215,7 @@ public sealed class SerdeHeadersTests
     {
         PlainSerializer key = new PlainSerializer();
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key, value);
+        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -244,7 +244,7 @@ public sealed class SerdeHeadersTests
     {
         HeaderAddingSerializer key = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key, value);
+        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 

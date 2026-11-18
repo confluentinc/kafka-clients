@@ -284,7 +284,7 @@ public sealed class KafkaProducerTransactionTests
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer =
-                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                new AsyncKafkaProducer<byte[], byte[]>(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             for (int call = 0; call < 2; call++)
             {

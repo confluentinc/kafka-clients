@@ -152,7 +152,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         // Java completes the future after the callbacks run. The probe is the send task's state seen from inside the
         // callback; comparing continuation order would race RunContinuationsAsynchronously.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TaskStateProbeCallback probe = new TaskStateProbeCallback();
@@ -512,7 +512,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     {
         // A token that ends the caller's Get wait leaves the record and its callback alone.
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
@@ -892,10 +892,9 @@ public sealed class PublicProducerDeliveryCallbackTests
             bool autoComplete = true,
             ISerializer<byte[]>? valueSerializer = null)
         {
-            ISerializer<byte[]> value = valueSerializer ?? Serdes.ByteArray().Serializer();
             return flavor == Sync
-                ? new SyncFlavor(autoComplete, value)
-                : new AsyncFlavor(autoComplete, value);
+                ? new SyncFlavor(autoComplete, valueSerializer ?? Serdes.ByteArray().Serializer())
+                : new AsyncFlavor(autoComplete, valueSerializer);
         }
 
         internal abstract Task<RecordMetadata> Send(
@@ -943,10 +942,11 @@ public sealed class PublicProducerDeliveryCallbackTests
         {
             private readonly AsyncMockProducer<byte[], byte[]> _producer;
 
-            internal AsyncFlavor(bool autoComplete, ISerializer<byte[]> valueSerializer)
+            internal AsyncFlavor(bool autoComplete, ISerializer<byte[]>? valueSerializer)
             {
-                _producer = new AsyncMockProducer<byte[], byte[]>(
-                    Serdes.ByteArray().Serializer(), valueSerializer, autoComplete);
+                IAsyncSerializer<byte[]> value =
+                    valueSerializer is null ? new AsyncByteArraySerializer() : valueSerializer.AsAsync();
+                _producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), value, autoComplete);
             }
 
             internal override Task<RecordMetadata> Send(
@@ -954,8 +954,16 @@ public sealed class PublicProducerDeliveryCallbackTests
                 _producer.Send(record, callback).Delivery();
 
             internal override void SendInline(
-                ProducerRecord<byte[], byte[]> record, ICallback? callback) =>
-                _ = _producer.Send(record, callback!);
+                ProducerRecord<byte[], byte[]> record, ICallback? callback)
+            {
+                ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = _producer.Send(record, callback!);
+
+                // The throw of a test's serializer, which is not a built-in, ends the first stage: reading it throws.
+                if (firstStage.IsFaulted)
+                {
+                    firstStage.GetAwaiter().GetResult();
+                }
+            }
 
             internal override bool CompleteNext() => _producer.CompleteNext();
 

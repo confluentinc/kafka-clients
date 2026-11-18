@@ -437,7 +437,7 @@ public sealed class SerdeConfigureTests
         List<string> log = new List<string>();
         ConfigurableSerializer key = new ConfigurableSerializer(log);
         ConfigurableSerializer value = new ConfigurableSerializer(log);
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(ProducerConfigs(), key, value);
+        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(ProducerConfigs(), key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));

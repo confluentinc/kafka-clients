@@ -252,9 +252,9 @@ public sealed class SerdeHeadersBrokerTests
 
     /// <summary>
     /// A string serializer whose headers form adds a header (the schema id unless another is named) and records the
-    /// headers it was given.
+    /// headers it was given. The async form does the same after it has yielded, so the producer awaits it.
     /// </summary>
-    private sealed class HeaderAddingSerializer : ISerializerWithHeaders<string>
+    private sealed class HeaderAddingSerializer : ISerializerWithHeaders<string>, IAsyncSerializer<string>
     {
         private readonly string _header;
 
@@ -270,6 +270,13 @@ public sealed class SerdeHeadersBrokerTests
             Seen.Add(headers);
             headers.Add(_header, Encoding.UTF8.GetBytes("1"));
             return data is null ? (ReadOnlyMemory<byte>?)null : Encoding.UTF8.GetBytes(data);
+        }
+
+        public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            return Serialize(topic, headers, data);
         }
     }
 

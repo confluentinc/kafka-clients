@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -30,7 +31,8 @@ namespace Confluent.Kafka.UnitTests;
 /// goes to the delivery callback, once, with placeholder metadata, and fails the returned future; an
 /// <see cref="InvalidCastException"/> is wrapped in a <see cref="SerializationException"/> naming the classes; any
 /// other throw leaves <c>Send</c> as it is. On the two mocks, as Java's <c>MockProducer</c>, every throw leaves
-/// <c>Send</c> as the same instance. No case reaches the core.
+/// <c>Send</c> as the same instance. No case reaches the core. The asynchronous producers are given serializers that
+/// are not built-ins, so there a throw that leaves <c>Send</c> ends its first stage.
 /// </summary>
 public sealed class PublicProducerSerializerFailureTests
 {
@@ -222,7 +224,7 @@ public sealed class PublicProducerSerializerFailureTests
 
     [Theory]
     [InlineData(AsyncReal)]
-    public void ApiException_ACanceledToken_ThrowsBeforeTheCallback(string flavor)
+    public async Task ApiException_ACanceledToken_CancelsTheFirstStageBeforeTheCallback(string flavor)
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
         using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
@@ -231,10 +233,10 @@ public sealed class PublicProducerSerializerFailureTests
         using CancellationTokenSource canceled = new CancellationTokenSource();
         canceled.Cancel();
 
-        Assert.ThrowsAny<OperationCanceledException>(() =>
-        {
-            _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback, canceled.Token);
-        });
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage =
+            producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback, canceled.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await firstStage);
         Assert.Empty(callback.Completions);
     }
 
@@ -331,14 +333,15 @@ public sealed class PublicProducerSerializerFailureTests
     [InlineData(ApiKind)]
     [InlineData(InvalidCastKind)]
     [InlineData(OtherKind)]
-    public void OnTheAsyncMock_ASerializerThrow_LeavesTheSend_WithoutTheAsyncCallback(string kind)
+    public async Task OnTheAsyncMock_ASerializerThrow_EndsTheFirstStage_WithoutTheAsyncCallback(string kind)
     {
         ISerializer<string> failing = Failing(kind, out Func<Exception?> lastThrown);
-        using AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(Serdes.String().Serializer(), failing);
+        using AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(new AsyncStringSerializer(), failing.AsAsync());
         GatedAsyncCallback callback = new GatedAsyncCallback(Task.CompletedTask);
 
-        Exception error = Assert.ThrowsAny<Exception>(
-            () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback); });
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage =
+            producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"), callback);
+        Exception error = await Assert.ThrowsAnyAsync<Exception>(async () => await firstStage);
 
         Assert.Same(lastThrown(), error);
         Assert.Equal(0, callback.Calls);
@@ -402,9 +405,17 @@ public sealed class PublicProducerSerializerFailureTests
             {
                 SyncMock => new MockProducer<string, string>(key, value),
                 SyncReal => new KafkaProducer<string, string>(Unreachable(), key, value),
-                AsyncMock => new AsyncMockProducer<string, string>(key, value),
-                _ => new AsyncKafkaProducer<string, string>(Unreachable(), key, value),
+                AsyncMock => new AsyncMockProducer<string, string>(Async(key), Async(value)),
+                _ => new AsyncKafkaProducer<string, string>(Unreachable(), Async(key), Async(value)),
             };
+
+        // A built-in stays one, and a test's serializer that has an asynchronous form is given as it is.
+        private static IAsyncSerializer<string> Async(ISerializer<string> serializer) => serializer switch
+        {
+            StringSerializer => new AsyncStringSerializer(),
+            IAsyncSerializer<string> async => async,
+            _ => serializer.AsAsync(),
+        };
 
         internal Task<RecordMetadata> Send(ProducerRecord<string, string> record, ICallback? callback)
         {
@@ -418,9 +429,10 @@ public sealed class PublicProducerSerializerFailureTests
             ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage =
                 callback is null ? async.Send(record) : async.Send(record, callback);
 
-            // The first stage completes inside the call.
-            Assert.True(firstStage.IsCompletedSuccessfully);
-            return firstStage.Result.Get();
+            // The serializers complete inside the call, so the first stage does too. They are not built-ins, so a throw
+            // that leaves Send ends the first stage, and reading its result throws it here.
+            Assert.True(firstStage.IsCompleted);
+            return firstStage.GetAwaiter().GetResult().Get();
         }
 
         internal int HistoryCount() => _producer switch
@@ -526,9 +538,16 @@ public sealed class PublicProducerSerializerFailureTests
         }
     }
 
-    private sealed class InvalidCastSerializer : ISerializer<string>
+    /// <summary>
+    /// Throws an <see cref="InvalidCastException"/> from both forms, so the producer that wraps it names this class.
+    /// </summary>
+    private sealed class InvalidCastSerializer : ISerializer<string>, IAsyncSerializer<string>
     {
         internal Exception? LastThrown { get; private set; }
+
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken) =>
+            new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, data));
 
         public ReadOnlyMemory<byte>? Serialize(string topic, string? data)
         {

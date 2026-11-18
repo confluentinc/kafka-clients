@@ -70,7 +70,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, value);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
         TestTimeout.Dispose(producer);
 
         // Send throws synchronously (not an async method), so Assert.Throws is the overload.
@@ -84,7 +84,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), key.AsAsync(), value.AsAsync());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });
@@ -107,7 +107,7 @@ public sealed class PublicProducerSendClosedCheckTests
     public void AsyncSend_AfterDispose_WithThrowingSerializer_SurfacesIllegalState()
     {
         ThrowingSerializer<byte[]> key = new ThrowingSerializer<byte[]>();
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key.AsAsync(), new AsyncByteArraySerializer());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });

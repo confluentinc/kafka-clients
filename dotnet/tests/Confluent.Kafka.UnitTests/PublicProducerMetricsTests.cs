@@ -48,7 +48,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_AsyncMock_IsEmpty()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         Assert.Empty(producer.Metrics());
     }
@@ -67,7 +67,7 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_AsyncRealProducer_IsPopulatedAndWellFormed()
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            RealConfig(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         AssertPopulatedAndWellFormed(producer.Metrics());
@@ -139,7 +139,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public async Task Metrics_AsyncMockAfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await TestTimeout.DisposeAsync(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
@@ -148,7 +148,7 @@ public sealed class PublicProducerMetricsTests
     public async Task Metrics_AsyncRealAfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            RealConfig(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            RealConfig(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await TestTimeout.DisposeAsync(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
@@ -167,7 +167,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIAsyncProducer()
     {
-        AsyncMockProducer<byte[], byte[]> mock = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> mock = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncProducer<byte[], byte[]> producer = mock;
         Assert.Empty(producer.Metrics());

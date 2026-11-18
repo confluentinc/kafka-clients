@@ -1131,7 +1131,9 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     // async callback of a serializer failure, which may still use them, is running, the one that closed the producer
     // included: then once the last of those ends, as Python closes its serializers after its callbacks. A close
     // returns only once they are disposed, except one from inside such a callback, which would wait for itself. A
-    // send still running on another thread when the close starts is not waited for, as in Java and Python.
+    // send still running on another thread when the close starts is not waited for, as in Java and Python. An
+    // asynchronous serializer's DisposeAsync is started here and not waited for on this thread: the close awaits the
+    // returned task, and a synchronous Dispose blocks on it.
     private Task DisposeTheSerializersAfter(Task failureCallbacks)
     {
         if (_serdes is not { } serdes)
@@ -1141,15 +1143,15 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
         if (failureCallbacks.IsCompleted)
         {
-            serdes.DisposeOnce();
-            return Task.CompletedTask;
+            ValueTask disposed = serdes.DisposeOnceAsync();
+            return disposed.IsCompletedSuccessfully ? Task.CompletedTask : disposed.AsTask();
         }
 
         return failureCallbacks.ContinueWith(
-            _ => serdes.DisposeOnce(),
+            _ => serdes.DisposeOnceAsync().AsTask(),
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+            TaskScheduler.Default).Unwrap();
     }
 
     private void WaitForTheSerializers() => TheSerializersDisposed().GetAwaiter().GetResult();

@@ -349,7 +349,7 @@ public sealed class PublicProducerSendWithCallbackTests
         new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
     private static AsyncKafkaProducer<byte[], byte[]> AsyncUnreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     private static Exception Capture(Action action)
     {

@@ -175,7 +175,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         try
         {
             await TestTimeout.Run(() => producer.Close(), Deadline);
@@ -233,7 +233,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         DestroyLog destroys = WatchDestroy(producer);
         using ManualResetEventSlim release = new ManualResetEventSlim();
         using ManualResetEventSlim entered = new ManualResetEventSlim();
@@ -287,7 +287,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         try
         {
             using CancellationTokenSource token = new CancellationTokenSource();
@@ -494,7 +494,7 @@ public sealed class PublicSerializerDisposalTests
         DisposableSerializer value = new DisposableSerializer("value");
         object producer = flavor == SyncFlavor
             ? new MockProducer<byte[], byte[]>(key, value)
-            : new AsyncMockProducer<byte[], byte[]>(key, value);
+            : new AsyncMockProducer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
         try
         {
             _ = await CloseBy(producer, how);
@@ -525,7 +525,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         ApiFailingSerializer value = new ApiFailingSerializer("value", log);
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         using ManualResetEventSlim afterDestroy = SignalAfterDestroy(producer);
         HeldAsyncCallback callback = new HeldAsyncCallback();
         try
@@ -582,7 +582,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         ApiFailingSerializer value = new ApiFailingSerializer("value", log);
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         using ManualResetEventSlim afterDestroy = SignalAfterDestroy(producer);
         HeldAsyncCallback held = new HeldAsyncCallback();
         ClosingAsyncCallback closing = new ClosingAsyncCallback(producer, how, beforeItsFirstAwait);
@@ -659,7 +659,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         ApiFailingSerializer value = new ApiFailingSerializer("value", log);
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
         HeldAsyncCallback held = new HeldAsyncCallback();
         ProducerCallingListener listener = new ProducerCallingListener(producer, how, key, value);
         try
@@ -710,7 +710,7 @@ public sealed class PublicSerializerDisposalTests
         ISerializer<byte[]> value) =>
         flavor == SyncFlavor
             ? new KafkaProducer<byte[], byte[]>(configs, key, value)
-            : new AsyncKafkaProducer<byte[], byte[]>(configs, key, value);
+            : new AsyncKafkaProducer<byte[], byte[]>(configs, key.AsAsync(), value.AsAsync());
 
     private static string NullSerializer(string key) =>
         "Invalid value null for configuration " + key + ": must be non-null.";

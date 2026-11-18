@@ -21,6 +21,7 @@ using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Producer;
 
 using Xunit;
 
@@ -31,7 +32,7 @@ namespace Confluent.Kafka.UnitTests;
 /// public <c>DisposeAsync()</c>, <c>Dispose()</c> or <c>Close()</c> it would never call, since it disposes through
 /// <see cref="IAsyncDisposable"/> or else <see cref="IDisposable"/>; one that does not dispose them takes every shape,
 /// and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces. The asynchronous consumers
-/// make the check when they are built: the real one disposes its deserializers, the mock does not.
+/// and producers make the check when they are built: the real ones dispose their serdes, the mocks do not.
 /// </summary>
 public sealed class AsyncSerdeGuardTests
 {
@@ -160,6 +161,62 @@ public sealed class AsyncSerdeGuardTests
             Assert.Equal(serde is IAsyncDisposable || serde is IDisposable ? 1 : 0, serde.Disposals);
         }
     }
+
+    [Theory]
+    [MemberData(nameof(Refused))]
+    public void AnAsyncKafkaProducer_RefusesACloseItWouldNeverCall_DisposingNothing(Type shape, string what)
+    {
+        foreach (bool asKey in new[] { true, false })
+        {
+            Serde serde = (Serde)Activator.CreateInstance(shape)!;
+            Disposable other = new Disposable();
+
+            IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+                () => new AsyncKafkaProducer<string, string>(
+                    ProducerConfigs(), asKey ? serde : other, asKey ? other : serde));
+
+            Assert.Equal(Prefix + shape.Name + " declares " + what + ", so the producer would never call it.", e.Message);
+            Assert.Equal(0, serde.Disposals);
+            Assert.Equal(0, other.Disposals);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Refused))]
+    public async Task AnAsyncMockProducer_TakesEveryShape_SinceItDisposesNothing(Type shape, string what)
+    {
+        Assert.NotEmpty(what);
+        Serde serde = (Serde)Activator.CreateInstance(shape)!;
+        Disposable other = new Disposable();
+
+        await TestTimeout.DisposeAsync(new AsyncMockProducer<string, string>(serde, other));
+
+        Assert.Equal(0, serde.Disposals);
+        Assert.Equal(0, other.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(Accepted))]
+    public async Task AnAsyncKafkaProducer_TakesASerdeItDisposesThroughAnInterface_AndDisposesItOnce(Type shape)
+    {
+        foreach (bool asKey in new[] { true, false })
+        {
+            Serde serde = (Serde)Activator.CreateInstance(shape)!;
+            Plain other = new Plain();
+
+            await TestTimeout.DisposeAsync(new AsyncKafkaProducer<string, string>(
+                ProducerConfigs(), asKey ? serde : other, asKey ? other : serde));
+
+            Assert.Equal(serde is IAsyncDisposable || serde is IDisposable ? 1 : 0, serde.Disposals);
+        }
+    }
+
+    private static Dictionary<string, object?> ProducerConfigs() =>
+        new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:1",
+            ["max.block.ms"] = "5",
+        };
 
     private static Dictionary<string, object?> ConsumerConfigs() =>
         new Dictionary<string, object?>

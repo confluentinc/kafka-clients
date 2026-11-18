@@ -181,7 +181,7 @@ internal sealed class V3AsyncTransactionalProducer : ITransactionalProducer
 
     internal V3AsyncTransactionalProducer(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
     }
 
     public ValueTask InitTransactions() => new(_producer.InitTransactions());

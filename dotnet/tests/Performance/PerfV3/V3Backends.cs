@@ -129,7 +129,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 
     internal V3AsyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
     }
 
     public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)

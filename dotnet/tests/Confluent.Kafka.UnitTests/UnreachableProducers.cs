@@ -51,7 +51,7 @@ internal static class UnreachableProducers
         Async((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
     internal static AsyncKafkaProducer<byte[], byte[]> Async(object maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     internal static string Topic(string prefix) => prefix + "-" + Guid.NewGuid().ToString("N");
 

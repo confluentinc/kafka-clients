@@ -108,7 +108,7 @@ public sealed class TransactionsBrokerTests
         await using AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(
             GroupConfigs("read_committed"), new AsyncStringDeserializer(), new AsyncStringDeserializer());
         await using AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            TransactionalConfigs("dotnet-eos-txn"), Serdes.String().Serializer(), Serdes.String().Serializer());
+            TransactionalConfigs("dotnet-eos-txn"), new AsyncStringSerializer(), new AsyncStringSerializer());
 
         await consumer.Subscribe(new[] { source });
         List<ConsumerRecord<string, string>> records = new List<ConsumerRecord<string, string>>();
@@ -175,7 +175,7 @@ public sealed class TransactionsBrokerTests
     {
         string topic = await TopicAsync("dotnet-abort");
         await using (AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            TransactionalConfigs("dotnet-abort-txn"), Serdes.String().Serializer(), Serdes.String().Serializer()))
+            TransactionalConfigs("dotnet-abort-txn"), new AsyncStringSerializer(), new AsyncStringSerializer()))
         {
             await producer.InitTransactions();
             await producer.BeginTransaction();
@@ -229,9 +229,9 @@ public sealed class TransactionsBrokerTests
         string topic = await TopicAsync("dotnet-fence");
         Dictionary<string, object?> configs = TransactionalConfigs("dotnet-fence-txn");
         await using AsyncKafkaProducer<string, string> fenced =
-            new AsyncKafkaProducer<string, string>(configs, Serdes.String().Serializer(), Serdes.String().Serializer());
+            new AsyncKafkaProducer<string, string>(configs, new AsyncStringSerializer(), new AsyncStringSerializer());
         await using AsyncKafkaProducer<string, string> fencing =
-            new AsyncKafkaProducer<string, string>(configs, Serdes.String().Serializer(), Serdes.String().Serializer());
+            new AsyncKafkaProducer<string, string>(configs, new AsyncStringSerializer(), new AsyncStringSerializer());
 
         await fenced.InitTransactions();
         await fenced.BeginTransaction();
@@ -274,7 +274,7 @@ public sealed class TransactionsBrokerTests
         string topic = await TopicAsync("dotnet-idempotent");
         string[] values = Enumerable.Range(0, 100).Select(i => "v" + i).ToArray();
         await using (AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            IdempotentConfigs(), Serdes.String().Serializer(), Serdes.String().Serializer()))
+            IdempotentConfigs(), new AsyncStringSerializer(), new AsyncStringSerializer()))
         {
             List<AsyncKafkaFuture<RecordMetadata>> futures = new List<AsyncKafkaFuture<RecordMetadata>>();
             foreach (string value in values)

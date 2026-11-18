@@ -595,7 +595,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
     }
 
     private static AsyncMockProducer<byte[], byte[]> ManualMock() =>
-        new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
 
     private static TaskCompletionSource<bool> NewGate() =>
         new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -199,14 +199,14 @@ public sealed class PublicProducerSendStringTests
                     new KafkaProducer<string, string>(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer()), historyCount: null);
             case AsyncKafka:
                 return new AsyncSubject(
-                    new AsyncKafkaProducer<string, string>(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer()),
+                    new AsyncKafkaProducer<string, string>(Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer()),
                     historyCount: null);
             case Mock:
                 MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
                 return new SyncSubject(mock, mock.HistoryCount);
             case AsyncMock:
                 AsyncMockProducer<string, string> asyncMock =
-                    new AsyncMockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
+                    new AsyncMockProducer<string, string>(new AsyncStringSerializer(), new AsyncStringSerializer());
                 return new AsyncSubject(asyncMock, asyncMock.HistoryCount);
             default:
                 throw new ArgumentOutOfRangeException(nameof(producer), producer, null);

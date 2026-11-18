@@ -80,11 +80,11 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             // An empty or all-blank config selects an AsyncMockProducer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             }
             else
             {
-                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             }
         }
         catch (Exception ex)

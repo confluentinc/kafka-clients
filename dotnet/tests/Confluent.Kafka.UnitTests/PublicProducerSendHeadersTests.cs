@@ -71,7 +71,7 @@ public sealed class PublicProducerSendHeadersTests
         List<(string Topic, string? Data)> calls = new List<(string Topic, string? Data)>();
         CallLog serializer = new CallLog(calls);
         AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(Unreachable(), serializer, serializer);
+            new AsyncKafkaProducer<string, string>(Unreachable(), serializer.AsAsync(), serializer.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, value: "value", key: "key");
         record.Headers().Add(new Header("test", Bytes("header2")));
@@ -100,11 +100,12 @@ public sealed class PublicProducerSendHeadersTests
     public async Task AsyncKafkaProducer_SerializerFailure_LeavesTheHeadersWritable()
     {
         AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            Unreachable(), Serdes.String().Serializer(), new ThrowingSerializer<string>());
+            Unreachable(), new AsyncStringSerializer(), new ThrowingSerializer<string>().AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
-        Assert.Throws<ThrowingSerializer<string>.BoomException>(() => { _ = producer.Send(record); });
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(record);
+        await Assert.ThrowsAsync<ThrowingSerializer<string>.BoomException>(async () => await firstStage);
 
         AssertWritable(record);
     }
@@ -132,7 +133,7 @@ public sealed class PublicProducerSendHeadersTests
     public async Task AsyncKafkaProducer_ASentRecord_IsSentAgain()
     {
         AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
-            Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer());
+            Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
         ValueTask<AsyncKafkaFuture<RecordMetadata>> first = producer.Send(record);
@@ -164,7 +165,7 @@ public sealed class PublicProducerSendHeadersTests
     public async Task AsyncMockProducer_LeavesTheHeadersWritable()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>("t", value: Bytes("v"));
 

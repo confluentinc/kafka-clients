@@ -572,7 +572,7 @@ public sealed class SerializationTests
     public async Task AsyncMockProducer_AKeylessRecordOfALongSerde_SendsANullKey()
     {
         AsyncMockProducer<long?, string> producer =
-            new AsyncMockProducer<long?, string>(Serdes.Long().Serializer(), Serdes.String().Serializer());
+            new AsyncMockProducer<long?, string>(new AsyncLongSerializer(), new AsyncStringSerializer());
         try
         {
             await (await producer.Send(new ProducerRecord<long?, string>(Topic, value: "keyless"))).Get();

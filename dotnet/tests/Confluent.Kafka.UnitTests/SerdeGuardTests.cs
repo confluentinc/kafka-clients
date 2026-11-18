@@ -51,7 +51,7 @@ public sealed class SerdeGuardTests
     private const string ClosingDeserializerMessage = Prefix + "ClosingDeserializer declares Close() but does not "
         + "implement IDisposable, so the consumer would never call it.";
 
-    private static readonly string[] s_producers = { "KafkaProducer", "AsyncKafkaProducer", "MockProducer", "AsyncMockProducer" };
+    private static readonly string[] s_producers = { "KafkaProducer", "MockProducer" };
 
     private static readonly string[] s_consumers = { "KafkaConsumer", "MockConsumer" };
 
@@ -59,11 +59,11 @@ public sealed class SerdeGuardTests
 
     public static TheoryData<string, bool> Consumers => Cases(s_consumers);
 
-    public static TheoryData<string, bool> RealProducers => Cases(new[] { "KafkaProducer", "AsyncKafkaProducer" });
+    public static TheoryData<string, bool> RealProducers => Cases(new[] { "KafkaProducer" });
 
     public static TheoryData<string, bool> RealConsumers => Cases(new[] { "KafkaConsumer" });
 
-    public static TheoryData<string> MockProducers => new TheoryData<string> { "MockProducer", "AsyncMockProducer" };
+    public static TheoryData<string> MockProducers => new TheoryData<string> { "MockProducer" };
 
     public static TheoryData<string> MockConsumers => new TheoryData<string> { "MockConsumer" };
 
@@ -211,9 +211,7 @@ public sealed class SerdeGuardTests
     private static object Producer(string producer, ISerializer<string> key, ISerializer<string> value) => producer switch
     {
         "KafkaProducer" => new KafkaProducer<string, string>(ProducerConfigs(), key, value),
-        "AsyncKafkaProducer" => new AsyncKafkaProducer<string, string>(ProducerConfigs(), key, value),
-        "MockProducer" => new MockProducer<string, string>(key, value),
-        _ => new AsyncMockProducer<string, string>(key, value),
+        _ => new MockProducer<string, string>(key, value),
     };
 
     private static object Consumer(string consumer, IDeserializer<string> key, IDeserializer<string> value) => consumer switch

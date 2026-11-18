@@ -32,9 +32,17 @@ namespace Confluent.Kafka.Common.Serialization;
 /// through the first of the two it implements, and a mock producer does not.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Each built-in serializer has a class of this interface, named <c>Async</c> and the serializer's name
 /// (<see cref="AsyncStringSerializer"/>). A serializer of one's own that does not wait is given to an asynchronous
 /// producer through a class of this interface that calls it and returns a completed <see cref="ValueTask{TResult}"/>.
+/// </para>
+/// <para>
+/// A producer given two built-in classes serializes inside its <c>Send</c> call and waits for neither. A producer
+/// given any other class awaits the key serializer and then the value serializer, and the record enters the producer
+/// when both have completed, so <c>Send</c>'s first stage covers the wait. A failure, thrown by the call or carried
+/// by the <see cref="ValueTask{TResult}"/>, ends that first stage, and nothing is sent.
+/// </para>
 /// </remarks>
 /// <typeparam name="T">The type encoded.</typeparam>
 public interface IAsyncSerializer<T>
@@ -46,10 +54,12 @@ public interface IAsyncSerializer<T>
     /// <param name="topic">The topic the record is sent to.</param>
     /// <param name="headers">The record's headers, which may be empty but are never <see langword="null"/>. The
     /// serializer may change them as a side effect of serializing; it is best practice to only add headers, and not to
-    /// remove or change existing ones.</param>
+    /// remove or change existing ones. A mock producer passes a new, empty <see cref="Headers"/> that it then drops,
+    /// as Java's <c>MockProducer</c> does.</param>
     /// <param name="data">The value to encode; may be <see langword="null"/>, which the producer passes for a record
     /// with no key or no value.</param>
-    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <param name="cancellationToken">Cancels the call: the token the producer's <c>Send</c> was given. An
+    /// <see cref="OperationCanceledException"/> from the serializer ends <c>Send</c>'s first stage as cancelled.</param>
     /// <returns>
     /// The bytes, or <see langword="null"/>, which is sent as a null key or value. An empty memory is sent as empty
     /// bytes. A <see langword="null"/> <c>byte[]</c> converts to an empty memory, not to <see langword="null"/>: return

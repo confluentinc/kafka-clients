@@ -73,7 +73,7 @@ internal sealed class SoakRecord
 /// Encodes a <see cref="SoakRecord"/>, padded to the profile's target size (a longer record stays
 /// unpadded); the target is per-instance state, where Python keeps it on the class.
 /// </summary>
-internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
+internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>, IAsyncSerializer<SoakRecord>
 {
     private static readonly byte[] s_padUnit = Encoding.ASCII.GetBytes(" SoakRecord nr #0");
 
@@ -94,6 +94,11 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
 
         _padSource = pad;
     }
+
+    // The async producer's form: the record is encoded before the call returns.
+    public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+        string topic, Headers headers, SoakRecord? data, CancellationToken cancellationToken) =>
+        new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, data));
 
     public ReadOnlyMemory<byte>? Serialize(string topic, SoakRecord? data)
     {
