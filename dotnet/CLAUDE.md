@@ -1068,7 +1068,10 @@ M19/P1: Java's `clientId()` is package-private and Python has no `client_id()` (
 producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`,
 Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; it maps **no**
 concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
-so its defensive null guard carries a producer-accurate message, decision D-5) and the two
+so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
+producer metrics only, none of Java's network-client metrics: no connection, request, I/O or
+authentication metrics, no per-node metrics and no `app-info` *(recorded gap; Python's binding
+returns the same set. Why: the core registers none of them. Goes when: the core does)*) and the two
 metric-subscription methods. `BeginTransaction` is not on this list: it waits while the core drains
 the queued sends, so it is a `Task` on `IAsyncProducer` (§4 **Producer transactions**).
 Everything else is async.
