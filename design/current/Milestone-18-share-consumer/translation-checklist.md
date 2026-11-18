@@ -118,7 +118,10 @@ async Rust, check each of:
      with `BgJoin::Spawned` (unit tests, `with_components`) it is spawned on the
      caller's runtime, which may be multi-threaded. Even on `current_thread`, a
      spawned continuation interleaves with the loop at each await and across
-     iterations.
+     iterations;
+  8. a Java `finally` (or `try/finally` state reset) around a call that becomes
+     an `.await` needs a drop guard, because the future can be cancelled; test it
+     by dropping the future mid-await.
 
 **Applies to:** share code translating a Java callback, `whenComplete` /
 `thenApply` chain, `synchronized` section reached re-entrantly, or a Java thread
@@ -142,7 +145,7 @@ on a wrong "`current_thread` cannot race" assumption, hence item 7), the #277
 poll-vs-metadata ABBA deadlock (`FetchCollector::update_partition_state` held
 `SubscriptionState` then took the `Metadata` lock; `Metadata::update` holds
 `Metadata` then locks `SubscriptionState`; Java's `Metadata#metadataExpireMs` is
-an unsynchronized getter — item 5), C2-06 and C4-09 (clock read
+an unsynchronized getter — item 5), M18 P2 review (`AcknowledgementCommitCallbackHandler#onComplete`'s `finally` reset of `enteredCallback`, lost when the future was dropped — item 8), C2-06 and C4-09 (clock read
 at spawn), C4-03 (reentrant monitor → `Mutex` deadlock), C4-08 (callbacks out of
 order), C4-14 (missing wake after a channel hop), C3-04 (value moved out under a
 concurrent reader).
