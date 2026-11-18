@@ -2094,7 +2094,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testProcessEventFailureCompletesFutureExceptionally"
     )]
-    async fn test_process_event_failure_completes_future_exceptionally() {
+    async fn test_process_event_failure_completes_future_with_error() {
         let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
         thread.application_event_processor.fail_process_for_test = Some("Simulated processing failure".to_string());
 
