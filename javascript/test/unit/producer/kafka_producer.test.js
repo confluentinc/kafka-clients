@@ -1264,6 +1264,10 @@ const AFTER_CLOSE = [
   { call: 'p[Symbol.asyncDispose]()', outcome: 'resolved' },
   // Java's flush() has no closed check: it returns.
   { call: 'p.flush()', outcome: 'resolved' },
+  // A topic the closed producer has no metadata for: Java's partitionsFor()
+  // asks for a metadata update, and ProducerMetadata#awaitUpdate throws
+  // KafkaException("Requested metadata update after close").
+  { call: "p.partitionsFor('t')", outcome: 'KafkaError: Requested metadata update after close' },
   // Answered inside the call, with Java's errors.
   { call: 'p.close(-1)', outcome: 'IllegalArgumentError: The timeout cannot be negative.' },
   { call: "p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') }))", outcome: `IllegalStateError: ${CLOSED_MESSAGE}` },

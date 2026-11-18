@@ -429,6 +429,54 @@ const N = 300;
 );
 
 (SKIP ? test.skip : test)(
+  'partitionsFor() on a closed producer answers from its cached metadata, or rejects for a topic it has none for, and the process exits',
+  () => {
+    // Java 4.4.0's partitionsFor() after close(): a topic the producer's
+    // metadata holds is answered from it (waitOnMetadata needs no update),
+    // and any other topic asks for one, which ProducerMetadata#awaitUpdate
+    // refuses with KafkaException("Requested metadata update after close").
+    // Both answers come after the close's completion, so only the hold of a
+    // waiting call keeps Node running until them (javascript/CLAUDE.md,
+    // "Threads and liveness"): the child has nothing else holding Node,
+    // prints the answers, and exits right after the last.
+    const topic = freshTopic('closed-pf');
+    const script = `
+      const { performance } = require('node:perf_hooks');
+      const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+      const names = (partitions) => partitions.map((info) => info.topic() + '-' + info.partition()).join(' ');
+      const describe = (e) => (e.constructor === KafkaError ? 'KafkaError' : 'another class, ' + e.constructor.name) + ': ' + e.message;
+      let mark;
+      process.on('exit', () => console.log('exited after', performance.now() - mark < 1000 ? 'less than 1s' : 'more'));
+      (async () => {
+        const p = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP } });
+        // The first send creates the topic (auto-creation), with one partition.
+        await (await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: Buffer.from('v') }))).get();
+        const open = names(await p.partitionsFor(process.env.TOPIC));
+        await p.close();
+        const known = await p.partitionsFor(process.env.TOPIC).then(names, describe);
+        const unknown = await p.partitionsFor(process.env.TOPIC + '-none').then(names, describe);
+        mark = performance.now();
+        console.log(['open: ' + open, 'known after close: ' + known, 'unknown after close: ' + unknown].join('\\n'));
+      })();
+    `;
+    const r = spawnSync(process.execPath, ['--no-warnings', '-e', script], {
+      cwd: path.join(__dirname, '..', '..'),
+      encoding: 'utf8',
+      timeout: 90000,
+      env: { ...process.env, BOOTSTRAP, TOPIC: topic },
+    });
+    assert.equal(r.signal, null, `the process did not exit on its own: ${r.stdout}${r.stderr}`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(
+      r.stdout,
+      `open: ${topic}-0\nknown after close: ${topic}-0\nunknown after close: KafkaError: Requested metadata update after close\nexited after less than 1s\n`,
+    );
+  },
+  180000,
+);
+
+(SKIP ? test.skip : test)(
   'NUL bytes in a key, a value and a header value cross byte-exact',
   async () => {
     // Only the strings the C ABI reads as NUL-terminated (topic, header key,
@@ -1504,28 +1552,11 @@ async function createdTopic(what) {
         highWatermark >= base + 100 * (round + 1),
         `Consumed ${highWatermark - base} records before timeout instead of the expected ${100 * (round + 1)} records`,
       );
-      await holdingTheLoop(() => producer.close());
+      await producer.close();
     }
   },
   600000,
 );
-
-/**
- * Runs `body` with the event loop held by a timer: a closed producer no
- * longer keeps Node running.
- *
- * @template T
- * @param {() => Promise<T>} body
- * @returns {Promise<T>}
- */
-async function holdingTheLoop(body) {
-  const hold = setInterval(() => {}, 1000);
-  try {
-    return await body();
-  } finally {
-    clearInterval(hold);
-  }
-}
 
 // BaseProducerSendTest.testSendNonCompressedMessageWithCreateTime and
 // testSendCompressedMessageWithCreateTime (gzip): 100 lingering records keep
@@ -1848,7 +1879,7 @@ test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool
         assert.equal(callbacks, 0);
         assert.ok(Date.now() - started < 30000, `close took ${Date.now() - started} ms`);
         // close() without a timeout sends what the accumulator holds.
-        await holdingTheLoop(() => first.get());
+        await first.get();
         return;
       } finally {
         // Every try's producer is closed, the retried ones and a failed one.
@@ -1920,13 +1951,11 @@ test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool
     for (const p of producers) await (await p.send(record)).get();
     for (const p of producers) {
       await p.close();
-      await holdingTheLoop(() =>
-        assert.rejects(p.send(record), (e) => {
-          assert.ok(e instanceof IllegalStateError && !(e instanceof KafkaError), `${e}`);
-          assert.equal(e.message, 'Cannot perform operation after producer has been closed');
-          return true;
-        }),
-      );
+      await assert.rejects(p.send(record), (e) => {
+        assert.ok(e instanceof IllegalStateError && !(e instanceof KafkaError), `${e}`);
+        assert.equal(e.message, 'Cannot perform operation after producer has been closed');
+        return true;
+      });
     }
   },
   120000,

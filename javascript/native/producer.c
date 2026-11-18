@@ -17,14 +17,14 @@
 // logic.
 //
 // Every operation uses the `_cb` twin of its Java method (send_with_callback_cb,
-// flush_cb, close_cb / close_with_timeout_cb), whose completion, like every
-// delivery callback, the core QUEUES on the producer's callback vector; the
-// producer's CallbackQueue (callback_queue.c) drains it on the JS thread, from
-// the event loop or from send()'s `pump`. So every completion runs on the JS
-// thread and builds its JS values there. A send's hand-over completion may
-// also fire inside send_with_callback_cb itself, on the JS thread (the record
-// taken or refused at once), so a send's whole state is in place before that
-// call.
+// flush_cb, partitions_for_cb, close_cb / close_with_timeout_cb), whose
+// completion, like every delivery callback, the core QUEUES on the producer's
+// callback vector; the producer's CallbackQueue (callback_queue.c) drains it
+// on the JS thread, from the event loop or from send()'s `pump`. So every
+// completion runs on the JS thread and builds its JS values there. A send's
+// hand-over completion may also fire inside send_with_callback_cb itself, on
+// the JS thread (the record taken or refused at once), so a send's whole
+// state is in place before that call.
 //
 // Each request has its own context (SendCtx, FlushCtx, CloseCtx, FutureWait,
 // PartitionsForCtx), whose pointer is what the core receives as the
@@ -35,14 +35,18 @@
 // "Threads and liveness"): `cbq_call_begin` as the statement right before the
 // call, after every early return of the function making it, and
 // `cbq_call_end` as the last statement of its completion (send_on_handover,
-// flush_on_complete, close_on_complete, future_on_wait), on every path: the
-// drain, inline inside the call, and the destroy; nowhere else (not in the
-// delivery callback). So a call made on a closed producer holds Node until
-// its answer ran, as Java's call returns, and so does a second close made
-// while the first runs, whose answer comes after the first's. A send's
-// hand-over and a wait on a record's future are counted the same way, so one
-// rule covers every call whatever order the core answers in, although every
-// answer of theirs seen so far came before the close's completion.
+// flush_on_complete, partitions_for_on_complete, close_on_complete,
+// future_on_wait), on every path: the drain, inline inside the call, and the
+// destroy; nowhere else (not in the delivery callback). So a call made on a
+// closed producer holds Node until its answer ran, as Java's call returns,
+// and so does a second close made while the first runs, whose answer comes
+// after the first's. A send's hand-over and a wait on a record's future are
+// counted the same way, so one rule covers every call whatever order the core
+// answers in, although every answer of theirs seen so far came before the
+// close's completion. A MockProducer makes the same calls, through the same
+// view and the same sites, so its calls are counted the same way: its own
+// calls (history, clear, completeNext, errorNext, the error setters) are
+// `_err` calls, answered inside the call, with no completion to count.
 //
 // A delivery callback that returns a Promise is awaited: its report through
 // `__set_callback_result` waits until the Promise settled (send_on_settled),
@@ -1267,7 +1271,8 @@ static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
 }
 
 // The partitions_for_cb completion, on the JS thread: `done(error, null)` or
-// `done(null, partitions)`.
+// `done(null, partitions)`, then the end of the call's count (a call made on a
+// closed producer holds Node until then).
 static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
     PartitionsForCtx* ctx = (PartitionsForCtx*)opaque;
     Producer* p = ctx->p;
@@ -1295,6 +1300,7 @@ static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t
     error_discard(error);
     delete_ref(env, &ctx->done);
     free(ctx);
+    cbq_call_end(env, &p->queue);
 }
 
 // producerPartitionsFor(handle, topic, done): Producer.partitionsFor(topic)
@@ -1332,6 +1338,7 @@ napi_value js_producer_partitions_for(napi_env env, napi_callback_info info) {
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
+    cbq_call_begin(env, &p->queue);
     kafka_producer_Producer_partitions_for_cb(p->view, topic, partitions_for_on_complete, ctx);
     free(topic);
     return NULL;
