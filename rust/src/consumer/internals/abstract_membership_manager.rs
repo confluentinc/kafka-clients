@@ -404,14 +404,14 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
 
     /// Signals that the member is leaving the group so that group-type actions
     /// can run (the consumer releases its assignment through
-    /// `onPartitionsRevoked` / `onPartitionsLost`). Returns the ack the leave
-    /// waits on before clearing the assignment, or `None` (Java's completed
-    /// future).
+    /// `onPartitionsRevoked` / `onPartitionsLost`). Returns the
+    /// [`LeaveCallback`] whose ack the leave waits on before clearing the
+    /// assignment, or `None` (Java's completed future).
     ///
     /// Java: `protected CompletableFuture<Void> signalMemberLeavingGroup()`,
     /// whose base body returns `CompletableFuture.completedFuture(null)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#signalMemberLeavingGroup")]
-    fn signal_member_leaving_group(&self, _current_time_ms: i64) -> Result<Option<SignalAck>, Error> {
+    fn signal_member_leaving_group(&self, _current_time_ms: i64) -> Result<Option<LeaveCallback>, Error> {
         Ok(None)
     }
 
@@ -692,25 +692,22 @@ pub(crate) struct AbstractMembershipManager {
     /// before any request manager polls, so `PREPARE_LEAVING -> LEAVING`
     /// keeps the event's queue position and can never land in the middle of
     /// a heartbeat build.
-    pending_leave_callback: Mutex<Option<PendingLeaveCallback>>,
+    pending_leave_callback: Mutex<Option<LeaveCallback>>,
     /// Lock-free mirror of `pending_leave_callback.is_some()`, so the
     /// steady-state bg loop pays one atomic load.
     pending_leave_callback_flag: std::sync::atomic::AtomicBool,
-    /// The partitions the last [`Self::revoke_partitions`] call passed to
-    /// `signalPartitionsRevoked`. A leave clears it before
-    /// `signal_member_leaving_group` and takes it afterwards, so a leave that
-    /// revoked (epoch > 0) knows which partitions to name in Java's
-    /// `revokePartitions` failure log when its ack arrives. Rust-only: Java
-    /// logs from the revocation future's own `whenComplete`.
-    last_revoked_partitions: Mutex<Option<Vec<TopicPartition>>>,
 }
 
-/// The pending release callback of an `unsubscribe()` leave: its ack, and the
-/// partitions `revokePartitions` revoked when the release was an
-/// `onPartitionsRevoked` (`None` for `onPartitionsLost`).
-struct PendingLeaveCallback {
-    ack_rx: SignalAck,
-    revoked_partitions: Option<Vec<TopicPartition>>,
+/// The release callback of an `unsubscribe()` leave, as
+/// [`MembershipManagerHooks::signal_member_leaving_group`] returns it: its
+/// ack, and the partitions [`AbstractMembershipManager::revoke_partitions`]
+/// revoked when the release was an `onPartitionsRevoked` (`None` for
+/// `onPartitionsLost`), so the leave can name them in Java's
+/// `revokePartitions` failure log when the ack arrives. Rust-only (DoD §7):
+/// Java logs from the revocation future's own `whenComplete`.
+pub(crate) struct LeaveCallback {
+    pub(crate) ack_rx: SignalAck,
+    pub(crate) revoked_partitions: Option<Vec<TopicPartition>>,
 }
 
 impl AbstractMembershipManager {
@@ -761,7 +758,6 @@ impl AbstractMembershipManager {
             pending_release_flag: std::sync::atomic::AtomicBool::new(false),
             pending_leave_callback: Mutex::new(None),
             pending_leave_callback_flag: std::sync::atomic::AtomicBool::new(false),
-            last_revoked_partitions: Mutex::new(None),
         }
     }
 
@@ -2297,8 +2293,8 @@ impl AbstractMembershipManager {
     /// error. Rust logs that line where the ack is consumed: the reconcile
     /// chain when resuming [`PendingReconcile::AfterRevoke`], and a leave in
     /// [`Self::drive_pending_leave_callback`], before the `leaveGroup`
-    /// release-failure line (the partitions reach it through
-    /// `last_revoked_partitions`).
+    /// release-failure line (the leave returns the partitions with its ack as
+    /// a [`LeaveCallback`]).
     ///
     /// Java: `CompletableFuture<Void> revokePartitions(Set<TopicPartition>)`
     /// (package-private, called by `revokeAndAssign` and by
@@ -2353,13 +2349,6 @@ impl AbstractMembershipManager {
             }
         }
 
-        {
-            let mut last = match self.last_revoked_partitions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            *last = Some(revoked_partitions.clone());
-        }
         let ack = hooks.signal_partitions_revoked(
             revoked_partitions.clone(),
             ack_through_application_events,
@@ -2907,12 +2896,9 @@ impl AbstractMembershipManager {
         };
 
         if run_callbacks {
-            self.take_last_revoked_partitions();
-            let signal = hooks.signal_member_leaving_group(current_time_ms);
-            let revoked_partitions = self.take_last_revoked_partitions();
-            match signal {
-                Ok(Some(ack_rx)) => {
-                    self.store_pending_leave_callback(PendingLeaveCallback { ack_rx, revoked_partitions });
+            match hooks.signal_member_leaving_group(current_time_ms) {
+                Ok(Some(callback)) => {
+                    self.store_pending_leave_callback(callback);
                     return Ok(leave_result);
                 },
                 Ok(None) => {
@@ -2958,15 +2944,7 @@ impl AbstractMembershipManager {
     /// clear-and-leave step — the first leave's future was already completed
     /// by the fence / fatal transition. Java would still run the stale step
     /// and move the new leave to LEAVING before its own callback ran.
-    /// Takes [`Self::last_revoked_partitions`], leaving `None`.
-    fn take_last_revoked_partitions(&self) -> Option<Vec<TopicPartition>> {
-        match self.last_revoked_partitions.lock() {
-            Ok(mut g) => g.take(),
-            Err(p) => p.into_inner().take(),
-        }
-    }
-
-    fn store_pending_leave_callback(&self, pending: PendingLeaveCallback) {
+    fn store_pending_leave_callback(&self, pending: LeaveCallback) {
         let mut guard = match self.pending_leave_callback.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -3008,7 +2986,7 @@ impl AbstractMembershipManager {
                 .store(false, std::sync::atomic::Ordering::Release);
             guard.take()
         };
-        let Some(PendingLeaveCallback { mut ack_rx, revoked_partitions }) = pending else {
+        let Some(LeaveCallback { mut ack_rx, revoked_partitions }) = pending else {
             return Ok(());
         };
         let result = ack_rx.try_recv();
@@ -3046,7 +3024,7 @@ impl AbstractMembershipManager {
             ),
             Err(oneshot::error::TryRecvError::Empty) => {
                 // Ack not ready — keep waiting (the loop continues).
-                self.store_pending_leave_callback(PendingLeaveCallback { ack_rx, revoked_partitions });
+                self.store_pending_leave_callback(LeaveCallback { ack_rx, revoked_partitions });
                 return Ok(());
             },
         }

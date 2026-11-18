@@ -49,7 +49,7 @@ use super::RequestManager;
 use super::SubscriptionState;
 #[cfg(test)]
 use super::abstract_membership_manager::PendingReconcile;
-use super::abstract_membership_manager::SignalAck;
+use super::abstract_membership_manager::{LeaveCallback, SignalAck};
 use super::metrics::ConsumerRebalanceMetricsManager;
 use super::metrics::RebalanceMetricsManager;
 use super::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
@@ -639,7 +639,7 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#invokeOnPartitionsRevokedOrLostToReleaseAssignment"
     )]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalMemberLeavingGroup")]
-    fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<Option<SignalAck>, Error> {
+    fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<Option<LeaveCallback>, Error> {
         // Snapshot the dropped partitions + epoch under short locks, one at
         // a time.
         let (dropped_partitions, member_epoch) = {
@@ -672,17 +672,18 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         if member_epoch > 0 {
             // Member is part of the group. Invoke onPartitionsRevoked.
             let dropped: HashSet<TopicPartition> = dropped_partitions.into_iter().collect();
-            self.abstract_mm
-                .revoke_partitions(self, &dropped, true, current_time_ms)
-                .map(|(_, ack)| ack)
+            let (revoked_partitions, ack) =
+                self.abstract_mm.revoke_partitions(self, &dropped, true, current_time_ms)?;
+            Ok(ack.map(|ack_rx| LeaveCallback { ack_rx, revoked_partitions: Some(revoked_partitions) }))
         } else {
             // Member is not part of the group anymore. Invoke onPartitionsLost.
-            self.enqueue_rebalance_callback_with_ack_through_application_events(
+            let ack = self.enqueue_rebalance_callback_with_ack_through_application_events(
                 ConsumerRebalanceListenerMethodName::OnPartitionsLost,
                 dropped_partitions,
                 true,
                 current_time_ms,
-            )
+            )?;
+            Ok(ack.map(|ack_rx| LeaveCallback { ack_rx, revoked_partitions: None }))
         }
     }
 
