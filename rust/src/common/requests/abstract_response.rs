@@ -83,6 +83,8 @@ use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
+use super::ShareGroupDescribeResponse;
+use super::ShareGroupHeartbeatResponse;
 use super::TxnOffsetCommitResponse;
 use super::UnregisterControllerResponse;
 use super::UpdateFeaturesResponse;
@@ -231,6 +233,10 @@ pub enum ConcreteResponse {
     WriteTxnMarkers(WriteTxnMarkersResponse),
     /// A ListTransactions response.
     ListTransactions(ListTransactionsResponse),
+    /// A ShareGroupDescribe response (KIP-932).
+    ShareGroupDescribe(ShareGroupDescribeResponse),
+    /// A ShareGroupHeartbeat response (KIP-932).
+    ShareGroupHeartbeat(ShareGroupHeartbeatResponse),
 }
 
 impl ConcreteResponse {
@@ -291,6 +297,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
             Self::ListTransactions(r) => r.api_key(),
+            Self::ShareGroupDescribe(r) => r.api_key(),
+            Self::ShareGroupHeartbeat(r) => r.api_key(),
         }
     }
 
@@ -360,6 +368,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::WriteTxnMarkers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareGroupDescribe(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ShareGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -534,6 +544,12 @@ impl ConcreteResponse {
             Self::ListTransactions(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::ShareGroupDescribe(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareGroupHeartbeat(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -600,6 +616,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareGroupDescribe(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -670,6 +688,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.error_counts(),
             Self::WriteTxnMarkers(r) => r.error_counts(),
             Self::ListTransactions(r) => r.error_counts(),
+            Self::ShareGroupDescribe(r) => r.error_counts(),
+            Self::ShareGroupHeartbeat(r) => r.error_counts(),
         }
     }
 
@@ -732,6 +752,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.throttle_time_ms(),
             Self::WriteTxnMarkers(r) => r.throttle_time_ms(),
             Self::ListTransactions(r) => r.throttle_time_ms(),
+            Self::ShareGroupDescribe(r) => r.throttle_time_ms(),
+            Self::ShareGroupHeartbeat(r) => r.throttle_time_ms(),
         }
     }
 
@@ -793,6 +815,8 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::WriteTxnMarkers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareGroupDescribe(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ShareGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -859,6 +883,8 @@ impl ConcreteResponse {
             | Self::DescribeProducers(_)
             | Self::DescribeTransactions(_)
             | Self::WriteTxnMarkers(_)
+            | Self::ShareGroupHeartbeat(_)
+            | Self::ShareGroupDescribe(_)
             | Self::ListTransactions(_) => self.api_key().response_schema(version).get("throttle_time_ms").is_some(),
         }
     }
@@ -1136,6 +1162,12 @@ impl ConcreteResponse {
                 let response = ListTransactionsResponse::parse(readable, version)?;
                 Ok(Self::ListTransactions(response))
             },
+            ApiKeys::SHARE_GROUP_DESCRIBE => {
+                Ok(Self::ShareGroupDescribe(ShareGroupDescribeResponse::parse(readable, version)?))
+            },
+            ApiKeys::SHARE_GROUP_HEARTBEAT => Ok(Self::ShareGroupHeartbeat(ShareGroupHeartbeatResponse::parse(
+                readable, version,
+            )?)),
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
@@ -1203,6 +1235,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::DescribeTransactions(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
             Self::ListTransactions(r) => write!(f, "{r}"),
+            Self::ShareGroupDescribe(r) => write!(f, "{r}"),
+            Self::ShareGroupHeartbeat(r) => write!(f, "{r}"),
         }
     }
 }
@@ -1334,6 +1368,8 @@ mod tests {
             (TXN_OFFSET_COMMIT, crate::TxnOffsetCommitResponseData),
             (WRITE_TXN_MARKERS, crate::WriteTxnMarkersResponseData),
             (LIST_TRANSACTIONS, crate::ListTransactionsResponseData),
+            (SHARE_GROUP_DESCRIBE, crate::ShareGroupDescribeResponseData),
+            (SHARE_GROUP_HEARTBEAT, crate::ShareGroupHeartbeatResponseData),
         ];
 
         let mut checked = 0;
