@@ -26,10 +26,23 @@
 // taken or refused at once), so a send's whole state is in place before that
 // call.
 //
-// Each request has its own context (SendCtx, FlushCtx, CloseCtx), whose
-// pointer is what the core receives as the completion's opaque. A send that
-// fails at hand-over parks its context on the orphan list, freed only after
-// destroy.
+// Each request has its own context (SendCtx, FlushCtx, CloseCtx, FutureWait),
+// whose pointer is what the core receives as the completion's opaque. A send
+// that fails at hand-over parks its context on the orphan list, freed only
+// after destroy.
+//
+// Every `_cb` call is counted on the producer's queue (javascript/CLAUDE.md,
+// "Threads and liveness"): `cbq_call_begin` as the statement right before the
+// call, after every early return of the function making it, and
+// `cbq_call_end` as the last statement of its completion (send_on_handover,
+// flush_on_complete, close_on_complete, future_on_wait), on every path: the
+// drain, inline inside the call, and the destroy; nowhere else (not in the
+// delivery callback). So a call made on a closed producer holds Node until
+// its answer ran, as Java's call returns, and so does a second close made
+// while the first runs, whose answer comes after the first's. A send's
+// hand-over and a wait on a record's future are counted the same way, so one
+// rule covers every call whatever order the core answers in, although every
+// answer of theirs seen so far came before the close's completion.
 //
 // A delivery callback that returns a Promise is awaited: its report through
 // `__set_callback_result` waits until the Promise settled (send_on_settled),
@@ -40,9 +53,10 @@
 //
 // Closed state and teardown (javascript/CLAUDE.md, rules 1 and 10): the
 // binding keeps no closed flag and refuses no call; a call after close() goes
-// to the FFI, whose error is the core's. close() does not free the native
-// handle: its completion only lets Node exit and lets the handle object be
-// collected (cbq_closed). The handle object's finalizer then destroys the
+// to the FFI, whose answer is the core's. close() does not free the native
+// handle: its completion only lets Node exit once no call made on the
+// producer waits for its answer, and lets the handle object be collected
+// (cbq_closed). The handle object's finalizer then destroys the
 // closed producer (outside any drain, running no JS), and releases the
 // threadsafe function, whose finalizer frees this struct together with the
 // handle object's finalizer (two owners). `KafkaProducer_destroy_err` runs the
@@ -271,7 +285,7 @@ static void send_ctx_release(napi_env env, SendCtx* ctx) {
 
 // One wait on a record's future: `get_cb` or `get_with_timeout_cb`. It holds
 // one reference on the send's context and one unit of the producer struct
-// until its completion.
+// until its completion, and is one of the producer's counted calls.
 typedef struct {
     SendCtx* ctx;
     Producer* p;
@@ -317,6 +331,8 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
     ctx->waits--;
     send_ctx_maybe_destroy_future(env, ctx);
     send_ctx_release(env, ctx);
+    cbq_call_end(env, &p->queue);
+    // The wait's unit of the struct, which holds the queue: released last.
     producer_release(p);
 }
 
@@ -371,8 +387,13 @@ napi_value js_record_future_get(napi_env env, napi_callback_info info) {
     ctx->refs++;
     ctx->waits++;
     p->owners++;
-    if (!w->timed) kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);
-    else kafka_common_KafkaFuture_get_with_timeout_cb(ctx->future, timeout, future_on_wait, w);
+    if (!w->timed) {
+        cbq_call_begin(env, &p->queue);
+        kafka_common_KafkaFuture_get_cb(ctx->future, future_on_wait, w);
+    } else {
+        cbq_call_begin(env, &p->queue);
+        kafka_common_KafkaFuture_get_with_timeout_cb(ctx->future, timeout, future_on_wait, w);
+    }
     return NULL;
 }
 
@@ -430,13 +451,12 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
         // KafkaProducer, which would otherwise never be collected, nor the
         // closed producer destroyed.
         if (cbq_is_closed(&p->queue)) delete_ref(env, &ctx->on_complete);
-        return;
-    }
-    if (ctx->handover_failed) {
+    } else if (ctx->handover_failed) {
         send_ctx_free(env, ctx);
-        return;
+    } else {
+        send_ctx_release(env, ctx);
     }
-    send_ctx_release(env, ctx);
+    cbq_call_end(env, &p->queue);
 }
 
 // The owned error a callback's failure is reported with: the core logs it, as
@@ -750,6 +770,7 @@ napi_value js_producer_send(napi_env env, napi_callback_info info) {
     }
     // Everything the completions read is in place: the hand-over completion can
     // fire inside this call.
+    cbq_call_begin(env, &p->queue);
     kafka_producer_Producer_send_with_callback_cb(p->view, record, callback, send_on_handover, ctx);
     // The call consumed the callback and copied the record; the key and value
     // stay borrowed until the hand-over completion (send_on_handover).
@@ -771,6 +792,7 @@ static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_discard(error);
     delete_ref(env, &ctx->done);
     free(ctx);
+    cbq_call_end(env, &p->queue);
 }
 
 // producerFlush(handle, done): Producer.flush() through flush_cb;
@@ -797,6 +819,7 @@ napi_value js_producer_flush(napi_env env, napi_callback_info info) {
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
+    cbq_call_begin(env, &p->queue);
     kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);
     return NULL;
 }
@@ -839,9 +862,11 @@ static void producer_destroy(napi_env env, Producer* p) {
 // The close completion (close_cb / close_with_timeout_cb), on the JS thread.
 // A timeout the core rejected (Java's IllegalArgumentException) closed
 // nothing: the producer stays open and keeps Node running. Any other outcome
-// closed it: Node may exit and the handle object be collected (cbq_closed).
-// `done(error | null, closedNow)`, closedNow true for the close that closed
-// the producer, false for a rejected one or a later close.
+// closed it: the handle object may be collected (cbq_closed), and Node may
+// exit once no call made on the producer waits for its answer, this close
+// included until its cbq_call_end, after `done` ran. `done(error | null,
+// closedNow)`, closedNow true for the close that closed the producer, false
+// for a rejected one or a later close.
 static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     CloseCtx* ctx = (CloseCtx*)opaque;
     Producer* p = ctx->p;
@@ -870,6 +895,7 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_discard(error);
     delete_ref(env, &ctx->done);
     free(ctx);
+    cbq_call_end(env, &p->queue);
 }
 
 // producerClose(handle, timeoutMs, done): Producer.close() for a timeoutMs of
@@ -918,8 +944,13 @@ napi_value js_producer_close(napi_env env, napi_callback_info info) {
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
-    if (!timed) kafka_producer_Producer_close_cb(p->view, close_on_complete, ctx);
-    else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);
+    if (!timed) {
+        cbq_call_begin(env, &p->queue);
+        kafka_producer_Producer_close_cb(p->view, close_on_complete, ctx);
+    } else {
+        cbq_call_begin(env, &p->queue);
+        kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, ctx);
+    }
     return NULL;
 }
 

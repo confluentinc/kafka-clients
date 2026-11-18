@@ -319,6 +319,54 @@ test("a record's native future is released across close, collection and destroy,
   );
 });
 
+test("a record's future waited on natively across close(0) fails as Java's get() throws, and the process exits", { skip: SKIP, timeout: 180000 }, () => {
+  // Lingering records (linger.ms 60000), each future's get() waiting through
+  // the FFI (get_cb, get_with_timeout_cb) when close(0) aborts them: Java's
+  // get() throws ExecutionException, caused by the KafkaException
+  // "Producer is closed forcefully.". This checks Java's answer, and that the
+  // process exits right after the last answer, so each wait's count ended
+  // (javascript/CLAUDE.md, "Threads and liveness"). It does not exercise the
+  // hold of a wait: both waits are answered before the close completes,
+  // while the open producer still holds Node. The producers stay reachable,
+  // so no garbage collection releases what a wait left held.
+  const topic = freshTopic('closed-wait');
+  const script = `
+    const { performance } = require('node:perf_hooks');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const describe = (e) => e.constructor.name + ' caused by ' + e.cause.constructor.name + ': ' + e.cause.message;
+    const producers = [];
+    let mark;
+    process.on('exit', () => console.log('exited after', performance.now() - mark < 1000 ? 'less than 1s' : 'more'));
+    (async () => {
+      const outcomes = new Set();
+      for (let round = 0; round < 5; round++) {
+        const p = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP, 'linger.ms': 60000 } });
+        producers.push(p);
+        const untimed = await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: 'u' }));
+        const timed = await p.send(new ProducerRecord({ topic: process.env.TOPIC, value: 't' }));
+        const waits = [untimed.get(), timed.get({ timeout: 60000 })].map((w) => w.then(() => 'resolved', describe));
+        outcomes.add('done before the close: ' + untimed.isDone() + ' ' + timed.isDone());
+        await p.close(0);
+        for (const outcome of await Promise.all(waits)) outcomes.add(outcome);
+      }
+      mark = performance.now();
+      console.log([...outcomes].join('\\n'));
+    })();
+  `;
+  const r = spawnSync(process.execPath, ['--no-warnings', '-e', script], {
+    cwd: path.join(__dirname, '..', '..'),
+    encoding: 'utf8',
+    timeout: 90000,
+    env: { ...process.env, BOOTSTRAP, TOPIC: topic },
+  });
+  assert.equal(r.signal, null, `the process did not exit on its own: ${r.stdout}${r.stderr}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    'done before the close: false false\nExecutionError caused by KafkaError: Producer is closed forcefully.\nexited after less than 1s\n',
+  );
+});
+
 test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: SKIP, timeout: 120000 }, async () => {
   // Only the strings the C ABI reads as NUL-terminated (topic, header key,
   // config) refuse a NUL; bytes cross with their length.

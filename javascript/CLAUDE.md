@@ -249,10 +249,11 @@ These decide every question, in this order:
     `close_with_timeout_cb` every time, a second close included, and does not
     free the native handle. Its completion (`close_on_complete`) records the
     core's answer: any outcome but a rejected timeout closed the producer, so
-    `cbq_closed` unreferences the threadsafe function and makes the queue's
-    reference on the handle object weak, and drops the `on_complete`
-    function of every send context parked on the orphan list (a hand-over
-    refused after the close drops its own at once): no delivery callback can
+    `cbq_closed` lets Node go once no call made on the producer waits for its
+    answer ("Threads and liveness"), makes the queue's reference on the
+    handle object weak, and drops the `on_complete` function of every send
+    context parked on the orphan list (a hand-over refused after the close
+    drops its own at once): no delivery callback can
     fire for those records any more, and the functions' closures hold the
     `KafkaProducer`, which would never be collected. The handle object's Node-API
     finalizer (`producer_finalize`) then calls `KafkaProducer_destroy_err`,
@@ -275,13 +276,53 @@ binding:
   JS thread that owns the client,
   inside the drain, so JS values are created there directly.
 - A producer keeps Node running from its creation until `close()` closes it
-  (root conventions, Lifetime): the threadsafe function is created
-  referenced, as Node-API creates it, and `cbq_closed` calls
-  `napi_unref_threadsafe_function` once the core reported the producer
-  closed, so nothing is counted. The threadsafe function is not released
-  then: the completions of calls made after the close still run, while
-  something else keeps the event loop alive (a closed producer no longer
-  holds it). A script that never calls `close()` never exits on its own.
+  (root conventions, Lifetime), and a call made on it keeps Node running
+  until that call settles, closed or not, as Java's call returns. The
+  threadsafe function is created referenced, as Node-API creates it, and is
+  referenced while the producer is open or while one of its `_cb` calls waits
+  for its completion; `cbq_hold_update` (`native/callback_queue.c`) is the
+  one place that references or unreferences it, only when that answer
+  changes. Node-API counts neither call (a uv handle's ref is a flag), so the
+  callback queue counts the calls itself: `cbq_call_begin` as the statement
+  right before each `_cb` call, in the same block, after every early return
+  of the function making it, and `cbq_call_end` as the last statement of its
+  completion (only the release of the producer struct, which may free the
+  queue, comes after), on every path: the drain, inline inside the call, and
+  the destroy, where the hold no longer changes since the threadsafe function
+  is being released. Neither appears anywhere else: a delivery callback ends
+  no count. Every `_cb` call is counted: a send's hand-over
+  (`send_with_callback_cb`, ended in `send_on_handover`), `flush_cb`,
+  `close_cb` and `close_with_timeout_cb` (ended in `close_on_complete`, after
+  the JS callback), and the waits on a record's future (`get_cb`,
+  `get_with_timeout_cb`, ended in `future_on_wait`). A second close made while
+  the first runs is answered after the first close's completion; the
+  hand-overs and the waits have been answered before it in every scenario
+  found, so their counts are guarded by `check-tsfn-lifetime` and by the test
+  of a late `close()` and `flush()` after a record's callback ran, not by a
+  test of a late answer. `cbq_closed`, run by the close completion once the
+  core reported the producer closed, ends the open half, so a closed producer
+  with no call waiting lets Node exit right after its last answer ran. The
+  threadsafe function is not released then: the completions of calls made
+  after the close still run, and each such call holds Node until it has. A
+  script that never calls `close()` never exits on its own.
+- That is how this binding reads the Lifetime rule: the hold lasts while a
+  call waits. Read literally, the rule's "calls
+  `napi_unref_threadsafe_function` once `close()` has closed the client, so
+  nothing is counted" lets Node go at the first close completion, so a
+  completion the core queues after it is lost when nothing else holds Node:
+  an awaited `close()`, `close(timeout)`, `[Symbol.asyncDispose]()` or
+  `flush()` on a closed producer never settles, the code after its `await`
+  never runs, Node exits with code 0, and of two `close()` calls at once one
+  is lost. That breaks the rule's own reason ("this way no pending send or
+  poll is cut off"), the root conventions' "an async one rejects with it"
+  (Implementation over the FFI: an async call after `close()` settles with
+  the core's answer), and Java parity, where each of those calls returns. So
+  the code follows the rule's intent: a closed client holds Node only while a
+  call made on it is still waiting for its answer
+  (`design/current/javascript-producer/PLAN-close-liveness.md`). The wording
+  proposed to the rules' owner: "…calls `napi_unref_threadsafe_function` once
+  `close()` has closed the client and every call made on it has had its
+  answer."
 - The handle object is held by a strong reference from its creation until
   the close (`cbq_attach` / `cbq_closed`), so garbage collection never
   finalizes an open producer, even once the `KafkaProducer` object is
@@ -997,12 +1038,26 @@ The rules, each named in its finding:
   must not be negative", the busy message, ...), so the binding cannot raise
   it itself (root conventions, Errors, Q35, Q58, Q60). The binding's own
   listed checks write their own messages.
-- `check-tsfn-lifetime`: no `napi_ref_threadsafe_function` in `native/`,
-  and `napi_unref_threadsafe_function` only on the close path,
-  `cbq_closed`, which must call it and which only the close completion,
-  `close_on_complete`, calls, so a client keeps Node running until the core
-  reports it closed (root conventions, Lifetime, Q21; "Threads and
-  liveness").
+- `check-tsfn-lifetime`: `napi_ref_threadsafe_function` and
+  `napi_unref_threadsafe_function` appear in `native/` only in the hold
+  update, `cbq_hold_update`, which calls both; `cbq_closed`, where the open
+  half of the hold ends, is called only by the close completion,
+  `close_on_complete`; every `kafka_*_cb(` call is a whole statement right
+  after a `cbq_call_begin` that is a whole statement too, in the same block
+  (so under the same condition), one each, and a `cbq_call_begin` anywhere
+  else is a finding; a `cbq_call_end` appears only in a completion passed to
+  a `_cb` call (the argument of the header parameter typed `..._cb_t`), and
+  no function calling it is called directly (not from the delivery callback,
+  not through a helper); and each such completion calls `cbq_call_end` once,
+  as a statement of its body's own block, with no `return` in the body and
+  nothing after it but the release of the client struct
+  (`producer_release`). So a client keeps Node running
+  while it is open or a call made on it waits for its answer (root
+  conventions, Lifetime, Q21; "Threads and liveness"). Checked by function,
+  lexically, as the other `native/` rules read the C sources: not that a
+  begin and its call name the same client's queue, that the core fires each
+  completion once (the FFI's contract), nor what the hold update decides,
+  which the unit tests check.
 - `check-default-helpers`: each interface the user implements (an
   exported interface or function type translating a Java interface that no
   exported class implements: `Callback`, not `Producer`) whose Java

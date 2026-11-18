@@ -26,11 +26,17 @@
 // destroy began (`stopped`) or while the handle is finalized.
 //
 // Liveness (javascript/CLAUDE.md, "Threads and liveness"): the threadsafe
-// function stays referenced, as Node-API creates it, from the client's
-// creation until the core reports the client closed (cbq_closed), so an open
-// client keeps Node running and nothing is counted; it is unreferenced then,
-// and stays alive for the completions of calls made after the close. The
-// handle object is held by a strong reference until then too, so garbage
+// function is referenced, as Node-API creates it, while the client is open
+// (from its creation until the core reports it closed, cbq_closed) or while
+// one of its `_cb` calls waits for its completion (`pending`, which
+// cbq_call_begin and cbq_call_end count around each call), and unreferenced
+// otherwise. So an open client keeps Node running, and so does a call made on
+// a closed one, until its answer ran, as Java's call returns: a closed client
+// with no call waiting lets Node exit. Node-API counts neither the reference
+// nor the unreference (a uv handle's ref is a flag), so the count is the
+// binding's own, and cbq_hold_update is the one place that changes the
+// reference. The tsfn stays alive after the close, for those answers. The
+// handle object is held by a strong reference until the close, so garbage
 // collection never finalizes an open client; once closed it is weak, and the
 // handle object's finalizer destroys the client.
 //
@@ -82,8 +88,8 @@ int cbq_init(napi_env env, CallbackQueue* q, const char* name, void* client, cbq
         return -1;
     }
     napi_value resource_name;
-    // Referenced, as Node-API creates it: the client keeps Node running until
-    // it is closed (cbq_closed).
+    // Referenced, as Node-API creates it: the client keeps Node running while
+    // it is open (cbq_hold_update).
     if (napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &resource_name) != napi_ok
         || napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, q, tsfn_finalize, q, call_js,
                                            &q->tsfn) != napi_ok) {
@@ -92,8 +98,36 @@ int cbq_init(napi_env env, CallbackQueue* q, const char* name, void* client, cbq
         return -1;
     }
     q->tsfn_alive = 1;
+    q->held = 1;
+    q->pending = 0;
     q->notify_open = 1;
     return 0;
+}
+
+// The one place the tsfn is referenced or unreferenced: it holds Node while
+// the client is open (`self_strong`) or while one of its `_cb` calls waits
+// for its completion (`pending`), and the reference changes only when that
+// answer does. Nothing changes once the destroy began, while the handle
+// object is finalized, or once the tsfn is gone: it is being released then.
+// JS thread.
+static void cbq_hold_update(napi_env env, CallbackQueue* q) {
+    if (q->stopped || q->finalizing || !q->tsfn_alive) return;
+    int hold = q->self_strong || q->pending > 0;
+    if (hold == q->held) return;
+    napi_status status = hold ? napi_ref_threadsafe_function(env, q->tsfn)
+                              : napi_unref_threadsafe_function(env, q->tsfn);
+    if (status == napi_ok) q->held = hold;
+}
+
+void cbq_call_begin(napi_env env, CallbackQueue* q) {
+    q->pending++;
+    // A call made on a closed client holds Node again, until its answer.
+    cbq_hold_update(env, q);
+}
+
+void cbq_call_end(napi_env env, CallbackQueue* q) {
+    q->pending--;
+    cbq_hold_update(env, q);
 }
 
 int cbq_attach(napi_env env, CallbackQueue* q, napi_value handle) {
@@ -112,11 +146,13 @@ void cbq_notify(void* opaque) {
 
 int cbq_closed(napi_env env, CallbackQueue* q) {
     if (!q->self_strong) return 0;
-    // Node may exit from now on; the tsfn itself stays, for late completions.
-    if (q->tsfn_alive) napi_unref_threadsafe_function(env, q->tsfn);
     // The handle object may now be collected: its finalizer destroys the client.
     if (q->self_ref != NULL) napi_reference_unref(env, q->self_ref, NULL);
     q->self_strong = 0;
+    // Node may exit once no call made on the client waits for its answer (the
+    // close completion running this is one, until its cbq_call_end); the tsfn
+    // itself stays, for those answers.
+    cbq_hold_update(env, q);
     return 1;
 }
 

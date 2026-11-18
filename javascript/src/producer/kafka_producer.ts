@@ -522,11 +522,11 @@ export class KafkaProducer implements Producer {
    *
    * Close every producer: a producer keeps Node running until it is closed,
    * and no garbage collection closes one, so a script that never calls
-   * `close()` never exits on its own. Once closed, the producer no longer
-   * holds Node, and its native client is released when the producer is
-   * garbage collected. `await using` closes a producer at the end of its
-   * scope (`[Symbol.asyncDispose]`). Do not call it from a send callback: it
-   * waits for that callback.
+   * `close()` never exits on its own. Once closed, the producer holds Node
+   * only while a call made on it waits for its answer, and its native client
+   * is released when the producer is garbage collected. `await using` closes
+   * a producer at the end of its scope (`[Symbol.asyncDispose]`). Do not call
+   * it from a send callback: it waits for that callback.
    */
   close(): Promise<void>;
   /**
