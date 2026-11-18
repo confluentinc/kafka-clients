@@ -14,9 +14,10 @@
 
 #pragma once
 
-// The one place the binding includes the C API. Every other header of the
-// binding includes this file, never `confluent_kafka_bindings.h` itself
-// (cpp/CLAUDE.md §1): the C header declares no `extern "C"` block of its own.
+// The one place the binding includes the C API (cpp/CLAUDE.md §1.2): a source of
+// the library includes this file, never `confluent_kafka_bindings.h` itself, as
+// the C header declares no `extern "C"` block of its own. No public header
+// includes it.
 extern "C" {
 #include <confluent_kafka_bindings.h>
 }

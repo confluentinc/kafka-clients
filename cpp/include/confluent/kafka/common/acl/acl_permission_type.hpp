@@ -14,11 +14,9 @@
 
 #pragma once
 
-#include <algorithm>
-#include <array>
-#include <cctype>
+#include <confluent/kafka/export.hpp>
+
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 namespace confluent::kafka::common::acl {
@@ -38,54 +36,24 @@ enum class AclPermissionType : int8_t {
 /// Return the code of this permission type.
 /// @param acl_permission_type the permission type
 /// @return its code
-inline int8_t code(AclPermissionType acl_permission_type) {
-    return static_cast<int8_t>(acl_permission_type);
-}
+CONFLUENT_KAFKA_CPP_API int8_t code(AclPermissionType acl_permission_type);
 
 /// Return true if this permission type is UNKNOWN.
 /// @param acl_permission_type the permission type
 /// @return whether it is UNKNOWN
-inline bool is_unknown(AclPermissionType acl_permission_type) {
-    return acl_permission_type == AclPermissionType::UNKNOWN;
-}
+CONFLUENT_KAFKA_CPP_API bool is_unknown(AclPermissionType acl_permission_type);
 
 namespace acl_permission_type {
 
 /// Return the AclPermissionType with the provided code or `AclPermissionType::UNKNOWN` if one cannot be found.
 /// @param code the code
 /// @return the permission type
-inline AclPermissionType from_code(int8_t code) {
-    switch (code) {
-        case 1:
-            return AclPermissionType::ANY;
-        case 2:
-            return AclPermissionType::DENY;
-        case 3:
-            return AclPermissionType::ALLOW;
-        default:
-            return AclPermissionType::UNKNOWN;
-    }
-}
+CONFLUENT_KAFKA_CPP_API AclPermissionType from_code(int8_t code);
 
 /// Parse the given string as an ACL permission.
 /// @param str The string to parse.
 /// @return The AclPermissionType, or UNKNOWN if the string could not be matched.
-inline AclPermissionType from_string(std::string_view str) {
-    std::string upper(str);
-    std::ranges::transform(upper, upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    static constexpr std::array<std::pair<std::string_view, AclPermissionType>, 4> NAMES{{
-        {"UNKNOWN", AclPermissionType::UNKNOWN},
-        {"ANY", AclPermissionType::ANY},
-        {"DENY", AclPermissionType::DENY},
-        {"ALLOW", AclPermissionType::ALLOW},
-    }};
-    for (const auto& [name, type] : NAMES) {
-        if (upper == name) {
-            return type;
-        }
-    }
-    return AclPermissionType::UNKNOWN;
-}
+CONFLUENT_KAFKA_CPP_API AclPermissionType from_string(std::string_view str);
 
 }  // namespace acl_permission_type
 }  // namespace confluent::kafka::common::acl

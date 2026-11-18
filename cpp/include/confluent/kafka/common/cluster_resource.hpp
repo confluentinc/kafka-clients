@@ -14,70 +14,81 @@
 
 #pragma once
 
+#include <confluent/kafka/export.hpp>
+
 #include <cstddef>
 #include <functional>
+#include <iosfwd>
 #include <memory>
 #include <optional>
-#include <ostream>
 #include <string>
 #include <string_view>
 
 namespace confluent::kafka::common {
 
 /// The `ClusterResource` class encapsulates metadata for a Kafka cluster.
-class ClusterResource {
+class CONFLUENT_KAFKA_CPP_API ClusterResource {
 public:
     /// Create `ClusterResource` with a cluster id. Note that cluster id may be `std::nullopt` if the
     /// metadata request was sent to a broker without support for cluster ids.
     /// @param cluster_id The cluster id
-    explicit ClusterResource(std::optional<std::string_view> cluster_id)
-        : impl_(std::make_shared<const Impl>(
-              Impl{cluster_id ? std::optional<std::string>(std::string(*cluster_id)) : std::nullopt})) {}
+    explicit ClusterResource(std::optional<std::string_view> cluster_id);
+
+    /// Copies `other`, sharing its immutable value.
+    /// @param other the cluster resource to copy
+    ClusterResource(const ClusterResource& other);
+
+    /// Moves `other`, which is left empty and may only be assigned to or destroyed.
+    /// @param other the cluster resource to move
+    ClusterResource(ClusterResource&& other) noexcept;
+
+    /// Copies `other` into this cluster resource.
+    /// @param other the cluster resource to copy
+    /// @return this cluster resource
+    ClusterResource& operator=(const ClusterResource& other);
+
+    /// Moves `other` into this cluster resource; `other` is left empty.
+    /// @param other the cluster resource to move
+    /// @return this cluster resource
+    ClusterResource& operator=(ClusterResource&& other) noexcept;
+
+    ~ClusterResource();
 
     /// Return the cluster id. Note that it may be `std::nullopt` if the metadata request was sent to a broker
     /// without support for cluster ids.
     /// @return the cluster id, or `std::nullopt`
-    [[nodiscard]] const std::optional<std::string>& cluster_id() const { return impl_->cluster_id; }
+    [[nodiscard]] const std::optional<std::string>& cluster_id() const;
 
     /// Whether `a` and `b` have the same cluster id.
     /// @param a a cluster resource
     /// @param b another cluster resource
     /// @return true when the cluster ids are equal, both absent included
-    friend bool operator==(const ClusterResource& a, const ClusterResource& b) {
-        return a.impl_ == b.impl_ || a.cluster_id() == b.cluster_id();
-    }
+    friend CONFLUENT_KAFKA_CPP_API bool operator==(const ClusterResource& a, const ClusterResource& b);
 
 private:
-    // cpp/CLAUDE.md §12.3: one pointer, so a field Java adds later keeps the layout. The value is
-    // immutable, so copies share it.
-    struct Impl {
-        std::optional<std::string> cluster_id;
-    };
+    // cpp/CLAUDE.md §12.3: one pointer, so a field Java adds later keeps the layout.
+    struct Impl;
     std::shared_ptr<const Impl> impl_;
 };
 
 /// Returns `ClusterResource(clusterId=<id>)`, as Java's toString, with `null` for an absent id.
 /// @param resource a cluster resource
 /// @return the class name and the cluster id
-inline std::string to_string(const ClusterResource& resource) {
-    return "ClusterResource(clusterId=" + resource.cluster_id().value_or("null") + ")";
-}
+CONFLUENT_KAFKA_CPP_API std::string to_string(const ClusterResource& resource);
 
 /// Writes `to_string(resource)` to `out`.
 /// @param out the stream
 /// @param resource a cluster resource
 /// @return `out`
-inline std::ostream& operator<<(std::ostream& out, const ClusterResource& resource) {
-    return out << to_string(resource);
-}
+CONFLUENT_KAFKA_CPP_API std::ostream& operator<<(std::ostream& out, const ClusterResource& resource);
 
 }  // namespace confluent::kafka::common
 
 /// Hashes a cluster resource from its cluster id, as Java's Objects.hash(clusterId).
 template <>
-struct std::hash<confluent::kafka::common::ClusterResource> {
-    std::size_t operator()(const confluent::kafka::common::ClusterResource& resource) const noexcept {
-        const auto& id = resource.cluster_id();
-        return 31U + (id ? std::hash<std::string>{}(*id) : 0U);
-    }
+struct CONFLUENT_KAFKA_CPP_API std::hash<confluent::kafka::common::ClusterResource> {
+    /// Returns the hash of `resource`.
+    /// @param resource a cluster resource
+    /// @return its hash
+    std::size_t operator()(const confluent::kafka::common::ClusterResource& resource) const noexcept;
 };

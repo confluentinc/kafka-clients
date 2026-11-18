@@ -20,7 +20,6 @@ function(confluent_kafka_cpp_unit_test name)
     gtest_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST)
 endfunction()
 
-confluent_kafka_cpp_unit_test(ffi_handle_test)
 confluent_kafka_cpp_unit_test(topic_partition_test)
 confluent_kafka_cpp_unit_test(node_test)
 confluent_kafka_cpp_unit_test(cluster_resource_test)
@@ -31,3 +30,12 @@ confluent_kafka_cpp_unit_test(kafka_principal_test)
 confluent_kafka_cpp_unit_test(subscription_pattern_test)
 confluent_kafka_cpp_unit_test(acl_permission_type_test)
 confluent_kafka_cpp_unit_test(config_resource_test)
+
+# The library's private RAII handles over the C header, which only the library's
+# sources and this test see (cpp/CLAUDE.md §1.2).
+add_executable(ffi_handle_test ffi_handle_test.cpp)
+target_include_directories(ffi_handle_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(ffi_handle_test SYSTEM PRIVATE ${_ck_include_dir})
+target_link_libraries(ffi_handle_test PRIVATE ConfluentKafka::cpp confluent_kafka_core GTest::gtest_main)
+target_compile_options(ffi_handle_test PRIVATE ${CONFLUENT_KAFKA_CPP_WARNINGS})
+gtest_discover_tests(ffi_handle_test TEST_PREFIX "ffi_handle_test." DISCOVERY_MODE PRE_TEST)

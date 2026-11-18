@@ -14,10 +14,10 @@
 
 #pragma once
 
-#include <array>
+#include <confluent/kafka/export.hpp>
+
 #include <cstdint>
 #include <string_view>
-#include <utility>
 
 namespace confluent::kafka::common::resource {
 
@@ -50,61 +50,27 @@ enum class PatternType : int8_t {
 
 /// @param pattern_type the pattern type
 /// @return the code of this resource.
-inline int8_t code(PatternType pattern_type) {
-    return static_cast<int8_t>(pattern_type);
-}
+CONFLUENT_KAFKA_CPP_API int8_t code(PatternType pattern_type);
 
 /// @param pattern_type the pattern type
 /// @return whether this resource pattern type is UNKNOWN.
-inline bool is_unknown(PatternType pattern_type) {
-    return pattern_type == PatternType::UNKNOWN;
-}
+CONFLUENT_KAFKA_CPP_API bool is_unknown(PatternType pattern_type);
 
 /// @param pattern_type the pattern type
 /// @return whether this resource pattern type is a concrete type, rather than UNKNOWN or one of the filter types.
-inline bool is_specific(PatternType pattern_type) {
-    return pattern_type != PatternType::UNKNOWN && pattern_type != PatternType::ANY &&
-           pattern_type != PatternType::MATCH;
-}
+CONFLUENT_KAFKA_CPP_API bool is_specific(PatternType pattern_type);
 
 namespace pattern_type {
 
 /// Return the PatternType with the provided code or `PatternType::UNKNOWN` if one cannot be found.
 /// @param code the code
 /// @return the pattern type
-inline PatternType from_code(int8_t code) {
-    switch (code) {
-        case 1:
-            return PatternType::ANY;
-        case 2:
-            return PatternType::MATCH;
-        case 3:
-            return PatternType::LITERAL;
-        case 4:
-            return PatternType::PREFIXED;
-        default:
-            return PatternType::UNKNOWN;
-    }
-}
+CONFLUENT_KAFKA_CPP_API PatternType from_code(int8_t code);
 
 /// Return the PatternType with the provided name or `PatternType::UNKNOWN` if one cannot be found.
 /// @param name the constant's name, matched exactly
 /// @return the pattern type
-inline PatternType from_string(std::string_view name) {
-    static constexpr std::array<std::pair<std::string_view, PatternType>, 5> NAMES{{
-        {"UNKNOWN", PatternType::UNKNOWN},
-        {"ANY", PatternType::ANY},
-        {"MATCH", PatternType::MATCH},
-        {"LITERAL", PatternType::LITERAL},
-        {"PREFIXED", PatternType::PREFIXED},
-    }};
-    for (const auto& [constant, type] : NAMES) {
-        if (name == constant) {
-            return type;
-        }
-    }
-    return PatternType::UNKNOWN;
-}
+CONFLUENT_KAFKA_CPP_API PatternType from_string(std::string_view name);
 
 }  // namespace pattern_type
 }  // namespace confluent::kafka::common::resource

@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The ABI probe's one translation unit: see test/probe/CMakeLists.txt.
+// The header probe's one translation unit: see test/probe/CMakeLists.txt.
 #include <cstdint>
 
 #include "probe_includes.hpp"
 
 namespace confluent::kafka::probe {
 
-/// Exported so the library is never empty: the version the headers declare.
+/// Something to compile beside the headers: the version they declare.
 extern "C" std::int32_t confluent_kafka_cpp_probe_version() {
     return (((VERSION_MAJOR * 1000) + VERSION_MINOR) * 1000) + VERSION_PATCH;
 }

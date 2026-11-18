@@ -14,18 +14,20 @@
 
 #pragma once
 
+#include <confluent/kafka/export.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iosfwd>
 #include <memory>
-#include <ostream>
 #include <string>
 #include <string_view>
 
 namespace confluent::kafka::common::config {
 
 /// A class representing resources that have configs.
-class ConfigResource {
+class CONFLUENT_KAFKA_CPP_API ConfigResource {
 public:
     /// Type of resource.
     enum class Type : int8_t {
@@ -46,111 +48,84 @@ public:
     /// Create an instance of this class with the provided parameters.
     /// @param type a non-null resource type
     /// @param name a non-null resource name
-    ConfigResource(Type type, std::string_view name)
-        : impl_(std::make_shared<const Impl>(Impl{.type = type, .name = std::string(name)})) {}
+    ConfigResource(Type type, std::string_view name);
+
+    /// Copies `other`, sharing its immutable value.
+    /// @param other the config resource to copy
+    ConfigResource(const ConfigResource& other);
+
+    /// Moves `other`, which is left empty and may only be assigned to or destroyed.
+    /// @param other the config resource to move
+    ConfigResource(ConfigResource&& other) noexcept;
+
+    /// Copies `other` into this config resource.
+    /// @param other the config resource to copy
+    /// @return this config resource
+    ConfigResource& operator=(const ConfigResource& other);
+
+    /// Moves `other` into this config resource; `other` is left empty.
+    /// @param other the config resource to move
+    /// @return this config resource
+    ConfigResource& operator=(ConfigResource&& other) noexcept;
+
+    ~ConfigResource();
 
     /// Return the resource type.
     /// @return the resource type
-    [[nodiscard]] Type type() const { return impl_->type; }
+    [[nodiscard]] Type type() const;
 
     /// Return the resource name.
     /// @return the resource name
-    [[nodiscard]] const std::string& name() const { return impl_->name; }
+    [[nodiscard]] const std::string& name() const;
 
     /// Returns true if this is the default resource of a resource type.
     /// Resource name is empty for the default resource.
     /// @return whether the name is empty
-    [[nodiscard]] bool is_default() const { return impl_->name.empty(); }
+    [[nodiscard]] bool is_default() const;
 
     /// Whether `a` and `b` name the same resource.
     /// @param a a config resource
     /// @param b another config resource
     /// @return true when the type and the name are equal
-    friend bool operator==(const ConfigResource& a, const ConfigResource& b) {
-        return a.impl_ == b.impl_ || (a.type() == b.type() && a.name() == b.name());
-    }
+    friend CONFLUENT_KAFKA_CPP_API bool operator==(const ConfigResource& a, const ConfigResource& b);
 
     /// Returns `ConfigResource(type=<type>, name='<name>')`, as Java's toString.
     /// @param resource a config resource
     /// @return its description
-    friend std::string to_string(const ConfigResource& resource) {
-        return "ConfigResource(type=" + std::string(type_name(resource.type())) + ", name='" + resource.name() + "')";
-    }
+    friend CONFLUENT_KAFKA_CPP_API std::string to_string(const ConfigResource& resource);
 
 private:
-    // Java's Enum.name() of a Type, for toString; Type does not override toString, so cpp/CLAUDE.md §3.3
-    // gives it no public to_string.
-    static std::string_view type_name(Type type) {
-        switch (type) {
-            case Type::GROUP:
-                return "GROUP";
-            case Type::CLIENT_METRICS:
-                return "CLIENT_METRICS";
-            case Type::BROKER_LOGGER:
-                return "BROKER_LOGGER";
-            case Type::BROKER:
-                return "BROKER";
-            case Type::TOPIC:
-                return "TOPIC";
-            case Type::UNKNOWN:
-                return "UNKNOWN";
-        }
-        return "UNKNOWN";
-    }
-
-    // cpp/CLAUDE.md §12.3: one pointer; the value is immutable, so copies share it.
-    struct Impl {
-        Type type;
-        std::string name;
-    };
+    // cpp/CLAUDE.md §12.3: one pointer, so a field Java adds later keeps the layout.
+    struct Impl;
     std::shared_ptr<const Impl> impl_;
 };
 
 /// Returns the id of a resource type.
 /// @param type the resource type
 /// @return its id
-inline int8_t id(ConfigResource::Type type) {
-    return static_cast<int8_t>(type);
-}
+CONFLUENT_KAFKA_CPP_API int8_t id(ConfigResource::Type type);
 
 /// Writes `to_string(resource)` to `out`.
 /// @param out the stream
 /// @param resource a config resource
 /// @return `out`
-inline std::ostream& operator<<(std::ostream& out, const ConfigResource& resource) {
-    return out << to_string(resource);
-}
+CONFLUENT_KAFKA_CPP_API std::ostream& operator<<(std::ostream& out, const ConfigResource& resource);
 
 namespace config_resource::type {
 
 /// Returns the resource type of `id`, or UNKNOWN.
 /// @param id the id
 /// @return the resource type
-inline ConfigResource::Type for_id(int8_t id) {
-    switch (id) {
-        case 32:
-            return ConfigResource::Type::GROUP;
-        case 16:
-            return ConfigResource::Type::CLIENT_METRICS;
-        case 8:
-            return ConfigResource::Type::BROKER_LOGGER;
-        case 4:
-            return ConfigResource::Type::BROKER;
-        case 2:
-            return ConfigResource::Type::TOPIC;
-        default:
-            return ConfigResource::Type::UNKNOWN;
-    }
-}
+CONFLUENT_KAFKA_CPP_API ConfigResource::Type for_id(int8_t id);
 
 }  // namespace config_resource::type
 }  // namespace confluent::kafka::common::config
 
 /// Hashes a config resource from its type and name, as Java's hashCode reads them.
 template <>
-struct std::hash<confluent::kafka::common::config::ConfigResource> {
-    std::size_t operator()(const confluent::kafka::common::config::ConfigResource& r) const noexcept {
-        return (31U * std::hash<confluent::kafka::common::config::ConfigResource::Type>{}(r.type())) +
-               std::hash<std::string>{}(r.name());
-    }
+struct CONFLUENT_KAFKA_CPP_API std::hash<confluent::kafka::common::config::ConfigResource> {
+    /// Returns the hash of `r`.
+    /// @param r a config resource
+    /// @return its hash
+    std::size_t operator()(const confluent::kafka::common::config::ConfigResource& r) const noexcept;
 };

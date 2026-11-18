@@ -1,7 +1,8 @@
 # Confluent Kafka C++
 
-A header-only C++20 binding of the Confluent Kafka Rust client, built on the client's C FFI
-(`confluent_kafka_bindings.h`). Its API is the Apache Kafka Java client's `org.apache.kafka.clients`
+A C++20 binding of the Confluent Kafka Rust client, built on the client's C FFI
+(`confluent_kafka_bindings.h`) as a compiled library, shared (`libconfluent_kafka_cpp.so.0.1`) and
+static, so a fix reaches programs through a package upgrade. Its API is the Apache Kafka Java client's `org.apache.kafka.clients`
 API in C++ form; the rules that derive it are in [CLAUDE.md](CLAUDE.md).
 
 **Status: scaffold.** The build, the test framework, the formatter and the translation linter are in
@@ -44,12 +45,14 @@ The CMake project locates the core through cache variables:
 | `RUST_PROJECT_ROOT` | `../rust` | the Rust crate; the header is read from `<root>/target/include` and the library from `<root>/target/<profile>` |
 | `CONFLUENT_KAFKA_INCLUDE_DIR` | derived | directory holding `confluent_kafka_bindings.h` |
 | `CONFLUENT_KAFKA_LIB_DIR` | derived | directory holding `libconfluent_kafka` |
-| `LINK_TYPE` | `shared` | `shared` or `static` |
+| `CONFLUENT_KAFKA_NATIVE_STATIC_LIBS` | threads, `dl`, `m` | the system libraries a program linking the core's static library needs |
 | `CONFLUENT_KAFKA_CPP_SANITIZE` | `OFF` | build the tests with AddressSanitizer and UndefinedBehaviorSanitizer |
 | `CONFLUENT_KAFKA_CPP_BUILD_TESTS` | `ON` when top-level | build `test/unit` and `test/probe` |
 
-Consumers link the INTERFACE target `ConfluentKafka::cpp` (`find_package(ConfluentKafkaCpp)` after
-`cmake --install`, or `add_subdirectory(cpp)`).
+The core is found as both its shared and its static library. Programs link `ConfluentKafka::cpp`
+(the shared library, over the shared core) or `ConfluentKafka::cpp_static` (the static library,
+over the core's static library), through `add_subdirectory(cpp)`; the C header is needed only to
+build the library.
 
 The Makefile variables `CLANG_FORMAT`, `CLANG_TIDY` and `CLANG_TIDY_EXTRA_ARGS` select the LLVM
 binaries; `CLANG_TIDY_EXTRA_ARGS` takes, for example, `--extra-arg=-isystem<gcc include dir>` when a
@@ -58,9 +61,10 @@ clang-tidy build lacks its own resource directory.
 ## Layout
 
 ```
-include/confluent/kafka/   the library (one header per Java class; detail/ is internal)
+include/confluent/kafka/   the public headers (one per Java class); export.hpp marks the exports
+src/                       the library's sources (one .cpp per header); detail/ is the C boundary
 test/unit/                 GoogleTest, one executable per file
-test/probe/                a shared library instantiating every public header (ABI baseline)
+test/probe/                every public header compiled on its own
 tools/lint/                the translation linter: Java model, rules, clang-tidy checks, data files
 tools/abi_check.cmake      the interface check against a previous release
 design/current/            plans, status, the documentation contract-change ledger

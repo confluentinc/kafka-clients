@@ -14,52 +14,37 @@
 
 #pragma once
 
-#include <confluent/kafka/detail/ffi.hpp>
+#include <confluent/kafka/export.hpp>
 
-#include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdint>
+#include <iosfwd>
 #include <optional>
-#include <ostream>
 #include <string>
 #include <string_view>
-#include <utility>
 
 namespace confluent::kafka::common::config {
 
 /// Describes whether the server should require or request client authentication.
 enum class SslClientAuth : int32_t {
     /// Java's `REQUIRED`.
-    REQUIRED = kafka_common_config_SslClientAuth_REQUIRED,
+    REQUIRED = 0,
     /// Java's `REQUESTED`.
-    REQUESTED = kafka_common_config_SslClientAuth_REQUESTED,
+    REQUESTED = 1,
     /// Java's `NONE`.
-    NONE = kafka_common_config_SslClientAuth_NONE,
+    NONE = 2,
 };
 
 /// Returns the constant's name in lower case, as Java's toString: `required`, `requested`, `none`.
 /// @param ssl_client_auth the client authentication setting
 /// @return its name in lower case
-inline std::string to_string(SslClientAuth ssl_client_auth) {
-    switch (ssl_client_auth) {
-        case SslClientAuth::REQUIRED:
-            return "required";
-        case SslClientAuth::REQUESTED:
-            return "requested";
-        case SslClientAuth::NONE:
-            return "none";
-    }
-    return {};
-}
+CONFLUENT_KAFKA_CPP_API std::string to_string(SslClientAuth ssl_client_auth);
 
 /// Writes `to_string(ssl_client_auth)` to `out`.
 /// @param out the stream
 /// @param ssl_client_auth the client authentication setting
 /// @return `out`
-inline std::ostream& operator<<(std::ostream& out, SslClientAuth ssl_client_auth) {
-    return out << to_string(ssl_client_auth);
-}
+CONFLUENT_KAFKA_CPP_API std::ostream& operator<<(std::ostream& out, SslClientAuth ssl_client_auth);
 
 namespace ssl_client_auth {
 
@@ -71,25 +56,7 @@ inline constexpr std::array<SslClientAuth, 3> VALUES{SslClientAuth::REQUIRED, Ss
 /// name that is none of the constants.
 /// @param key the configured value, or `std::nullopt`
 /// @return the setting, or `std::nullopt` when `key` names none
-inline std::optional<SslClientAuth> for_config(std::optional<std::string_view> key) {
-    if (!key) {
-        return SslClientAuth::NONE;
-    }
-    std::string upper_case_key(*key);
-    std::ranges::transform(upper_case_key, upper_case_key.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    static constexpr std::array<std::pair<std::string_view, SslClientAuth>, 3> NAMES{{
-        {"REQUIRED", SslClientAuth::REQUIRED},
-        {"REQUESTED", SslClientAuth::REQUESTED},
-        {"NONE", SslClientAuth::NONE},
-    }};
-    for (const auto& [name, auth] : NAMES) {
-        if (upper_case_key == name) {
-            return auth;
-        }
-    }
-    return std::nullopt;
-}
+CONFLUENT_KAFKA_CPP_API std::optional<SslClientAuth> for_config(std::optional<std::string_view> key);
 
 }  // namespace ssl_client_auth
 }  // namespace confluent::kafka::common::config

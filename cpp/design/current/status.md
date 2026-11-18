@@ -8,10 +8,10 @@ Updated 2026-11-18.
   INTERFACE target, install and package config, version check against `version.hpp`), Makefile
   (build, test, format, format-check, lint, clean), root `make build-cpp` / `make test-cpp`
   (standalone; not yet part of `build-all`, `test` or `verify`).
-- `include/confluent/kafka/detail/ffi.hpp`: the single include of the C header, `UniqueHandle`,
-  `ErrorHandle`, `ErrorSlot`.
-- Tests: GoogleTest harness (`confluent_kafka_cpp_unit_test`), `ffi_handle_test`, the ABI probe
-  library under `test/probe`.
+- `src/detail/ffi.hpp` (moved from `include/` by the packaging step 2): the single include of the
+  C header, `UniqueHandle`, `ErrorHandle`, `ErrorSlot`.
+- Tests: GoogleTest harness (`confluent_kafka_cpp_unit_test`), `ffi_handle_test`, the header probe
+  under `test/probe`.
 - `.clang-format`, `.clang-tidy` with the naming rules of CLAUDE.md §2.
 - `CLAUDE.md` with the rules derived from the kickstart questionnaire answers (Confluence page
   6364529292).
@@ -130,7 +130,9 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
 1. The rules. Done.
 2. The library: `src/`, an object library into `ConfluentKafka::cpp` (shared, soname
    `libconfluent_kafka_cpp.so.0.1`) and `::cpp_static`; the eleven classes' bodies out of their
-   headers; `detail/ffi.hpp` to `src/detail/`.
+   headers; `detail/ffi.hpp` to `src/detail/`. Done. The library has no `NEEDED` on the core yet:
+   none of the translated classes calls the FFI, and `--as-needed` drops the unused link.
+   `make install` installs the headers and both libraries only, until step 4.
 3. The linter: `inline-definition`, `missing-export`, a public header including the C header.
 4. The package config: exported targets for both libraries and the core, pkg-config, install
    components, unit tests against the static library too.

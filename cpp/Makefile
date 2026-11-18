@@ -10,12 +10,12 @@ CLANG_TIDY_EXTRA_ARGS ?=
 
 # The linter's own code is formatted too; its vendored grammar, its fixtures (line numbers carry
 # their expectations) and the build trees are not.
-SOURCES := $(shell find include test tools/lint \( -path tools/lint/build -o -path tools/lint/grammar \
+SOURCES := $(shell find include src test tools/lint \( -path tools/lint/build -o -path tools/lint/grammar \
 	-o -path tools/lint/test/fixtures \) -prune \
 	-o \( -name '*.hpp' -o -name '*.cpp' \) -print)
 # Translation units clang-tidy processes; headers are covered through
 # .clang-tidy's HeaderFilterRegex.
-TIDY_SOURCES := $(shell find test -name '*.cpp')
+TIDY_SOURCES := $(shell find src test -name '*.cpp')
 
 # The translation linter (tools/lint, cpp/CLAUDE.md §12-§13): a clang-tidy
 # plugin, which loads only into the clang-tidy of the LLVM major it is built

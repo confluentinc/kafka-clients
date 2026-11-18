@@ -14,11 +14,12 @@
 
 #pragma once
 
+#include <confluent/kafka/export.hpp>
+
 #include <cstddef>
 #include <functional>
-#include <map>
+#include <iosfwd>
 #include <memory>
-#include <ostream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -38,7 +39,7 @@ namespace confluent::kafka::common {
 /// group, tags parameters can be used to create unique metric names while reporting in JMX or any custom reporting.
 ///
 /// Ex: standard JMX MBean can be constructed like **domainName:type=group,key1=val1,key2=val2**
-class MetricName {
+class CONFLUENT_KAFKA_CPP_API MetricName {
 public:
     /// Please create MetricName by method `Metrics::metric_name(name, group, description, tags)`
     ///
@@ -47,45 +48,53 @@ public:
     /// @param description A human-readable description to include in the metric
     /// @param tags        additional key/value attributes of the metric
     MetricName(std::string_view name, std::string_view group, std::string_view description,
-               const std::unordered_map<std::string, std::string>& tags)
-        : impl_(std::make_shared<const Impl>(Impl{.name = std::string(name),
-                                                  .group = std::string(group),
-                                                  .description = std::string(description),
-                                                  .tags = tags})) {}
+               const std::unordered_map<std::string, std::string>& tags);
+
+    /// Copies `other`, sharing its immutable value.
+    /// @param other the metric name to copy
+    MetricName(const MetricName& other);
+
+    /// Moves `other`, which is left empty and may only be assigned to or destroyed.
+    /// @param other the metric name to move
+    MetricName(MetricName&& other) noexcept;
+
+    /// Copies `other` into this metric name.
+    /// @param other the metric name to copy
+    /// @return this metric name
+    MetricName& operator=(const MetricName& other);
+
+    /// Moves `other` into this metric name; `other` is left empty.
+    /// @param other the metric name to move
+    /// @return this metric name
+    MetricName& operator=(MetricName&& other) noexcept;
+
+    ~MetricName();
 
     /// Returns the name of the metric.
     /// @return the name
-    [[nodiscard]] const std::string& name() const { return impl_->name; }
+    [[nodiscard]] const std::string& name() const;
 
     /// Returns the logical group name of the metrics to which this metric belongs.
     /// @return the group
-    [[nodiscard]] const std::string& group() const { return impl_->group; }
+    [[nodiscard]] const std::string& group() const;
 
     /// Returns the additional key/value attributes of the metric.
     /// @return the tags
-    [[nodiscard]] const std::unordered_map<std::string, std::string>& tags() const { return impl_->tags; }
+    [[nodiscard]] const std::unordered_map<std::string, std::string>& tags() const;
 
     /// Returns the human-readable description of the metric.
     /// @return the description
-    [[nodiscard]] const std::string& description() const { return impl_->description; }
+    [[nodiscard]] const std::string& description() const;
 
     /// Whether `a` and `b` have the same name, group and tags; the description is not compared, as in Java.
     /// @param a a metric name
     /// @param b another metric name
     /// @return true when the group, the name and the tags are equal
-    friend bool operator==(const MetricName& a, const MetricName& b) {
-        return a.impl_ == b.impl_ || (a.group() == b.group() && a.name() == b.name() && a.tags() == b.tags());
-    }
+    friend CONFLUENT_KAFKA_CPP_API bool operator==(const MetricName& a, const MetricName& b);
 
 private:
-    // cpp/CLAUDE.md §12.3: one pointer, so a field Java adds later keeps the layout. The value is
-    // immutable, so copies share it.
-    struct Impl {
-        std::string name;
-        std::string group;
-        std::string description;
-        std::unordered_map<std::string, std::string> tags;
-    };
+    // cpp/CLAUDE.md §12.3: one pointer, so a field Java adds later keeps the layout.
+    struct Impl;
     std::shared_ptr<const Impl> impl_;
 };
 
@@ -93,38 +102,22 @@ private:
 /// toString; the tags are printed in key order, where Java prints its map's iteration order.
 /// @param metric_name a metric name
 /// @return the metric name's fields
-inline std::string to_string(const MetricName& metric_name) {
-    std::string tags;
-    for (const auto& [key, value] :
-         std::map<std::string, std::string>(metric_name.tags().begin(), metric_name.tags().end())) {
-        tags.append(tags.empty() ? "" : ", ").append(key).append("=").append(value);
-    }
-    return "MetricName [name=" + metric_name.name() + ", group=" + metric_name.group() +
-           ", description=" + metric_name.description() + ", tags={" + tags + "}]";
-}
+CONFLUENT_KAFKA_CPP_API std::string to_string(const MetricName& metric_name);
 
 /// Writes `to_string(metric_name)` to `out`.
 /// @param out the stream
 /// @param metric_name a metric name
 /// @return `out`
-inline std::ostream& operator<<(std::ostream& out, const MetricName& metric_name) {
-    return out << to_string(metric_name);
-}
+CONFLUENT_KAFKA_CPP_API std::ostream& operator<<(std::ostream& out, const MetricName& metric_name);
 
 }  // namespace confluent::kafka::common
 
 /// Hashes a metric name from its group, name and tags, as Java's hashCode reads them; the tags' hash is the
 /// order-independent sum of Java's Map.hashCode.
 template <>
-struct std::hash<confluent::kafka::common::MetricName> {
-    std::size_t operator()(const confluent::kafka::common::MetricName& metric_name) const noexcept {
-        const std::hash<std::string> text;
-        std::size_t tags = 0;
-        for (const auto& [key, value] : metric_name.tags()) {
-            tags += text(key) ^ text(value);
-        }
-        std::size_t h = 31U + text(metric_name.group());
-        h = (31U * h) + text(metric_name.name());
-        return (31U * h) + tags;
-    }
+struct CONFLUENT_KAFKA_CPP_API std::hash<confluent::kafka::common::MetricName> {
+    /// Returns the hash of `metric_name`.
+    /// @param metric_name a metric name
+    /// @return its hash
+    std::size_t operator()(const confluent::kafka::common::MetricName& metric_name) const noexcept;
 };

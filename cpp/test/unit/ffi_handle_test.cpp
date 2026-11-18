@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <confluent/kafka/detail/ffi.hpp>
 #include <confluent/kafka/version.hpp>
 
 #include <gtest/gtest.h>
 
 #include <string_view>
 #include <utility>
+
+#include "detail/ffi.hpp"
 
 namespace {
 
