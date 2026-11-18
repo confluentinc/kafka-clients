@@ -108,18 +108,13 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback? callback)
     {
         ThrowIfRefused();
 
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, callback);

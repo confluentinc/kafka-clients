@@ -1258,7 +1258,10 @@ without waiting for their reports, as Java's and Python's mock `flush()` do
 (`ffi-marshalling.md` §A7); and a commit or an abort ends with the same `TimeoutException`, a
 recorded deviation. A callback that awaits
 `Get()` of its own record, or of any later record of the producer, never ends. A `null`
-callback throws `ArgumentNullException`, and `Send(record, null)` does not compile.
+callback, of either form and on all four producers, means no callback: the record is sent as
+`Send(record)` sends it, as Java's `send(record, null)` and Python's `callback=None` do. On
+`IAsyncProducer` a bare `Send(record, null)` does not compile, since it matches both callback
+overloads, so a caller casts the `null`.
 
 ⚠ **§4 reentrancy row — the core's handle is host scaffolding that restores a Java
 behavior, not new API surface (M9/P8; DoD #7).** The core's `ConsumerHandle` has
