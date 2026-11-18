@@ -39,6 +39,11 @@ mod mock_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
 pub mod offset_commit_callback;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
+)]
+mod share_consumer_config;
 mod subscription_pattern;
 
 pub(crate) mod internals;
@@ -61,6 +66,8 @@ pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
+pub(crate) use share_consumer_config::ShareConsumerConfig;
 pub use subscription_pattern::SubscriptionPattern;
 
 use std::collections::{HashMap, HashSet};
