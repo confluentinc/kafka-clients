@@ -68,11 +68,12 @@ pub trait AcknowledgementCommitCallback: Send + Sync + 'static {
     /// # Translation notes
     ///
     /// Java's `InterruptException` (the calling thread is interrupted) has no
-    /// Rust counterpart: a task is not interrupted. The method returns
-    /// nothing, as Java's `void onComplete`; a panic in it is not caught.
+    /// Rust counterpart: a task is not interrupted. A panic in this method is
+    /// caught and logged, and the remaining partitions still get their call,
+    /// unless the crate is built with `panic = "abort"`.
     // Java's `onComplete` is `void` but may throw; the caller,
     // `AcknowledgementCommitCallbackHandler#onComplete`, logs and swallows what
-    // it throws. With no `Result` here there is nothing to swallow
+    // it throws. A panic is the Rust counterpart, and the handler catches it
     // (`share-consumer.md` §3).
     #[doc(alias = "org.apache.kafka.clients.consumer.AcknowledgementCommitCallback#onComplete")]
     async fn on_complete(&self, offsets: &HashMap<TopicIdPartition, HashSet<i64>>, error: Option<&Error>);
