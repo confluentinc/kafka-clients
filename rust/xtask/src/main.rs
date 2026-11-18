@@ -19,6 +19,7 @@ mod config_types;
 mod dotnet_java_name_baseline;
 mod error_hierarchy;
 mod error_predicates;
+mod install_c;
 mod java;
 mod java_api;
 mod java_parse;
@@ -70,6 +71,7 @@ fn main() -> anyhow::Result<()> {
         Some("integrity-test") => integrity_test()?,
         Some("package-check") => package_check()?,
         Some("api-compat") => api_compat::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("install-c") => install_c::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("bump-version") => bump_version::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos") => chaos()?,
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
@@ -2827,6 +2829,15 @@ fn print_help() {
                   Cargo.toml version allows it over the tag's
                     --baseline TAG (default $API_COMPAT_BASELINE, else the highest
                     rust/vX.Y.Z or vX.Y.Z tag not above the current version)
+                  A breaking C ABI change also needs C_ABI_MAJOR in build.rs raised over the tag's
+  install-c       Build the C library for a system package (release, `ffi`, with its soname)
+                  and install it: the shared library under its versioned name with its links,
+                  the static library, both C headers and pkgconfig/confluent-kafka.pc
+                    --destdir DIR  stage under DIR (a package's build root)
+                    --prefix DIR   default /usr/local
+                    --libdir DIR, --includedir DIR, --bindir DIR  relative to the prefix
+                                   unless absolute (Debian's /usr/lib/<multiarch>)
+                    --target TRIPLE  build for TRIPLE
   bump-version    Set one version on the Rust crates released together, Cargo.lock and
                   the Python packages: semver in Cargo manifests, PEP 440 in Python
                     e.g. cargo xtask bump-version 0.3.0-rc.1 (Python gets 0.3.0rc1);
