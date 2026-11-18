@@ -25,6 +25,7 @@ and overridable `protected` methods); the rest are on
 | `groupId()` | `AbstractMembershipManager::group_id` |
 | `memberId()` | `AbstractMembershipManager::member_id` |
 | `memberEpoch()` | `AbstractMembershipManager::member_epoch` |
+| `leaveGroupOperation()` | `AbstractMembershipManager::leave_group_operation` (written by `leave_group_on_close` through `set_leave_group_operation`) |
 | `onHeartbeatSuccess(R)` | `AbstractMembershipManager::on_heartbeat_success` |
 | `throwIfUnexpectedError(R)` (private) | `AbstractMembershipManager::return_if_unexpected_error` |
 | `errorCode(R)` (abstract) | `MembershipManagerHooks::error_code` |
@@ -70,7 +71,7 @@ and overridable `protected` methods); the rest are on
 | `findResolvableAssignmentAndTriggerMetadataUpdate()` (private) | `AbstractMembershipManager::find_resolvable_assignment_and_trigger_metadata_update` |
 | `findTopicNameInGlobalOrLocalCache(Uuid)` (private) | inlined in `find_resolvable_assignment_and_trigger_metadata_update`, its only caller |
 | `revokePartitions(Set)` | `AbstractMembershipManager::revoke_partitions` (**new in P4b**) |
-| `assignPartitions(TopicIdPartitionSet, SortedSet)` (private) | split across `continue_after_revoke` (signal + topic-name cache trim) and `continue_after_assign` (its `whenComplete`: enable partitions / failure log) |
+| `assignPartitions(TopicIdPartitionSet, SortedSet)` (private) | split across `continue_after_revoke` (the `signalPartitionsAssigned` call) and `continue_after_assign` (its `whenComplete`: enable partitions / failure log, then the topic-name cache trim). Divergence: Java trims the cache unconditionally right after `signalPartitionsAssigned` returns; Rust trims only after the assign callback succeeded. For the consumer a failed `onPartitionsAssigned` therefore skips the trim (backtest S2-4, confirmed by Critic 245; consumer follow-up). The share manager is unaffected: its assignment applies inline, and a failure there throws before Java's trim too |
 | `signalPartitionsAssigned(TopicIdPartitionSet, SortedSet)` (abstract) | `MembershipManagerHooks::signal_partitions_assigned` (takes `TopicIdPartitionSet#topicPartitions`, ledger G5) |
 | `signalPartitionsBeingRevoked(Set)` | `MembershipManagerHooks::signal_partitions_being_revoked` (**new in P4b**) |
 | `signalPartitionsRevoked(Set)` | `MembershipManagerHooks::signal_partitions_revoked` |
@@ -173,7 +174,7 @@ Rust-only: `metadata_arc` and `Deref<Target = Metadata>` stand in for Java's
 
 | Class | Java methods | Mapped to a Rust function | No Rust function, with reason |
 |---|---|---|---|
-| `AbstractMembershipManager` (+ `LocalAssignment`) | 78 | 64 | 14: 6 inlined into their only caller or split into the `CompletableFuture` chain steps, 6 visible-for-testing accessors, the base `poll` (each subclass polls), the `TopicIdPartitionSet` constructor (G5) |
+| `AbstractMembershipManager` (+ `LocalAssignment`) | 79 | 65 | 14: 6 inlined into their only caller or split into the `CompletableFuture` chain steps, 6 visible-for-testing accessors, the base `poll` (each subclass polls), the `TopicIdPartitionSet` constructor (G5) |
 | `ShareMembershipManager` | 10 | 10 | 0 |
 | `ShareHeartbeatRequestManager` (+ `HeartbeatState`, `SentFields`) | 18 | 18 | 0 |
 | `ShareRebalanceMetricsManager` | 7 | 6 | 1 (private constructor folded in) |

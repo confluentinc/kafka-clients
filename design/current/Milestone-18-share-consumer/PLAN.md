@@ -338,7 +338,8 @@ These are pre-existing divergences from Java in the consumer, found while prepar
 |---|---|---|
 | `AbstractMembershipManager#revokePartitions` never translated. The reconcile path only marks partitions pending revocation; it skips `retainAll(assignedPartitions)`, the paused-partition log (`signalPartitionsBeingRevoked`) and the FATAL abort. The leave path (`ConsumerMembershipManager#signalMemberLeavingGroup`, epoch > 0) doesn't mark pending revocation at all. | Critic 240 (P4a) | **Fixed in P4b** in the shared base, as its own commit labelled as a consumer behaviour change (user, 2026-11-19). The share manager reaches the same method. |
 | `signalReconciliationCompleting` runs after `transitionTo(ACKNOWLEDGING)`; Java runs it before (`AbstractMembershipManager#maybeReconcile` completion), and Java's `reconciliationInProgress &&` guard is missing. | Critic 240 (P4a) | Consumer follow-up (the share hook is a no-op), not M18 |
-| Backtest candidates S1-2/3/4, S2-3, S2-4, S5-1, S5-2 (`backtest-report.md`) | Critic 202 | Unverified; consumer follow-up backlog |
+| Backtest candidate S2-4 (`backtest-report.md`): `assignPartitions` trims the topic-name cache unconditionally in Java; Rust trims only after a successful `onPartitionsAssigned` (`continue_after_assign`) | Critic 202; **confirmed by Critic 245** (P4b) | Consumer follow-up; share unaffected (the share assignment applies inline) |
+| Backtest candidates S1-2/3/4, S2-3, S5-1, S5-2 (`backtest-report.md`) | Critic 202 | Unverified; consumer follow-up backlog |
 
 **Why `revokePartitions` was missed.** Java has had the method since at least 4.1, and Milestone 8
 translated from 4.2. The name appears in no Rust file, plan or review before M18, so it was never
