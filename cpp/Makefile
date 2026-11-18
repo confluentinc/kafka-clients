@@ -28,6 +28,9 @@ LINT_BUILD_DIR = tools/lint/build
 LLVM_MAJOR := $(shell cat tools/lint/LLVM_VERSION)
 LINT_CLANG_TIDY ?= clang-tidy-$(LLVM_MAJOR)
 FFI_INCLUDE = $(RUST_PROJECT_ROOT)/target/include
+# The core's libraries abi-check builds each tree's library against: the release
+# build when there is one.
+CORE_LIB_DIR ?= $(if $(wildcard $(RUST_PROJECT_ROOT)/target/release/libconfluent_kafka.a),$(RUST_PROJECT_ROOT)/target/release,$(RUST_PROJECT_ROOT)/target/debug)
 LINT_PLUGIN = $(LINT_BUILD_DIR)/libConfluentKafkaTidy.so
 LINT_PROBE = $(LINT_BUILD_DIR)/probe/probe.cpp
 # abi-check: BASELINE=<rev> picks the release compared with (default: the
@@ -104,7 +107,7 @@ abi-check: lint-plugin
 	cmake -DREPO_ROOT=$(REPO_ROOT) -DSOURCE_DIR=$(CURDIR) -DWORK_DIR=$(CURDIR)/$(LINT_BUILD_DIR)/abi \
 		-DCLANG_TIDY=$(LINT_CLANG_TIDY) -DPLUGIN=$(CURDIR)/$(LINT_PLUGIN) \
 		-DCK_JAVA_MODEL=$(CURDIR)/$(LINT_BUILD_DIR)/ck_java_model -DFFI_INCLUDE=$(FFI_INCLUDE) \
-		-DBASELINE=$(BASELINE) -DSTRICT=$(STRICT) -P tools/abi_check.cmake
+		-DCORE_LIB_DIR=$(CORE_LIB_DIR) -DBASELINE=$(BASELINE) -DSTRICT=$(STRICT) -P tools/abi_check.cmake
 
 # Everything the C++ binding checks: formatting, both linters, the unit tests
 # against both libraries, the linter's tests and the interface check.

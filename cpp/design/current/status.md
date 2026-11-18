@@ -149,7 +149,14 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    program built with `find_package`, over each library.
 5. `cargo xtask install-c` (the core with its soname, links, static library, headers and
    `confluent-kafka.pc`) and the `api-compat` rule that a C ABI break raises `C_ABI_MAJOR`.
-6. `abi-check` on the real shared library, with the `SOVERSION` rule.
+6. `abi-check` on the real shared library, with the `SOVERSION` rule. Done: each tree's library is
+   built by its own CMake (Debug, against `CORE_LIB_DIR`) and compared by `abidiff
+   --no-added-syms` with the public headers given; a break under an unchanged `SOVERSION` is a
+   second finding. A header-only baseline shipped no library, so it has no ABI to compare. The
+   previous tests of private code (`#include "detail/..."`) are left out. The test's cases now
+   patch sources as well as headers and check why a case fails: a removed overload is a removed
+   symbol under the soname `0.1`; an inserted enumerator keeps the values (the ABI) and changes
+   the order (the API inventory).
 7. `packaging/debian/`: one source package, `libconfluent-kafka0`, `libconfluent-kafka-dev`,
    `libconfluent-kafka-cpp0.1`, `libconfluent-kafka-cpp-dev`, built per distro release in its
    container; the upgrade checked by running a program built against the old package.

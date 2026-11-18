@@ -16,16 +16,17 @@
 # release taken from its git tag, three ways.
 #   1. The API inventories (confluent-kafka-inventory) compared by
 #      `ck_java_model api-diff`: a declaration removed or changed is breaking.
-#   2. `abidiff` on a probe library of each tree, built with
-#      -fkeep-inline-functions so the header-only classes leave their inline
-#      members and types for it to see.
+#   2. `abidiff` on the shared library of each tree, built with debug info, its
+#      public headers given so only what they reach is compared; a break under
+#      an unchanged SOVERSION is reported too. A header-only baseline (before
+#      the compiled library) shipped no library a program loads: skipped.
 #   3. The previous release's unit tests compiled against the new headers.
 #
 #   cmake -DREPO_ROOT=<repo> -DSOURCE_DIR=<cpp dir of the new tree>
 #         -DWORK_DIR=<scratch dir> -DCLANG_TIDY=<clang-tidy-21> -DPLUGIN=<.so>
 #         -DCK_JAVA_MODEL=<ck_java_model> -DFFI_INCLUDE=<dir of the C header>
-#         [-DBASELINE=<rev>] [-DGTEST_INCLUDE=<dir>] [-DCXX=g++] [-DSTRICT=ON]
-#         -P abi_check.cmake
+#         -DCORE_LIB_DIR=<dir of libconfluent_kafka> [-DBASELINE=<rev>]
+#         [-DGTEST_INCLUDE=<dir>] [-DCXX=g++] [-DSTRICT=ON] -P abi_check.cmake
 #
 # BASELINE defaults to the highest cpp/vX.Y.Z tag not above the new tree's
 # version; with neither, there is nothing to compare. A break fails the run
@@ -33,7 +34,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-foreach(_var REPO_ROOT SOURCE_DIR WORK_DIR CLANG_TIDY PLUGIN CK_JAVA_MODEL FFI_INCLUDE)
+foreach(_var REPO_ROOT SOURCE_DIR WORK_DIR CLANG_TIDY PLUGIN CK_JAVA_MODEL FFI_INCLUDE CORE_LIB_DIR)
     if(NOT DEFINED ${_var} OR "${${_var}}" STREQUAL "")
         message(FATAL_ERROR "abi-check: ${_var} is not set")
     endif()
@@ -71,12 +72,13 @@ if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "abi-check: ${BASELINE} is not a commit")
 endif()
 
-# The baseline's headers and tests, extracted once per commit.
+# The baseline's cpp/ tree, extracted once per commit.
 set(_old_root "${WORK_DIR}/trees/${_sha}")
 set(_old "${_old_root}/cpp")
-if(NOT EXISTS "${_old}/include")
+if(NOT EXISTS "${_old}/CMakeLists.txt")
+    file(REMOVE_RECURSE "${_old_root}")
     file(MAKE_DIRECTORY "${_old_root}")
-    execute_process(COMMAND git -C "${REPO_ROOT}" archive -o "${_old_root}/tree.tar" "${_sha}" cpp/include cpp/test
+    execute_process(COMMAND git -C "${REPO_ROOT}" archive -o "${_old_root}/tree.tar" "${_sha}" cpp
                     RESULT_VARIABLE _rc)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "abi-check: git archive of ${BASELINE} failed")
@@ -86,8 +88,21 @@ if(NOT EXISTS "${_old}/include")
 endif()
 message(STATUS "abi-check: ${SOURCE_DIR} against ${BASELINE} (${_sha})")
 
+# The soname version of the tree at `tree` (a cpp directory), as its
+# CMakeLists.txt derives it from project(): 0.<minor> before 1.0, the major after.
+function(_ck_soversion tree out_var)
+    file(STRINGS "${tree}/CMakeLists.txt" _project REGEX "^project\\(confluent_kafka_cpp VERSION ")
+    string(REGEX MATCH "VERSION ([0-9]+)\\.([0-9]+)" _ "${_project}")
+    if(CMAKE_MATCH_1 EQUAL 0)
+        set(${out_var} "0.${CMAKE_MATCH_2}" PARENT_SCOPE)
+    else()
+        set(${out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+    endif()
+endfunction()
+
 # Writes, for the tree at `tree` (a cpp directory), its probe source, its API
-# inventory and its probe library under `out`.
+# inventory and, for a compiled library (a src/ tree), its shared library
+# under `out`.
 function(_ck_tree tree out)
     file(MAKE_DIRECTORY "${out}")
     file(GLOB_RECURSE _headers RELATIVE "${tree}/include" "${tree}/include/confluent/kafka/*.hpp")
@@ -105,12 +120,20 @@ function(_ck_tree tree out)
     if(NOT EXISTS "${out}/inventory.txt")
         message(FATAL_ERROR "abi-check: no inventory for ${tree}:\n${_output}")
     endif()
+    if(NOT EXISTS "${tree}/src")
+        return()
+    endif()
     execute_process(
-        COMMAND "${CXX}" -std=c++20 -shared -fPIC -g -fkeep-inline-functions "-I${tree}/include" -isystem
-                "${FFI_INCLUDE}" "${out}/probe.cpp" -o "${out}/probe.so"
+        COMMAND "${CMAKE_COMMAND}" -S "${tree}" -B "${out}/build" -DCMAKE_BUILD_TYPE=Debug
+                "-DCMAKE_CXX_COMPILER=${CXX}" -DCONFLUENT_KAFKA_CPP_BUILD_TESTS=OFF
+                "-DCONFLUENT_KAFKA_INCLUDE_DIR=${FFI_INCLUDE}" "-DCONFLUENT_KAFKA_LIB_DIR=${CORE_LIB_DIR}"
         RESULT_VARIABLE _rc OUTPUT_VARIABLE _output ERROR_VARIABLE _output)
+    if(_rc EQUAL 0)
+        execute_process(COMMAND "${CMAKE_COMMAND}" --build "${out}/build" --target confluent_kafka_cpp
+                        RESULT_VARIABLE _rc OUTPUT_VARIABLE _output ERROR_VARIABLE _output)
+    endif()
     if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "abi-check: the probe of ${tree} does not build:\n${_output}")
+        message(FATAL_ERROR "abi-check: the library of ${tree} does not build:\n${_output}")
     endif()
 endfunction()
 
@@ -127,11 +150,32 @@ if(NOT _rc EQUAL 0)
     list(APPEND _breaks "the API inventory")
 endif()
 
-# 2. The ABI of the probe libraries. abidiff's exit status is a bit set: 4 an
+# 2. The ABI of the shared libraries. abidiff's exit status is a bit set: 4 an
 # ABI change, 8 an incompatible one.
+# Script mode (-P) defines no CMAKE_SHARED_LIBRARY_SUFFIX.
+if(CMAKE_HOST_APPLE)
+    set(_ck_library libconfluent_kafka_cpp.dylib)
+else()
+    set(_ck_library libconfluent_kafka_cpp.so)
+endif()
+set(_old_library "")
+set(_new_library "")
+if(EXISTS "${WORK_DIR}/old/build/${_ck_library}")
+    set(_old_library "${WORK_DIR}/old/build/${_ck_library}")
+endif()
+if(EXISTS "${WORK_DIR}/new/build/${_ck_library}")
+    set(_new_library "${WORK_DIR}/new/build/${_ck_library}")
+endif()
 find_program(_abidiff abidiff)
-if(_abidiff)
-    execute_process(COMMAND "${_abidiff}" --no-added-syms "${WORK_DIR}/old/probe.so" "${WORK_DIR}/new/probe.so"
+if(NOT _old_library)
+    message("-- abidiff: ${BASELINE} is header-only and shipped no library a program loads; nothing to compare")
+elseif(NOT _new_library)
+    message(FATAL_ERROR "abi-check: ${SOURCE_DIR} built no shared library")
+elseif(NOT _abidiff)
+    message(WARNING "abi-check: abidiff not found; the ABI comparison is skipped")
+else()
+    execute_process(COMMAND "${_abidiff}" --no-added-syms --headers-dir1 "${_old}/include"
+                            --headers-dir2 "${SOURCE_DIR}/include" "${_old_library}" "${_new_library}"
                     RESULT_VARIABLE _rc OUTPUT_VARIABLE _output ERROR_VARIABLE _output)
     message("-- abidiff (exit ${_rc})\n${_output}")
     math(EXPR _abi_bits "${_rc} & 12")
@@ -140,10 +184,17 @@ if(_abidiff)
         message(FATAL_ERROR "abi-check: abidiff failed")
     endif()
     if(NOT _abi_bits EQUAL 0)
-        list(APPEND _breaks "the ABI of the probe")
+        list(APPEND _breaks "the ABI of the shared library")
+        # §12.4: a break needs a new soname, or programs built against the
+        # baseline load a library they do not fit.
+        _ck_soversion("${_old}" _old_soversion)
+        _ck_soversion("${SOURCE_DIR}" _new_soversion)
+        if(_old_soversion STREQUAL _new_soversion)
+            message("-- the ABI breaks under the soname libconfluent_kafka_cpp.so.${_new_soversion} of ${BASELINE}: "
+                    "raise the version in CMakeLists.txt (cpp/CLAUDE.md §12.4)")
+            list(APPEND _breaks "the soname")
+        endif()
     endif()
-else()
-    message(WARNING "abi-check: abidiff not found; the ABI comparison is skipped")
 endif()
 
 # 3. The previous release's unit tests against the new headers. A test of the

@@ -143,7 +143,14 @@ if(BUILD_TESTING)
     add_test(NAME javamodel_kafka_test COMMAND javamodel_kafka_test)
 
     # make -C cpp abi-check (cpp/CLAUDE.md §12.4) against HEAD: compatible
-    # changes pass, breaking ones fail. Needs git, g++ and abidiff.
+    # changes pass, breaking ones fail. Needs git, g++, abidiff and the core's
+    # libraries beside its header (the release build when there is one).
+    get_filename_component(_ck_core_target_dir "${CK_LINT_FFI_INCLUDE_DIR}" DIRECTORY)
+    if(EXISTS "${_ck_core_target_dir}/release/libconfluent_kafka.a")
+        set(_ck_core_lib_dir "${_ck_core_target_dir}/release")
+    else()
+        set(_ck_core_lib_dir "${_ck_core_target_dir}/debug")
+    endif()
     add_test(NAME abi_check
         COMMAND ${CMAKE_COMMAND}
                 -DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/../../..
@@ -152,6 +159,7 @@ if(BUILD_TESTING)
                 -DPLUGIN=$<TARGET_FILE:ConfluentKafkaTidy>
                 -DCK_JAVA_MODEL=$<TARGET_FILE:ck_java_model_cli>
                 -DFFI_INCLUDE=${CK_LINT_FFI_INCLUDE_DIR}
+                -DCORE_LIB_DIR=${_ck_core_lib_dir}
                 -DABI_CHECK=${CMAKE_CURRENT_SOURCE_DIR}/../abi_check.cmake
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/test/abi_check_test.cmake)
 
