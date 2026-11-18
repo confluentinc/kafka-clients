@@ -90,14 +90,7 @@ impl AbstractConfig {
         )
     )]
     pub(crate) fn new(definition: &'static ConfigDef, originals: ConfigMap, do_log: bool) -> Result<Self, Error> {
-        Self::with_hooks(
-            definition,
-            originals,
-            do_log,
-            "AbstractConfig",
-            Ok,
-            |_| Ok(ConfigMap::new()),
-        )
+        Self::with_hooks(definition, originals, do_log, "AbstractConfig", Ok, |_| Ok(ConfigMap::new()))
     }
 
     /// Java's `AbstractConfig(definition, originals, configProviderProps,
@@ -819,29 +812,18 @@ mod tests {
     /// the hook's reads mark keys used.
     #[test]
     fn test_post_process_parsed_config() {
-        let config = AbstractConfig::with_hooks(
-            &POST_DEF,
-            map(&[("a", "5".into())]),
-            false,
-            "TestConfig",
-            Ok,
-            |config| {
+        let config =
+            AbstractConfig::with_hooks(&POST_DEF, map(&[("a", "5".into())]), false, "TestConfig", Ok, |config| {
                 let a = config.get_int("a")?.unwrap_or_default();
                 Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(a * 2)))]))
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(config.get_int("b").unwrap(), Some(10));
         assert!(config.unused().is_empty());
 
-        let err = AbstractConfig::with_hooks(
-            &POST_DEF,
-            ConfigMap::new(),
-            false,
-            "TestConfig",
-            Ok,
-            |_| Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(-1)))])),
-        )
+        let err = AbstractConfig::with_hooks(&POST_DEF, ConfigMap::new(), false, "TestConfig", Ok, |_| {
+            Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(-1)))]))
+        })
         .unwrap_err();
         assert_eq!(
             config_error_message::<()>(Err(err)),
