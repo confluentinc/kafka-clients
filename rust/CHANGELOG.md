@@ -9,41 +9,28 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 - Fix: partition revocation now follows Java 4.4.0's
   `AbstractMembershipManager#revokePartitions`, which the consumer had not
   translated. No API or signature changes. What changes:
-  - `onPartitionsRevoked` receives only the partitions still assigned when it
-    runs. During a rebalance that waits on the pre-revocation auto-commit, a
-    partition that left the assignment meanwhile is no longer passed.
-  - An INFO log ("The pause flag in partitions [...] will be removed due to
-    revocation.") names paused partitions whose pause flag the revocation
-    drops, and an INFO log ("Revoking previously assigned partitions [...]")
-    precedes each revocation.
-  - On `unsubscribe` / `close` while still in the group (member epoch > 0),
-    the partitions being released are marked pending revocation before
-    `onPartitionsRevoked` runs: fetching for them stops and in-flight fetch
-    responses for them are discarded. Positions are unchanged, so committing
-    inside the callback still works.
-  - A failed `onPartitionsRevoked` during a rebalance is logged with Java's
-    message ("onPartitionsRevoked callback invocation failed for partitions
-    [...]").
-  - A revocation reached by a member in the fatal state fails without
-    calling `onPartitionsRevoked`, as in Java. The rebalance already stopped
-    before the revocation when the member failed during the pre-revocation
-    commit, so this changes no outcome today.
-
-### C FFI
-
-- A NULL mandatory argument (a handle, a string, a list, a map, an element, a
-  function pointer) is checked at every export and reported with the error Java
-  throws there: `kafka_common_Error_LOCAL_NULL_POINTER` (the new
-  `LocalNullPointerError`, Java's `NullPointerException`, message
-  "<parameter> must not be null"), or Java's own error and text where Java
-  checks the argument (`IllegalArgumentException` for `assign(null)`). Fallible
-  functions, the `_err` twins of `confluent_kafka_bindings.h` and `_cb`
-  completions deliver it; a `confluent_kafka.h` function with no error channel
-  logs it and aborts the process, as does a fallible function given a NULL
-  `out_err` when it has an error to store. Nothing dereferences a NULL.
-- **Breaking:** the made-up failure values (`fallback`) a function without an
-  error channel returned on a caught panic are gone: such a panic aborts.
-  `_destroy(NULL)` stays a no-op.
+  - An INFO log ("Revoking previously assigned partitions [...]") precedes
+    each revocation, and another ("The pause flag in partitions [...] will be
+    removed due to revocation.") names paused partitions whose pause flag the
+    revocation drops.
+  - On `unsubscribe` (or subscribing to an empty topic list) while still in
+    the group (member epoch > 0), the partitions being released are marked
+    pending revocation before `onPartitionsRevoked` runs: fetching for them
+    stops and in-flight fetch responses for them are discarded. Positions are
+    unchanged, so committing inside the callback still works. `close` is not
+    affected: it runs the listener directly, as in Java.
+  - As a consequence, during that `onPartitionsRevoked`, `position()` on a
+    released partition that has no position yet no longer fetches one: it
+    waits until `default.api.timeout.ms` and returns a timeout error, as in
+    Java.
+  - A failed `onPartitionsRevoked` logs Java's ERROR line
+    ("onPartitionsRevoked callback invocation failed for partitions [...]"),
+    during a rebalance and during `unsubscribe`.
+  - Two further steps are translated for Java parity but change no outcome
+    today: revoking only the partitions still assigned when the revocation
+    runs, and skipping `onPartitionsRevoked` for a member in the fatal state.
+    On every reachable path the rebalance has already stopped before either
+    could make a difference.
 
 ## [1.0.0] - 2026-10-30
 
