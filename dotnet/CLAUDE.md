@@ -1407,9 +1407,18 @@ decision 10). The parts, each decided against the Java source:
   the core delivers it (offset -1, `rust/src/ffi/producer/callback.rs:29-30` at `0035d9ff`).
   Python's `on_delivery` receives `None` on failure, so this is stricter than Python.
 - **Which outcomes fire it.** Every record the core accepted fires it exactly once, success or
-  failure. A record rejected before the append fires nothing: the sync `Send` throws, and the
-  async `Send`'s first stage faults. The one exception is a serializer's `ApiException` on
-  `KafkaProducer` / `AsyncKafkaProducer`, which fires it once, where **Thread** (above) says. When the send reports an error, the callback may still
+  failure. A record the core refuses before the append with an `ApiException` (the metadata wait
+  timing out, `RecordTooLargeException`) fires it once too and fails its future, as Java's
+  `doSend` does, but through the callback queue, on the completion thread: when `Send` returns, or
+  the async `Send`'s first stage completes, the callback may not have run yet and the future may
+  not be done, and a running callback delays both *(recorded deviation, as Python's: Java's
+  `doSend` runs the callback inside `send`, on the caller's thread, and returns a future already
+  done. Why: the core reports a record's callback only through the producer's callback queue,
+  which the completion thread runs. Goes when: the core runs the callback of a record it refuses
+  inside the send call)*. A serializer's `ApiException` on `KafkaProducer` /
+  `AsyncKafkaProducer` fires it once, where **Thread** (above) says. Any other refusal
+  before the append fires nothing: the sync `Send` throws, and the async `Send`'s first stage
+  faults. When the send reports an error, the callback may still
   fire later, once, if the record reached the accumulator (Java's `doSend` appends the record
   with its callback before `maybeAddPartition` fails; BH:38221-38227, BH:38251-38254). So an
   error from `Send` does not prove the callback will not fire. A record that `Close` fails while

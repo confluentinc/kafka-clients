@@ -41,10 +41,15 @@ namespace Confluent.Kafka.Producer;
 /// failure, also when the wait on its future was abandoned, with one case left out, as in Java and Python:
 /// a record whose batch a produce response did not complete, still in flight when a graceful <c>Close</c>
 /// ends, is dropped by the producer without a delivery, so it fires nothing and its future never completes.
-/// A record refused before it was appended fires nothing: the synchronous <c>Send</c> throws, and the
-/// asynchronous <c>Send</c>'s first stage faults; the one exception is a serializer's
-/// <see cref="Common.Errors.ApiException"/> on <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, which fires it
-/// once inside <c>Send</c> and fails the future. An error from <c>Send</c> does not prove that the callback will
+/// A record the producer refuses before appending it with an <see cref="Common.Errors.ApiException"/> (its
+/// topic's metadata not found within <c>max.block.ms</c>, a record larger than <c>max.request.size</c>) fires it
+/// once and fails its future, as in Java, but later, on the completion thread: when <c>Send</c> returns, or the
+/// asynchronous <c>Send</c>'s first stage completes, the callback may not have run yet and the future may not be
+/// done, and a running callback delays both, where Java runs it inside <c>send</c> and returns a future already
+/// done. A serializer's <see cref="Common.Errors.ApiException"/> on <c>KafkaProducer</c> and
+/// <c>AsyncKafkaProducer</c> fires it inside <c>Send</c> instead (<b>Thread</b>, above). Any other refusal before
+/// the append fires nothing: the synchronous <c>Send</c> throws, and the asynchronous <c>Send</c>'s first stage
+/// faults. An error from <c>Send</c> does not prove that the callback will
 /// not fire: a record that reached the accumulator before the send failed (a transactional
 /// producer's send outside a transaction) still fires it once. A record that <c>Close</c> fails while it
 /// waits for metadata or buffer memory ("Producer closed while send in progress") fires nothing, as in
