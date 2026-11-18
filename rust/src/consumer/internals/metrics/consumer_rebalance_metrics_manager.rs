@@ -15,20 +15,14 @@
 //! Consumer-group rebalance latency / rate / failure metrics
 //! (`org.apache.kafka.clients.consumer.internals.metrics.ConsumerRebalanceMetricsManager`).
 //!
-//! # `RebalanceMetricsManager` abstract base folded in
+//! # `RebalanceMetricsManager` base
 //!
 //! Java's `ConsumerRebalanceMetricsManager extends RebalanceMetricsManager`,
-//! an abstract base providing the `metricGroupName` + `createMetric(...)`
-//! helper and the abstract `recordRebalanceStarted/Ended` / `rebalanceStarted`
-//! / default-no-op `maybeRecordRebalanceFailed` surface. The base exists so
-//! `AbstractMembershipManager` can hold a polymorphic `RebalanceMetricsManager`
-//! shared by the consumer/streams and share variants. Per
-//! `consumer-threading.md` §20 the Share and Streams managers are out of scope,
-//! so only this one concrete implementation exists in the Rust client.
-//! Translating the base as a single-impl trait would add a trait with no
-//! polymorphism (CLAUDE.md DoD §7), so we fold the base directly here. A
-//! `RebalanceMetricsManager` trait can be extracted with no API change if/when
-//! Share/Streams are translated.
+//! the abstract base `AbstractMembershipManager` holds so the consumer and
+//! share membership managers can each supply their own. Rust translates the
+//! base as the [`RebalanceMetricsManager`] trait, implemented here; the
+//! `metricGroupName` / `createMetric` construction helpers are inlined into
+//! [`ConsumerRebalanceMetricsManager::new`] (see that trait's module docs).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -42,12 +36,12 @@ use crate::common::metrics::stats::{Avg, CumulativeCount, CumulativeSum, Max, Ra
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
 use crate::consumer::internals::SubscriptionState;
-use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger, RebalanceMetricsManager};
 
 /// Records consumer-group rebalance latency, rate, total, and failure metrics,
 /// plus the `assigned-partitions` and `last-rebalance-seconds-ago` gauges.
-/// Mirrors Java's `ConsumerRebalanceMetricsManager` (with the abstract
-/// `RebalanceMetricsManager` base folded in — see module docs).
+/// Mirrors Java's `ConsumerRebalanceMetricsManager`; the abstract
+/// `RebalanceMetricsManager` methods are its [`RebalanceMetricsManager`] impl.
 ///
 /// Owned by the membership state machine (bg task). `record_rebalance_started`
 /// / `record_rebalance_ended` fire once per reconcile cycle and
@@ -255,29 +249,6 @@ impl ConsumerRebalanceMetricsManager {
         }
     }
 
-    /// Java: `recordRebalanceStarted(long nowMs)`.
-    pub(crate) fn record_rebalance_started(&self, now_ms: i64) {
-        self.last_rebalance_start_ms.store(now_ms, Ordering::SeqCst);
-    }
-
-    /// Java: `recordRebalanceEnded(long nowMs)`.
-    pub(crate) fn record_rebalance_ended(&self, now_ms: i64) {
-        self.last_rebalance_end_ms.store(now_ms, Ordering::SeqCst);
-        let latency = now_ms - self.last_rebalance_start_ms.load(Ordering::SeqCst);
-        record_or_log(self.successful_rebalance_sensor.record_with_value(latency as f64));
-    }
-
-    /// Java: `maybeRecordRebalanceFailed()`. A rebalance failed only if a start
-    /// was recorded after the last end (`lastRebalanceStartMs > lastRebalanceEndMs`).
-    pub(crate) fn maybe_record_rebalance_failed(&self) {
-        let start = self.last_rebalance_start_ms.load(Ordering::SeqCst);
-        let end = self.last_rebalance_end_ms.load(Ordering::SeqCst);
-        if start <= end {
-            return;
-        }
-        record_or_log(self.failed_rebalance_sensor.record());
-    }
-
     /// Removes every sensor and metric this manager registered. Java inherits
     /// `AbstractConsumerMetricsManager.close()` (KAFKA-19542).
     ///
@@ -295,12 +266,37 @@ impl ConsumerRebalanceMetricsManager {
     pub(crate) fn close(&self) {
         self.inner.close();
     }
+}
+
+impl RebalanceMetricsManager for ConsumerRebalanceMetricsManager {
+    /// Java: `recordRebalanceStarted(long nowMs)`.
+    fn record_rebalance_started(&self, now_ms: i64) {
+        self.last_rebalance_start_ms.store(now_ms, Ordering::SeqCst);
+    }
+
+    /// Java: `recordRebalanceEnded(long nowMs)`.
+    fn record_rebalance_ended(&self, now_ms: i64) {
+        self.last_rebalance_end_ms.store(now_ms, Ordering::SeqCst);
+        let latency = now_ms - self.last_rebalance_start_ms.load(Ordering::SeqCst);
+        record_or_log(self.successful_rebalance_sensor.record_with_value(latency as f64));
+    }
+
+    /// Java: `maybeRecordRebalanceFailed()`. A rebalance failed only if a start
+    /// was recorded after the last end (`lastRebalanceStartMs > lastRebalanceEndMs`).
+    fn maybe_record_rebalance_failed(&self) {
+        let start = self.last_rebalance_start_ms.load(Ordering::SeqCst);
+        let end = self.last_rebalance_end_ms.load(Ordering::SeqCst);
+        if start <= end {
+            return;
+        }
+        record_or_log(self.failed_rebalance_sensor.record());
+    }
+
     /// Java: `rebalanceStarted()`. Part of the manager's public surface but,
     /// as in Java, not called from the membership state machine — only the
     /// `ConsumerRebalanceMetricsManagerTest` cases exercise it. Kept (not
     /// `#[cfg(test)]`) to preserve the Java API.
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn rebalance_started(&self) -> bool {
+    fn rebalance_started(&self) -> bool {
         self.last_rebalance_start_ms.load(Ordering::SeqCst) > self.last_rebalance_end_ms.load(Ordering::SeqCst)
     }
 }

@@ -47,6 +47,7 @@ use super::PollResult;
 use super::RequestManager;
 use super::SubscriptionState;
 use super::metrics::ConsumerRebalanceMetricsManager;
+use super::metrics::RebalanceMetricsManager;
 use super::{AbstractMembershipManager, LocalAssignment};
 
 /// KIP-848 consumer-group membership manager.
@@ -277,7 +278,7 @@ impl ConsumerMembershipManager {
             metadata,
             background_event_handler,
             auto_commit_enabled,
-            metrics_manager,
+            metrics_manager.map(|m| m as Arc<dyn RebalanceMetricsManager>),
             time,
         );
         Self {

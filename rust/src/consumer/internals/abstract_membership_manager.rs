@@ -65,7 +65,7 @@ use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
-use crate::consumer::internals::metrics::ConsumerRebalanceMetricsManager;
+use crate::consumer::internals::metrics::RebalanceMetricsManager;
 
 use super::ConsumerMembershipManager;
 use super::ConsumerMetadata;
@@ -199,8 +199,9 @@ pub(crate) struct MembershipInner {
     /// Java: `RebalanceMetricsManager metricsManager`. Records rebalance
     /// start/end/failure. `None` in tests that build the membership manager
     /// without a metrics registry; the live consumer always wires it
-    /// (M5). Folded `ConsumerRebalanceMetricsManager` (single concrete impl).
-    pub(crate) metrics_manager: Option<Arc<ConsumerRebalanceMetricsManager>>,
+    /// (M5). The group type supplies the implementation (Java's abstract
+    /// `RebalanceMetricsManager`).
+    pub(crate) metrics_manager: Option<Arc<dyn RebalanceMetricsManager>>,
     /// Java: `Time time`. Clock used to stamp rebalance start/end. Defaults to
     /// the metrics `SystemTime`; the consumer overrides it to share the
     /// metrics clock when it wires `metrics_manager` (M5).
@@ -366,7 +367,7 @@ impl AbstractMembershipManager {
         metadata: Arc<ConsumerMetadata>,
         background_event_handler: Arc<BackgroundEventHandler>,
         auto_commit_enabled: bool,
-        metrics_manager: Option<Arc<ConsumerRebalanceMetricsManager>>,
+        metrics_manager: Option<Arc<dyn RebalanceMetricsManager>>,
         time: Arc<dyn Time>,
     ) -> Self {
         // Java: `Uuid.randomUuid().toString()`. We use the same Uuid
