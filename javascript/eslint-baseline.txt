@@ -1,0 +1,53 @@
+# Findings of the Node.js client's rule linter not burnt down yet
+# (ESLint's `kafka/` rules, `npx eslint .`; design/current/javascript-rule-linter/PLAN.md).
+# One `<kind> <subject>` per line, or `prefix:<p>` to waive every finding whose
+# subject starts with `p`. A line matching no finding any more is itself a
+# finding: delete it. See everything with
+# `KAFKA_LINT_NO_BASELINE=1 npx eslint .`.
+
+# check-java-completeness: Java API the client does not translate yet.
+# KafkaProducer, with the reasons of the producer package's documentation
+# (src/producer/index.ts): transactions aren't in the preview; clientInstanceId
+# and the metric-subscription calls have no FFI entry point; partitionsFor and
+# metrics are not translated yet.
+missing clients.producer.KafkaProducer#abortTransaction
+missing clients.producer.KafkaProducer#beginTransaction
+missing clients.producer.KafkaProducer#clientInstanceId
+missing clients.producer.KafkaProducer#commitTransaction
+missing clients.producer.KafkaProducer#initTransactions
+missing clients.producer.KafkaProducer#metrics
+missing clients.producer.KafkaProducer#partitionsFor
+missing clients.producer.KafkaProducer#registerMetricForSubscription
+missing clients.producer.KafkaProducer#sendOffsetsToTransaction
+missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# Producer, the interface: the same members as KafkaProducer's, left out for
+# the same reasons.
+missing clients.producer.Producer#abortTransaction
+missing clients.producer.Producer#beginTransaction
+missing clients.producer.Producer#clientInstanceId
+missing clients.producer.Producer#commitTransaction
+missing clients.producer.Producer#initTransactions
+missing clients.producer.Producer#metrics
+missing clients.producer.Producer#partitionsFor
+missing clients.producer.Producer#registerMetricForSubscription
+missing clients.producer.Producer#sendOffsetsToTransaction
+missing clients.producer.Producer#unregisterMetricFromSubscription
+# KafkaProducer's public metric and thread-name constants: not translated yet.
+missing clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
+missing clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
+# RecordMetadata: Java's public constructor, not translated yet: it takes a
+# TopicPartition, which this client does not translate yet.
+missing clients.producer.RecordMetadata#RecordMetadata
+
+
+# check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
+# Each line names one Java form not translated, so a wrong shape of the forms
+# that are translated is still a finding.
+# KafkaProducer's constructor takes the configuration alone: its forms taking
+# serializers are not translated yet (the producer package's documentation,
+# src/producer/index.ts), and a Map and Properties are one configs type.
+overload-missing KafkaProducer.constructor/KafkaProducer(Map,Serializer,Serializer)
+overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
+# Header's constructor takes Java's (String, byte[]) form: JavaScript has no
+# ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
+overload-missing Header.constructor/RecordHeader(ByteBuffer,ByteBuffer)
