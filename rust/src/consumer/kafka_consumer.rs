@@ -1170,6 +1170,45 @@ mod tests {
         );
     }
 
+    /// `sasl.jaas.config` is parsed with Java's `JaasConfig` grammar when the
+    /// channel builder of a SASL protocol is created, so the values Kafka
+    /// 4.4.0's `KafkaConsumer` refuses fail construction with its error chain:
+    /// Java's network thread creates the `NetworkClient` and hands its failure
+    /// to the constructor. Under `PLAINTEXT` the value is never read, and the
+    /// consumer is built, as in Java.
+    #[tokio::test]
+    async fn construction_parses_sasl_jaas_config_as_java_does() {
+        use crate::common::security::jaas_context::tests::{
+            CLIENT_CONSTRUCTION_REFUSALS, assert_sasl_jaas_config_refusal,
+        };
+
+        for (jaas, message) in CLIENT_CONSTRUCTION_REFUSALS {
+            let config = |protocol: &str| {
+                let props = HashMap::from([
+                    ("bootstrap.servers".to_string(), "127.0.0.1:9092".to_string()),
+                    ("group.protocol".to_string(), "consumer".to_string()),
+                    ("group.id".to_string(), "g".to_string()),
+                    ("security.protocol".to_string(), protocol.to_string()),
+                    ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+                    ("sasl.jaas.config".to_string(), jaas.to_string()),
+                ]);
+                ConsumerConfig::new(&props).expect("valid config")
+            };
+            let error =
+                KafkaConsumer::<String, String>::new(config("SASL_PLAINTEXT"), StringDeserializer, StringDeserializer)
+                    .expect_err("Java refuses the value");
+            assert_sasl_jaas_config_refusal(&error, "Failed to construct kafka consumer", message);
+
+            let mut consumer =
+                KafkaConsumer::<String, String>::new(config("PLAINTEXT"), StringDeserializer, StringDeserializer)
+                    .unwrap_or_else(|e| panic!("PLAINTEXT does not read {jaas:?}: {e:?}"));
+            consumer
+                .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+                .await
+                .expect("close");
+        }
+    }
+
     /// `KafkaConsumer` can move to another task but not be shared between
     /// tasks, as Java's `KafkaConsumer` is single-threaded and enforces it at
     /// run time with `acquire()` (`consumer-threading.md` §2). The compiler
