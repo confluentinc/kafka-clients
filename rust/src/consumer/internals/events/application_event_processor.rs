@@ -80,6 +80,7 @@ use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::internals::MembershipManagerHooks;
 use crate::consumer::internals::RequestManagers;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 
@@ -3011,9 +3012,7 @@ mod tests {
         );
 
         // Leave heartbeat response (epoch -1) completes it.
-        mm.abstract_mm
-            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
-            .unwrap();
+        mm.on_heartbeat_success(&leave_heartbeat_response(mm.member_id())).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .expect("UnsubscribeEvent must complete once the leave response arrives")
@@ -3143,9 +3142,7 @@ mod tests {
         assert!(rx2.try_recv().is_err(), "second leave must wait for the ongoing leave");
         assert!(rx3.try_recv().is_err(), "close-time leave must wait for the ongoing leave");
 
-        mm.abstract_mm
-            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
-            .unwrap();
+        mm.on_heartbeat_success(&leave_heartbeat_response(mm.member_id())).unwrap();
         for rx in [rx1, rx2, rx3] {
             tokio::time::timeout(std::time::Duration::from_secs(5), rx)
                 .await
@@ -3260,9 +3257,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "still waiting for the leave heartbeat response");
 
         mm.abstract_mm.on_heartbeat_request_generated().unwrap();
-        mm.abstract_mm
-            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
-            .unwrap();
+        mm.on_heartbeat_success(&leave_heartbeat_response(mm.member_id())).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .expect("UnsubscribeEvent must complete once the leave response arrives")

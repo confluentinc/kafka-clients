@@ -60,7 +60,7 @@ use super::{PollResult, UnsentRequest};
 /// defers the state-update to the next bg-task `poll()` cycle. The
 /// rationale (per Phase 12.5 PLAN §"2. consumer_heartbeat_request_manager"
 /// "Structural decision"): the success path calls
-/// `membership_manager.abstract_mm.on_heartbeat_success(...)`, and the membership
+/// `membership_manager.on_heartbeat_success(...)`, and the membership
 /// manager owns its own `Arc<Mutex<...>>`. Channel-back ensures no
 /// heartbeat-side guard is held when the cross-RM call fires
 /// (consumer-threading.md §16).
@@ -555,7 +555,7 @@ impl ConsumerHeartbeatRequestManager {
             let member_id = self.membership_manager.member_id();
             self.inner
                 .on_successful_response(&member_id, new_interval_ms, completion_time_ms);
-            if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_success(response) {
+            if let Err(e) = self.membership_manager.on_heartbeat_success(response) {
                 log::error!("on_heartbeat_success failed: {}", e);
                 let _ = self
                     .inner
@@ -1237,6 +1237,7 @@ mod tests {
     use crate::consumer::ConsumerConfig;
     use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
+    use crate::consumer::internals::MembershipManagerHooks;
     use tokio::sync::mpsc;
 
     /// Default heartbeat interval used by Java's
@@ -1961,7 +1962,7 @@ mod tests {
     /// `PendingHeartbeatCompletion::Response` envelope. On the next
     /// `poll(now)`, the drain at the top invokes
     /// `on_response` → `inner.on_successful_response` +
-    /// `membership_manager.abstract_mm.on_heartbeat_success(response)`. The
+    /// `membership_manager.on_heartbeat_success(response)`. The
     /// membership state advances past JOINING.
     ///
     /// This is the test that would have caught the Phase-12 audit

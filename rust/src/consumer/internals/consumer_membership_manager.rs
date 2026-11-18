@@ -48,7 +48,7 @@ use super::RequestManager;
 use super::SubscriptionState;
 use super::metrics::ConsumerRebalanceMetricsManager;
 use super::metrics::RebalanceMetricsManager;
-use super::{AbstractMembershipManager, LocalAssignment};
+use super::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
 
 /// KIP-848 consumer-group membership manager.
 ///
@@ -81,10 +81,6 @@ pub(crate) struct ConsumerMembershipManager {
     /// wiring up the full commit pipeline; Phase 10 wires it through
     /// the supplier.
     pub(crate) commit_request_manager: Option<Arc<CommitRequestManager>>,
-    /// Java: `CloseOptions.GroupMembershipOperation leaveGroupOperation`.
-    /// Stored on the membership manager so `leave_group_epoch()` can
-    /// dispatch correctly.
-    pub(crate) leave_group_operation: Mutex<GroupMembershipOperation>,
     /// Phase 41b — non-blocking reconcile callback state.
     ///
     /// Java's `maybeReconcile` fires the §31 rebalance-listener callback
@@ -288,7 +284,6 @@ impl ConsumerMembershipManager {
             rebalance_timeout_ms,
             server_assignor,
             commit_request_manager,
-            leave_group_operation: Mutex::new(GroupMembershipOperation::Default),
             pending_reconcile: Mutex::new(None),
             pending_reconcile_flag: std::sync::atomic::AtomicBool::new(false),
             pending_release: Mutex::new(None),
@@ -298,40 +293,24 @@ impl ConsumerMembershipManager {
         }
     }
 
-    /// Java: `groupId()`.
+    /// Java: `groupId()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn group_id(&self) -> String {
-        let g = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        g.group_id.clone()
+        self.abstract_mm.group_id()
     }
 
-    /// Java: `memberId()`.
+    /// Java: `memberId()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn member_id(&self) -> String {
-        let g = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        g.member_id.clone()
+        self.abstract_mm.member_id()
     }
 
-    /// Java: `memberEpoch()`.
+    /// Java: `memberEpoch()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn member_epoch(&self) -> i32 {
-        let g = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        g.member_epoch
+        self.abstract_mm.member_epoch()
     }
 
-    /// Java: `state()`.
+    /// Java: `state()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn state(&self) -> MemberState {
-        let g = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        g.state
+        self.abstract_mm.state()
     }
 
     /// Java: `groupInstanceId()`.
@@ -352,58 +331,20 @@ impl ConsumerMembershipManager {
         self.server_assignor.as_deref()
     }
 
-    /// Java: `leaveGroupOperation()`.
+    /// Java: `leaveGroupOperation()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn leave_group_operation(&self) -> GroupMembershipOperation {
-        let g = match self.leave_group_operation.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *g
+        self.abstract_mm.leave_group_operation()
     }
 
     /// Set the leave-group operation. Java sets this in
     /// `leaveGroupOnClose(...)`.
     pub(crate) fn set_leave_group_operation(&self, op: GroupMembershipOperation) {
-        let mut g = match self.leave_group_operation.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *g = op;
+        self.abstract_mm.set_leave_group_operation(op);
     }
 
-    /// Java: `currentAssignment()`.
+    /// Java: `currentAssignment()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn current_assignment(&self) -> LocalAssignment {
-        let g = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        g.current_assignment.clone()
-    }
-
-    /// Java: `joinGroupEpoch()` — 0 for the consumer group protocol.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#joinGroupEpoch")]
-    pub(crate) fn join_group_epoch(&self) -> i32 {
-        ConsumerGroupHeartbeatRequest::JOIN_GROUP_MEMBER_EPOCH
-    }
-
-    /// Java: `leaveGroupEpoch()`. For static members + `LEAVE_GROUP`
-    /// operation: -1 (force fence). Otherwise: -1 for dynamic members,
-    /// -2 for static members.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch")]
-    pub(crate) fn leave_group_epoch(&self) -> i32 {
-        let is_static_member = self.group_instance_id.is_some();
-        // The mechanism to make static members permanently leave the group is to
-        // send an HB to leave with the -1 epoch (used by dynamic members).
-        // This will make the group coordinator fence this member, effectively
-        // removing it from the group.
-        if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
-            return ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
-        }
-        if is_static_member {
-            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_STATIC_MEMBER_EPOCH
-        } else {
-            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH
-        }
+        self.abstract_mm.current_assignment()
     }
 
     /// Java: `transitionToJoining()`.
@@ -415,55 +356,6 @@ impl ConsumerMembershipManager {
     pub(crate) fn transition_to_sending_leave_group(&self, due_to_expired_poll_timer: bool) -> Result<(), Error> {
         self.abstract_mm
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
-    }
-
-    /// The heartbeat response's error code, for
-    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
-    ///
-    /// Java: `protected short errorCode(ConsumerGroupHeartbeatResponse response)`
-    /// (`ConsumerMembershipManager#errorCode`), the override of the
-    /// abstract hook.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#errorCode")]
-    pub(crate) fn error_code(response: &ConsumerGroupHeartbeatResponse) -> i16 {
-        response.data().error_code
-    }
-
-    /// The member epoch the heartbeat response carries, for
-    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
-    /// Named after CLAUDE.md §2's overload rule: Java's `memberEpoch(R)` sits
-    /// beside the `memberEpoch()` getter ([`Self::member_epoch`]).
-    ///
-    /// Java: `protected int memberEpoch(ConsumerGroupHeartbeatResponse response)`
-    /// (`ConsumerMembershipManager#memberEpoch`).
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#memberEpoch")]
-    pub(crate) fn member_epoch_with_response(response: &ConsumerGroupHeartbeatResponse) -> i32 {
-        response.data().member_epoch
-    }
-
-    /// The new target assignment the heartbeat response carries, if any, for
-    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681). The
-    /// field is only populated when there is a new target assignment for the
-    /// member.
-    ///
-    /// Java builds each topic's partitions as a `TreeSet`, so they come out
-    /// sorted and without duplicates whatever order the broker sent; the
-    /// `Vec` here is sorted and deduplicated to match. That matters because
-    /// [`LocalAssignment::update_with`] compares the `Vec`s by value.
-    ///
-    /// Java: `protected Optional<Map<Uuid, SortedSet<Integer>>>
-    /// extractAssignment(ConsumerGroupHeartbeatResponse response)`
-    /// (`ConsumerMembershipManager#extractAssignment`).
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#extractAssignment")]
-    pub(crate) fn extract_assignment(response: &ConsumerGroupHeartbeatResponse) -> Option<HashMap<Uuid, Vec<i32>>> {
-        let assignment = response.data().assignment.as_ref()?;
-        let mut new_assignment = HashMap::with_capacity(assignment.topic_partitions.len());
-        for topic_partition in &assignment.topic_partitions {
-            let mut partitions = topic_partition.partitions.clone();
-            partitions.sort_unstable();
-            partitions.dedup();
-            new_assignment.insert(topic_partition.topic_id, partitions);
-        }
-        Some(new_assignment)
     }
 
     /// Java: `transitionToFatal()` (override that wires Consumer-specific
@@ -2180,15 +2072,96 @@ impl ConsumerMembershipManager {
         self.transition_to_sending_leave_group(false)
     }
 
-    /// Java: `onHeartbeatFailure(boolean retriable)`.
+    /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)` (inherited
+    /// from `AbstractMembershipManager`).
+    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
+        self.abstract_mm.on_heartbeat_success::<Self>(response)
+    }
+
+    /// Java: `onHeartbeatFailure(boolean retriable)` (inherited from
+    /// `AbstractMembershipManager`).
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) {
-        if self.abstract_mm.on_heartbeat_failure(retriable) {
-            log::warn!(
-                "Member {} with epoch {} received a failed response to the heartbeat to leave the group \
-                 and completed the leave operation. ",
-                self.member_id(),
-                self.member_epoch()
-            );
+        self.abstract_mm.on_heartbeat_failure(retriable);
+    }
+}
+
+/// The `ConsumerMembershipManager` overrides of Java's abstract
+/// `AbstractMembershipManager` methods.
+impl MembershipManagerHooks for ConsumerMembershipManager {
+    type Response = ConsumerGroupHeartbeatResponse;
+
+    /// The heartbeat response's error code, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
+    ///
+    /// Java: `protected short errorCode(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager#errorCode`), the override of the
+    /// abstract hook.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#errorCode")]
+    fn error_code(response: &ConsumerGroupHeartbeatResponse) -> i16 {
+        response.data().error_code
+    }
+
+    /// The member epoch the heartbeat response carries, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
+    /// Named after CLAUDE.md §2's overload rule: Java's `memberEpoch(R)` sits
+    /// beside the `memberEpoch()` getter ([`Self::member_epoch`]).
+    ///
+    /// Java: `protected int memberEpoch(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager#memberEpoch`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#memberEpoch")]
+    fn member_epoch_with_response(response: &ConsumerGroupHeartbeatResponse) -> i32 {
+        response.data().member_epoch
+    }
+
+    /// The new target assignment the heartbeat response carries, if any, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681). The
+    /// field is only populated when there is a new target assignment for the
+    /// member.
+    ///
+    /// Java builds each topic's partitions as a `TreeSet`, so they come out
+    /// sorted and without duplicates whatever order the broker sent; the
+    /// `Vec` here is sorted and deduplicated to match. That matters because
+    /// [`LocalAssignment::update_with`] compares the `Vec`s by value.
+    ///
+    /// Java: `protected Optional<Map<Uuid, SortedSet<Integer>>>
+    /// extractAssignment(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager#extractAssignment`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#extractAssignment")]
+    fn extract_assignment(response: &ConsumerGroupHeartbeatResponse) -> Option<HashMap<Uuid, Vec<i32>>> {
+        let assignment = response.data().assignment.as_ref()?;
+        let mut new_assignment = HashMap::with_capacity(assignment.topic_partitions.len());
+        for topic_partition in &assignment.topic_partitions {
+            let mut partitions = topic_partition.partitions.clone();
+            partitions.sort_unstable();
+            partitions.dedup();
+            new_assignment.insert(topic_partition.topic_id, partitions);
+        }
+        Some(new_assignment)
+    }
+
+    /// Java: `joinGroupEpoch()` — 0 for the consumer group protocol.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#joinGroupEpoch")]
+    fn join_group_epoch(&self) -> i32 {
+        ConsumerGroupHeartbeatRequest::JOIN_GROUP_MEMBER_EPOCH
+    }
+
+    /// Java: `leaveGroupEpoch()`. For static members + `LEAVE_GROUP`
+    /// operation: -1 (force fence). Otherwise: -1 for dynamic members,
+    /// -2 for static members.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch")]
+    fn leave_group_epoch(&self) -> i32 {
+        let is_static_member = self.group_instance_id.is_some();
+        // The mechanism to make static members permanently leave the group is to
+        // send an HB to leave with the -1 epoch (used by dynamic members).
+        // This will make the group coordinator fence this member, effectively
+        // removing it from the group.
+        if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
+            return ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
+        }
+        if is_static_member {
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_STATIC_MEMBER_EPOCH
+        } else {
+            ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH
         }
     }
 }
@@ -3236,7 +3209,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
+        mgr.on_heartbeat_success(&resp).unwrap();
         // Member stays in PREPARE_LEAVING; the new assignment is
         // ignored because the state can't accept new assignments.
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
@@ -3532,7 +3505,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
+        mgr.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Receive a heartbeat with a full multi-topic target assignment.
@@ -3556,7 +3529,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
+        mgr.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Receive an empty target assignment (revoke everything).
@@ -3570,7 +3543,7 @@ mod tests {
         data.heartbeat_interval_ms = 5000;
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
+        mgr.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Drive `reconcile(0, can_commit)` on a bg task, expecting exactly
@@ -6155,15 +6128,13 @@ mod tests {
         );
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
-        mgr.abstract_mm
-            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
-            .unwrap();
+        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
         assert!(
             !send_leave.is_done(),
             "Send leave operation should not complete until a leave response is received"
         );
 
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_send_leave_completed(mgr, send_leave);
     }
 
@@ -6464,15 +6435,13 @@ mod tests {
             "Java: leaveGroup() must not complete when the leave heartbeat is only generated (no response yet)"
         );
 
-        mgr.abstract_mm
-            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
-            .unwrap();
+        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
         assert!(
             !leave_result.is_done(),
             "Java: a non-leave heartbeat response must not complete the leave"
         );
 
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_send_leave_completed(&mgr, &leave_result);
     }
 
@@ -6564,7 +6533,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
         assert!(!leave_result.is_done());
 
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_leave_completed_successfully(&leave_result);
         assert_eq!(
             mgr.state(),
@@ -6612,7 +6581,7 @@ mod tests {
 
         // The invalid-epoch response takes and completes the leave future;
         // the member stays PREPARE_LEAVING.
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_leave_completed_successfully(&first_leave);
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
 
@@ -6638,7 +6607,7 @@ mod tests {
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         assert!(!second_leave.is_done(), "still waiting for the leave heartbeat's response");
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_send_leave_completed(&mgr, &second_leave);
     }
 
@@ -6667,9 +6636,7 @@ mod tests {
             }
             // A response with a positive epoch + an assignment should be
             // ignored; the state must be unchanged.
-            mgr.abstract_mm
-                .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5))
-                .unwrap();
+            mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5)).unwrap();
             assert_eq!(mgr.state(), state, "response must be ignored in {state:?}");
         }
     }
@@ -6690,15 +6657,13 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // Receive a previous heartbeat response, which should be ignored.
-        mgr.abstract_mm
-            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
-            .unwrap();
+        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         assert!(!leave_result.is_done());
 
         // Receive a leave heartbeat response, which should unblock the
         // consumer.
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         assert_leave_completed_successfully(&leave_result);
 
@@ -6707,7 +6672,7 @@ mod tests {
         mgr.abstract_mm.on_consumer_poll(mgr.join_group_epoch()).unwrap();
 
         // A late leave response no longer affects the rejoining member.
-        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
 
         assert_eq!(mgr.state(), MemberState::Joining);
         assert_eq!(mgr.member_epoch(), 0);
@@ -6767,7 +6732,7 @@ mod tests {
         data.member_id = Some(mgr.member_id());
         data.member_epoch = 5;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        let err = mgr.abstract_mm.on_heartbeat_success(&resp).unwrap_err();
+        let err = mgr.on_heartbeat_success(&resp).unwrap_err();
         // Error message content is part of the contract (DoD §3). Java formats
         // the `Errors` constant with `%s`, i.e. its enum name
         // (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#throwIfUnexpectedError`).
@@ -6846,7 +6811,7 @@ mod tests {
         data.heartbeat_interval_ms = 5000;
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
+        mgr.on_heartbeat_success(&resp).unwrap();
         // Empty assignment for a JOINING member: target changes (epoch
         // bumps via update_with), so we transition to RECONCILING.
         assert_eq!(mgr.state(), MemberState::Reconciling);

@@ -71,7 +71,7 @@ pub(crate) use abstract_fetch::AbstractFetch;
 pub(crate) use abstract_heartbeat_request_manager::{
     AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
 };
-pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
+pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
 pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
 // `ConsumerHandle` is public (tagged `rust-only`): `crate::consumer` re-exports it.
 pub use async_kafka_consumer::ConsumerHandle;

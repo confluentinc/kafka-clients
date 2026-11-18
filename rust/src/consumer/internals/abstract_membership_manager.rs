@@ -22,16 +22,21 @@
 //!
 //! Java models this as `abstract class AbstractMembershipManager<R extends
 //! AbstractResponse>` with concrete subclasses for Consumer / Share /
-//! Streams. Phase 8b translates only the Consumer subclass scope per
-//! `consumer-threading.md` §20 — Share / Streams are out of scope.
+//! Streams (Streams is out of scope).
 //!
-//! Composition over inheritance: this struct holds the shared
-//! membership-state fields (group ID, member ID / epoch, current /
-//! target assignments, listener registrations). The composing
-//! [`super::ConsumerMembershipManager`]
-//! wraps an `Arc<Mutex<MembershipInner>>` and provides Consumer-specific
-//! configuration (group instance ID, server assignor, rack ID, commit
-//! manager, ...).
+//! Composition over inheritance, as for `AbstractFetch`: this struct holds
+//! the shared membership-state fields (group ID, member ID / epoch, current /
+//! target assignments, listener registrations) and the base-class methods.
+//! The subclass ([`super::ConsumerMembershipManager`]) composes it as its
+//! `abstract_mm` field and provides its group-type configuration.
+//!
+//! Java's `abstract` methods, and the `protected` methods a subclass
+//! overrides, are the [`MembershipManagerHooks`] trait, which the subclass
+//! implements. A base method that calls one takes the subclass as a `hooks`
+//! argument (`self.abstract_mm.transition_to_fenced(self, now)`), the Rust
+//! stand-in for Java's virtual dispatch on `this`; methods that need no hook
+//! take only `&self`. The subclass keeps thin forwarding methods with the Java
+//! names, so its callers see the inherited methods as they do in Java.
 //!
 //! The state is shared via `Arc<Mutex<MembershipInner>>` between the
 //! membership manager itself and
@@ -60,15 +65,14 @@ use tokio::sync::oneshot;
 use crate::Metadata;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::protocol::Errors;
-use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
+use crate::consumer::GroupMembershipOperation;
 use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
 use crate::consumer::internals::metrics::RebalanceMetricsManager;
 
-use super::ConsumerMembershipManager;
 use super::MemberState;
 use super::MemberStateListener;
 use super::SubscriptionState;
@@ -337,6 +341,56 @@ impl MembershipInner {
     }
 }
 
+/// The group-type-specific half of Java's `AbstractMembershipManager<R>`:
+/// its `abstract` methods and the `protected` methods a subclass overrides.
+/// Implemented by each membership manager (the consumer's
+/// [`super::ConsumerMembershipManager`], and the share consumer's from P4b).
+/// Methods with a default body translate a Java base method that has one;
+/// the rest are Java's `abstract` methods.
+///
+/// The base methods of [`AbstractMembershipManager`] that call a hook take the
+/// implementing subclass as a `hooks` argument (see the module docs).
+pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
+    /// Java's type parameter `R extends AbstractResponse`: the group type's
+    /// heartbeat response.
+    type Response;
+
+    /// The heartbeat response's error code.
+    ///
+    /// Java: `protected abstract short errorCode(R response)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#errorCode")]
+    fn error_code(response: &Self::Response) -> i16;
+
+    /// The member epoch the heartbeat response carries. Named after CLAUDE.md
+    /// §2's overload rule: Java's `memberEpoch(R)` sits beside the
+    /// `memberEpoch()` getter ([`AbstractMembershipManager::member_epoch`]).
+    ///
+    /// Java: `protected abstract int memberEpoch(R response)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#memberEpoch")]
+    fn member_epoch_with_response(response: &Self::Response) -> i32;
+
+    /// The new target assignment the heartbeat response carries, if any, with
+    /// each topic's partitions sorted and deduplicated (Java builds a
+    /// `TreeSet`).
+    ///
+    /// Java: `protected abstract Optional<Map<Uuid, SortedSet<Integer>>>
+    /// extractAssignment(R response)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#extractAssignment")]
+    fn extract_assignment(response: &Self::Response) -> Option<HashMap<Uuid, Vec<i32>>>;
+
+    /// The epoch a member uses to join the group.
+    ///
+    /// Java: `abstract int joinGroupEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#joinGroupEpoch")]
+    fn join_group_epoch(&self) -> i32;
+
+    /// The epoch a member uses to leave the group.
+    ///
+    /// Java: `abstract int leaveGroupEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroupEpoch")]
+    fn leave_group_epoch(&self) -> i32;
+}
+
 /// Public surface of the membership manager — the parts of
 /// `AbstractMembershipManager` that don't depend on the Consumer-specific
 /// hooks. Mirrors Java's `protected` / `package-private` API; we keep
@@ -356,6 +410,10 @@ pub(crate) struct AbstractMembershipManager {
     /// consumer its `ShareConsumerMetadata`'s.
     pub(crate) metadata: Arc<Metadata>,
     pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
+    /// Java: `CloseOptions.GroupMembershipOperation leaveGroupOperation`, set
+    /// by `leaveGroupOnClose(...)`. Read by the subclass's `leaveGroupEpoch()`
+    /// and `isLeavingGroup()`.
+    leave_group_operation: Mutex<GroupMembershipOperation>,
 }
 
 impl AbstractMembershipManager {
@@ -401,7 +459,78 @@ impl AbstractMembershipManager {
             subscriptions,
             metadata,
             background_event_handler,
+            leave_group_operation: Mutex::new(GroupMembershipOperation::Default),
         }
+    }
+
+    /// Java: `groupId()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#groupId")]
+    pub(crate) fn group_id(&self) -> String {
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.group_id.clone()
+    }
+
+    /// Java: `memberId()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#memberId")]
+    pub(crate) fn member_id(&self) -> String {
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.member_id.clone()
+    }
+
+    /// Java: `memberEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#memberEpoch")]
+    pub(crate) fn member_epoch(&self) -> i32 {
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.member_epoch
+    }
+
+    /// Java: `state()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#state")]
+    pub(crate) fn state(&self) -> MemberState {
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.state
+    }
+
+    /// Java: `currentAssignment()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#currentAssignment")]
+    pub(crate) fn current_assignment(&self) -> LocalAssignment {
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        g.current_assignment.clone()
+    }
+
+    /// Java: `leaveGroupOperation()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroupOperation")]
+    pub(crate) fn leave_group_operation(&self) -> GroupMembershipOperation {
+        let g = match self.leave_group_operation.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *g
+    }
+
+    /// Set the leave-group operation. Java assigns the field in
+    /// `leaveGroupOnClose(...)`.
+    pub(crate) fn set_leave_group_operation(&self, op: GroupMembershipOperation) {
+        let mut g = match self.leave_group_operation.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *g = op;
     }
 
     /// Java: `registerStateListener(MemberStateListener listener)`.
@@ -416,17 +545,13 @@ impl AbstractMembershipManager {
 
     /// Update member info and transition member state based on a successful
     /// heartbeat response. The common response handling lives here
-    /// (KAFKA-20681, 6a6b536fbc); group type specifics are provided by
-    /// [`ConsumerMembershipManager::error_code`],
-    /// [`ConsumerMembershipManager::member_epoch_with_response`] and
-    /// [`ConsumerMembershipManager::extract_assignment`].
+    /// (KAFKA-20681, 6a6b536fbc); group type specifics are provided by the
+    /// [`MembershipManagerHooks::error_code`],
+    /// [`MembershipManagerHooks::member_epoch_with_response`] and
+    /// [`MembershipManagerHooks::extract_assignment`] hooks of `H`.
     ///
     /// Java: `public final void onHeartbeatSuccess(R response)`
-    /// (`AbstractMembershipManager#onHeartbeatSuccess`). The Rust abstract layer is
-    /// hard-wired to [`ConsumerGroupHeartbeatResponse`] (Share / Streams are
-    /// out of scope per `consumer-threading.md` §20), so the three hooks
-    /// Java declares `protected abstract` are plain associated functions of
-    /// the one subclass in scope, called directly rather than dispatched.
+    /// (`AbstractMembershipManager#onHeartbeatSuccess`).
     ///
     /// Returns `Err(LocalIllegalArgument)` for an unexpected error in the
     /// response body — Java throws `IllegalArgumentException`.
@@ -438,10 +563,10 @@ impl AbstractMembershipManager {
     /// which is what unblocks the `unsubscribe()` / `close()` caller waiting
     /// on the leave.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatSuccess")]
-    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
-        Self::return_if_unexpected_error(response)?;
+    pub(crate) fn on_heartbeat_success<H: MembershipManagerHooks>(&self, response: &H::Response) -> Result<(), Error> {
+        Self::return_if_unexpected_error::<H>(response)?;
 
-        let response_member_epoch = ConsumerMembershipManager::member_epoch_with_response(response);
+        let response_member_epoch = H::member_epoch_with_response(response);
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -497,7 +622,7 @@ impl AbstractMembershipManager {
 
         guard.update_member_epoch(response_member_epoch);
 
-        if let Some(assignment) = ConsumerMembershipManager::extract_assignment(response) {
+        if let Some(assignment) = H::extract_assignment(response) {
             if !state.can_handle_new_assignment() {
                 // New assignment received but member is in a state where it cannot take new
                 // assignments (ex. preparing to leave the group)
@@ -518,8 +643,8 @@ impl AbstractMembershipManager {
     /// Java: `private void throwIfUnexpectedError(R response)`
     /// (`AbstractMembershipManager#throwIfUnexpectedError`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#throwIfUnexpectedError")]
-    fn return_if_unexpected_error(response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
-        let error_code = ConsumerMembershipManager::error_code(response);
+    fn return_if_unexpected_error<H: MembershipManagerHooks>(response: &H::Response) -> Result<(), Error> {
+        let error_code = H::error_code(response);
         if error_code != Errors::None.code() {
             return Err(Error::local_illegal_argument(format!(
                 "Unexpected error in Heartbeat response. Expected no error, but received: {}",
@@ -925,7 +1050,7 @@ impl AbstractMembershipManager {
     ///
     /// `join_group_epoch` is supplied by the caller — Phase 10's AEP
     /// `AsyncPoll` arm reads it via
-    /// [`crate::consumer::internals::ConsumerMembershipManager::join_group_epoch`]
+    /// [`MembershipManagerHooks::join_group_epoch`]
     /// just before invoking this method.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeRejoinStaleMember")]
     pub(crate) fn maybe_rejoin_stale_member(&self, join_group_epoch: i32) {
@@ -990,10 +1115,8 @@ impl AbstractMembershipManager {
     /// an UNSUBSCRIBED member completes the leave in progress once the request
     /// completes, regardless of the response (Java:
     /// `if (state == UNSUBSCRIBED && maybeCompleteLeaveInProgress())`).
-    /// Returns `true` when this call completed a leave in progress; the caller
-    /// (the Consumer subclass) then logs the warning Java logs.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatFailure")]
-    pub(crate) fn on_heartbeat_failure(&self, retriable: bool) -> bool {
+    pub(crate) fn on_heartbeat_failure(&self, retriable: bool) {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -1003,11 +1126,18 @@ impl AbstractMembershipManager {
             metrics.maybe_record_rebalance_failed();
         }
         if guard.state != MemberState::Unsubscribed {
-            return false;
+            return;
         }
         let leave = guard.take_leave_in_progress();
         drop(guard);
-        Self::complete_leave(leave)
+        if Self::complete_leave(leave) {
+            log::warn!(
+                "Member {} with epoch {} received a failed response to the heartbeat to leave the group \
+                 and completed the leave operation. ",
+                self.member_id(),
+                self.member_epoch()
+            );
+        }
     }
 
     /// Complete the leave in progress (if any). This is expected to be used to
