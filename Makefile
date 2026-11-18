@@ -40,6 +40,7 @@ VENV = . venv/bin/activate
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
 	build-grpc-native-javascript test-integration-javascript-native \
+	chaos-javascript chaos-javascript-native \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
@@ -90,8 +91,9 @@ build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
 # The Node.js client (javascript/). `verify` runs its build, its rule linter,
-# its type check and its unit tests (test-javascript-unit, through `test`, and
-# lint-javascript), so it needs Node.js 22.14 or newer and `npm ci` in
+# its format check, its type checks (of the sources and of the tests) and its
+# unit tests (test-javascript-unit, through `test`, and lint-javascript), so it
+# needs Node.js 22.14 or newer and `npm ci` in
 # javascript/ first (typescript and eslint are devDependencies); its
 # broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
 # verify-javascript-macos-docker, in .semaphore/semaphore.yml). Its build is the
@@ -239,10 +241,16 @@ test-integration-dotnet-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-dotnet
 test-integration-dotnet-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-dotnet
+# The JavaScript variants also run the Node.js client's own broker-backed
+# tests over SSL and mTLS, and over SASL_PLAINTEXT and SASL_SSL with the
+# StandardAuthorizer (javascript/'s test-integration-ssl and
+# test-integration-sasl, each against a broker of its own).
 test-integration-javascript-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+	$(MAKE) -C javascript $(ROOTS) test-integration-ssl
 test-integration-javascript-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
+	$(MAKE) -C javascript $(ROOTS) test-integration-sasl
 
 # ── Native (non-container) gRPC multilanguage arms ───────────────────────
 #
@@ -291,6 +299,16 @@ build-grpc-native-javascript: build-javascript
 
 test-integration-javascript-native: build-grpc-native-javascript
 	$(MAKE) -C rust test-integration-grpc-js-native
+
+# The chaos runs of the Node.js producer (rust/Makefile `chaos-javascript`):
+# the container backend, and the same runs with the server as a host process.
+# Long and destructive to their own cluster, so not part of `verify`;
+# .semaphore/chaos-javascript.yml runs the first as a scheduled task.
+chaos-javascript: build-grpc-images-javascript
+	$(MAKE) -C rust chaos-javascript
+
+chaos-javascript-native: build-grpc-native-javascript
+	MULTILANG_BACKEND_MODE=native $(MAKE) -C rust chaos-javascript
 
 # ── Performance integration tests ────────────────────────────────────────
 #
@@ -428,26 +446,33 @@ test-javascript: build-javascript
 
 # The Node.js client's tests that need no broker, the part of `test` (and so
 # of `verify`): the static tests (header conformance, the package layout, the
-# release scripts), the unit tests, and the type check, `tsc --strict` over
-# the sources (the build) and over the type tests (test-typing, against the
-# compiled declarations), with the interface check of the declarations and the
-# exports map against the committed API report (check-api).
+# release scripts), the unit tests, the memory probes (test-memory), and the
+# type checks, `tsc --strict` over the sources (the build), over the type
+# tests (test-typing, against the compiled declarations) and over every test
+# file (typecheck-tests), with the interface check of the declarations and the
+# exports map against the committed API report (check-api). The type check of
+# the tests reads the compiled declarations, so it runs here, in the one
+# sub-make that builds dist/, never beside it: under `make -j` a second build
+# would delete dist/ while these tests read it.
 test-javascript-unit: build-javascript
-	$(MAKE) -C javascript $(ROOTS) test-static test-unit test-typing check-api
+	$(MAKE) -C javascript $(ROOTS) test-static test-unit test-memory test-typing check-api typecheck-tests
 
-# macOS variant of test-javascript: the unit tests only, as
+# macOS variant of test-javascript: the unit and memory tests only, as
 # test-python-macos-docker runs pytest test/unit only. On macOS the gRPC
 # multilanguage arm runs natively instead (see verify-javascript-macos-docker).
 test-javascript-macos-docker: build-javascript
-	$(MAKE) -C javascript $(ROOTS) test-unit
+	$(MAKE) -C javascript $(ROOTS) test-unit test-memory
 
 # The Node.js client's rule linter (ESLint, javascript/eslint.config.cjs, and
 # the runner, javascript/scripts/lint_rules.js) and its own tests; ESLint is a
 # devDependency, so `npm ci` in javascript/ first, as for the build. It reads
 # the bindings header the Rust build writes and the committed Java index
 # (javascript/java-index.json, `cargo xtask java-api`), not the kafka submodule.
+# It never builds or reads javascript/dist/, so it runs beside the tests under
+# `make -j`; the type check of the tests, which needs dist/, is in
+# test-javascript-unit.
 lint-javascript: build-rust-all-features
-	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint
+	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint format-check
 
 verify-javascript: test-javascript lint-javascript
 

@@ -16,7 +16,6 @@
 
 // N4 check-single-drainer (scripts/lint/rules/single_drainer.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
@@ -75,7 +74,10 @@ test('a client destroy reached from a completion, and a drain whose loop is a fo
   });
   assert.deepEqual(findings(r), ["native/callback_queue.c:23: cbq_drain's loop calls kafka_x_Thing_destroy_err: destroy after the loop"]);
   r = runN(RULE, {
-    'native/callback_queue.c': QUEUE_C.replace(/    while \(1\) \{[\s\S]*?\n    \}\n/, '    int32_t ran = q->execute(q->client, &ffi_err);\n    error_discard(ffi_take(&ffi_err));\n    (void)ran;\n'),
+    'native/callback_queue.c': QUEUE_C.replace(
+      /    while \(1\) \{[\s\S]*?\n    \}\n/,
+      '    int32_t ran = q->execute(q->client, &ffi_err);\n    error_discard(ffi_take(&ffi_err));\n    (void)ran;\n',
+    ),
   });
   assert.deepEqual(findings(r), ['cbq_drain: has no loop (while, for, do) the rule can read']);
 });
@@ -83,7 +85,8 @@ test('a client destroy reached from a completion, and a drain whose loop is a fo
 test('the executor cbq_init is given, and what the loop calls, run inside the drain', () => {
   const { HEADER } = require('./_c_fixture');
   const header = `${HEADER}\nvoid kafka_x_K_destroy_err(kafka_x_K_t *self_, kafka_common_Error_t **out_err);\n\nconst kafka_x_P_t *kafka_x_K__as_P_err(kafka_x_K_t *self_, kafka_common_Error_t **out_err);\n`;
-  const destroy = 'static void producer_destroy(void* k) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_K_destroy_err(k, &ffi_err));\n}\n\n';
+  const destroy =
+    'static void producer_destroy(void* k) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_K_destroy_err(k, &ffi_err));\n}\n\n';
   // The executor destroys the client: the loop's next q->execute uses a freed view.
   let r = runN(RULE, {
     'confluent_kafka_bindings.h': header,
@@ -99,10 +102,10 @@ test('the executor cbq_init is given, and what the loop calls, run inside the dr
   // A native destroy the loop calls by name.
   r = runN(RULE, {
     'confluent_kafka_bindings.h': header,
-    'native/callback_queue.c': QUEUE_C.replace('        if (ran <= 0) break;\n', '        if (ran <= 0) break;\n        client_destroy(q->client);\n').replace(
-      'void cbq_drain(',
-      `${destroy.replace('static void producer_destroy', 'static void client_destroy')}void cbq_drain(`,
-    ),
+    'native/callback_queue.c': QUEUE_C.replace(
+      '        if (ran <= 0) break;\n',
+      '        if (ran <= 0) break;\n        client_destroy(q->client);\n',
+    ).replace('void cbq_drain(', `${destroy.replace('static void producer_destroy', 'static void client_destroy')}void cbq_drain(`),
   });
   assert.deepEqual(findings(r), [
     "client_destroy: runs inside the drain (called by cbq_drain's loop) and reaches kafka_x_K_destroy_err through client_destroy -> kafka_x_K_destroy_err (native/callback_queue.c:19): mark the client and destroy after the drain",
@@ -119,9 +122,10 @@ test('the executor cbq_init is given, and what the loop calls, run inside the dr
 test("a client's destroy is reached only from the handle object's finalizer, for a closed client", () => {
   const { HEADER } = require('./_c_fixture');
   const header = `${HEADER}\nvoid kafka_x_K_destroy_err(kafka_x_K_t *self_, kafka_common_Error_t **out_err);\n\nconst kafka_x_P_t *kafka_x_K__as_P_err(kafka_x_K_t *self_, kafka_common_Error_t **out_err);\n`;
-  const destroy = 'static void producer_destroy(void* k) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_K_destroy_err(k, &ffi_err));\n}\n\n';
-  const finalizer = (body) => `static void producer_finalize(void* env, void* data, void* hint) {\n${body}}\n\n`;
-  const wrapped = (finalize) =>
+  const destroy =
+    'static void producer_destroy(void* k) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_K_destroy_err(k, &ffi_err));\n}\n\n';
+  const finalizer = (/** @type {string} */ body) => `static void producer_finalize(void* env, void* data, void* hint) {\n${body}}\n\n`;
+  const wrapped = (/** @type {string} */ finalize) =>
     PRODUCER_C.replace('void js_create(', `${destroy}${finalize}void js_create(`).replace(
       '    cbq_init(q, p, producer_execute);\n',
       '    cbq_init(q, p, producer_execute);\n    napi_wrap(0, 0, p, producer_finalize, NULL, NULL);\n',
@@ -140,7 +144,10 @@ test("a client's destroy is reached only from the handle object's finalizer, for
   // Destroyed from a call, not the finalizer.
   r = runN(RULE, {
     'confluent_kafka_bindings.h': header,
-    'native/producer.c': PRODUCER_C.replace('void js_create(', `${destroy}void js_close(void* k) {\n    producer_destroy(k);\n}\n\nvoid js_create(`),
+    'native/producer.c': PRODUCER_C.replace(
+      'void js_create(',
+      `${destroy}void js_close(void* k) {\n    producer_destroy(k);\n}\n\nvoid js_create(`,
+    ),
   });
   assert.deepEqual(findings(r), [
     "js_close: reaches kafka_x_K_destroy_err (native/producer.c:49), which only the handle object's finalizer (napi_wrap's) may: no close, completion or call destroys a client",
@@ -164,7 +171,9 @@ test('an allowlist entry that matches nothing is a finding', () => {
 });
 
 test('without cbq_drain it is a finding', () => {
-  const r = runN(RULE, { 'native/callback_queue.c': QUEUE_C.replace('void cbq_drain(CallbackQueue* q) {', 'void cbq_flush(CallbackQueue* q) {') });
+  const r = runN(RULE, {
+    'native/callback_queue.c': QUEUE_C.replace('void cbq_drain(CallbackQueue* q) {', 'void cbq_flush(CallbackQueue* q) {'),
+  });
   assert.deepEqual(findings(r), ['cbq_drain: is defined in no native/*.c']);
 });
 

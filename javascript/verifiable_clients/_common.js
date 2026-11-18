@@ -36,6 +36,10 @@ function nowMillis() {
  * "name"})` puts `timestamp` then `name` first, and the event's own properties
  * follow in declaration order (a JavaScript object keeps the order its string
  * keys were added in).
+ *
+ * @param {string} name the event's name
+ * @param {Record<string, unknown>} [fields] its own properties
+ * @returns {{ timestamp: number, name: string } & Record<string, unknown>} the event
  */
 function event(name, fields = {}) {
   return { timestamp: nowMillis(), name, ...fields };
@@ -204,7 +208,9 @@ class ArgumentParser {
       if (shown.has(option)) continue;
       if (option.group !== null) {
         const members = option.group.options.map((o) => `${o.flag} ${o.metavar}`).join(' | ');
-        parts.push(option.group.required && option.group.options.length > 1 ? `(${members})` : option.group.required ? members : `[${members}]`);
+        parts.push(
+          option.group.required && option.group.options.length > 1 ? `(${members})` : option.group.required ? members : `[${members}]`,
+        );
         for (const member of option.group.options) shown.add(member);
         continue;
       }

@@ -24,21 +24,80 @@ export abstract class InvalidOffsetError extends KafkaError {
         name?: never;
     });
     constructor(message: string | null);
+    abstract partitions(): TopicPartitionSet;
 }
 
 // @public
 export class LogTruncationError extends OffsetOutOfRangeError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        fetchOffsets: TopicPartitionMap<bigint | number>; /** Java's `Map<TopicPartition, OffsetAndMetadata> divergentOffsets`. */
+        divergentOffsets: TopicPartitionMap<OffsetAndMetadata>;
+        name?: never;
+    });
+    constructor(options: {
+        message: string | null; /** Java's `Map<TopicPartition, Long> fetchOffsets`. */
+        fetchOffsets: TopicPartitionMap<bigint | number>; /** Java's `Map<TopicPartition, OffsetAndMetadata> divergentOffsets`. */
+        divergentOffsets: TopicPartitionMap<OffsetAndMetadata>;
+        name?: never;
+    });
+    divergentOffsets(): TopicPartitionMap<OffsetAndMetadata>;
 }
 
 // @public
 export class NoOffsetForPartitionError extends InvalidOffsetError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        partition: TopicPartition;
+        name?: never;
+    });
+    constructor(options: {
+        partitions: Iterable<TopicPartition>;
+        name?: never;
+    });
+    partitions(): TopicPartitionSet;
+}
+
+// @public
+export class OffsetAndMetadata {
+    constructor(options: {
+        offset: bigint | number;
+        leaderEpoch: number | null;
+        metadata: string | null;
+    });
+    constructor(options: {
+        offset: bigint | number;
+        leaderEpoch?: never;
+        metadata: string | null;
+    });
+    constructor(offset: bigint | number);
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    readonly leaderEpoch: number | null;
+    readonly metadata: string;
+    readonly offset: bigint;
+    toJSON(): {
+        offset: string;
+        leaderEpoch: number | null;
+        metadata: string;
+    };
+    toString(): string;
 }
 
 // @public
 export class OffsetOutOfRangeError extends InvalidOffsetError {
-    protected constructor(...args: unknown[]);
+    constructor(options: {
+        offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>;
+        name?: never;
+    });
+    constructor(options: {
+        message: string | null; /** Java's `Map<TopicPartition, Long> offsetOutOfRangePartitions`. */
+        offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>;
+        name?: never;
+    });
+    offsetOutOfRangePartitions(): TopicPartitionMap<bigint>;
+    partitions(): TopicPartitionSet;
 }
 
 // @public
@@ -59,7 +118,5 @@ export class RetriableCommitFailedError extends RetriableError {
         name?: never;
     });
 }
-
-// (No @packageDocumentation comment for this package)
 
 ```

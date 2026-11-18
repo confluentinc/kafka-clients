@@ -121,7 +121,11 @@ async function main() {
 
   // The one addon loaded is the platform package's.
   const addons = Object.keys(require.cache).filter((file) => file.endsWith('.node'));
-  assert.deepEqual(addons.map((file) => fs.realpathSync(file)), [addonPath], `the addons loaded are ${addons}`);
+  assert.deepEqual(
+    addons.map((file) => fs.realpathSync(file)),
+    [addonPath],
+    `the addons loaded are ${addons}`,
+  );
   console.log(`the addon is ${addonPath}`);
 
   // A producer opens, takes a record with headers and closes; nothing
@@ -131,7 +135,7 @@ async function main() {
   const record = new ProducerRecord({
     topic: 'package-smoke',
     partition: null,
-    key: 'k',
+    key: Buffer.from('k'),
     value: Buffer.from('v'),
     headers: [new Header({ key: 'h', value: Buffer.from('1') }), new Header({ key: 'n', value: null })],
   });
@@ -147,7 +151,10 @@ async function main() {
     () => 'sent',
     (error) => error.name,
   );
-  assert.throws(() => record.headers.add({ key: 'late', value: null }), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+  assert.throws(() => record.headers.add({ key: 'late', value: null }), {
+    name: 'IllegalStateError',
+    message: 'RecordHeaders has been closed.',
+  });
   await producer.close({ timeout: 0 });
   console.log(`the send of a record with headers ended: ${await sent}`);
   console.log(`${MAIN} ${version} works on ${platform}`);

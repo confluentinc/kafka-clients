@@ -18,7 +18,6 @@
 // and none is a plain name that has an `_err` twin (javascript/CLAUDE.md;
 // Python's test_ffi_twins.py, .NET's NativeAbiConformanceTests).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -30,7 +29,11 @@ const NATIVE = path.join(__dirname, '..', '..', 'native');
 const header = fs.readFileSync(headerPath(), 'utf8');
 const declared = declaredFunctions(header);
 
-/** The kafka_* functions a C source file calls (an identifier followed by `(`). */
+/**
+ * The kafka_* functions a C source file calls (an identifier followed by `(`).
+ *
+ * @param {string} file
+ */
 function calledFunctions(file) {
   return calledIn(fs.readFileSync(file, 'utf8'));
 }
@@ -66,10 +69,11 @@ test('the producer uses the functions of the plan', () => {
   ]) {
     assert.ok(called.has(name), `${name} is not called`);
   }
-  // Rules 4 and 5 (no blocking twin, never read the future) are the rule
-  // linter's check-cb-twin-only (make lint-rules), which forbids the blocking
-  // form of every function with a `_cb` twin, and every
-  // kafka_common_KafkaFuture_get* call, the `_cb` forms included.
+  // Rules 4 and 5 (no blocking twin; a record's future waited on only
+  // through kafka_common_KafkaFuture_get_cb and get_with_timeout_cb) are the
+  // rule linter's check-cb-twin-only (make lint-rules), which forbids the
+  // blocking form of every function with a `_cb` twin, the future's `get` and
+  // `get_with_timeout` included, and allows their `_cb` twins.
 });
 
 test('no blocking close: every close is a _cb twin, and no finalizer closes a producer (rule 4)', () => {
@@ -90,10 +94,15 @@ test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both w
   const start = registry.indexOf('export const FFI_NAMES');
   assert.ok(start >= 0, 'src/internal/error_registry.ts has no FFI_NAMES');
   const body = registry.slice(start, registry.indexOf(']);', start));
+  /** @type {Array<[number, string]>} */
   const FFI_NAMES = [...body.matchAll(/^ {2}\[(-?\d+), '([A-Z0-9_]+)'\],$/gm)].map((m) => [Number(m[1]), m[2]]);
   assert.ok(FFI_NAMES.length > 0, 'FFI_NAMES has no rows');
-  const values = new Map(errorEnumerators(header));
-  assert.deepEqual([...FFI_NAMES].sort((a, b) => a[0] - b[0]), [...values].map(([n, v]) => [v, n]).sort((a, b) => a[0] - b[0]));
+  // scripts/header.js's `[name, value]` pairs, which its JavaScript does not type.
+  const values = new Map(/** @type {Array<[string, number]>} */ (errorEnumerators(header)));
+  assert.deepEqual(
+    [...FFI_NAMES].sort((a, b) => a[0] - b[0]),
+    [...values].map(/** @returns {[number, string]} */ ([n, v]) => [v, n]).sort((a, b) => a[0] - b[0]),
+  );
   assert.equal(values.get('LOCAL_ILLEGAL_ARGUMENT'), -3);
   assert.equal(values.get('LOCAL_ILLEGAL_STATE'), -4);
 });
@@ -109,6 +118,10 @@ test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both w
 /**
  * The text between the parenthesis at `open` (its index in `code`) and its
  * match, and the index after the match.
+ *
+ * @param {string} code
+ * @param {number} open
+ * @returns {{inner: string, end: number}}
  */
 function balanced(code, open) {
   let depth = 0;
@@ -126,8 +139,14 @@ function balanced(code, open) {
   throw new Error(`unbalanced parenthesis at ${open}`);
 }
 
-/** The top-level comma-separated parts of an argument or parameter list. */
+/**
+ * The top-level comma-separated parts of an argument or parameter list.
+ *
+ * @param {string} list
+ * @returns {Array<string>}
+ */
 function topLevelParts(list) {
+  /** @type {Array<string>} */
   const parts = [];
   let depth = 0;
   let start = 0;
@@ -147,9 +166,15 @@ function topLevelParts(list) {
   return parts;
 }
 
-/** {name: [parameter, ...]} of every function prototype in the bindings header. */
+/**
+ * {name: [parameter, ...]} of every function prototype in the bindings header.
+ *
+ * @param {string} text
+ * @returns {Map<string, Array<string>>}
+ */
 function prototypes(text) {
   const code = stripComments(text);
+  /** @type {Map<string, Array<string>>} */
   const out = new Map();
   const re = /^[A-Za-z_][\w \t*]*?\b(kafka_\w+)\s*\(/gm;
   let m;
@@ -163,9 +188,15 @@ function prototypes(text) {
   return out;
 }
 
-/** [{name, args, at}] of every call of a kafka_* function in C source text. */
+/**
+ * [{name, args, at}] of every call of a kafka_* function in C source text.
+ *
+ * @param {string} text
+ * @returns {Array<{name: string, args: Array<string>, at: number}>}
+ */
 function calls(text) {
   const code = stripComments(text);
+  /** @type {Array<{name: string, args: Array<string>, at: number}>} */
   const out = [];
   const re = /\b(kafka_\w+)\s*\(/g;
   let m;
@@ -185,10 +216,18 @@ test('every call of a kafka_* function passes the arguments of its header protot
     for (const call of calls(fs.readFileSync(path.join(NATIVE, source), 'utf8'))) {
       const params = protos.get(call.name);
       assert.ok(params !== undefined, `${source}:${call.at}: ${call.name} has no prototype in confluent_kafka_bindings.h`);
-      assert.equal(call.args.length, params.length, `${source}:${call.at}: ${call.name} takes ${params.length} arguments (${params.join(', ')}), not ${call.args.length}`);
+      assert.equal(
+        call.args.length,
+        params.length,
+        `${source}:${call.at}: ${call.name} takes ${params.length} arguments (${params.join(', ')}), not ${call.args.length}`,
+      );
       // A fallible function's trailing out_err is the call's error slot.
       if (/\*\s*\*\s*out_err$/.test(params[params.length - 1] ?? '')) {
-        assert.match(call.args[call.args.length - 1], /^&?\w*err\w*$/, `${source}:${call.at}: ${call.name}'s out_err is ${call.args[call.args.length - 1]}`);
+        assert.match(
+          call.args[call.args.length - 1],
+          /^&?\w*err\w*$/,
+          `${source}:${call.at}: ${call.name}'s out_err is ${call.args[call.args.length - 1]}`,
+        );
         withOutErr += 1;
       }
       checked += 1;
@@ -201,7 +240,11 @@ test('the addon declares no prototype of its own for a kafka_* function, and bui
   for (const source of sources) {
     const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
     // A declaration is at file scope, at column 0; a statement is indented.
-    assert.doesNotMatch(code, /^(?!(?:else|return|if|while|for|do|case)\b)(?:extern\s+)?[A-Za-z_][\w \t*]*\bkafka_\w+\s*\([^;{]*\)\s*;/m, `${source} redeclares a function of the bindings header`);
+    assert.doesNotMatch(
+      code,
+      /^(?!(?:else|return|if|while|for|do|case)\b)(?:extern\s+)?[A-Za-z_][\w \t*]*\bkafka_\w+\s*\([^;{]*\)\s*;/m,
+      `${source} redeclares a function of the bindings header`,
+    );
   }
   const gyp = fs.readFileSync(path.join(NATIVE, 'binding.gyp'), 'utf8');
   for (const flag of ['"-Wall"', '"-Wextra"', '"-Werror"']) {

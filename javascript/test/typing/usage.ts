@@ -27,21 +27,51 @@ import { producer } from '@confluentinc/kafka-javascript';
 import {
   type Callback,
   type CloseArgs,
-  type Data,
   KafkaProducer,
+  MockProducer,
+  type Partitioner,
   type Producer,
   ProducerConfig,
   type ProducerConfigs,
   ProducerRecord,
   RecordMetadata,
 } from '@confluentinc/kafka-javascript/producer';
-import { KafkaError, KafkaFuture } from '@confluentinc/kafka-javascript/common';
+import {
+  KafkaError,
+  KafkaFuture,
+  type Metric,
+  MetricName,
+  MetricNameMap,
+  Node,
+  PartitionInfo,
+  TopicPartition,
+  TopicPartitionMap,
+  TopicPartitionSet,
+} from '@confluentinc/kafka-javascript/common';
+import { KafkaMetric } from '@confluentinc/kafka-javascript/common/metrics';
 import { CancellationError, ExecutionError, IllegalArgumentError, IllegalStateError } from '@confluentinc/kafka-javascript';
-import { AuthenticationError, RetriableError, SaslAuthenticationError, TopicAuthorizationError } from '@confluentinc/kafka-javascript/common/errors';
+import {
+  AuthenticationError,
+  GroupAuthorizationError,
+  RecordDeserializationError,
+  RecordTooLargeError,
+  RetriableError,
+  SaslAuthenticationError,
+  ThrottlingQuotaExceededError,
+  TopicAuthorizationError,
+} from '@confluentinc/kafka-javascript/common/errors';
+import {
+  LogTruncationError,
+  NoOffsetForPartitionError,
+  OffsetAndMetadata,
+  OffsetOutOfRangeError,
+} from '@confluentinc/kafka-javascript/consumer';
+import { TimestampType } from '@confluentinc/kafka-javascript/common/record';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
 import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
 import { Header, Headers } from '@confluentinc/kafka-javascript/common/header';
+import { type Serializer, stringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
 
 void producer;
 
@@ -56,10 +86,33 @@ const configs: ProducerConfigs = {
 // @ts-expect-error a configuration is a plain object, not a Map
 const fromMap: ProducerConfigs = new Map<string, unknown>([['bootstrap.servers', 'localhost:9092']]);
 void fromMap;
+// The serde config keys take a synchronous function ({ configs, isKey }) => serializer.
+const viaConfig: ProducerConfigs = {
+  'bootstrap.servers': 'localhost:9092',
+  'key.serializer': ({ configs: given, isKey }) => {
+    expectTypeOf(given).toEqualTypeOf<Readonly<Record<string, unknown>>>();
+    expectTypeOf(isKey).toEqualTypeOf<boolean>();
+    return { serialize: () => null };
+  },
+  'value.serializer': null,
+};
+void viaConfig;
+// @ts-expect-error a class name cannot be loaded in JavaScript
+const byClassName: ProducerConfigs = { 'key.serializer': 'org.apache.kafka.common.serialization.StringSerializer' };
+void byClassName;
+// @ts-expect-error the function returns the serializer synchronously, not a Promise
+const asyncFactory: ProducerConfigs = { 'value.serializer': async () => ({ serialize: () => null }) };
+void asyncFactory;
+// @ts-expect-error a known key that is no serde key takes no function
+const lingerFunction: ProducerConfigs = { 'linger.ms': () => ({ serialize: () => null }) };
+void lingerFunction;
 
 const headers: Header[] = [new Header({ key: 'h', value: Buffer.from('v') }), new Header({ key: 'n', value: null })];
-const key: Data = 'k';
+// A producer without serializers is a KafkaProducer<Uint8Array, Uint8Array>:
+// its records hold bytes.
+const key = Buffer.from('k');
 const record = new ProducerRecord({ topic: 't', partition: 0, timestamp: null, key, value: new Uint8Array(1), headers });
+expectTypeOf(record).toExtend<ProducerRecord<Uint8Array, Uint8Array>>();
 // One signature per Java constructor.
 new ProducerRecord({ topic: 't', partition: 0, timestamp: 5, key: null, value: 'v' });
 // A long takes a bigint too.
@@ -76,7 +129,9 @@ const recordHeaders = record.headers;
 expectTypeOf(recordHeaders).toEqualTypeOf<Headers>();
 void [topic, partition, recordHeaders];
 // Headers: Java's members, the headers given in any of the three forms.
-const built = new Headers([new Header({ key: 'a', value: Buffer.from('1') })]).add(new Header({ key: 'b', value: null })).add({ key: 'c', value: null });
+const built = new Headers([new Header({ key: 'a', value: Buffer.from('1') })])
+  .add(new Header({ key: 'b', value: null }))
+  .add({ key: 'c', value: null });
 expectTypeOf(built).toEqualTypeOf<Headers>();
 new Headers({ headers: built });
 new Headers({ headers: null });
@@ -117,7 +172,11 @@ new Headers([['k', null]]);
 // @ts-expect-error a {key, value} object is not a Header
 built.add({ header: { key: 'k', value: null } });
 // A data object: its fields spread into a plain object of the same types.
-const { timestamp: recordTimestamp, key: recordKey, value: recordValue }: { timestamp: bigint | null; key: Data | null; value: Data | null } = { ...record };
+const {
+  timestamp: recordTimestamp,
+  key: recordKey,
+  value: recordValue,
+}: { timestamp: bigint | null; key: Buffer | null; value: Uint8Array | null } = { ...record };
 void [recordTimestamp, recordKey, recordValue];
 
 const callback: Callback = ({ metadata, exception: error }: { metadata: RecordMetadata; exception: Error | null }) => {
@@ -245,7 +304,10 @@ async function produce(): Promise<void> {
   KafkaFuture.completedFuture({ key: 'k', value: 'v' });
   // @ts-expect-error generic code passes its value by name: a T may be a plain object
   const wrap = <V>(x: V): KafkaFuture<V> => KafkaFuture.completedFuture(x);
-  void wrap;
+  // By name, an unconstrained generic value type-checks.
+  const wrapByName = <V>(x: V): KafkaFuture<V> => KafkaFuture.completedFuture({ value: x });
+  expectTypeOf(wrapByName(1)).toEqualTypeOf<KafkaFuture<number>>();
+  void [wrap, wrapByName];
   if (now !== null) {
     // @ts-expect-error an instance of the caller's class is passed to getNow by name in TypeScript
     future.getNow(now);
@@ -330,6 +392,51 @@ async function produce(): Promise<void> {
   await kafkaProducer.flush();
   // @ts-expect-error flush takes no argument
   await kafkaProducer.flush(100);
+  // partitionsFor: Java's List as an array, through a Promise.
+  expectTypeOf(kafkaProducer.partitionsFor('t')).toEqualTypeOf<Promise<PartitionInfo[]>>();
+  expectTypeOf(asInterface.partitionsFor({ topic: 't' })).toEqualTypeOf<Promise<PartitionInfo[]>>();
+  // @ts-expect-error a topic is a string
+  void kafkaProducer.partitionsFor(1);
+  // metrics(): synchronous, Java's Map<MetricName, ? extends Metric>.
+  const metrics = kafkaProducer.metrics();
+  expectTypeOf(metrics).toEqualTypeOf<MetricNameMap<Metric>>();
+  expectTypeOf(asInterface.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
+  for (const [metricName, metric] of metrics) {
+    expectTypeOf(metricName.tags()).toEqualTypeOf<Map<string, string>>();
+    expectTypeOf(metric.metricValue()).toEqualTypeOf<unknown>();
+  }
+  const metricName = new MetricName({ name: 'n', group: 'g', description: '', tags: new Map([['client-id', 'c']]) });
+  expectTypeOf(metrics.get(metricName)).toEqualTypeOf<Metric | null>();
+  expectTypeOf(new MetricNameMap<number>()).toEqualTypeOf<MetricNameMap<number>>();
+  const maybeEntries: Array<[MetricName, number]> | undefined = undefined as Array<[MetricName, number]> | undefined;
+  // @ts-expect-error undefined is no entries: leave the argument out
+  void new MetricNameMap<number>(maybeEntries);
+  const kafkaMetric = new KafkaMetric({
+    lock: null,
+    metricName,
+    valueProvider: { value: () => 1 },
+    config: null,
+    time: { milliseconds: () => 0 },
+  });
+  const asMetric: Metric = kafkaMetric;
+  void asMetric;
+  // @ts-expect-error metrics() takes no argument
+  kafkaProducer.metrics(1);
+  // TopicPartitionMap and TopicPartitionSet (js-only, Q25): keyed by value.
+  const offsets = new TopicPartitionMap<bigint>([[new TopicPartition({ topic: 't', partition: 0 }), 5n]]);
+  expectTypeOf(offsets.get(new TopicPartition({ topic: 't', partition: 0 }))).toEqualTypeOf<bigint | null>();
+  expectTypeOf(offsets.set(new TopicPartition({ topic: 't', partition: 1 }), 6n)).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  for (const [tp, offset] of offsets) {
+    expectTypeOf(tp).toEqualTypeOf<TopicPartition>();
+    expectTypeOf(offset).toEqualTypeOf<bigint>();
+  }
+  // @ts-expect-error a TopicPartitionMap is keyed by TopicPartition only
+  offsets.set('t-0', 1n);
+  const partitions = new TopicPartitionSet([new TopicPartition({ topic: 't', partition: 0 })]);
+  expectTypeOf(partitions.has(new TopicPartition({ topic: 't', partition: 0 }))).toEqualTypeOf<boolean>();
+  expectTypeOf([...partitions]).toEqualTypeOf<TopicPartition[]>();
+  // @ts-expect-error a TopicPartitionSet holds TopicPartitions only
+  partitions.add({ topic: 't', partition: 0 });
   const closeArgs: CloseArgs = { timeout: 0 };
   await kafkaProducer.close(closeArgs);
   // @ts-expect-error undefined is no timeout: leave the argument out
@@ -392,8 +499,73 @@ new KafkaError(5);
 new TopicAuthorizationError({ message: 'm', cause: sasl });
 // @ts-expect-error ExecutionException has no (String) constructor
 new ExecutionError('failed');
-// @ts-expect-error QuotaViolationException's constructors take a payload, not translated yet
+// @ts-expect-error QuotaViolationException has no (String) constructor: its one form is { metric, value, bound }
 new QuotaViolationError('m');
+// metric() is a KafkaMetric, an error the core reports included: its name comes from the core.
+declare const quota: QuotaViolationError;
+expectTypeOf(quota.metric()).toEqualTypeOf<KafkaMetric>();
+// The payload constructors (Q39): Java's other parameters by name, beside message and cause.
+const unauthorized = new TopicAuthorizationError({ unauthorizedTopics: ['a', 'b'] });
+expectTypeOf(unauthorized.unauthorizedTopics()).toEqualTypeOf<Set<string>>();
+void new TopicAuthorizationError({ message: 'm', unauthorizedTopics: new Set(['a']) });
+// @ts-expect-error a payload is given by name only, never on its own
+new TopicAuthorizationError(['a']);
+// @ts-expect-error unauthorizedTopics is an iterable of strings
+new TopicAuthorizationError({ unauthorizedTopics: [1] });
+// A long payload taken is a bigint or a number; returned, a TopicPartitionMap<bigint>.
+const tooLarge = new RecordTooLargeError({
+  message: 'too large',
+  recordTooLargePartitions: new TopicPartitionMap<bigint | number>([[new TopicPartition({ topic: 't', partition: 0 }), 1]]),
+});
+expectTypeOf(tooLarge.recordTooLargePartitions()).toEqualTypeOf<TopicPartitionMap<bigint> | null>();
+// @ts-expect-error only a TopicPartitionMap is taken for a Map<TopicPartition, Long>
+new RecordTooLargeError({ message: 'm', recordTooLargePartitions: new Map<TopicPartition, bigint>() });
+const outOfRange = new OffsetOutOfRangeError({ offsetOutOfRangePartitions: new TopicPartitionMap<bigint>() });
+expectTypeOf(outOfRange.offsetOutOfRangePartitions()).toEqualTypeOf<TopicPartitionMap<bigint>>();
+expectTypeOf(outOfRange.partitions()).toEqualTypeOf<TopicPartitionSet>();
+expectTypeOf(
+  new NoOffsetForPartitionError({ partition: new TopicPartition({ topic: 't', partition: 0 }) }).partitions(),
+).toEqualTypeOf<TopicPartitionSet>();
+expectTypeOf(GroupAuthorizationError.forGroupId('g').groupId()).toEqualTypeOf<string | null>();
+expectTypeOf(GroupAuthorizationError.forGroupId({ groupId: 'g' })).toEqualTypeOf<GroupAuthorizationError>();
+expectTypeOf(new ThrottlingQuotaExceededError({ throttleTimeMs: 5, message: 'm' }).throttleTimeMs()).toEqualTypeOf<number>();
+void new ConfigError({ name: 'linger.ms', value: true });
+void new ConfigError({ name: 'linger.ms', value: 'x', message: 'bad' });
+// @ts-expect-error ConfigException has no (String name) constructor
+new ConfigError({ name: 'linger.ms' });
+// @ts-expect-error a getter only reads
+unauthorized.unauthorizedTopics(1);
+// @ts-expect-error LogTruncationException has no (String) constructor
+new LogTruncationError({ message: 'm' });
+const truncated = new LogTruncationError({
+  fetchOffsets: new TopicPartitionMap<bigint>(),
+  divergentOffsets: new TopicPartitionMap([[new TopicPartition({ topic: 't', partition: 0 }), new OffsetAndMetadata(5n)]]),
+});
+expectTypeOf(truncated.divergentOffsets()).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata>>();
+const offsetAndMetadata = new OffsetAndMetadata({ offset: 1, leaderEpoch: null, metadata: 'm' });
+expectTypeOf(offsetAndMetadata.offset).toEqualTypeOf<bigint>();
+expectTypeOf(offsetAndMetadata.leaderEpoch).toEqualTypeOf<number | null>();
+// @ts-expect-error OffsetAndMetadata has no (offset, leaderEpoch) constructor
+new OffsetAndMetadata({ offset: 1, leaderEpoch: 2 });
+const deserialization = new RecordDeserializationError({
+  origin: RecordDeserializationError.DeserializationExceptionOrigin.VALUE,
+  partition: new TopicPartition({ topic: 't', partition: 0 }),
+  offset: 1n,
+  timestamp: -1,
+  timestampType: TimestampType.CREATE_TIME,
+  keyBuffer: null,
+  valueBuffer: Buffer.from('v'),
+  headers: [],
+  message: 'failed',
+  cause: null,
+});
+expectTypeOf(deserialization.origin()).toEqualTypeOf<RecordDeserializationError.DeserializationExceptionOrigin>();
+expectTypeOf(deserialization.timestampType()).toEqualTypeOf<TimestampType>();
+expectTypeOf(deserialization.keyBuffer()).toEqualTypeOf<Buffer | null>();
+expectTypeOf(deserialization.offset()).toEqualTypeOf<bigint>();
+expectTypeOf(TimestampType.forName('CreateTime')).toEqualTypeOf<TimestampType>();
+const nullPartition = new TopicPartitionSet([null]);
+expectTypeOf(nullPartition.has(null)).toEqualTypeOf<boolean>();
 // An Error is not an options object: Java's ConfigException(Throwable) does not exist.
 const caught = new Error('caught');
 // @ts-expect-error a ConfigError takes no cause
@@ -463,8 +635,17 @@ new ProducerConfig();
 
 // Made by the client only: the constructors are private, and the library's
 // own factories and methods are left out of the declarations (stripInternal).
-const fields = { topic: 't', partition: 0, hasOffset: true, offset: 0n, hasTimestamp: true, timestamp: 0n, serializedKeySize: -1, serializedValueSize: -1 };
-// @ts-expect-error RecordMetadata's constructor is private
+const fields = {
+  topic: 't',
+  partition: 0,
+  hasOffset: true,
+  offset: 0n,
+  hasTimestamp: true,
+  timestamp: 0n,
+  serializedKeySize: -1,
+  serializedValueSize: -1,
+};
+// @ts-expect-error RecordMetadata's public constructor is Java's, not the fields the client reads
 new RecordMetadata(fields);
 // @ts-expect-error KafkaFuture's constructor is private
 new KafkaFuture();
@@ -506,8 +687,40 @@ const loose = { topic: 't', partition: 0, value: 'v' };
 new ProducerRecord(loose);
 // @ts-expect-error ProducerRecord takes no bare value: Java has no one-parameter constructor
 new ProducerRecord('t');
-// @ts-expect-error a key is bytes or a string
-new ProducerRecord({ topic: 't', key: 1, value: 'v' });
+// A record's key and value are what the serializers take; an omitted or a
+// null one binds never, through a signature per null combination, so every
+// producer sends it.
+expectTypeOf(new ProducerRecord({ topic: 't', key: 1, value: 'v' })).toEqualTypeOf<ProducerRecord<number, string>>();
+expectTypeOf(new ProducerRecord({ topic: 't', value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
+expectTypeOf(new ProducerRecord({ topic: 't', value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', key: null, value: 'v' })).toEqualTypeOf<ProducerRecord<never, string>>();
+expectTypeOf(new ProducerRecord({ topic: 't', key: 1, value: null })).toEqualTypeOf<ProducerRecord<number, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: null, value: null })).toEqualTypeOf<ProducerRecord<never, never>>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: 'v' })).toEqualTypeOf<
+  ProducerRecord<never, string>
+>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, key: 1, value: null, headers: null })).toEqualTypeOf<
+  ProducerRecord<number, never>
+>();
+expectTypeOf(new ProducerRecord({ topic: 't', partition: 0, timestamp: 1, key: null, value: null, headers: null })).toEqualTypeOf<
+  ProducerRecord<never, never>
+>();
+// A key or value that may be null binds its type without null.
+declare const maybeKey: string | null;
+expectTypeOf(new ProducerRecord({ topic: 't', key: maybeKey, value: maybeKey })).toEqualTypeOf<ProducerRecord<string, string>>();
+// send() takes the ProducerRecord<K, V> of the producer's serializers: a null
+// key or value fits any producer.
+async function nullRecords(typedProducer: KafkaProducer<string, string>): Promise<void> {
+  await typedProducer.send(new ProducerRecord({ topic: 't', key: null, value: null }));
+  await typedProducer.send({ record: new ProducerRecord({ topic: 't', key: null, value: 'v' }), callback: null });
+  // @ts-expect-error a number key goes to no producer of string keys
+  await typedProducer.send(new ProducerRecord({ topic: 't', key: 1, value: 'v' }));
+}
+void nullRecords;
+// Covariant: a record of narrower types is a record of wider ones.
+const wider: ProducerRecord<number | string, unknown> = new ProducerRecord({ topic: 't', key: 1, value: { a: 1 } });
+void wider;
 // @ts-expect-error a config value is a string, a number, a boolean, a bigint or an array of them
 new KafkaProducer({ 'linger.ms': {} });
 // @ts-expect-error a callback takes one object, ({ metadata, exception })
@@ -552,3 +765,162 @@ void literalError;
 // @ts-expect-error two error classes with the same public members are not interchangeable
 const otherError: TopicAuthorizationError = new SaslAuthenticationError('x');
 void otherError;
+
+// The common value types: TopicPartition and Node are data classes (readonly
+// fields), PartitionInfo keeps Java's methods.
+const tp = new TopicPartition({ topic: 't', partition: 0 });
+expectTypeOf(tp.topic).toEqualTypeOf<string | null>();
+expectTypeOf(tp.partition).toEqualTypeOf<number>();
+expectTypeOf(tp.toJSON()).toEqualTypeOf<{ topic: string | null; partition: number }>();
+// @ts-expect-error a TopicPartition's fields are readonly
+tp.partition = 1;
+// @ts-expect-error an object literal with TopicPartition's fields is no TopicPartition
+const literalTp: TopicPartition = { topic: 't', partition: 0, toJSON: () => ({ topic: 't', partition: 0 }) };
+void literalTp;
+const node = new Node({ id: 1, host: 'h', port: 9092, rack: null });
+expectTypeOf(node.rack).toEqualTypeOf<string | null>();
+expectTypeOf(node.isEmpty).toEqualTypeOf<boolean>();
+expectTypeOf(Node.noNode()).toEqualTypeOf<Node>();
+// @ts-expect-error isFenced needs the rack, as Java's constructors do
+void new Node({ id: 1, host: 'h', port: 9092, isFenced: true });
+declare const info: PartitionInfo;
+expectTypeOf(info.topic()).toEqualTypeOf<string | null>();
+expectTypeOf(info.leader()).toEqualTypeOf<Node | null>();
+// @ts-expect-error Java's constructors take the leader and the replicas too
+void new PartitionInfo({ topic: 't' });
+// A Java Node[] taken is any iterable of Node; one returned an array.
+const builtInfo = new PartitionInfo({ topic: 't', partition: 0, leader: node, replicas: new Set([node]), inSyncReplicas: [node] });
+expectTypeOf(builtInfo.replicas()).toEqualTypeOf<Node[] | null>();
+expectTypeOf(builtInfo.equals(info)).toEqualTypeOf<boolean>();
+expectTypeOf(builtInfo.hashCode()).toEqualTypeOf<number>();
+expectTypeOf(tp.equals({ obj: tp })).toEqualTypeOf<boolean>();
+expectTypeOf(node.hashCode()).toEqualTypeOf<number>();
+// RecordMetadata's public constructor is Java's: a long takes a bigint or a number.
+const builtMetadata = new RecordMetadata({
+  topicPartition: tp,
+  baseOffset: 15n,
+  batchIndex: 3,
+  timestamp: 1,
+  serializedKeySize: -1,
+  serializedValueSize: 5,
+});
+expectTypeOf(builtMetadata.offset).toEqualTypeOf<bigint>();
+expectTypeOf(KafkaProducer.NETWORK_THREAD_PREFIX).toEqualTypeOf<string>();
+expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
+
+// Serializers: the producer's type arguments are inferred from them, and an
+// omitted (or null) serializer binds Uint8Array.
+interface Order {
+  id: number;
+}
+// The built-in factory: called as a constructor argument, or without () in a
+// serde config key, its configure(configs, isKey) form.
+expectTypeOf(stringSerializer()).toEqualTypeOf<Serializer<string>>();
+expectTypeOf(stringSerializer({ configs: { 'serializer.encoding': 'UTF-8' }, isKey: true })).toEqualTypeOf<Serializer<string>>();
+// @ts-expect-error configure takes the configuration and isKey together
+stringSerializer({ configs: {} });
+const viaFactory: ProducerConfigs = { 'key.serializer': stringSerializer, 'value.serializer': stringSerializer };
+void viaFactory;
+// A configuration typed as ProducerConfigs has lost its functions' types:
+// the producer is typed as bytes.
+expectTypeOf(new KafkaProducer(viaFactory)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
+// The config keys bind the type their functions return, as arguments do
+// (Q27): the README's "the same through the configuration".
+expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer })).toEqualTypeOf<
+  KafkaProducer<string, string>
+>();
+expectTypeOf(new KafkaProducer({ configs: { ...configs, 'value.serializer': stringSerializer } })).toEqualTypeOf<
+  KafkaProducer<Uint8Array, string>
+>();
+expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': null })).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
+expectTypeOf(
+  new KafkaProducer({ configs: { ...configs, 'key.serializer': stringSerializer }, keySerializer: null, valueSerializer: null }),
+).toEqualTypeOf<KafkaProducer<string, Uint8Array>>();
+async function serializersFromTheConfiguration(): Promise<void> {
+  const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+  await same.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
+  // @ts-expect-error a string serializer takes no number
+  await same.send(new ProducerRecord({ topic: 't', key: 1, value: 'v' }));
+  await same.close();
+}
+void serializersFromTheConfiguration;
+const orderSerializer: Serializer<Order> = {
+  // A serializer may return a Promise, which send() awaits.
+  serialize: async ({ topic, headers, data }) => {
+    expectTypeOf(topic).toEqualTypeOf<string>();
+    expectTypeOf(headers).toEqualTypeOf<Headers>();
+    expectTypeOf(data).toEqualTypeOf<Order | null>();
+    return Promise.resolve(Buffer.from(JSON.stringify(data)));
+  },
+  close: () => undefined,
+};
+// @ts-expect-error a serializer returns bytes, not a string
+const textSerializer: Serializer<string> = { serialize: ({ data }) => data };
+void textSerializer;
+async function serializers(): Promise<void> {
+  const typed = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: orderSerializer });
+  expectTypeOf(typed).toEqualTypeOf<KafkaProducer<string, Order>>();
+  await typed.send(new ProducerRecord({ topic: 't', key: 'k', value: { id: 1 } }));
+  await typed.send({ record: new ProducerRecord({ topic: 't', key: null, value: null }), callback: null });
+  // @ts-expect-error a number key for a string serializer
+  await typed.send(new ProducerRecord({ topic: 't', key: 1, value: { id: 1 } }));
+  const bytes = new KafkaProducer({ configs });
+  expectTypeOf(bytes).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
+  expectTypeOf(new KafkaProducer(configs)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
+  await bytes.send(new ProducerRecord({ topic: 't', key: Buffer.from('k'), value: null }));
+  const half = new KafkaProducer({ configs, keySerializer: null, valueSerializer: stringSerializer() });
+  expectTypeOf(half).toEqualTypeOf<KafkaProducer<Uint8Array, string>>();
+  // @ts-expect-error Java's forms take both serializers or neither
+  void new KafkaProducer({ configs, keySerializer: stringSerializer() });
+  // @ts-expect-error a constructor argument is the serializer, not the factory (did you forget '()'?)
+  void new KafkaProducer({ configs, keySerializer: stringSerializer, valueSerializer: null });
+  // @ts-expect-error a serializer is an object, not the function that makes one
+  void new KafkaProducer({ configs, keySerializer: () => stringSerializer(), valueSerializer: null });
+  await Promise.all([typed.close(), bytes.close(), half.close()]);
+}
+void serializers;
+
+// MockProducer: Java's Producer, over the FFI's mock. Its type arguments are
+// inferred from its serializers; a mock built without them is the one place
+// a type argument is written (Q27).
+async function mocks(): Promise<void> {
+  const typed = new MockProducer({
+    autoComplete: true,
+    partitioner: null,
+    keySerializer: stringSerializer(),
+    valueSerializer: orderSerializer,
+  });
+  expectTypeOf(typed).toEqualTypeOf<MockProducer<string, Order>>();
+  const asInterface: Producer<string, Order> = typed;
+  expectTypeOf(asInterface.send).returns.toEqualTypeOf<Promise<KafkaFuture<RecordMetadata>>>();
+  await typed.send(new ProducerRecord({ topic: 't', key: 'k', value: { id: 1 } }));
+  // @ts-expect-error a number key for a string serializer
+  await typed.send(new ProducerRecord({ topic: 't', key: 1, value: { id: 1 } }));
+  expectTypeOf(typed.history()).toEqualTypeOf<Array<ProducerRecord<string, Order>>>();
+  expectTypeOf(typed.completeNext()).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.errorNext(new Error('e'))).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.errorNext({ e: null })).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.closed()).toEqualTypeOf<boolean>();
+  expectTypeOf(typed.flushed()).toEqualTypeOf<boolean>();
+  typed.setSendException(new KafkaError('send'));
+  typed.setFlushException({ flushException: null });
+  typed.setPartitionsForException(null);
+  typed.setCloseException({ closeException: new Error('close') });
+  // @ts-expect-error an error to throw is an Error
+  typed.setSendException('boom');
+  typed.clear();
+  // Java's MockProducer() binds nothing: the type arguments are written.
+  const untyped: MockProducer<string, string> = new MockProducer<string, string>();
+  await untyped.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
+  // The partitioner is Java's untranslated Partitioner, a placeholder.
+  const partitioner: Partitioner = { partition: () => 0 };
+  void new MockProducer({ autoComplete: false, partitioner, keySerializer: null, valueSerializer: null });
+  // @ts-expect-error Java's forms take all four parameters or none
+  void new MockProducer({ autoComplete: true });
+  // @ts-expect-error a mock's cluster is always empty: Java's Cluster form is left out
+  void new MockProducer({ cluster: null, autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null });
+  await using disposed = new MockProducer<Uint8Array, Uint8Array>();
+  void disposed;
+  await Promise.all([typed.close(), untyped.close()]);
+}
+void mocks;

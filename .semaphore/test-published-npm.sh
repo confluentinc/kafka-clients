@@ -16,8 +16,8 @@
 #
 #
 # Installs a published version of @confluentinc/kafka-javascript from npmjs.com, as a user does,
-# into an empty project, and runs the smoke program (javascript/tools/package-smoke) in it: the
-# install jobs of javascript-post-install.yml. On Linux it runs in a container of the given
+# into an empty project, and runs the smoke programs (javascript/tools/package-smoke: the CommonJS
+# one and its ES module half) in it: the install jobs of javascript-post-install.yml. On Linux it runs in a container of the given
 # image, with the official Node.js tarball of the given major version, whose SHA-256 is checked
 # against nodejs.org's SHASUMS256.txt; on macOS with the Node.js on PATH (`sem-version node`).
 # Must be POSIX sh. Nothing here holds a token.
@@ -85,19 +85,24 @@ install_and_smoke() {
             "@confluentinc/kafka-javascript@$1") \
         || die "npm install @confluentinc/kafka-javascript@$1 failed"
     node "$2" --platform "$platform" --version "$1" --project "$work/project"
+    # The ES module half, copied into the project: an ES module resolves a bare specifier from
+    # where it lies.
+    cp "$(dirname "$2")/package-smoke.mjs" "$work/project/package-smoke.mjs"
+    node "$work/project/package-smoke.mjs" --version "$1"
     rm -rf "$work"
 }
 
 if [ "${1:-}" = "--in-docker" ]; then
     version="$2"
     major="$3"
-    # The tools to fetch and unpack Node.js, which the smallest images lack.
+    # The tools to fetch and unpack Node.js, and the libatomic Node.js 26 loads, which the
+    # smallest images lack (almalinux:8 has no libatomic.so.1).
     if command -v apt-get >/dev/null 2>&1; then
         export DEBIAN_FRONTEND=noninteractive
         retry apt-get update -qq
-        retry apt-get install -y -qq --no-install-recommends ca-certificates curl tar gzip >/dev/null
+        retry apt-get install -y -qq --no-install-recommends ca-certificates curl tar gzip libatomic1 >/dev/null
     elif command -v dnf >/dev/null 2>&1; then
-        retry dnf install -y -q tar gzip >/dev/null
+        retry dnf install -y -q tar gzip libatomic >/dev/null
         command -v curl >/dev/null 2>&1 || retry dnf install -y -q curl >/dev/null
     else
         die "the image has neither apt-get nor dnf"

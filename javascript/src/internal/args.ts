@@ -57,6 +57,9 @@ export type Form = readonly string[];
  * The JavaScript type of a value, as a form error names it, in Python's form:
  * `a string`, `a number`, `an array`, `null`, `a Map` (an object, by its
  * class).
+ *
+ * @param value - the value to name
+ * @returns the name of its type
  */
 export function kind(value: unknown): string {
   if (value === null) return 'null';
@@ -113,16 +116,33 @@ export interface JavaFormsOptions {
    * `got <n> arguments`.
    */
   readonly callShapes?: boolean;
+  /**
+   * The one-parameter forms given by name only, never as a bare value (an
+   * error's payload parameter: `{ unauthorizedTopics }`): a form error lists
+   * such a form as its options object, `({ unauthorizedTopics })`.
+   */
+  readonly optionsOnly?: readonly string[];
 }
 
-/** Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null. */
+/**
+ * Whether `value` is a plain object: an object whose prototype is `Object.prototype` or null.
+ *
+ * @param value - the value to test
+ * @returns whether it is a plain object
+ */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object') return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 
-/** Whether `name` is an own enumerable property of `args`, what counts as given. */
+/**
+ * Whether `name` is an own enumerable property of `args`, what counts as given.
+ *
+ * @param args - the options object
+ * @param name - the parameter's name
+ * @returns whether the parameter is given
+ */
 function given(args: object, name: string): boolean {
   return Object.prototype.propertyIsEnumerable.call(args, name);
 }
@@ -169,9 +189,10 @@ export class JavaForms {
     this.#forms = table;
     this.#callShapes = options.callShapes === true;
     const listed = this.#callShapes ? [...forms].sort((a, b) => a.length - b.length) : forms;
+    const optionsOnly = new Set(options.optionsOnly ?? []);
     const shape = (form: Form): string => {
       const text = this.#inOrder(this.#mask(form));
-      return this.#callShapes && form.length > 1 ? `({ ${text} })` : `(${text})`;
+      return this.#callShapes && (form.length > 1 || (form.length === 1 && optionsOnly.has(form[0]))) ? `({ ${text} })` : `(${text})`;
     };
     this.#prefix = `${method}() takes one of ${listed.map(shape).join(', ')}; got `;
     // Java's one-parameter forms sharing one name (Map and Properties as
@@ -179,13 +200,15 @@ export class JavaForms {
     // (an error's `(message)` and `(cause)`) are told apart by the value's
     // type when `bareTypes` gives a test for each; without it they take no
     // bare value.
-    const single = [...new Set(forms.filter((form) => form.length === 1).map((form) => form[0]))];
+    const single = [...new Set(forms.filter((form) => form.length === 1 && !optionsOnly.has(form[0])).map((form) => form[0]))];
     const tests = options.bareTypes;
     if (tests !== undefined && single.length > 1 && single.some((name) => tests[name] === undefined)) {
       throw new Error(`JavaForms(${method}): bareTypes has no test for every one-parameter form`);
     }
     const bareNames = tests !== undefined || single.length === 1 ? single : [];
-    this.#bare = bareNames.map((name) => [name, forms.findIndex((form) => form.length === 1 && form[0] === name), tests?.[name] ?? null] as const);
+    this.#bare = bareNames.map(
+      (name) => [name, forms.findIndex((form) => form.length === 1 && form[0] === name), tests?.[name] ?? null] as const,
+    );
     this.#bareIsPlainObject = options.bareIsPlainObject === true;
     this.#reader = options.reader === true;
     if (this.#reader && (forms.length !== 1 || forms[0].length !== 0)) throw new Error(`JavaForms(${method}): a reader takes no parameter`);
@@ -221,12 +244,16 @@ export class JavaForms {
       // `undefined` is "not given" only as a key left out, never as a value.
       if (this.#bare.length > 0) {
         const name = this.#bare[0][0];
-        throw new TypeError(this.#undefinedMessages[name] ?? `${name} must not be undefined. Leave the argument out, or pass null for Java's null`);
+        throw new TypeError(
+          this.#undefinedMessages[name] ?? `${name} must not be undefined. Leave the argument out, or pass null for Java's null`,
+        );
       }
       if (this.#forms.size === 1 && this.#forms.has(0)) {
         throw new TypeError(`${this.#method}() takes no argument: leave it out rather than pass undefined`);
       }
-      throw new TypeError(`${this.#method}() takes one object of named parameters, not undefined: leave the argument out, or pass null for Java's null`);
+      throw new TypeError(
+        `${this.#method}() takes one object of named parameters, not undefined: leave the argument out, or pass null for Java's null`,
+      );
     }
     if (!this.#isOptions(args)) {
       const bare = this.#bareOf(args);
@@ -248,8 +275,7 @@ export class JavaForms {
     }
     if (!unknown && undefinedName !== null) {
       throw new TypeError(
-        this.#undefinedMessages[undefinedName] ??
-          `${undefinedName} must not be undefined. Leave the key out, or pass null for Java's null`,
+        this.#undefinedMessages[undefinedName] ?? `${undefinedName} must not be undefined. Leave the key out, or pass null for Java's null`,
       );
     }
     return this.#matched(mask, unknown ? args : null);

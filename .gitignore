@@ -11,6 +11,8 @@ tools/java-perf-test/bin/
 *.json
 # The Node.js client's committed Java index (`cargo xtask java-api`).
 !/javascript/java-index.json
+# The Java vectors the Node.js client's unit tests read (javascript/tools/java-vectors/).
+!/javascript/test/java_vectors.json
 *.jsonl
 !design/current/img/*.svg
 # The Confluent.Kafka NuGet package's icon (dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj).
