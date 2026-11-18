@@ -293,18 +293,16 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// the returned future's <see cref="KafkaFuture{T}.Get()"/> returns or throws.
     /// </summary>
     /// <remarks>
-    /// A <see langword="null"/> <paramref name="callback"/> is rejected, where Java accepts it:
-    /// <see cref="Send(ProducerRecord{TKey, TValue})"/> already sends without one. The callback's contract is
-    /// in <see cref="ICallback"/>.
+    /// A <see langword="null"/> <paramref name="callback"/> means no callback: the record is sent as
+    /// <see cref="Send(ProducerRecord{TKey, TValue})"/> sends it, as in Java. The callback's contract is in
+    /// <see cref="ICallback"/>.
     /// </remarks>
     /// <param name="record">The record to publish.</param>
-    /// <param name="callback">The delivery callback (non-null).</param>
+    /// <param name="callback">The delivery callback, or <see langword="null"/> for none.</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
     /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
     /// failure.</returns>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="record"/> or <paramref name="callback"/> is null.
-    /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
     /// cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">On <c>KafkaProducer</c>, a serializer threw an
@@ -314,7 +312,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
-    KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback);
+    KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback? callback);
 
     /// <summary>
     /// Blocks until every record whose <c>Send</c> returned before this call has completed, and its

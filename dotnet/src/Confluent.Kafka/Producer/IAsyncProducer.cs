@@ -326,12 +326,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <remarks>
     /// Don't change or reuse the key and value buffers until <c>Send</c> throws or the
     /// <see cref="ValueTask{TResult}"/> it returns has completed. A <see langword="null"/>
-    /// <paramref name="callback"/> is rejected, where Java accepts it:
-    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> already sends without one. The
+    /// <paramref name="callback"/> means no callback: the record is sent as
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> sends it, as in Java. A bare
+    /// <c>null</c> argument matches this overload and the <see cref="IAsyncCallback"/> one, so cast it. The
     /// callback's contract is in <see cref="ICallback"/>.
     /// </remarks>
     /// <param name="record">The record to publish.</param>
-    /// <param name="callback">The delivery callback (non-null).</param>
+    /// <param name="callback">The delivery callback, or <see langword="null"/> for none.</param>
     /// <param name="cancellationToken">
     /// Never cancels the record. If it fires while the first stage is pending, that stage ends with
     /// <see cref="OperationCanceledException"/> once the producer has taken or refused the record. See the
@@ -343,9 +344,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="RecordMetadata"/>, or for an <c>ExecutionException</c> around the delivery failure. Await the
     /// <see cref="ValueTask{TResult}"/> once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="record"/> or <paramref name="callback"/> is null.
-    /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
     /// cannot receive unchanged (thrown synchronously, or ending the first stage when a serializer is awaited).</exception>
     /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
@@ -355,7 +354,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        ICallback callback,
+        ICallback? callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -368,15 +367,15 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="ValueTask{TResult}"/> it returns has completed.
     /// </remarks>
     /// <param name="record">The record to send.</param>
-    /// <param name="callback">The callback; not <c>null</c>.</param>
+    /// <param name="callback">The callback, or <see langword="null"/> for none, as with the <see cref="ICallback"/>
+    /// overload.</param>
     /// <param name="cancellationToken">
     /// Never cancels the record. If it fires while the first stage is pending, that stage ends with
     /// <see cref="OperationCanceledException"/> once the producer has taken or refused the record. See the
     /// type's remarks.
     /// </param>
     /// <returns>The first stage, which hands back the record's future.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="record"/> or <paramref name="callback"/> is
-    /// <c>null</c>.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
     /// cannot receive unchanged (thrown synchronously, or ending the first stage when a serializer is awaited).</exception>
     /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
@@ -386,7 +385,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncCallback callback,
+        IAsyncCallback? callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
