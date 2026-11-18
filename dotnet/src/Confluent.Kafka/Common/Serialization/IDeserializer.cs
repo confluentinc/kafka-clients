@@ -164,6 +164,34 @@ public static class DeserializerExtensions
     }
 
     /// <summary>
+    /// Decodes <paramref name="data"/>, a memory the deserializer may keep or return, with the record's headers, Java's
+    /// <c>Deserializer.deserialize(String, Headers, ByteBuffer)</c>:
+    /// <see cref="IDeserializerWithReadOnlyMemory{T}.Deserialize(string, Headers, ReadOnlyMemory{byte})"/> when
+    /// <paramref name="deserializer"/> implements it, and otherwise, as Java's default,
+    /// <see cref="Deserialize{T}(IDeserializer{T}, string, Headers, ReadOnlySpan{byte})"/> over the memory's span.
+    /// </summary>
+    /// <typeparam name="T">The type the bytes are decoded to.</typeparam>
+    /// <param name="deserializer">The deserializer.</param>
+    /// <param name="topic">The topic the record was consumed from.</param>
+    /// <param name="headers">The record's headers, which may be empty but are never <see langword="null"/>.</param>
+    /// <param name="data">The bytes, exactly the key or the value. They must stay valid for as long as a
+    /// deserializer that keeps them needs them.</param>
+    /// <returns>The decoded value; may be <see langword="null"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="deserializer"/> is null.</exception>
+    /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>.</exception>
+    public static T? Deserialize<T>(this IDeserializer<T> deserializer, string topic, Headers headers, ReadOnlyMemory<byte> data)
+    {
+        if (deserializer is null)
+        {
+            throw new ArgumentNullException(nameof(deserializer));
+        }
+
+        return deserializer is IDeserializerWithReadOnlyMemory<T> withMemory
+            ? withMemory.Deserialize(topic, headers, data)
+            : deserializer.Deserialize(topic, headers, data.Span);
+    }
+
+    /// <summary>
     /// Configures <paramref name="deserializer"/>, Java's <c>Deserializer.configure(Map, boolean)</c>:
     /// <see cref="IDeserializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool)"/> when
     /// <paramref name="deserializer"/> implements it, and otherwise nothing, as Java's default.

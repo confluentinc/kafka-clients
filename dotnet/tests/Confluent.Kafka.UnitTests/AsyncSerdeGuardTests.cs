@@ -1,0 +1,229 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Internal;
+
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests;
+
+/// <summary>
+/// The construction check of an asynchronous serializer or deserializer: a client that disposes its serdes refuses a
+/// public <c>DisposeAsync()</c>, <c>Dispose()</c> or <c>Close()</c> it would never call, since it disposes through
+/// <see cref="IAsyncDisposable"/> or else <see cref="IDisposable"/>; one that does not dispose them takes every shape,
+/// and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces.
+/// </summary>
+public sealed class AsyncSerdeGuardTests
+{
+    private const string Prefix = "Confluent.Kafka.UnitTests.AsyncSerdeGuardTests+";
+
+    public static TheoryData<Type, string> Refused => new TheoryData<Type, string>
+    {
+        { typeof(StrayDisposeAsync), "DisposeAsync() but does not implement IAsyncDisposable" },
+        { typeof(StrayDispose), "Dispose() but does not implement IDisposable" },
+        { typeof(StrayClose), "Close() but does not implement IAsyncDisposable or IDisposable" },
+        { typeof(AsyncDisposableWithStrayDispose), "Dispose() but does not implement IDisposable" },
+        { typeof(DisposableWithStrayDisposeAsync), "DisposeAsync() but does not implement IAsyncDisposable" },
+    };
+
+    public static TheoryData<Type> Accepted => new TheoryData<Type>
+    {
+        typeof(Plain),
+        typeof(AsyncDisposable),
+        typeof(Disposable),
+        typeof(AsyncDisposableAndDisposable),
+        typeof(ClosingAsyncDisposable),
+        typeof(ClosingDisposable),
+        typeof(StrayConfigure),
+    };
+
+    [Theory]
+    [MemberData(nameof(Refused))]
+    public void AClientThatDisposesItsSerdes_RefusesACloseItWouldNeverCall(Type shape, string what)
+    {
+        Serde serde = (Serde)Activator.CreateInstance(shape)!;
+
+        IllegalArgumentException asSerializer = Assert.Throws<IllegalArgumentException>(
+            () => SerdeGuard.Check((IAsyncSerializer<string>)serde, DefaultMethodGuard.Producer, disposes: true));
+        IllegalArgumentException asDeserializer = Assert.Throws<IllegalArgumentException>(
+            () => SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes: true));
+
+        Assert.Equal(
+            Prefix + shape.Name + " declares " + what + ", so the producer would never call it.", asSerializer.Message);
+        Assert.Equal(
+            Prefix + shape.Name + " declares " + what + ", so the consumer would never call it.", asDeserializer.Message);
+        Assert.Equal(0, serde.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(Refused))]
+    public void AClientThatDoesNotDisposeItsSerdes_TakesEveryShape(Type shape, string what)
+    {
+        Assert.NotEmpty(what);
+        Serde serde = (Serde)Activator.CreateInstance(shape)!;
+
+        SerdeGuard.Check((IAsyncSerializer<string>)serde, DefaultMethodGuard.Producer, disposes: false);
+        SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes: false);
+
+        Assert.Equal(0, serde.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(Accepted))]
+    public void AClient_TakesASerdeItDisposesThroughAnInterface_OrThatDeclaresNoClose(Type shape)
+    {
+        Serde serde = (Serde)Activator.CreateInstance(shape)!;
+
+        foreach (bool disposes in new[] { true, false })
+        {
+            SerdeGuard.Check((IAsyncSerializer<string>)serde, DefaultMethodGuard.Producer, disposes);
+            SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes);
+        }
+
+        Assert.Equal(0, serde.Disposals);
+    }
+
+    [Fact]
+    public void TheBuiltIns_AreTaken()
+    {
+        SerdeGuard.Check(new AsyncStringSerializer(), DefaultMethodGuard.Producer, disposes: true);
+        SerdeGuard.Check(new AsyncStringDeserializer(), DefaultMethodGuard.Consumer, disposes: true);
+        SerdeGuard.Check(new AsyncReadOnlyMemorySerializer(), DefaultMethodGuard.Producer, disposes: true);
+        SerdeGuard.Check(new AsyncReadOnlyMemoryDeserializer(), DefaultMethodGuard.Consumer, disposes: true);
+    }
+
+    /// <summary>An asynchronous serializer and deserializer of strings that does nothing, counting its disposals.</summary>
+    private abstract class Serde : IAsyncSerializer<string>, IAsyncDeserializer<string>
+    {
+        internal int Disposals { get; private protected set; }
+
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+    }
+
+    /// <summary>A serde with no close.</summary>
+    private sealed class Plain : Serde
+    {
+    }
+
+    /// <summary>A serde with a public DisposeAsync() but not IAsyncDisposable.</summary>
+    private sealed class StrayDisposeAsync : Serde
+    {
+        public ValueTask DisposeAsync()
+        {
+            Disposals++;
+            return default;
+        }
+    }
+
+    /// <summary>A serde with a public Dispose() but not IDisposable.</summary>
+    private sealed class StrayDispose : Serde
+    {
+        public void Dispose() => Disposals++;
+    }
+
+    /// <summary>A serde with a public Close() and neither disposal interface.</summary>
+    private sealed class StrayClose : Serde
+    {
+        public void Close() => Disposals++;
+    }
+
+    /// <summary>An IAsyncDisposable serde with a public Dispose() but not IDisposable.</summary>
+    private sealed class AsyncDisposableWithStrayDispose : Serde, IAsyncDisposable
+    {
+        public void Dispose() => Disposals++;
+
+        public ValueTask DisposeAsync()
+        {
+            Disposals++;
+            return default;
+        }
+    }
+
+    /// <summary>An IDisposable serde with a public DisposeAsync() but not IAsyncDisposable.</summary>
+    private sealed class DisposableWithStrayDisposeAsync : Serde, IDisposable
+    {
+        public void Dispose() => Disposals++;
+
+        public ValueTask DisposeAsync()
+        {
+            Disposals++;
+            return default;
+        }
+    }
+
+    /// <summary>An IAsyncDisposable serde.</summary>
+    private sealed class AsyncDisposable : Serde, IAsyncDisposable
+    {
+        public ValueTask DisposeAsync()
+        {
+            Disposals++;
+            return default;
+        }
+    }
+
+    /// <summary>An IDisposable serde.</summary>
+    private sealed class Disposable : Serde, IDisposable
+    {
+        public void Dispose() => Disposals++;
+    }
+
+    /// <summary>A serde with both disposal interfaces.</summary>
+    private sealed class AsyncDisposableAndDisposable : Serde, IAsyncDisposable, IDisposable
+    {
+        public void Dispose() => Disposals++;
+
+        public ValueTask DisposeAsync()
+        {
+            Disposals++;
+            return default;
+        }
+    }
+
+    /// <summary>An IAsyncDisposable serde with a public Close() beside it.</summary>
+    private sealed class ClosingAsyncDisposable : Serde, IAsyncDisposable
+    {
+        public void Close() => Disposals++;
+
+        public ValueTask DisposeAsync()
+        {
+            Disposals++;
+            return default;
+        }
+    }
+
+    /// <summary>An IDisposable serde with a public Close() beside it.</summary>
+    private sealed class ClosingDisposable : Serde, IDisposable
+    {
+        public void Close() => Disposals++;
+
+        public void Dispose() => Disposals++;
+    }
+
+    /// <summary>A serde with a public Configure but not the configure interfaces.</summary>
+    private sealed class StrayConfigure : Serde
+    {
+        public void Configure(IReadOnlyDictionary<string, object?> configs, bool isKey) => Disposals++;
+    }
+}

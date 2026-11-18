@@ -22,7 +22,9 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// Refuses, when a client is built, a serializer or deserializer with a public method the client would never call: a
 /// headers form or a memory form without the interface that makes the client call it, or a <c>Close()</c> without
-/// <see cref="IDisposable"/>.
+/// <see cref="IDisposable"/>. For an asynchronous serializer or deserializer, whose one method a client always calls,
+/// it is a <c>DisposeAsync()</c>, a <c>Dispose()</c> or a <c>Close()</c> without the interface the client disposes
+/// it through.
 /// </summary>
 internal static class SerdeGuard
 {
@@ -61,6 +63,37 @@ internal static class SerdeGuard
         }
 
         CheckClose(deserializer, client, disposes);
+    }
+
+    internal static void Check<T>(IAsyncSerializer<T> serializer, string client, bool disposes) =>
+        CheckAsyncClose(serializer, client, disposes);
+
+    internal static void Check<T>(IAsyncDeserializer<T> deserializer, string client, bool disposes) =>
+        CheckAsyncClose(deserializer, client, disposes);
+
+    // An asynchronous client disposes a serde through IAsyncDisposable, or else through IDisposable. One that is both
+    // is taken, as .NET pairs the two, although its Dispose() is then not called.
+    private static void CheckAsyncClose(object serde, string client, bool disposes)
+    {
+        if (!disposes)
+        {
+            return;
+        }
+
+        if (serde is not IAsyncDisposable && DefaultMethodGuard.Declares(serde, "DisposeAsync"))
+        {
+            throw DefaultMethodGuard.NeverCalled(serde, "DisposeAsync()", "IAsyncDisposable", client);
+        }
+
+        if (serde is not IDisposable && DefaultMethodGuard.Declares(serde, "Dispose"))
+        {
+            throw DefaultMethodGuard.NeverCalled(serde, "Dispose()", "IDisposable", client);
+        }
+
+        if (serde is not IAsyncDisposable && serde is not IDisposable && DefaultMethodGuard.Declares(serde, "Close"))
+        {
+            throw DefaultMethodGuard.NeverCalled(serde, "Close()", "IAsyncDisposable or IDisposable", client);
+        }
     }
 
     // The mocks never dispose a serde, so only the clients that do refuse a Close() they would not call.
