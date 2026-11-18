@@ -63,7 +63,7 @@ _ck_case(appended_enumerator PASS confluent/kafka/common/resource/pattern_type.h
 _ck_case(inserted_enumerator FAIL confluent/kafka/common/resource/pattern_type.hpp
          "    UNKNOWN = 0,\n" "    UNKNOWN = 0,\n    /// Inserted.\n    INSERTED = 9,\n")
 _ck_case(removed_overload FAIL confluent/kafka/common/node.hpp
-         "    Node(int32_t id, std::optional<std::string_view> host, int32_t port) : Node(id, host, port, std::nullopt, false) {}\n"
+         "    Node(int32_t id, std::optional<std::string_view> host, int32_t port);\n"
          "")
 if(_failures)
     message(FATAL_ERROR "abi_check_test failed:${_failures}")

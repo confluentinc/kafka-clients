@@ -146,8 +146,16 @@ else()
     message(WARNING "abi-check: abidiff not found; the ABI comparison is skipped")
 endif()
 
-# 3. The previous release's unit tests against the new headers.
+# 3. The previous release's unit tests against the new headers. A test of the
+# library's private code (one including "detail/...", src/detail) is not part of
+# the interface.
 file(GLOB _old_tests "${_old}/test/unit/*_test.cpp")
+foreach(_test IN LISTS _old_tests)
+    file(STRINGS "${_test}" _private REGEX "^#include \"detail/")
+    if(_private)
+        list(REMOVE_ITEM _old_tests "${_test}")
+    endif()
+endforeach()
 set(_gtest_flags "")
 if(DEFINED GTEST_INCLUDE AND NOT GTEST_INCLUDE STREQUAL "")
     set(_gtest_flags -isystem "${GTEST_INCLUDE}")

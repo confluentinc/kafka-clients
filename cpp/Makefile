@@ -16,6 +16,8 @@ SOURCES := $(shell find include src test tools/lint \( -path tools/lint/build -o
 # Translation units clang-tidy processes; headers are covered through
 # .clang-tidy's HeaderFilterRegex.
 TIDY_SOURCES := $(shell find src test -name '*.cpp')
+# The library's sources (cpp/CLAUDE.md §3.2).
+LIB_SOURCES := $(shell find src -name '*.cpp')
 
 # The translation linter (tools/lint, cpp/CLAUDE.md §12-§13): a clang-tidy
 # plugin, which loads only into the clang-tidy of the LLVM major it is built
@@ -65,9 +67,13 @@ lint-plugin:
 		-DCK_LINT_FFI_INCLUDE_DIR=$(FFI_INCLUDE)
 	cmake --build $(LINT_BUILD_DIR)
 
-# The confluent-kafka-* checks on every public header: no finding.
-lint-custom: lint-plugin
+# The confluent-kafka-* checks on every public header, and confluent-kafka-source
+# on each of the library's sources, read through the build's compile commands:
+# no finding.
+lint-custom: build lint-plugin
 	cd $(LINT_BUILD_DIR) && ctest --output-on-failure -R '^lint_binding_headers$$'
+	$(LINT_CLANG_TIDY) -load $(LINT_PLUGIN) -p $(BUILD_DIR) --quiet \
+		-config="{Checks: '-*,confluent-kafka-source', WarningsAsErrors: '*'}" $(LIB_SOURCES)
 
 # The linter's own tests: the Java model, the rules, a fixture per check, the
 # mutations of real headers, the Javadoc word-count parity, abi-check.

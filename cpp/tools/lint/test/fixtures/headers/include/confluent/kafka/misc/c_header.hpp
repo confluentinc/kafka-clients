@@ -14,7 +14,7 @@
 
 #pragma once
 
-#include <confluent_kafka_bindings.h>  // EXPECT: confluent-kafka-header only through <confluent/kafka/detail/ffi.hpp>
+#include <confluent_kafka_bindings.h>  // EXPECT: confluent-kafka-header a public header never includes the C header
 
 namespace confluent::kafka::misc {
 inline int c_header() { return 4; }

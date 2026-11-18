@@ -108,25 +108,7 @@ clang::SourceLocation main_file_start(const clang::SourceManager& sm) {
 
 }  // namespace
 
-void JavaMembersCheck::registerMatchers(MatchFinder* finder) {
-    TranslationUnitCheck::registerMatchers(finder);
-    using namespace clang::ast_matchers;
-    // §1.3: a _cb function is never called.
-    finder->addMatcher(declRefExpr(to(functionDecl(matchesName("_cb$")))).bind("cb"), this);
-}
-
 void JavaMembersCheck::check(const MatchFinder::MatchResult& result) {
-    if (const auto* cb = result.Nodes.getNodeAs<clang::DeclRefExpr>("cb")) {
-        const auto& sm = *result.SourceManager;
-        const auto entry = sm.getFileEntryRefForID(sm.getFileID(sm.getSpellingLoc(cb->getLocation())));
-        if (entry && !relative_to_include_root(entry->getName(), settings()).empty()) {
-            diag(cb->getLocation(),
-                 "%0 is a _cb function: the binding calls only the own-name fallible functions and the _err twins "
-                 "(cpp/CLAUDE.md §1.3)")
-                << cb->getDecl();
-        }
-        return;
-    }
     const auto& java = JavaSide::get(settings());
     const auto pairing = pair_all(*result.Context, settings(), java);
     for (const auto& tp : pairing.types) {

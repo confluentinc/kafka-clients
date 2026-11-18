@@ -133,7 +133,13 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    headers; `detail/ffi.hpp` to `src/detail/`. Done. The library has no `NEEDED` on the core yet:
    none of the translated classes calls the FFI, and `--as-needed` drops the unused link.
    `make install` installs the headers and both libraries only, until step 4.
-3. The linter: `inline-definition`, `missing-export`, a public header including the C header.
+3. The linter: `confluent-kafka-library` (a body in a public header outside §3.2's list, a class
+   or free function without `CONFLUENT_KAFKA_CPP_API`), the header check's "never the C header",
+   and `confluent-kafka-source`, which takes the `_cb` rule from the members check and runs on
+   each source under `src/`. Done, in a check of their own rather than in `-abi`: each fixture
+   runs only its check, and the `abi` fixture's classes have no export marks. Fixtures `library`
+   and `source`, three mutations of `node.hpp`. The planned C declarations in the lint probe are
+   not needed: no check looks C entry points up.
 4. The package config: exported targets for both libraries and the core, pkg-config, install
    components, unit tests against the static library too.
 5. `cargo xtask install-c` (the core with its soname, links, static library, headers and

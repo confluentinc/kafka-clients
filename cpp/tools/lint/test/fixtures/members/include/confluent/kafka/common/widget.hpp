@@ -19,8 +19,6 @@
 #include <string>
 #include <string_view>
 
-extern "C" int32_t kafka_widget_poll_cb();
-
 namespace confluent::kafka::common {
 class Widget {  // EXPECT: confluent-kafka-java-members has no method unsupported translating Java's org.apache.kafka.common.Widget#unsupported(int,int)
 public:
@@ -29,7 +27,7 @@ public:
     explicit Widget(std::string_view name);
     void failure(std::exception_ptr failure);
     [[nodiscard]] std::string name() const;
-    [[nodiscard]] int32_t count() const { return kafka_widget_poll_cb(); }  // EXPECT: confluent-kafka-java-members is a _cb function
+    [[nodiscard]] int32_t count() const;
     static Widget parse(std::string_view text);
     [[nodiscard]] int32_t extra() const;  // EXPECT: confluent-kafka-java-members translates nothing of Java's org.apache.kafka.common.Widget
     int32_t visible = 0;  // EXPECT: confluent-kafka-java-members is a public data member

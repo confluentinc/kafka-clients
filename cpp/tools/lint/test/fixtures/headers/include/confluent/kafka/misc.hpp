@@ -15,6 +15,7 @@
 #pragma once
 
 #include <confluent/kafka/misc/c_header.hpp>
+#include <confluent/kafka/misc/ffi_include.hpp>
 #include <confluent/kafka/misc/no_license.hpp>
 #include <confluent/kafka/misc/no_pragma.hpp>
 #include <confluent/kafka/misc/nolint.hpp>

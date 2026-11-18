@@ -66,12 +66,10 @@ public:
 
 /// confluent-kafka-java-members: every public Java member has its C++
 /// translation and every public C++ member translates one (§1.4, §4.1); no
-/// public data member (§2.4, §12.3); Java's constants are constexpr; no _cb
-/// function is called (§1.3).
+/// public data member (§2.4, §12.3); Java's constants are constexpr.
 class JavaMembersCheck : public TranslationUnitCheck {
 public:
     using TranslationUnitCheck::TranslationUnitCheck;
-    void registerMatchers(clang::ast_matchers::MatchFinder* finder) override;
     void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
 };
 
@@ -118,6 +116,25 @@ public:
     void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
 };
 
+/// confluent-kafka-library: a public header defines only a constexpr or
+/// deleted function, a template or an interface's constructor; every class and
+/// free function the library defines is marked CONFLUENT_KAFKA_CPP_API (§3.2).
+class LibraryCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void registerMatchers(clang::ast_matchers::MatchFinder* finder) override;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
+/// confluent-kafka-source: the library's sources (src/, run on each of them,
+/// not on the probe) call no _cb function (§1.3).
+class SourceCheck : public TranslationUnitCheck {
+public:
+    using TranslationUnitCheck::TranslationUnitCheck;
+    void registerMatchers(clang::ast_matchers::MatchFinder* finder) override;
+    void check(const clang::ast_matchers::MatchFinder::MatchResult& result) override;
+};
+
 /// confluent-kafka-inventory: writes the API inventory to the file named by
 /// the option ConfluentKafkaInventoryFile, for `make -C cpp abi-check`
 /// (§12.4); reports nothing, and does nothing without the option.
@@ -128,7 +145,7 @@ public:
 };
 
 /// confluent-kafka-header: every public header has the Apache 2.0 header and
-/// `#pragma once`, reaches the C header only through detail/ffi.hpp, is
+/// `#pragma once`, never includes the C header or src/detail/ffi.hpp, is
 /// included by its module header, and has no TODO, FIXME or silenced check.
 class HeaderCheck : public TranslationUnitCheck {
 public:

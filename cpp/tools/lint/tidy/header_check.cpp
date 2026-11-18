@@ -51,6 +51,7 @@ std::string read_file(const std::string& path) {
     return text.str();
 }
 
+/// Whether `line` includes the C header, directly or through src/detail/ffi.hpp.
 bool is_c_header_include(std::string_view line) {
     const auto first = line.find_first_not_of(" \t");
     if (first == std::string_view::npos || line.substr(first, 1) != "#") {
@@ -58,7 +59,8 @@ bool is_c_header_include(std::string_view line) {
     }
     return line.find("include") != std::string_view::npos &&
            (line.find("confluent_kafka_bindings.h") != std::string_view::npos ||
-            line.find("confluent_kafka.h") != std::string_view::npos);
+            line.find("confluent_kafka.h") != std::string_view::npos ||
+            line.find("detail/ffi.hpp") != std::string_view::npos);
 }
 
 }  // namespace
@@ -103,9 +105,10 @@ void HeaderCheck::check(const clang::ast_matchers::MatchFinder::MatchResult& res
         }
         for (std::size_t i = 0; i < lines.size(); ++i) {
             const auto& l = lines[i];
-            if (rel != "confluent/kafka/detail/ffi.hpp" && is_c_header_include(l)) {
+            if (is_c_header_include(l)) {
                 diag(at_line(i + 1),
-                     "the C header is included only through <confluent/kafka/detail/ffi.hpp> (cpp/CLAUDE.md §1.2)");
+                     "a public header never includes the C header: the library's sources reach it through "
+                     "src/detail/ffi.hpp (cpp/CLAUDE.md §1.2)");
             }
             if (l.find("TODO") != std::string_view::npos || l.find("FIXME") != std::string_view::npos) {
                 diag(at_line(i + 1),

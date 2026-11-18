@@ -445,8 +445,8 @@ Interfaces Java declares:
    against an unreachable bootstrap address. A class Java ships without tests takes the Rust
    core's tests of it.
 2. Binding-specific tests: the translation linter (`tools/lint/`, §12–13), whose
-   `confluent-kafka-java-members` check rejects any reference to a `_cb` function (the compiler
-   already rejects a `kafka_` name the C header does not declare); the error
+   `confluent-kafka-source` check, run on each of the library's sources, rejects any reference to
+   a `_cb` function (the compiler already rejects a `kafka_` name the C header does not declare); the error
    tests of §6.9; lifetime tests run under ASan and UBSan (`-DCONFLUENT_KAFKA_CPP_SANITIZE=ON`),
    once per `make verify`; an overload test per Java overload set; compile-fail tests (a private
    constructor, a copied client, a null where the type has none); serde test vectors against
@@ -518,7 +518,8 @@ Interfaces Java declares:
    (`tools/lint/LLVM_VERSION`), that parses `kafka/clients/src/main/java` with an
    ANTLR-generated parser and checks the headers against these rules: `confluent-kafka-java-class`,
    `-java-inheritance`, `-java-enum`, `-java-members`, `-java-signature` (§1-§5), `-doc` (§12.1,
-   §12.2), `-abi` (§3.2, §12.3), `-header` (§1.2, §3.1) and `-surface` (§1.4). `make lint` runs it with clang-tidy's
+   §12.2), `-abi` (§12.3), `-library` (§3.2), `-header` (§1.2, §3.1) and `-surface` (§1.4) on
+   the public headers, `-source` (§1.3) on each source under `src/`. `make lint` runs it with clang-tidy's
    own checks and fails on any finding; `make lint-tests` runs its tests; `ck_java_model expected
    <FQN>` prints the shape it expects for a Java class. Every exception is a line of a data file
    under `tools/lint/data/`, never a `NOLINT`: `baseline.txt` (in-scope classes not translated yet,

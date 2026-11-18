@@ -33,6 +33,8 @@ public:
         factories.registerCheck<SurfaceCheck>("confluent-kafka-surface");
         factories.registerCheck<DocCheck>("confluent-kafka-doc");
         factories.registerCheck<AbiCheck>("confluent-kafka-abi");
+        factories.registerCheck<LibraryCheck>("confluent-kafka-library");
+        factories.registerCheck<SourceCheck>("confluent-kafka-source");
         factories.registerCheck<InventoryCheck>("confluent-kafka-inventory");
         factories.registerCheck<HeaderCheck>("confluent-kafka-header");
     }

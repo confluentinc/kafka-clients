@@ -89,7 +89,7 @@ set(CK_LINT_FFI_INCLUDE_DIR "${_ck_lint_ffi_default}" CACHE PATH "The directory 
 
 add_library(ConfluentKafkaTidy MODULE
     tidy/module.cpp tidy/session.cpp tidy/class_checks.cpp tidy/header_check.cpp tidy/type_reader.cpp
-    tidy/pairing.cpp tidy/member_checks.cpp tidy/doc_check.cpp tidy/abi_check.cpp
+    tidy/pairing.cpp tidy/member_checks.cpp tidy/doc_check.cpp tidy/abi_check.cpp tidy/library_check.cpp
     tidy/public_decls.cpp tidy/inventory.cpp)
 target_include_directories(ConfluentKafkaTidy SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 separate_arguments(_ck_llvm_definitions NATIVE_COMMAND "${LLVM_DEFINITIONS}")
@@ -179,7 +179,7 @@ if(BUILD_TESTING)
                 confluent-kafka-java-class confluent-kafka-java-inheritance confluent-kafka-java-enum
                 confluent-kafka-java-members confluent-kafka-java-signature confluent-kafka-surface
                 confluent-kafka-header confluent-kafka-doc confluent-kafka-abi
-                confluent-kafka-inventory)
+                confluent-kafka-library confluent-kafka-source confluent-kafka-inventory)
     file(GLOB _ck_fixtures LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/*")
     foreach(_fixture IN LISTS _ck_fixtures)
         if(IS_DIRECTORY "${_fixture}")
