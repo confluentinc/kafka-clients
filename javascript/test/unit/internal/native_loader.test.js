@@ -172,11 +172,24 @@ test('when nothing loads, the error names the platform package, the usual causes
   );
 });
 
-test('this checkout loads its development build', () => {
+test('this checkout loads its development build, as an instance of its own', () => {
   // The unit tests run against native/build/Release/ (`make -C javascript build`).
-  const loaded = Object.keys(require.cache).filter((p) => p.endsWith(ADDON_FILE));
+  // src/internal/native.ts loads it with process.dlopen, an addon instance of
+  // this copy of the package's own, never through require(), whose cache would
+  // hand another copy the same instance: the process's shared objects list it,
+  // and the require cache holds no addon.
   require('../../../dist/internal/native');
-  const now = Object.keys(require.cache).filter((p) => p.endsWith(ADDON_FILE));
-  assert.ok(loaded.length <= 1);
-  assert.deepEqual(now, [path.join(__dirname, '..', '..', '..', 'native', 'build', 'Release', ADDON_FILE)]);
+  const previous = process.report.excludeNetwork;
+  let objects;
+  try {
+    process.report.excludeNetwork = true;
+    objects = process.report.getReport().sharedObjects;
+  } finally {
+    process.report.excludeNetwork = previous;
+  }
+  assert.deepEqual(
+    objects.filter((p) => p.endsWith(ADDON_FILE)),
+    [path.join(__dirname, '..', '..', '..', 'native', 'build', 'Release', ADDON_FILE)],
+  );
+  assert.deepEqual(Object.keys(require.cache).filter((p) => p.endsWith(ADDON_FILE)), []);
 });

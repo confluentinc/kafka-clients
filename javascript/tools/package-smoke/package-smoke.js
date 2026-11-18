@@ -119,8 +119,19 @@ async function main() {
   }
   console.log('deep imports fail, and the folders behind the import paths resolve');
 
-  // The one addon loaded is the platform package's.
-  const addons = Object.keys(require.cache).filter((file) => file.endsWith('.node'));
+  // The one addon loaded is the platform package's. The client loads it with
+  // process.dlopen, an instance of each copy of the package's own, which no
+  // require() cache lists: the process's shared objects do (the report's
+  // network section excluded, so no DNS lookup can block it).
+  const previous = process.report.excludeNetwork;
+  let objects;
+  try {
+    process.report.excludeNetwork = true;
+    objects = process.report.getReport().sharedObjects;
+  } finally {
+    process.report.excludeNetwork = previous;
+  }
+  const addons = objects.filter((file) => file.endsWith('.node'));
   assert.deepEqual(addons.map((file) => fs.realpathSync(file)), [addonPath], `the addons loaded are ${addons}`);
   console.log(`the addon is ${addonPath}`);
 

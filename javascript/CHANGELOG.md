@@ -210,6 +210,11 @@ newer.
   (a `close()` made from the callback before its first `await` closes at
   once) frees what the record held natively: its send context, its slot and
   its native future used to stay allocated for good.
+- Two copies of the package that load the one addon file (two versions in
+  `node_modules` sharing one platform package) keep their own classes: each
+  copy's producers report that copy's errors and `RecordMetadata`. The copy
+  loaded last used to build both copies' errors and metadata. Each copy now
+  loads an addon instance of its own.
 
 ### Known limitations
 

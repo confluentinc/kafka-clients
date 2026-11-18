@@ -101,9 +101,23 @@ interface Native {
   ): void;
 }
 
+// Loads an addon instance of this copy of the package's own: process.dlopen
+// with a module object of its own, not require(), whose cache hands every copy
+// that resolves the same .node file (two versions in node_modules sharing one
+// platform package) the one instance. The factories registered below are an
+// instance's, so this copy's producers build this copy's errors and
+// RecordMetadata, as each copy of Java's kafka-clients, loaded by a class
+// loader of its own, throws its own classes. The file is resolved as require()
+// resolves it.
+function loadOwnInstance(id: string): unknown {
+  const addonModule = { exports: {} };
+  process.dlopen(addonModule, require.resolve(id));
+  return addonModule.exports;
+}
+
 // This module is dist/internal/native.js, and dist/ is beside native/ in the
 // checkout, so the development build is <dist>/../native/build/Release/.
-const loaded = loadAddon(require, platformKey(process), join(__dirname, '..', '..'));
+const loaded = loadAddon(loadOwnInstance, platformKey(process), join(__dirname, '..', '..'));
 const native = loaded.addon as Native;
 debug('addon loaded from %s', loaded.path);
 

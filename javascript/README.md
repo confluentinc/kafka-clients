@@ -564,7 +564,9 @@ package root.
   (`send(record)` throws `IllegalArgumentError` "send() takes one of (record),
   (record, callback); got a ProducerRecord", and `send({ record })` throws
   `TypeError` "record must be a ProducerRecord"), and an error of one copy is
-  no `instanceof` the other copy's classes. Make sure npm installs the
+  no `instanceof` the other copy's classes. A producer reports the errors and
+  `RecordMetadata` of the copy that made it, even when the copies share one
+  platform package. Make sure npm installs the
   package once (`npm ls @confluentinc/kafka-javascript`; deduplicate with
   `npm dedupe` or an `overrides` entry).
 - **No clients in worker threads.** The preview doesn't support clients in

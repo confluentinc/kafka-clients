@@ -144,3 +144,77 @@ test('two copies of the package: their classes are distinct, so calls taking the
     await producer.close({ timeout: 0 });
   }
 });
+
+test("two copies sharing one addon: each copy's producer reports its own copy's errors and RecordMetadata", async () => {
+  // README.md, Limitations: "an error of one copy is no instanceof the other
+  // copy's classes", and a caller tells an error by its class (root
+  // conventions, Errors: the class is the check). So what a copy's producer
+  // reports is that copy's, as each copy of Java's kafka-clients, loaded by a
+  // class loader of its own, throws its own classes. Both copies load the one
+  // addon file (native/ linked), as two versions sharing one platform package
+  // do, and each loads an addon instance of its own (src/internal/native.ts).
+  const other = secondCopy();
+  const copies = [
+    {
+      label: 'this copy',
+      root: require(pkg.name),
+      errors: require(`${pkg.name}/common/errors`),
+      producer: require(`${pkg.name}/producer`),
+    },
+    {
+      label: 'the second copy',
+      root: other(pkg.name),
+      errors: other(`${pkg.name}/common/errors`),
+      producer: other(`${pkg.name}/producer`),
+    },
+  ];
+  assert.notEqual(copies[0].errors.TimeoutError, copies[1].errors.TimeoutError, 'the second copy is the same module');
+  /** @param {unknown} e */
+  const nameOf = (e) => (e instanceof Error ? e.name : String(e));
+  const seen = [];
+  for (const copy of copies) {
+    const { KafkaProducer, ProducerRecord, RecordMetadata } = copy.producer;
+    const producer = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 });
+    /** @type {{ metadata: unknown, exception: unknown }} */
+    const delivered = { metadata: null, exception: null };
+    const future = await producer.send({
+      record: new ProducerRecord({ topic: 'two-copies', value: Buffer.from('v') }),
+      callback: (/** @type {{ metadata: unknown, exception: unknown }} */ delivery) => {
+        delivered.metadata = delivery.metadata;
+        delivered.exception = delivery.exception;
+      },
+    });
+    // The metadata timeout (Java's org.apache.kafka.common.errors.TimeoutException),
+    // in the callback and, wrapped, from the future.
+    /** @type {unknown} */
+    const failure = await future.get().then(
+      () => null,
+      (/** @type {unknown} */ e) => e,
+    );
+    await producer.close({ timeout: 0 });
+    // The closed producer's refusal, the core's IllegalStateError.
+    /** @type {unknown} */
+    const refused = await producer.send(new ProducerRecord({ topic: 'two-copies', value: Buffer.from('v') })).then(
+      () => null,
+      (/** @type {unknown} */ e) => e,
+    );
+    const cause = failure instanceof Error ? failure.cause : undefined;
+    seen.push({
+      copy: copy.label,
+      callbackError: [nameOf(delivered.exception), delivered.exception instanceof copy.errors.TimeoutError],
+      callbackMetadata: delivered.metadata instanceof RecordMetadata,
+      fromTheFuture: [nameOf(failure), failure instanceof copy.root.ExecutionError, cause instanceof copy.errors.TimeoutError],
+      afterClose: [nameOf(refused), refused instanceof copy.root.IllegalStateError],
+    });
+  }
+  assert.deepEqual(
+    seen,
+    copies.map((copy) => ({
+      copy: copy.label,
+      callbackError: ['TimeoutError', true],
+      callbackMetadata: true,
+      fromTheFuture: ['ExecutionError', true, true],
+      afterClose: ['IllegalStateError', true],
+    })),
+  );
+});

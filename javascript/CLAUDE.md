@@ -764,7 +764,15 @@ The layout is the root conventions' (Layout and modules).
   in `src/internal/native.ts`, never in an `index.ts`;
   `src/internal/native_loader.ts` finds it, the platform package's
   (`@confluentinc/kafka-javascript-<platform>`) first, then the development
-  build `native/build/Release/`.
+  build `native/build/Release/`. Each copy of the package loads an addon
+  instance of its own (`process.dlopen` with a module object of its own, not
+  `require()`, whose cache would hand two copies resolving the same `.node`
+  file the one instance), and `setFactories` registers that copy's classes on
+  its instance, so a copy's producers build that copy's errors and
+  `RecordMetadata`, as each copy of Java's kafka-clients, loaded by a class
+  loader of its own, throws its own classes. The `.node` file itself is loaded
+  once per process, so what the addon keeps per process (the preview notice,
+  `addon_pin_loaded`) stays once per process.
 - Types are TypeScript, under `strict` (`tsconfig.json`). The docs follow the
   root conventions (Documentation): TSDoc translated from the Javadoc, Java's
   contract first, at most 150% of the Javadoc's words, no Java file or line

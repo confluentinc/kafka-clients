@@ -133,8 +133,9 @@ void error_throw_owned(napi_env env, kafka_common_Error_t* e) {
 
 // setFactories(errorFactory, metadataFactory, warn): the JS constructors the
 // C layer hands its plain objects to, and the function it hands an error with
-// nowhere else to go (process.emitWarning). Called once, by src/, when it
-// loads the addon.
+// nowhere else to go (process.emitWarning). Called once per addon instance, by
+// src/ when it loads the instance: each copy of the package loads one of its
+// own (src/internal/native.ts), so the factories are that copy's classes.
 napi_value js_set_factories(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value argv[3];
