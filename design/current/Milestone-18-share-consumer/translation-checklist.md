@@ -36,7 +36,10 @@ note.
 
 **Over-application to avoid:** a Java timing assertion (`time.sleep`, a timer
 expiry) may be adapted to the Rust test clock with a note at the test. It is not
-ported as a literal wall-clock sleep.
+ported as a literal wall-clock sleep. A Java test that cannot compile in Rust
+(it relies on a Java runtime type error, e.g. `FetchSessionHandlerTest#testDoubleBuild`
+against a builder that `build_request` consumes) is skipped with a one-line reason;
+no compile-fail test is required.
 
 **Evidence:** C1-27 (fixture widened to accept `NetworkError`), C2-01 (dropped
 `assertFalse(leaveResult.isDone())`), C3-02 (v0 input swapped for v2), C3-03
@@ -79,6 +82,9 @@ takes config or collaborators.
 **Over-application to avoid:** "production constructor" means the public/crate
 constructor driven over `MockClient` (or the existing mock network fixture). It does
 not mean adding broker-backed unit tests, or adding test seams to production code.
+A test-only setter **is** allowed when it is the faithful port of a Java test-only
+override (a subclass or anonymous override in the Java test, e.g.
+`FetchCollectorTest#testErrorInInitialize`), with a note at the setter.
 
 **Evidence:** C2-07 (`client.rack` parsed, never wired; tests passed the rack
 directly), C3-06, C1-16 (fixture calls a setter production never calls), C5-01.
@@ -89,14 +95,30 @@ directly), C3-06, C1-16 (fixture calls a setter production never calls), C5-01.
 async Rust, check each of:
 
   1. read the clock at completion, not when the task is spawned;
-  2. preserve completion order (no unordered per-callback `spawn`);
+  2. preserve completion order. Flag an unordered per-callback `spawn` only when
+     the completion order is observable and nothing downstream restores Java's
+     order; trace where the order is restored (e.g.
+     `AsyncKafkaConsumer::register_async_commit` chains each commit continuation
+     on its predecessor) before reporting;
   3. wake the background task when re-enqueuing work it must see;
   4. do not collapse a `CompletableFuture` chain so that when `isDone()` becomes
      true changes;
-  5. map every nested lock path where a Java reentrant monitor becomes a
-     non-reentrant `std::sync::Mutex`;
-  6. a loop translated from a Java thread loop that can spin without awaiting I/O
-     must yield, and is tested on a `current_thread` runtime.
+  5. map lock **order**, not only reentrancy: for every pair of locks held at the
+     same time, check both acquisition orders across all paths (ABBA), including
+     a lock taken inside a getter that Java leaves unsynchronized; and every
+     nested path where a Java reentrant monitor becomes a non-reentrant
+     `std::sync::Mutex`;
+  6. a loop translated from a Java thread loop that can iterate without awaiting
+     anything that can pend must yield, and is tested on a `current_thread`
+     runtime;
+  7. racing continuations: reason about interleavings at every `.await` point and
+     at loop-iteration boundaries. The runtime flavour is **not** an exemption.
+     In production the consumer bg loop runs on a dedicated `current_thread`
+     runtime (`ConsumerNetworkThread::spawn_dedicated`, `new_current_thread`);
+     with `BgJoin::Spawned` (unit tests, `with_components`) it is spawned on the
+     caller's runtime, which may be multi-threaded. Even on `current_thread`, a
+     spawned continuation interleaves with the loop at each await and across
+     iterations.
 
 **Applies to:** share code translating a Java callback, `whenComplete` /
 `thenApply` chain, `synchronized` section reached re-entrantly, or a Java thread
@@ -104,14 +126,23 @@ loop.
 **Does not apply to:** straight-line synchronous code.
 
 **Over-application to avoid:**
-  - item 6 only covers a translated thread loop that can spin without awaiting
-    I/O. Never add `yield_now()` to per-record decode or send loops;
+  - item 6 does not apply to per-record decode or send loops (never add
+    `yield_now()` there), nor to a loop that awaits I/O on every iteration
+    (e.g. `ConsumerNetworkThread::run`, which awaits the selector poll each
+    time);
+  - item 2: per-callback spawns whose order is restored downstream are not a
+    finding;
   - item 3 uses `ApplicationEventHandler::wake_background_task`, never
     `WakeupTrigger`: the wrong primitive returns a spurious `Wakeup` to the caller
     (consumer-threading.md §31).
 
 **Evidence:** C1-01 (busy loop froze a `current_thread` runtime), C2-01 (chain
-collapsed), C2-05 (racing reconciliations after a spawn), C2-06 and C4-09 (clock read
+collapsed), C2-05 (racing reconciliations after a spawn; the backtest withdrew it
+on a wrong "`current_thread` cannot race" assumption, hence item 7), the #277
+poll-vs-metadata ABBA deadlock (`FetchCollector::update_partition_state` held
+`SubscriptionState` then took the `Metadata` lock; `Metadata::update` holds
+`Metadata` then locks `SubscriptionState`; Java's `Metadata#metadataExpireMs` is
+an unsynchronized getter — item 5), C2-06 and C4-09 (clock read
 at spawn), C4-03 (reentrant monitor → `Mutex` deadlock), C4-08 (callbacks out of
 order), C4-14 (missing wake after a channel hop), C3-04 (value moved out under a
 concurrent reader).
@@ -178,11 +209,16 @@ claim need the method body read, not just the method name:
 If Java contradicts a rule, the agent escalates to the Manager and does not follow
 the rule.
 
-**Applies to:** `share-consumer.md`, this checklist, phase PLANs, and Critic
-comments that assert Java behaviour.
-**Does not apply to:** documented deviations that carry a *Why* (the async API,
-the panics policy, Rust-only types). "Java wins" is about claims of Java behaviour,
-not about those.
+**Applies to:** `share-consumer.md`, this checklist, phase PLANs, Critic
+comments that assert Java behaviour, and **deviation notes in code and tests**. A
+deviation note is a claim about Java (and about the Rust code it excuses) and must
+stay true; a stale note is a finding (backtest S5-1: a test note claimed the
+`CompletedFetch` abort-marker path was untranslated after it had been
+translated).
+**Does not apply to:** the *choice* behind a documented deviation that carries a
+*Why* (the async API, the panics policy, Rust-only types). "Java wins" is about
+claims of Java behaviour, not about those choices; the facts a deviation note
+states are still checked (see above).
 
 **Over-application to avoid:** on a contradiction the agent escalates; it does not
 rewrite the rule or the code on its own.
