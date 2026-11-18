@@ -80,6 +80,7 @@ use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::internals::HeartbeatRequestManagerHooks;
 use crate::consumer::internals::MembershipManagerHooks;
 use crate::consumer::internals::RequestManagers;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};

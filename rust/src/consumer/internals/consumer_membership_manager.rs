@@ -200,6 +200,10 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `transitionToSendingLeaveGroup(boolean dueToExpiredPollTimer)`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production callers go through the generic heartbeat code")
+    )]
     pub(crate) fn transition_to_sending_leave_group(&self, due_to_expired_poll_timer: bool) -> Result<(), Error> {
         self.abstract_mm
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
@@ -211,12 +215,20 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `transitionToFenced()` (inherited from `AbstractMembershipManager`).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production callers go through the generic heartbeat code")
+    )]
     pub(crate) fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), Error> {
         self.abstract_mm.transition_to_fenced(self, current_time_ms)
     }
 
     /// Java: `transitionToStale()` (inherited from `AbstractMembershipManager`):
     /// the release half; see [`AbstractMembershipManager::transition_to_stale`].
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production callers go through the generic heartbeat code")
+    )]
     pub(crate) fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), Error> {
         self.abstract_mm.transition_to_stale(self, current_time_ms)
     }
@@ -334,22 +346,6 @@ impl ConsumerMembershipManager {
         Err(Error::local_illegal_state(
             "drive_release_to_completion did not settle within the iteration budget",
         ))
-    }
-
-    /// Java: `isLeavingGroup()` (override).
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#isLeavingGroup")]
-    pub(crate) fn is_leaving_group(&self) -> bool {
-        let leave_op = self.leave_group_operation();
-        if matches!(leave_op, GroupMembershipOperation::RemainInGroup) && self.group_instance_id.is_none() {
-            return false;
-        }
-        let state = self.state();
-        let is_leaving_state = matches!(state, MemberState::PrepareLeaving | MemberState::Leaving);
-        let has_leave_operation = matches!(
-            leave_op,
-            GroupMembershipOperation::Default | GroupMembershipOperation::LeaveGroup
-        ) || self.group_instance_id.is_some();
-        is_leaving_state && has_leave_operation
     }
 
     /// Java: `leaveGroupOnClose(GroupMembershipOperation)` (inherited); see
@@ -518,12 +514,20 @@ impl ConsumerMembershipManager {
 
     /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)` (inherited
     /// from `AbstractMembershipManager`).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production callers go through the generic heartbeat code")
+    )]
     pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         self.abstract_mm.on_heartbeat_success::<Self>(response)
     }
 
     /// Java: `onHeartbeatFailure(boolean retriable)` (inherited from
     /// `AbstractMembershipManager`).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production callers go through the generic heartbeat code")
+    )]
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) {
         self.abstract_mm.on_heartbeat_failure(retriable);
     }
@@ -533,6 +537,26 @@ impl ConsumerMembershipManager {
 /// `AbstractMembershipManager` methods.
 impl MembershipManagerHooks for ConsumerMembershipManager {
     type Response = ConsumerGroupHeartbeatResponse;
+
+    fn abstract_mm(&self) -> &AbstractMembershipManager {
+        &self.abstract_mm
+    }
+
+    /// Java: `isLeavingGroup()` (override).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#isLeavingGroup")]
+    fn is_leaving_group(&self) -> bool {
+        let leave_op = self.leave_group_operation();
+        if matches!(leave_op, GroupMembershipOperation::RemainInGroup) && self.group_instance_id.is_none() {
+            return false;
+        }
+        let state = self.state();
+        let is_leaving_state = matches!(state, MemberState::PrepareLeaving | MemberState::Leaving);
+        let has_leave_operation = matches!(
+            leave_op,
+            GroupMembershipOperation::Default | GroupMembershipOperation::LeaveGroup
+        ) || self.group_instance_id.is_some();
+        is_leaving_state && has_leave_operation
+    }
 
     /// The heartbeat response's error code, for
     /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).

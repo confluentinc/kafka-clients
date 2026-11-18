@@ -69,7 +69,7 @@ mod wakeup_trigger;
 
 pub(crate) use abstract_fetch::AbstractFetch;
 pub(crate) use abstract_heartbeat_request_manager::{
-    AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
+    AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatRequestManagerHooks,
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
 pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;

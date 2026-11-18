@@ -353,6 +353,21 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
     /// heartbeat response.
     type Response;
 
+    /// The composed base state. Rust-only accessor (Java's subclass *is* the
+    /// base), used by the generic heartbeat code to reach the inherited
+    /// methods.
+    fn abstract_mm(&self) -> &AbstractMembershipManager;
+
+    /// `true` while the member is leaving the group (`PREPARE_LEAVING` or
+    /// `LEAVING`) in a way that sends a leave heartbeat.
+    ///
+    /// Java: `public boolean isLeavingGroup()`, whose base body is
+    /// `state == PREPARE_LEAVING || state == LEAVING`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#isLeavingGroup")]
+    fn is_leaving_group(&self) -> bool {
+        matches!(self.abstract_mm().state(), MemberState::PrepareLeaving | MemberState::Leaving)
+    }
+
     /// The heartbeat response's error code.
     ///
     /// Java: `protected abstract short errorCode(R response)`.
