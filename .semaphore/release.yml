@@ -1219,7 +1219,7 @@ blocks:
   # installs the one of the user's platform.
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (JavaScript): native addon (<platform>)" builds the addon of
-  #      one platform, alongside CI (.semaphore/build-javascript-native.sh):
+  #      one platform, after CI (.semaphore/build-javascript-native.sh):
   #      the Rust core as the wheels and the NuGet package build it, then the
   #      addon linked statically against it, in the manylinux_2_28 image on
   #      Linux, so that it needs glibc 2.28 at most, and for macOS 11.0 on
