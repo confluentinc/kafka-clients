@@ -372,8 +372,11 @@ each loop iteration, and `setShareFetchAction(fetchBuffer)` around
 `ShareFetchBuffer#awaitNotEmpty`, whose `wakeup` ends the wait), and
 `ShareConsumerImpl#commitSync(Duration)` (`setActiveTask(commitFuture)`).
 `close` calls `disableWakeups()` first. `subscribe` / `unsubscribe` do not
-register a wakeup task. Translate the share-fetch action on the existing Rust
-`WakeupTrigger` (consumer-threading.md §11); how a second thread reaches
+register a wakeup task. The existing Rust `WakeupTrigger` cancellation token
+(consumer-threading.md §11) already covers what Java's `ShareFetchAction` does,
+so no new action type is added (see `infra-audit.md`); the share poll's
+fetch-buffer wait must end on the token exactly as the consumer's poll does.
+How a second thread reaches
 `wakeup(&self)` while `poll` holds `&mut self` is decision D6.
 
 **Anti-patterns:** waking the background task through `WakeupTrigger`
