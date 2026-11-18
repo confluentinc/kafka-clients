@@ -1922,6 +1922,49 @@ test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool
   600000,
 );
 
+// KafkaProducerTest.testFlushMeasureLatency: Java's MockTime(1) moves its
+// clock on every read, so each of its flushes takes time, although nothing
+// is pending. The real clock moves only while a flush does something, and an
+// empty one can take less than one of its ticks, so each flush here sends a
+// record lingering in the accumulator (linger.ms holds it well past the test)
+// and waits for its produce response. metrics() is a snapshot, so it is read
+// after each flush.
+(SKIP ? test.skip : test)(
+  'flush() records flush-time-ns-total, which grows with each flush',
+  async () => {
+    const { MetricName } = require('@confluentinc/kafka-javascript/common');
+    const topic = await newTopic('flush-time');
+    const producer = new KafkaProducer({
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-flush-time', 'linger.ms': 600000 },
+    });
+    const key = new MetricName({
+      name: 'flush-time-ns-total',
+      group: 'producer-metrics',
+      description: '',
+      tags: new Map([['client-id', 'js-it-flush-time']]),
+    });
+    try {
+      assert.equal(producer.metrics().get(key)?.metricValue(), 0);
+      /** @type {number[]} */
+      const totals = [];
+      for (const value of ['first', 'second']) {
+        // send() resolves once the record lingers in the accumulator, its
+        // topic's metadata fetched; the flush sends it and waits for it.
+        const future = await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(value) }));
+        assert.equal(future.isDone(), false, 'the record lingers until the flush');
+        await producer.flush();
+        assert.equal(future.isDone(), true);
+        totals.push(/** @type {number} */ (producer.metrics().get(key)?.metricValue()));
+      }
+      assert.ok(totals[0] > 0, `the first flush recorded ${totals[0]} ns`);
+      assert.ok(totals[1] > totals[0], `the total grew from ${totals[0]} to ${totals[1]} ns`);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
 // KafkaProducerMetricsTest.shouldRecordMetadataWaitTime, through the public
 // API: Java records an exact value through the internal recorder; here a
 // send's wait for a fresh topic's metadata makes it grow, and a send with the

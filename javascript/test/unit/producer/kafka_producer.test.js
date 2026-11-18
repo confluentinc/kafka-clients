@@ -2857,24 +2857,10 @@ function producerMetric(name, clientId) {
   return new MetricName({ name, group: 'producer-metrics', description: '', tags: new Map([['client-id', clientId]]) });
 }
 
-// KafkaProducerTest.testFlushMeasureLatency: Java's MockClient and MockTime(1)
-// only give a flush a network and a clock that moves; a flush with nothing
-// pending needs neither. metrics() is a snapshot, so it is read after each
-// flush.
-test('flush() records flush-time-ns-total, which grows with each flush', async () => {
-  const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-flush-time' } });
-  const key = producerMetric('flush-time-ns-total', 'unit-flush-time');
-  try {
-    await producer.flush();
-    const first = producer.metrics().get(key)?.metricValue();
-    assert.equal(typeof first, 'number');
-    assert.ok(/** @type {number} */ (first) > 0);
-    await producer.flush();
-    assert.ok(/** @type {number} */ (producer.metrics().get(key)?.metricValue()) > /** @type {number} */ (first));
-  } finally {
-    await producer.close();
-  }
-});
+// KafkaProducerTest.testFlushMeasureLatency is ported in the broker suite
+// (test/integration/producer.test.js): Java's MockTime(1) moves its clock on
+// every read, while here a flush with nothing pending can take less than one
+// tick of the real clock, so each flush there waits for a record of its own.
 
 // KafkaProducerMetricsTest.shouldRemoveMetricsOnClose: Java's
 // KafkaProducerMetrics#close removes its seven *-time-ns-total metrics (and
