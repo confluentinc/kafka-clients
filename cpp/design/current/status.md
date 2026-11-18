@@ -132,7 +132,6 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    `libconfluent_kafka_cpp.so.0.1`) and `::cpp_static`; the eleven classes' bodies out of their
    headers; `detail/ffi.hpp` to `src/detail/`. Done. The library has no `NEEDED` on the core yet:
    none of the translated classes calls the FFI, and `--as-needed` drops the unused link.
-   `make install` installs the headers and both libraries only, until step 4.
 3. The linter: `confluent-kafka-library` (a body in a public header outside §3.2's list, a class
    or free function without `CONFLUENT_KAFKA_CPP_API`), the header check's "never the C header",
    and `confluent-kafka-source`, which takes the `_cb` rule from the members check and runs on
@@ -141,7 +140,13 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    and `source`, three mutations of `node.hpp`. The planned C declarations in the lint probe are
    not needed: no check looks C entry points up.
 4. The package config: exported targets for both libraries and the core, pkg-config, install
-   components, unit tests against the static library too.
+   components, unit tests against the static library too. Done: `ConfluentKafkaCppConfig.cmake`
+   defines `ConfluentKafka::core` and `::core_static` from the package prefix (or
+   `ConfluentKafkaCpp_CORE_LIB_DIR`) before the exported targets, whose names the in-tree
+   targets share; the version file is `SameMinorVersion` before 1.0, as the soname;
+   `confluent-kafka-cpp.pc` requires the core's `confluent-kafka.pc` (step 5). `make test-static`
+   (in `verify`); the `package_config` test installs the build tree and runs `test/package`, a
+   program built with `find_package`, over each library.
 5. `cargo xtask install-c` (the core with its soname, links, static library, headers and
    `confluent-kafka.pc`) and the `api-compat` rule that a C ABI break raises `C_ABI_MAJOR`.
 6. `abi-check` on the real shared library, with the `SOVERSION` rule.

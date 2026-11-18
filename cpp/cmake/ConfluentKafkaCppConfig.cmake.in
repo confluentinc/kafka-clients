@@ -1,8 +1,48 @@
 @PACKAGE_INIT@
 
+# The C++ binding: ConfluentKafka::cpp (shared, over the shared core) and
+# ConfluentKafka::cpp_static (static, over the core's static library), and the
+# core's own targets, ConfluentKafka::core and ConfluentKafka::core_static
+# (cpp/CLAUDE.md §13.1).
+#
+# The core is a separate package (libconfluent-kafka-dev), installed in the same
+# prefix; ConfluentKafkaCpp_CORE_LIB_DIR points at another directory holding it.
+
 include(CMakeFindDependencyMacro)
-if("@LINK_TYPE@" STREQUAL "static")
-    find_dependency(Threads)
+find_dependency(Threads)
+
+set(ConfluentKafkaCpp_CORE_LIB_DIR "" CACHE PATH "Directory holding libconfluent_kafka, when not in this package's prefix")
+set(_ck_core_hints "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
+if(ConfluentKafkaCpp_CORE_LIB_DIR)
+    set(_ck_core_hints "${ConfluentKafkaCpp_CORE_LIB_DIR}")
 endif()
+
+if(NOT TARGET ConfluentKafka::core)
+    if(WIN32)
+        find_file(ConfluentKafkaCpp_CORE_SHARED confluent_kafka.dll.lib HINTS ${_ck_core_hints} NO_DEFAULT_PATH)
+    else()
+        find_file(ConfluentKafkaCpp_CORE_SHARED libconfluent_kafka@CMAKE_SHARED_LIBRARY_SUFFIX@
+                  HINTS ${_ck_core_hints} NO_DEFAULT_PATH)
+    endif()
+    find_file(ConfluentKafkaCpp_CORE_STATIC @CMAKE_STATIC_LIBRARY_PREFIX@confluent_kafka@CMAKE_STATIC_LIBRARY_SUFFIX@
+              HINTS ${_ck_core_hints} NO_DEFAULT_PATH)
+    if(NOT ConfluentKafkaCpp_CORE_SHARED OR NOT ConfluentKafkaCpp_CORE_STATIC)
+        set(ConfluentKafkaCpp_FOUND FALSE)
+        set(ConfluentKafkaCpp_NOT_FOUND_MESSAGE
+            "the core libconfluent_kafka (shared and static) is not in ${_ck_core_hints}: install libconfluent-kafka-dev, or set ConfluentKafkaCpp_CORE_LIB_DIR")
+        return()
+    endif()
+    add_library(ConfluentKafka::core SHARED IMPORTED)
+    if(WIN32)
+        set_target_properties(ConfluentKafka::core PROPERTIES IMPORTED_IMPLIB "${ConfluentKafkaCpp_CORE_SHARED}")
+    else()
+        set_target_properties(ConfluentKafka::core PROPERTIES IMPORTED_LOCATION "${ConfluentKafkaCpp_CORE_SHARED}")
+    endif()
+    add_library(ConfluentKafka::core_static STATIC IMPORTED)
+    set_target_properties(ConfluentKafka::core_static PROPERTIES
+        IMPORTED_LOCATION "${ConfluentKafkaCpp_CORE_STATIC}"
+        INTERFACE_LINK_LIBRARIES "@CONFLUENT_KAFKA_NATIVE_STATIC_LIBS@")
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/ConfluentKafkaCppTargets.cmake")
 check_required_components(ConfluentKafkaCpp)

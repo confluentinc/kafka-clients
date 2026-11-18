@@ -64,19 +64,21 @@ find_package(Threads REQUIRED)
 set(CONFLUENT_KAFKA_NATIVE_STATIC_LIBS "Threads::Threads;${CMAKE_DL_LIBS};m" CACHE STRING
     "The system libraries a program linking libconfluent_kafka.a needs")
 
+# The core's targets, named as the package config names them (cmake/), since the
+# exported static target names the core's in its link interface.
 # IMPORTED_NO_SONAME: a cargo build of the core has no soname (rust/build.rs
 # sets one for packaging builds only), and a library without one linked by its
 # path leaves that path in the binary; -lconfluent_kafka records the soname
 # when there is one.
-add_library(confluent_kafka_core SHARED IMPORTED)
+add_library(ConfluentKafka::core SHARED IMPORTED)
 if(WIN32)
-    set_target_properties(confluent_kafka_core PROPERTIES IMPORTED_IMPLIB "${CONFLUENT_KAFKA_CORE_SHARED}")
+    set_target_properties(ConfluentKafka::core PROPERTIES IMPORTED_IMPLIB "${CONFLUENT_KAFKA_CORE_SHARED}")
 else()
-    set_target_properties(confluent_kafka_core PROPERTIES
+    set_target_properties(ConfluentKafka::core PROPERTIES
         IMPORTED_LOCATION "${CONFLUENT_KAFKA_CORE_SHARED}" IMPORTED_NO_SONAME TRUE)
 endif()
-add_library(confluent_kafka_core_static STATIC IMPORTED)
-set_target_properties(confluent_kafka_core_static PROPERTIES
+add_library(ConfluentKafka::core_static STATIC IMPORTED)
+set_target_properties(ConfluentKafka::core_static PROPERTIES
     IMPORTED_LOCATION "${CONFLUENT_KAFKA_CORE_STATIC}"
     INTERFACE_LINK_LIBRARIES "${CONFLUENT_KAFKA_NATIVE_STATIC_LIBS}")
 
@@ -132,7 +134,7 @@ _ck_library_sources(confluent_kafka_cpp_objects)
 add_library(confluent_kafka_cpp SHARED $<TARGET_OBJECTS:confluent_kafka_cpp_objects>)
 add_library(ConfluentKafka::cpp ALIAS confluent_kafka_cpp)
 _ck_library_sources(confluent_kafka_cpp)
-target_link_libraries(confluent_kafka_cpp PRIVATE confluent_kafka_core)
+target_link_libraries(confluent_kafka_cpp PRIVATE ConfluentKafka::core)
 set_target_properties(confluent_kafka_cpp PROPERTIES
     VERSION ${PROJECT_VERSION} SOVERSION ${CONFLUENT_KAFKA_CPP_SOVERSION} EXPORT_NAME cpp)
 
@@ -148,7 +150,7 @@ endif()
 add_library(ConfluentKafka::cpp_static ALIAS confluent_kafka_cpp_static)
 _ck_library_sources(confluent_kafka_cpp_static)
 target_compile_definitions(confluent_kafka_cpp_static PUBLIC CONFLUENT_KAFKA_CPP_STATIC)
-target_link_libraries(confluent_kafka_cpp_static PUBLIC confluent_kafka_core_static)
+target_link_libraries(confluent_kafka_cpp_static PUBLIC ConfluentKafka::core_static)
 set_target_properties(confluent_kafka_cpp_static PROPERTIES EXPORT_NAME cpp_static)
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
@@ -157,11 +159,25 @@ else()
     option(CONFLUENT_KAFKA_CPP_BUILD_TESTS "Build the unit tests and the header probe" OFF)
 endif()
 
+# Which library the unit tests link: the shared one, as most programs do, or the
+# static one (make test-static).
+set(CONFLUENT_KAFKA_CPP_TEST_LINK "shared" CACHE STRING "The library the unit tests link: shared or static")
+set_property(CACHE CONFLUENT_KAFKA_CPP_TEST_LINK PROPERTY STRINGS shared static)
+
 if(CONFLUENT_KAFKA_CPP_BUILD_TESTS)
     include(CTest)
     enable_testing()
     add_subdirectory(test/probe)
     add_subdirectory(test/unit)
+    # A program built against this tree installed, with find_package (test/package);
+    # not under the sanitizers, which the program would have to link too.
+    if(NOT CONFLUENT_KAFKA_CPP_SANITIZE)
+        get_filename_component(_ck_core_dir "${CONFLUENT_KAFKA_CORE_SHARED}" DIRECTORY)
+        add_test(NAME package_config
+            COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DWORK_DIR=${CMAKE_BINARY_DIR}/package_test
+                    -DCORE_LIB_DIR=${_ck_core_dir} "-DGENERATOR=${CMAKE_GENERATOR}" -DCXX=${CMAKE_CXX_COMPILER}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/package/package_test.cmake)
+    endif()
 endif()
 
 # The translation linter (tools/lint): parses the Java sources and checks the
@@ -172,9 +188,42 @@ if(CONFLUENT_KAFKA_CPP_LINT)
     add_subdirectory(tools/lint)
 endif()
 
-# Installation: the headers and both libraries. The package config with the
-# core's targets and the pkg-config file come with the packaging step
-# (design/current/status.md).
+# Installation, in two components a package maps to its runtime and -dev parts:
+# `runtime` the shared library and its soname link; `development` the headers,
+# the static library, the .so link, the package config and the pkg-config file.
+# The core is installed by its own packaging (rust/xtask `install-c`).
 include(GNUInstallDirs)
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(TARGETS confluent_kafka_cpp confluent_kafka_cpp_static)
+include(CMakePackageConfigHelpers)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT development)
+install(TARGETS confluent_kafka_cpp EXPORT ConfluentKafkaCppTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT runtime NAMELINK_COMPONENT development
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development)
+install(TARGETS confluent_kafka_cpp_static EXPORT ConfluentKafkaCppTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development)
+install(EXPORT ConfluentKafkaCppTargets
+    NAMESPACE ConfluentKafka::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ConfluentKafkaCpp
+    COMPONENT development)
+# The version file follows the soname: before 1.0 a minor may break (§12.4).
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+    set(_ck_compatibility SameMinorVersion)
+else()
+    set(_ck_compatibility SameMajorVersion)
+endif()
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/ConfluentKafkaCppConfigVersion.cmake"
+    COMPATIBILITY ${_ck_compatibility})
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ConfluentKafkaCppConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/ConfluentKafkaCppConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ConfluentKafkaCpp)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/ConfluentKafkaCppConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/ConfluentKafkaCppConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ConfluentKafkaCpp
+    COMPONENT development)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/confluent-kafka-cpp.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/confluent-kafka-cpp.pc" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/confluent-kafka-cpp.pc"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig COMPONENT development)

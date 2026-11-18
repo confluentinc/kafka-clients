@@ -30,12 +30,13 @@ make test-cpp
 # From cpp/, against an already built core:
 make build            # configure (Ninja) + build
 make test             # ctest
+make test-static      # the unit tests against the static library
 make format-check     # clang-format --dry-run --Werror
 make lint             # clang-tidy over the test sources, then the translation linter
 make lint-tests       # the translation linter's own tests
 make lint-baseline    # rewrite tools/lint/data/baseline.txt
 make abi-check        # against the previous cpp/vX.Y.Z tag, or BASELINE=<rev>; STRICT=ON fails on a break
-make verify           # format-check, lint, test, lint-tests, abi-check
+make verify           # format-check, lint, test, test-static, lint-tests, abi-check
 ```
 
 The CMake project locates the core through cache variables:
@@ -51,8 +52,13 @@ The CMake project locates the core through cache variables:
 
 The core is found as both its shared and its static library. Programs link `ConfluentKafka::cpp`
 (the shared library, over the shared core) or `ConfluentKafka::cpp_static` (the static library,
-over the core's static library), through `add_subdirectory(cpp)`; the C header is needed only to
-build the library.
+over the core's static library), through `add_subdirectory(cpp)` or, installed,
+`find_package(ConfluentKafkaCpp)`, which finds the core in the same prefix (or in
+`ConfluentKafkaCpp_CORE_LIB_DIR`); pkg-config users take `confluent-kafka-cpp`, with `--static` for
+the static library. The C header is needed only to build the library. `cmake --install` has two
+components: `runtime` (the shared library and its soname link) and `development` (everything
+else). `test/package` is a program built against the installed tree, run by the `package_config`
+test.
 
 The Makefile variables `CLANG_FORMAT`, `CLANG_TIDY` and `CLANG_TIDY_EXTRA_ARGS` select the LLVM
 binaries; `CLANG_TIDY_EXTRA_ARGS` takes, for example, `--extra-arg=-isystem<gcc include dir>` when a

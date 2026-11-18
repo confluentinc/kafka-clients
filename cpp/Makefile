@@ -1,6 +1,8 @@
 REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 BUILD_DIR = build
+# The unit tests against the static library (make test-static).
+STATIC_BUILD_DIR = build-static
 CMAKE_GENERATOR ?= Ninja
 CLANG_FORMAT ?= clang-format
 CLANG_TIDY ?= clang-tidy
@@ -36,7 +38,7 @@ STRICT ?= OFF
 # Every target expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target: the repository root's Makefile orders that
 # (`build-cpp` depends on the Rust build); run standalone, build it first.
-.PHONY: build devel-build test test-unit format format-check lint lint-plugin lint-custom lint-tests \
+.PHONY: build devel-build test test-unit test-static format format-check lint lint-plugin lint-custom lint-tests \
 	lint-baseline abi-check verify clean
 
 build:
@@ -51,6 +53,14 @@ test: test-unit
 
 test-unit: build
 	cd $(BUILD_DIR) && ctest --output-on-failure
+
+# The unit tests linked against ConfluentKafka::cpp_static and the core's static
+# library, in a build tree of their own.
+test-static:
+	cmake -S . -B $(STATIC_BUILD_DIR) -G $(CMAKE_GENERATOR) \
+		-DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCONFLUENT_KAFKA_CPP_TEST_LINK=static
+	cmake --build $(STATIC_BUILD_DIR)
+	cd $(STATIC_BUILD_DIR) && ctest --output-on-failure
 
 format:
 	$(CLANG_FORMAT) -i $(SOURCES)
@@ -96,9 +106,9 @@ abi-check: lint-plugin
 		-DCK_JAVA_MODEL=$(CURDIR)/$(LINT_BUILD_DIR)/ck_java_model -DFFI_INCLUDE=$(FFI_INCLUDE) \
 		-DBASELINE=$(BASELINE) -DSTRICT=$(STRICT) -P tools/abi_check.cmake
 
-# Everything the C++ binding checks: formatting, both linters, the unit tests,
-# the linter's tests and the interface check.
-verify: format-check lint test lint-tests abi-check
+# Everything the C++ binding checks: formatting, both linters, the unit tests
+# against both libraries, the linter's tests and the interface check.
+verify: format-check lint test test-static lint-tests abi-check
 
 clean:
-	rm -rf $(BUILD_DIR) $(LINT_BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(STATIC_BUILD_DIR) $(LINT_BUILD_DIR)
