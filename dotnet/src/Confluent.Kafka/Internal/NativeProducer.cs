@@ -763,6 +763,15 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
     private static Exception FlushInCallback()
     {
+        try
+        {
+            Trace.TraceError(FlushInCallbackMessage);
+        }
+        catch (Exception)
+        {
+            // A throwing TraceListener must not replace the refusal.
+        }
+
         using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin(FlushInCallbackMessage);
         IntPtr outErr = IntPtr.Zero;
         IntPtr error = NativeMethods.ErrorKafkaMessage(message.Pointer, ref outErr);

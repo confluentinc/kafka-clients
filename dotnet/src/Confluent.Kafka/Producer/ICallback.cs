@@ -59,7 +59,8 @@ namespace Confluent.Kafka.Producer;
 /// <b>Inside it.</b> Sending again is supported. <c>Get()</c> on the record's own future never returns, as
 /// in Java; <c>Get(TimeSpan)</c> and <c>Get(CancellationToken)</c> end as usual. <c>Close</c> closes with a
 /// zero timeout and returns at once, as Java's does. On <see cref="KafkaProducer{TKey, TValue}"/> and
-/// <see cref="AsyncKafkaProducer{TKey, TValue}"/>, <c>Flush</c> throws Java's "may lead to deadlock"
+/// <see cref="AsyncKafkaProducer{TKey, TValue}"/>, <c>Flush</c> writes Java's "may lead to deadlock" message to
+/// <see cref="System.Diagnostics.Trace"/> as an error, as Java logs it, and throws it as a
 /// <see cref="KafkaException"/>, and <c>PartitionsFor</c>, whose wait is queued behind the callback, ends
 /// after <c>max.block.ms</c> with a retriable <see cref="KafkaException"/>.
 /// </para>
