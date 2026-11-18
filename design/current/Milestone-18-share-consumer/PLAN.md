@@ -136,7 +136,7 @@ run in a parallel worktree.
 | **P6** | Events (10 `Share*Event` + `ShareAcknowledgementEventHandler`), processor arms, `RequestManagers` share supplier, `SubscriptionState::subscribe_to_share_group`, `WakeupTrigger` share action + processor tests. | 0.5k + edits | ~2k | P5b |
 | **P7** | `ShareConsumerImpl` (acquire/release, poll loop, ack-mode rules, `handleCompletedAcknowledgements`, close sequence), `KafkaShareConsumerMetrics` + `ShareConsumerImplTest`. | 1.5k / 1.1k | ~5k | P6 |
 | **P8** | Public API: `ShareConsumer` trait, `DynShareConsumer`, `KafkaShareConsumer`, `MockShareConsumer`, `api_promises.rs`, extended `check-consumer-receiver` lint, audience allow-list, plus `KafkaShareConsumerTest`, `MockShareConsumerTest`, `KafkaShareConsumerMetricsTest`. | 1.3k / 0.9k | ~3.5k | P7 |
-| **P9** ∥P3–P8 | *(Optional, decision D1.)* Admin share-group RPCs, handlers, results/options, `MockAdminClient` parity per `admin-client.md` §9, plus tests. | 1.9k / 1.0k | ~5k | P1 |
+| **P9** ∥P3–P8 | *(In scope: D1 decided 2026-11-18.)* Admin share-group RPCs, handlers, results/options, `MockAdminClient` parity per `admin-client.md` §9, plus tests. | 1.9k / 1.0k | ~5k | P1 |
 | **P10a** | Harness (cluster configs, version gating) + `ShareConsumerTestBase` + `ShareConsumerTest` (71 tests). | — / 2.9k | ~4.5k | P8 (+P9) |
 | **P10b** | `ShareConsumerDeliveryTest` (27), `DLQTest` (14), `LagTest` (9), `CallbackTest` (9), `RenewTest` (6), `RackAwareTest` (4). | — / 3.6k | ~4.5k | P10a |
 | **P11** | Close-out: coverage-ledger audit (every Java share file and test mapped or skipped with a reason), deferral-ledger audit (§6.2 R2), check the `4.4` branch for share fixes landed after 4.4.0, `make verify`, full integration on 4.2.0 and 4.4, docs (README, CHANGELOG, MILESTONES). | — | small | all |
@@ -249,13 +249,13 @@ added to CLAUDE.md or the DoD:
 
 ## 7. Open decisions
 
-- **D1** — Admin share-group RPCs: translate them in P9 (recommended: about 8 integration tests call
+- **D1** — **Decided 2026-11-18: yes, P9 is in scope.** Admin share-group RPCs: translate them in P9 (recommended: about 8 integration tests call
   `describeShareGroups` or the share-group offsets APIs, and the slice is small), or skip those tests
   with a reason.
 - **D2** — KIP-714 methods on `ShareConsumer`: mirror `Consumer` and leave them untranslated
   (recommended).
-- **D3** — Review shape: one milestone PR (as M16), or PRs at tier boundaries (recommended: PR-A =
-  P1–P2, PR-B = P3–P5, PR-C = P6–P8 + P9, PR-D = P10).
+- **D3** — **Decided 2026-11-18: four PRs** — PR-A = P1–P2, PR-B = P3–P5, PR-C = P6–P9, PR-D = P10.
+  (Options were one milestone PR, as M16, or PRs at tier boundaries.)
 - **D4** — Which §6.2 / §6.3 amendments to adopt now. They are cross-cutting, so they also bind
   producer and admin work.
 
@@ -306,7 +306,7 @@ added to CLAUDE.md or the DoD:
   Recommended: `Result<(), Error>` (`IllegalStateError`, Java's text). Whether a record is still in
   flight isn't readable from the signature, so the panic carve-out doesn't fit. The explicit-mode
   *"All records must be acknowledged…"* check is already inside `poll`'s `Result`.
-- **D8 — `AcknowledgementCommitCallback` shape.** Recommended: `#[async_trait]` like
+- **D8 — `AcknowledgementCommitCallback` shape.** **Decided 2026-11-18** (now `share-consumer.md` §3): `#[async_trait]` like
   `OffsetCommitCallback`,
   `on_complete(&self, offsets: &HashMap<TopicIdPartition, HashSet<i64>>, error: Option<&Error>)`.
   `commit_sync` returns `HashMap<TopicIdPartition, Option<Error>>`.
