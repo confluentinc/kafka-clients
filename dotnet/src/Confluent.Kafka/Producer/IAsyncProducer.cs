@@ -463,6 +463,11 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// synchronous on both producer interfaces. An <see cref="AsyncMockProducer{TKey, TValue}"/> returns an
     /// empty snapshot.
     /// </summary>
+    /// <remarks>
+    /// The snapshot holds the producer's own metrics. Java's network-client metrics are not in it: there are no
+    /// connection, request, I/O or authentication metrics, no per-node metrics and no <c>app-info</c>, so a
+    /// dashboard or alert built on those Java names finds nothing.
+    /// </remarks>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
