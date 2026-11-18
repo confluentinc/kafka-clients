@@ -41,7 +41,10 @@ namespace Confluent.Kafka.Common.Serialization;
 /// A producer given two built-in classes serializes inside its <c>Send</c> call and waits for neither. A producer
 /// given any other class awaits the key serializer and then the value serializer, and the record enters the producer
 /// when both have completed, so <c>Send</c>'s first stage covers the wait. A failure, thrown by the call or carried
-/// by the <see cref="ValueTask{TResult}"/>, ends that first stage, and nothing is sent.
+/// by the <see cref="ValueTask{TResult}"/>, ends that first stage, and nothing is sent; an
+/// <see cref="Confluent.Kafka.Common.Errors.ApiException"/> on an <c>AsyncKafkaProducer</c> instead fails the record
+/// through the future <c>Send</c> hands back, as a built-in serializer's does and as Java's
+/// <c>KafkaProducer.doSend</c>.
 /// </para>
 /// </remarks>
 /// <typeparam name="T">The type encoded.</typeparam>

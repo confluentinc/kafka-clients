@@ -60,6 +60,10 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // two awaited serializers) plus 8 B.
     private const long AwaitedPathPerSendBudgetBytes = 544;
 
+    // The same on an unoptimized (Debug) library, where each async method's state machine is a heap object although
+    // the serializers complete at once: the measured 1224 B (net8.0, net10.0) plus 8 B.
+    private const long AwaitedPathPerSendUnoptimizedBudgetBytes = 1232;
+
     // More attempts than the marginal test, as an absolute figure has no matched pair to cancel a one-off allocation.
     private const int AbsoluteMeasurementAttempts = 8;
 
@@ -168,12 +172,15 @@ public sealed class PublicProducerSendAllocationBudgetTests
             bytes = Math.Min(bytes, measured);
         }
 
+        long budget = LibraryBuild.IsOptimized
+            ? AwaitedPathPerSendBudgetBytes
+            : AwaitedPathPerSendUnoptimizedBudgetBytes;
         long perSend = bytes / SendCount;
         Assert.True(
-            perSend <= AwaitedPathPerSendBudgetBytes,
+            perSend <= budget,
             $"Awaited-path Send per-send caller-thread allocation {perSend} B exceeded the budget " +
-            $"{AwaitedPathPerSendBudgetBytes} B ({bytes} B over {SendCount} sends) — serializers that complete " +
-            "at once must not cost a boxed state machine or a copy.");
+            $"{budget} B ({bytes} B over {SendCount} sends, optimized library: {LibraryBuild.IsOptimized}) — " +
+            "serializers that complete at once must not cost a boxed state machine or a copy.");
     }
 
     [Fact]

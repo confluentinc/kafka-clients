@@ -59,15 +59,19 @@ namespace Confluent.Kafka.Producer;
 /// <c>Send</c>'s token, and the first stage covers that wait too; a built-in on the other side is called without a
 /// wait. The differences from the paragraph above:
 /// <list type="bullet">
-/// <item><description>a serializer failure, thrown by its call or carried by its
-/// <see cref="ValueTask{TResult}"/>, ends the first stage with the exception <c>Send</c> would have thrown, and
-/// an <see cref="OperationCanceledException"/> from a serializer ends it as cancelled. Nothing is sent, and the
-/// record's headers stay as the serializers left them, still writable. An <see cref="ApiException"/> still fails
-/// the record through its future, and the delivery callback then runs on the thread that ended the
-/// serialization;</description></item>
+/// <item><description>a serializer failure other than an <see cref="ApiException"/>, thrown by its call or
+/// carried by its <see cref="ValueTask{TResult}"/>, ends the first stage with the exception <c>Send</c> would have
+/// thrown, and an <see cref="OperationCanceledException"/> from a serializer ends it as cancelled. Nothing is
+/// sent, and the record's headers stay as the serializers left them, still writable. An
+/// <see cref="ApiException"/> from a serializer of an <see cref="AsyncKafkaProducer{TKey, TValue}"/> does not end
+/// the first stage with it: as on the built-in path, and as Java's <c>KafkaProducer.doSend</c>, it fails the
+/// record through its future, which the first stage hands back after the delivery callback has run on the thread
+/// that ended the serialization;</description></item>
 /// <item><description>the record's headers are the ones the serializers left, so a serializer may add headers.
 /// On <see cref="AsyncKafkaProducer{TKey, TValue}"/> they turn read-only once both serializers have completed,
-/// where the built-in path makes them read-only before <c>Send</c> returns. On
+/// where the built-in path makes them read-only before <c>Send</c> returns. A record whose token is cancelled, or
+/// whose producer is closed, while a serializer is awaited is not sent, although its headers are then already
+/// read-only. On
 /// <see cref="AsyncMockProducer{TKey, TValue}"/> each awaited serializer gets a new, empty
 /// <see cref="Headers"/> that is then dropped, and the record's headers stay writable, as on
 /// <see cref="MockProducer{TKey, TValue}"/>;</description></item>
@@ -110,7 +114,8 @@ namespace Confluent.Kafka.Producer;
 /// </para>
 /// <para>
 /// <see cref="IAsyncDisposable.DisposeAsync"/> closes and then frees the producer;
-/// <see cref="IDisposable.Dispose"/> is its blocking form. Both swallow a close error and are idempotent.
+/// <see cref="IDisposable.Dispose"/> is its blocking form, so <c>await using</c> or <c>DisposeAsync</c> is the
+/// form to prefer. Both swallow a close error and are idempotent.
 /// What a delivery callback may call on its own producer is in <see cref="ICallback"/>.
 /// An <see cref="AsyncKafkaProducer{TKey, TValue}"/> disposes the serializers it was given when it closes, as its
 /// constructor says; an <see cref="AsyncMockProducer{TKey, TValue}"/> does not.

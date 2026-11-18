@@ -85,7 +85,10 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <see cref="ConfigException"/> or a serializer with <see cref="IllegalArgumentException"/>. So a serializer
     /// shared with another client, or used after the close, sees it
     /// disposed. A close or a <c>DisposeAsync()</c> of the producer awaits a serializer's <c>DisposeAsync()</c>; a
-    /// <c>Dispose()</c> of the producer and this constructor wait for it on the calling thread. A serializer's
+    /// <c>Dispose()</c> of the producer and this constructor wait for it on the calling thread, so
+    /// <c>await using</c> or <c>DisposeAsync()</c> is the form to prefer. A serializer's <c>DisposeAsync()</c> is
+    /// always called with no synchronization context and with the default task scheduler current, so an
+    /// <c>await</c> in it never needs the thread that waits. A serializer's
     /// <c>DisposeAsync</c> or <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not
     /// rethrown.
     /// </remarks>
@@ -263,6 +266,12 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         _native.CloseWithCallback(timeout, cancellationToken);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Prefer <c>await using</c> or <see cref="DisposeAsync"/>: this call blocks its thread until the producer is
+    /// closed and its serializers are disposed. A serializer that is <see cref="IAsyncDisposable"/> is disposed
+    /// through its <c>DisposeAsync()</c>, called with no synchronization context and with the default task scheduler
+    /// current, which this call then waits for.
+    /// </remarks>
     public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>
