@@ -1,6 +1,6 @@
 # C++ binding: status
 
-Updated 2026-11-17.
+Updated 2026-11-18.
 
 ## Done
 
@@ -118,6 +118,28 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
   `verify-cpp`; README and CLAUDE.md §12.4, §13.3. CI is not wired: a Semaphore job needs LLVM
   21 from apt.llvm.org on Ubuntu 24.04, a JRE, `abidiff` and the Rust FFI build, and runs
   `make verify-cpp`.
+
+## Packaging: a compiled library (2026-11-18)
+
+Upgradable Linux packages: a fix to the C++ layer or to the core reaches programs by a package
+upgrade. The binding becomes a compiled library, shared and static, over the shared C core, and
+both cores' static libraries ship too (CLAUDE.md §3.2, §12.3, §12.4, §13.1, §13.4, rewritten for
+it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SONAME=1`,
+`C_ABI_MAJOR` in `rust/build.rs`). Steps, one commit each:
+
+1. The rules. Done.
+2. The library: `src/`, an object library into `ConfluentKafka::cpp` (shared, soname
+   `libconfluent_kafka_cpp.so.0.1`) and `::cpp_static`; the eleven classes' bodies out of their
+   headers; `detail/ffi.hpp` to `src/detail/`.
+3. The linter: `inline-definition`, `missing-export`, a public header including the C header.
+4. The package config: exported targets for both libraries and the core, pkg-config, install
+   components, unit tests against the static library too.
+5. `cargo xtask install-c` (the core with its soname, links, static library, headers and
+   `confluent-kafka.pc`) and the `api-compat` rule that a C ABI break raises `C_ABI_MAJOR`.
+6. `abi-check` on the real shared library, with the `SOVERSION` rule.
+7. `packaging/debian/`: one source package, `libconfluent-kafka0`, `libconfluent-kafka-dev`,
+   `libconfluent-kafka-cpp0.1`, `libconfluent-kafka-cpp-dev`, built per distro release in its
+   container; the upgrade checked by running a program built against the old package.
 
 ## Next
 

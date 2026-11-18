@@ -1,8 +1,11 @@
 # Confluent Kafka C++
 
 The C++ binding of the Rust Kafka client, package `confluent::kafka` under `cpp/`. It is a
-header-only C++20 library over the C FFI header `confluent_kafka_bindings.h`, and its surface is
-Java's `org.apache.kafka.clients` API (Apache Kafka 4.4.0, the `kafka/` submodule) in C++ form.
+compiled C++20 library, `libconfluent_kafka_cpp`, shared and static, over the C FFI header
+`confluent_kafka_bindings.h`, which only its sources include, and over the shared C core; its
+surface is Java's `org.apache.kafka.clients` API (Apache Kafka 4.4.0, the `kafka/` submodule) in
+C++ form. A fix to either library reaches a program through a package upgrade, without
+recompiling it (§3.2, §12.3).
 
 These rules are the C++ counterpart of the root `CLAUDE.md`'s Python section. Working under
 `cpp/` loads the root `CLAUDE.md` (the core, its C FFI in §4, errors in §12) and then this
@@ -19,13 +22,15 @@ Layout:
 cpp/
   CLAUDE.md                          this file
   README.md                          toolchain floor, build, test
-  CMakeLists.txt, cmake/             INTERFACE target ConfluentKafka::cpp, package config
+  CMakeLists.txt, cmake/             ConfluentKafka::cpp and ::cpp_static, package config (§13)
   Makefile                           build, test, format, format-check, lint, clean
   .clang-format, .clang-tidy         §10
-  include/confluent/kafka/           the library: one header per Java class (§3)
-    detail/                          hand-written boundary code, not public (§1)
+  include/confluent/kafka/           the public headers: one per Java class (§3)
+    detail/                          declarations users never name (§3.2)
+  src/                               the bodies: one .cpp per header (§3.2)
+    detail/                          hand-written boundary code over the C header (§1)
   test/unit/                         GoogleTest, one executable per file (§11)
-  test/probe/                        the ABI probe shared library (§12)
+  test/probe/                        every public header compiled on its own (§3.1)
   tools/                             checks run by CTest and the Makefile
   design/current/, design/history/   plans, status, doc-contract-changes.md
 ```
@@ -40,8 +45,9 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
    Nothing comes from librdkafka's `rdkafkacpp` or from another client; Javadoc is read for
    nullability only.
 2. **The binding includes only `confluent_kafka_bindings.h`**, and only from
-   `include/confluent/kafka/detail/ffi.hpp`, inside `extern "C"` (the header declares none).
-   It adds no FFI entry point. An overload whose entry point (§8) is missing is not generated,
+   `src/detail/ffi.hpp`, inside `extern "C"` (the header declares none); no public header
+   includes it or names a C type, which cbindgen's anonymous `typedef struct` handles make
+   impossible anyway. It adds no FFI entry point. An overload whose entry point (§8) is missing is not generated,
    and the module header's documentation block lists it under `@par Not generated`, one item
    per overload in `design/current/java-deprecated.txt`'s form followed by the C name looked
    for (`org.apache.kafka.clients.consumer.KafkaConsumer#clientInstanceId(Duration)`).
@@ -56,9 +62,10 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
    `end()`, `size()`, `operator==`, `std::hash`, `operator<<`, `to_string()`, `of()` factories.
 5. **Generated from fixed inputs**: these rules, the Java source, the C header,
    `tools/lint/data/decisions.txt` (§4.6) and the previous release give the same result on
-   every run. Hand-written and not generated:
-   `detail/` (error conversion, RAII handles, trampolines, the completion thread) and the tests
-   under `test/`. The error classes come from the C++ emitter of
+   every run. Generated: each public header, the non-template classes of §3.2 under
+   `include/confluent/kafka/detail/`, and each `.cpp` under `src/`. Hand-written and not
+   generated: `src/detail/` (error conversion, RAII handles, trampolines, the completion thread)
+   and the tests under `test/`. The error classes come from the C++ emitter of
    `cargo xtask generate-error-codes`; `check-generated` fails on stale output.
 6. **Core and FFI asks** are recorded in `cpp/design/current/status.md`, never worked around in
    the binding.
@@ -100,14 +107,25 @@ temporary, **Goes when**. Anything else that departs from Java needs a new rule,
 
 1. One header per Java class, snake_case, in its module directory
    (`include/confluent/kafka/consumer/close_options.hpp`), each starting with the Apache 2.0
-   header (§13), `#pragma once`, and including `<confluent/kafka/detail/ffi.hpp>` rather than the
-   C header. One umbrella header per module (`<confluent/kafka/consumer.hpp>`) includes them
+   header (§13), `#pragma once`, and including `<confluent/kafka/export.hpp>`, never the C
+   header (§1.2). One umbrella header per module (`<confluent/kafka/consumer.hpp>`) includes them
    all; users include the umbrella, a class header's name may change.
-2. Header-only: every function is `inline`, a template or `constexpr`; no `.cpp` ships.
+2. A compiled library: a public header declares, and the `.cpp` at the same path under `src/`
+   (`src/common/node.cpp`) defines. What a header defines is compiled into the user's program and
+   changes only when the program is rebuilt, so a header defines only what must be there: a
+   `constexpr` or `consteval` function or variable, a deleted function, the interface base
+   constructor of §12.3, and templates. A class template's members only convert between its type
+   parameters and bytes (the serde calls) and forward to a non-template class in
+   `confluent::kafka::detail` (`include/confluent/kafka/detail/`) defined in the library, so
+   `KafkaProducer<K, V>`'s logic is upgraded with the library too. Every class, free function and
+   explicit specialization the library defines (`std::hash<Node>`, its `operator()` in the
+   `.cpp`) is marked `CONFLUENT_KAFKA_CPP_API` from `<confluent/kafka/export.hpp>`; the library
+   builds with hidden visibility, so nothing else is exported.
 3. Enums: a Java `enum` whose constructor sets exactly one integer field → `enum class` with
    that underlying type and Java's values (`TimestampType : int32_t { CREATE_TIME = 0 }`); a
    Java `enum` with none → `enum class` whose enumerators take the values of the C header's `_e`
-   enum in Java order; a class hierarchy the C API flattens into a data-carrying enum
+   enum in Java order, written as literals and checked against the C enumerators by
+   `static_assert` in the enum's `.cpp`; a class hierarchy the C API flattens into a data-carrying enum
    (`OffsetSpec`, `TopicCollection`) stays a class hierarchy, never `std::variant`. Java's
    members of an enum are free functions beside it. A field or an instance method takes the enum
    first and keeps its own name, found by ADL: `id(TimestampType::CREATE_TIME)`,
@@ -323,7 +341,8 @@ Interfaces Java declares:
    `TimeoutError`), `is_done()`; `cancel`, `is_cancelled`, `is_completed_exceptionally` and
    `get_now` are binding-side over `is_done` and `get` (`cancel()` returns `false`);
    `when_complete` and `to_completion_stage` are not generated.
-5. Every core handle is owned by one RAII wrapper (`detail::UniqueHandle`) that calls
+5. Every core handle is owned by one RAII wrapper (`detail::UniqueHandle`, in `src/detail/`,
+   held by the class's private implementation, never by a public header) that calls
    `_destroy_err` in its destructor; a borrowed C pointer never escapes a C++ object that does
    not also keep its owner alive, as a `ConsumerRecord` keeps its `ConsumerRecords`.
 6. The binding reimplements no core logic and repeats no core check, with three exceptions,
@@ -452,19 +471,24 @@ Interfaces Java declares:
    `design/current/java-deprecated.txt`'s form
    (`confluent::kafka::common::Node::Node(int,String,int)`), unique across overloads.
 3. Source compatibility always; ABI stability from the first major version: no public data
-   members; every class with data, value types included, holds one pointer (its C handle or a
-   private implementation), so a field Java adds later keeps the layout; enumerators are
-   appended and users keep a `default:`; an abstract class's vtable is frozen at release, a
-   later Java method appended as a virtual with a default body, and the base's inline
-   constructor records the header version the subclass was compiled against, so the binding
-   calls a new slot only on an object that has it; interfaces cross as `std::shared_ptr`, so an
-   added method needs no new constructor.
+   members; every class with data, value types included, holds one pointer to a private
+   implementation defined in its `.cpp` (a C handle lives there too, §8.5), so a field Java adds
+   later keeps the layout; its destructor, copy and move members are declared in the header and
+   defined in the `.cpp`, `= default` where nothing more is needed; enumerators are appended and
+   users keep a `default:`; an abstract class's vtable is frozen at release, a later Java method
+   appended as a virtual with a default body, and the base's inline constructor, the one
+   constructor a header defines, records the header version the subclass was compiled against,
+   so the binding calls a new slot only on an object that has it; interfaces cross as
+   `std::shared_ptr`, so an added method needs no new constructor.
 4. The interface check (`make abi-check`, against the previous release's git tag or `BASELINE=`):
    an API inventory (every public declaration, written by the linter's
    `confluent-kafka-inventory`) compared with the previous release's by `ck_java_model api-diff`;
    the previous release's unit tests compiled against the new headers (catches an ambiguous new
-   overload); and a probe library of each tree, built with `-fkeep-inline-functions` so the
-   header-only classes leave their members and types, compared through `abidiff`. In development a rule change may alter interfaces per PR; in preview a change
+   overload); and the shared library of each tree compared through `abidiff`, its public
+   headers given, so a change to an exported function or to a public type's layout is reported.
+   The soname is `libconfluent_kafka_cpp.so.<SOVERSION>`, `SOVERSION` being `0.<minor>` before
+   1.0 and the major after it: an ABI break the check reports under an unchanged `SOVERSION` is a
+   finding. In development a rule change may alter interfaces per PR; in preview a change
    warns; after GA a change fails in a minor and warns in a major, where the ABI report is the
    release notes' list of breaks.
 5. A member Java deprecates (`design/current/java-deprecated.txt`) is not generated, as the root
@@ -475,13 +499,15 @@ Interfaces Java declares:
 
 ## 13. Build, format and lint
 
-1. C++20, header-only, under `include/confluent/kafka`; `cpp/CMakeLists.txt` exports the
-   INTERFACE target `ConfluentKafka::cpp`, which carries the include path, the C header's
-   directory (SYSTEM) and the link to the cdylib cargo builds under `rust/target/<profile>/`,
-   located through `RUST_PROJECT_ROOT` (default `../rust`) or `CONFLUENT_KAFKA_LIB_DIR` /
-   `CONFLUENT_KAFKA_INCLUDE_DIR`; `LINK_TYPE` picks static or shared. From the repository root:
-   `make build-cpp`, `make test-cpp`. Toolchain floor: GCC 11, Clang 16, MSVC 2019 16.10. No
-   C++17 mode.
+1. C++20, headers under `include/confluent/kafka`, sources under `src/`; `cpp/CMakeLists.txt`
+   builds one object library into `ConfluentKafka::cpp` (shared, `VERSION` and `SOVERSION` of
+   §12.4, linking the shared C core) and `ConfluentKafka::cpp_static` (static, linking the core's
+   static library and the system libraries it needs), both exported by the package config with
+   the core's own targets, plus a pkg-config file. The core is the one cargo builds under
+   `rust/target/<profile>/`, located through `RUST_PROJECT_ROOT` (default `../rust`) or
+   `CONFLUENT_KAFKA_LIB_DIR` / `CONFLUENT_KAFKA_INCLUDE_DIR`; the C header is needed to build the
+   library, never to use it. From the repository root: `make build-cpp`, `make test-cpp`.
+   Toolchain floor: GCC 11, Clang 16, MSVC 2019 16.10. No C++17 mode.
 2. `clang-format` with `cpp/.clang-format` (`BasedOnStyle: Google`, `IndentWidth: 4`,
    `ColumnLimit: 120`; layout only, names stay Java's); `clang-tidy` with `cpp/.clang-tidy`,
    every finding an error, `readability-identifier-naming` set to the names of §2, the `google-*`
@@ -492,15 +518,17 @@ Interfaces Java declares:
    (`tools/lint/LLVM_VERSION`), that parses `kafka/clients/src/main/java` with an
    ANTLR-generated parser and checks the headers against these rules: `confluent-kafka-java-class`,
    `-java-inheritance`, `-java-enum`, `-java-members`, `-java-signature` (§1-§5), `-doc` (§12.1,
-   §12.2), `-abi` (§12.3), `-header` and `-surface` (§1.4). `make lint` runs it with clang-tidy's
+   §12.2), `-abi` (§3.2, §12.3), `-header` (§1.2, §3.1) and `-surface` (§1.4). `make lint` runs it with clang-tidy's
    own checks and fails on any finding; `make lint-tests` runs its tests; `ck_java_model expected
    <FQN>` prints the shape it expects for a Java class. Every exception is a line of a data file
    under `tools/lint/data/`, never a `NOLINT`: `baseline.txt` (in-scope classes not translated yet,
    rewritten by `make lint-baseline`, only shrinking), `decisions.txt` (§4.6) and
    `scope-excluded.txt` (what these rules cut out of §1.4's scope).
 4. `check-generated` covers the error emitter's output and every generated header. Released
-   through a vcpkg overlay port under `cpp/vcpkg/` (headers plus a prebuilt cdylib per platform),
-   versioned separately from the core, starting at a preview version; no Conan recipe.
+   as Linux packages (`packaging/debian/`: the core's runtime and `-dev` packages, the C++
+   library's, each `-dev` carrying the static library) and through a vcpkg overlay port under
+   `cpp/vcpkg/` that builds the library from source, versioned separately from the core, starting
+   at a preview version; no Conan recipe.
 5. Every file carries the Apache 2.0 header, copyright Confluent Inc.; code translated from
    OpenJDK keeps GPL with Classpath Exception. No TODO or FIXME: a Java path not implemented
    fails with the right `Error`, never silently.
