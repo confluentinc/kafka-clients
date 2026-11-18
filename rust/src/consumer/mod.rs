@@ -17,6 +17,8 @@
 //! Translated from `org.apache.kafka.clients.consumer`. The `clients` Java
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
+mod acknowledge_type;
+pub mod acknowledgement_commit_callback;
 pub mod close_options;
 mod consumer_commit_failed_error;
 mod consumer_config;
@@ -41,6 +43,8 @@ mod subscription_pattern;
 
 pub(crate) mod internals;
 
+pub use acknowledge_type::AcknowledgeType;
+pub use acknowledgement_commit_callback::AcknowledgementCommitCallback;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
