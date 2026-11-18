@@ -158,6 +158,61 @@ test('a hundred thousand timed gets on a pending future leave no wait behind, an
   assert.deepEqual(out.leaks, NO_LEAKS);
 });
 
+test('a callback Promise still pending when the closed producer is collected is reported once, before the destroy, and runs no JS after', () => {
+  // close() from inside a callback closes as close({ timeout: 0 }) does, as
+  // Java's org.apache.kafka.clients.producer.KafkaProducer#close does on its
+  // I/O thread, so it completes with the callback's Promise still pending.
+  // Once the closed producer is collected, no JS can read the record's
+  // future (a KafkaFuture holding a slot holds the producer's handle), so the
+  // destroy frees its native future, slot and context, each once
+  // (javascript/CLAUDE.md, rule 5: the context destroys the native future
+  // exactly once), as Java's garbage collector frees a closed producer's.
+  const out = probe(`
+    const { KafkaProducer, ProducerRecord } = require(D + '/producer');
+    const collected = [];
+    const registry = new FinalizationRegistry((name) => collected.push(name));
+    const events = [];
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const result = {};
+      await (async () => {
+        const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 100 } });
+        registry.register(p, 'producer');
+        let closing;
+        // Nothing waits on the record's future: a wait would hold the producer.
+        await p.send({
+          record: new ProducerRecord({ topic: 'never', value: Buffer.from('v') }),
+          callback: () => {
+            events.push('callback');
+            closing = p.close();
+            return new Promise(() => {});
+          },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        events.push(await closing.then(() => 'closed', (e) => 'close failed: ' + e.message));
+        const s = native.producerStats();
+        result.beforeCollection = { made: s.deferralsMade, reported: s.deferralsReported };
+      })();
+      await settle(20);
+      const s = native.producerStats();
+      result.atDestroy = { made: s.deferralsMade, reported: s.deferralsReported, released: s.deferralsReleased };
+      // Nothing more reaches JS once the producer is destroyed.
+      events.push('collected');
+      await settle(5);
+      result.events = events;
+      result.collected = collected;
+      result.leaks = leaks();
+      console.log(JSON.stringify(result));
+      clearInterval(hold);
+    })();
+  `);
+  assert.deepEqual(out.events, ['callback', 'closed', 'collected']);
+  assert.deepEqual(out.collected, ['producer']);
+  assert.deepEqual(out.beforeCollection, { made: 1, reported: 0 });
+  assert.deepEqual(out.atDestroy, { made: 1, reported: 1, released: 1 });
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
 // The same probe on a KafkaProducer needs a broker, so that its send()
 // resolves at the hand-over well before the delivery:
 // test/integration/memory_probes.test.js.
