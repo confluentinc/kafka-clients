@@ -130,10 +130,11 @@ method must await it.
   - How Rust surfaces the closed check is not decided here. For the async
     methods it is an `Err` in the existing `Result`. For the sync getters
     (`subscription`, `acquisition_lock_timeout_ms`,
-    `set_acknowledgement_commit_callback`), follow the existing `Consumer`
-    precedent (`Consumer::subscription` / `Consumer::paused` in
-    `rust/src/consumer/mod.rs` return plain values and document a panic on
-    `KafkaConsumer`). For `acknowledge*`, the shape is decision D7.
+    `set_acknowledgement_commit_callback`), follow CLAUDE.md §12.5 (Panics
+    policy: a guarded getter on a closed consumer stays a panic with Java's
+    message, documented under `# Panics`), as the `Consumer` precedent does
+    (`Consumer::subscription` / `Consumer::paused` in
+    `rust/src/consumer/mod.rs`). For `acknowledge*`, the shape is decision D7.
 
 **Anti-patterns:**
 
