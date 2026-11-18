@@ -273,12 +273,21 @@ the client logs it, and it reaches no caller. Do not wait inside the
 callback's Promise for `flush()` or `close()` of the same producer: they wait
 for it.
 
+Callbacks run one at a time, in the order their records complete, as Java
+runs them one after another on its I/O thread: a later record's callback
+starts only once an earlier callback's Promise has settled, so a slow
+callback holds back the callbacks after it, and with them their records'
+futures. A callback's timed `future.get({ timeout })` on a later record's
+future rejects with `TimeoutError`: that record's callback waits for this
+one.
+
 Inside a callback, do not call `flush()` or `close()` of the same producer,
 do not run a transaction call, and do not await the future of a record sent
 later: each waits for the callback itself. Before the callback's first
 `await` the producer refuses them; after it they can hang. A callback
 Promise that never settles has no time limit, as in Java: it holds its
-record's future, `flush()` and `close()`, `close({ timeout })` included.
+record's future, the callbacks of the records after it, `flush()` and
+`close()`, `close({ timeout })` included.
 
 ### Parameters by name
 

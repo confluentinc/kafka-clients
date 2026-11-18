@@ -178,6 +178,146 @@ test('a callback that returns a Promise is awaited: the future and flush() wait 
   }
 });
 
+// Records sent this far apart complete this far apart: each fails its
+// metadata wait max.block.ms after its own send, so they complete, and their
+// callbacks are due, in send order.
+const COMPLETION_GAP_MS = 60;
+const gap = () => new Promise((res) => setTimeout(res, COMPLETION_GAP_MS));
+
+test("callbacks run one at a time in completion order: a later record's callback waits for an earlier one's Promise", { timeout: 30000 }, async () => {
+  // Java runs its callbacks one after another on the producer's I/O thread, so
+  // a slow callback holds back the next: here a later record's callback starts
+  // only once an earlier callback's Promise settled, and flush() and close()
+  // still settle, after every callback they cover.
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  let release;
+  const released = new Promise((res) => (release = res));
+  try {
+    const events = [];
+    const sends = [];
+    for (let i = 0; i < 4; i++) {
+      sends.push(
+        producer.send({
+          record: new ProducerRecord({ topic: `unit-serial-${i}`, value: 'v' }),
+          callback: async () => {
+            events.push(`start ${i}`);
+            // The first holds back until released; the later ones take less
+            // time the later they come, so run together they would end in
+            // reverse order.
+            if (i === 0) await released;
+            else await new Promise((res) => setTimeout(res, (4 - i) * 40));
+            events.push(`end ${i}`);
+          },
+        }),
+      );
+      await gap();
+    }
+    // Every record has completed, and the first callback's Promise holds the
+    // others back: none of them started, and neither flush() nor a future is done.
+    const futures = await Promise.all(sends);
+    let flushed = false;
+    const flush = producer.flush().then(() => (flushed = true));
+    await new Promise((res) => setTimeout(res, 200));
+    assert.deepEqual(events, ['start 0']);
+    assert.equal(flushed, false);
+    assert.deepEqual(futures.map((f) => f.isDone()), [false, false, false, false]);
+    release();
+    await flush;
+    assert.deepEqual(events, ['start 0', 'end 0', 'start 1', 'end 1', 'start 2', 'end 2', 'start 3', 'end 3']);
+    // Each record's future completed after its own callback, with its own outcome.
+    for (let i = 0; i < 4; i++) {
+      assert.equal(futures[i].isDone(), true);
+      await assert.rejects(delivery(futures[i]), { name: 'TimeoutError', message: TIMEOUT_MESSAGE(`unit-serial-${i}`) });
+    }
+  } finally {
+    // A failed check must not leave close() waiting for the first callback.
+    release();
+    await producer.close();
+  }
+});
+
+test("a callback's timed get() on a later record's future times out: that record's callback waits for this one", { timeout: 30000 }, async () => {
+  // As Java's get(timeout), called on the I/O thread from a callback, times out
+  // on a record whose callback that thread runs next: the later record's future
+  // completes only after its callback ran, which waits for this callback.
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  try {
+    const { TimeoutError } = require('@confluentinc/kafka-javascript');
+    const events = [];
+    let second;
+    let outcome;
+    const first = producer.send({
+      record: new ProducerRecord({ topic: 'unit-timed-1', value: 'v' }),
+      callback: async () => {
+        events.push('first callback');
+        const future = await second;
+        outcome = await future.get({ timeout: 200 }).then(
+          () => 'resolved',
+          (e) => e,
+        );
+        events.push('first callback ends');
+      },
+    });
+    await gap();
+    second = producer.send({
+      record: new ProducerRecord({ topic: 'unit-timed-2', value: 'v' }),
+      callback: () => {
+        events.push('second callback');
+      },
+    });
+    const [firstFuture, secondFuture] = await Promise.all([first, second]);
+    await producer.flush();
+    assert.ok(outcome instanceof TimeoutError, `the timed get() settled with ${outcome}`);
+    assert.equal(outcome.constructor, TimeoutError);
+    assert.deepEqual(events, ['first callback', 'first callback ends', 'second callback']);
+    // Then each record completed with its own delivery error.
+    await assert.rejects(delivery(firstFuture), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-timed-1') });
+    await assert.rejects(delivery(secondFuture), { name: 'TimeoutError', message: TIMEOUT_MESSAGE('unit-timed-2') });
+  } finally {
+    await producer.close();
+  }
+});
+
+test('a callback queued behind a pending Promise runs once its turn comes, before close() settles', { timeout: 30000 }, async () => {
+  // close() waits for every callback of the records it covers, the ones still
+  // waiting for their turn included, as Java's close() joins the I/O thread.
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  const events = [];
+  let release;
+  const released = new Promise((res) => (release = res));
+  let closing = null;
+  try {
+    const first = producer.send({
+      record: new ProducerRecord({ topic: 'unit-close-1', value: 'v' }),
+      callback: async () => {
+        events.push('first');
+        await released;
+      },
+    });
+    await gap();
+    const second = producer.send({
+      record: new ProducerRecord({ topic: 'unit-close-2', value: 'v' }),
+      callback: () => {
+        events.push('second');
+      },
+    });
+    const futures = await Promise.all([first, second]);
+    let closed = false;
+    closing = producer.close().then(() => (closed = true));
+    await new Promise((res) => setTimeout(res, 200));
+    assert.deepEqual(events, ['first']);
+    assert.equal(closed, false);
+    release();
+    await closing;
+    assert.deepEqual(events, ['first', 'second']);
+    assert.deepEqual(futures.map((f) => f.isDone()), [true, true]);
+  } finally {
+    // A failed check must not leave the close waiting for the first callback.
+    release();
+    await (closing ?? producer.close());
+  }
+});
+
 test("a callback's rejection is handled as a throw: the outcome is unchanged and nothing surfaces", () => {
   const r = runNode(`
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');

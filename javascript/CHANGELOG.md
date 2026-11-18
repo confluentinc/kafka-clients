@@ -134,6 +134,9 @@ newer.
   awaited (its result is wrapped with `Promise.resolve`): the record's future
   completes, and a `flush()` or `close()` covering the record returns, once
   it settled; a rejection is logged as a throw is, and reaches no caller.
+  Callbacks run one at a time, in the order their records complete, as
+  Java's do: a later record's callback starts only once an earlier callback's
+  Promise has settled.
 - `KafkaFuture` has Java's members: `completedFuture`, `allOf`,
   `toCompletionStage()` (a `Promise`), `thenApply`, `whenComplete`, `cancel`,
   `get()` and `get(timeout)`, `getNow`, `isCancelled`,
@@ -215,6 +218,10 @@ newer.
   copy's producers report that copy's errors and `RecordMetadata`. The copy
   loaded last used to build both copies' errors and metadata. Each copy now
   loads an addon instance of its own.
+- Delivery callbacks run one at a time, in completion order, as Java's run
+  one after another on its I/O thread. A callback that returned a Promise
+  used to let the callbacks of later records start, and their futures
+  complete, before it settled.
 
 ### Known limitations
 

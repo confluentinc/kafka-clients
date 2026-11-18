@@ -257,8 +257,10 @@ export class KafkaProducer implements Producer {
    *    `ExecutionError` whose `cause` is the error the delivery failed with,
    *    as Java's `get()` throws. The callback, when given, runs first, on the
    *    JS thread, and receives the error itself; a callback that returns a
-   *    Promise is awaited before the future completes. A future whose `get()`
-   *    is never called raises no unhandled rejection.
+   *    Promise is awaited before the future completes. Callbacks run one at a
+   *    time, in the order their records complete, as Java's do: a later
+   *    record's callback waits until an earlier one's Promise settled. A
+   *    future whose `get()` is never called raises no unhandled rejection.
    *
    * Ordering is the caller's: records from code that awaits each `send()`
    * before the next reach the producer in that order (so records to one
@@ -303,7 +305,8 @@ export class KafkaProducer implements Producer {
    * later: each waits for the callback itself. Before the callback's first
    * `await` the producer refuses them; after it they can hang. A callback
    * Promise that never settles has no time limit: it holds its record's
-   * future, `flush()` and `close()`, `close({ timeout })` included.
+   * future, the callbacks of the records after it, `flush()` and `close()`,
+   * `close({ timeout })` included.
    */
   send(options: {
     /** The record to send. */
@@ -408,7 +411,8 @@ export class KafkaProducer implements Producer {
     // the delivery is recorded, and the Promise returned here settles, once
     // the thenable did, and the core's report waits for that
     // (native/producer.c, send_defer). A callback returning nothing allocates
-    // no Promise.
+    // no Promise. The addon calls this in the callback's turn: one callback at
+    // a time, in completion order (native/producer.c, send_on_completion).
     const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined | Promise<string | undefined> => {
       let failure: string | undefined;
       let returned: unknown;
