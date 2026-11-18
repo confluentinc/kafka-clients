@@ -256,7 +256,9 @@ rules and readings. Newest entries are at the end; dates are in IST.
     future waits only for its own callback's report, so a later record's future completes while the callback is
     still pending; only the callback's own record's future waits for it, and the docs name that one. Both are a
     **(root conflict)** marked in `javascript/CLAUDE.md`, the docs following Java and the core (entry 4's exception
-    for text that, read literally, misdescribes what the client does).
+    for text that, read literally, misdescribes what the client does). The second no longer holds since entry 34:
+    callbacks run one at a time, so a later record's future completes only after its own callback, which waits for
+    this one, as Q46 says; the docs name both futures, and only the first conflict stays marked.
 
 ## Java's configuration tests through the constructor (2026-11-18)
 
@@ -326,7 +328,11 @@ rules and readings. Newest entries are at the end; dates are in IST.
     first `await`; Java's mock makes no such check). Java's mock calls `onCompletion`
     with no `try` (`MockProducer.Completion#complete`), so its error propagates and the record's future stays
     incomplete; here the core's mock completes the future once the Promise settled, the deviation already recorded
-    for a throw, which now covers this case too.
+    for a throw, which now covers this case too. Since entry 34 the mock's callbacks run one at a time too, and these
+    rules hold with it: a callback that waits for its turn runs after `completeNext()` or `errorNext()` returned, so
+    what it throws goes to the FIFO, as a rejection does; `flush()` and `close()` also wait for the callbacks waiting
+    for their turn; and a `send()` nested in a callback, settling after its own callback, never settles when that
+    callback awaits it.
 
 ## Core issues (2026-11-18)
 
@@ -378,3 +384,23 @@ rules and readings. Newest entries are at the end; dates are in IST.
     client and every call made on it has had its answer." The fix and its plan came with PR #312
     (`PLAN-close-liveness.md`); a closed client kept reachable while a call is pending stays the root's Future
     improvement (Q49).
+
+## Callbacks one at a time (decided by the owner, 2026-11-18 and 2026-11-19)
+
+34. **Send callbacks run one at a time, in completion order**, for Java parity, as Python's `AsyncProducer` and the
+    .NET binding run them (owner's decision of 2026-11-18; the root conventions leave it open). Java runs its
+    delivery callbacks one after another on the producer's I/O thread, so a slow callback holds back the next. The
+    addon (PR #312) keeps a callback the core delivers while another runs or its Promise is awaited in a run queue,
+    with its `RecordMetadata` and error, and runs it once that Promise settled; the record's future still completes
+    after its own callback, and `flush()` and `close()` wait for the callbacks waiting for their turn. On 2026-11-19
+    the owner kept it with no core change and no binding-side mark of "inside a callback": a callback that waited for
+    its turn runs from the settled Promise's continuation, outside the core's drain, so the core sees no callback
+    running and it is as after its first `await`. Its `flush()` is not refused and its `close()` is not made
+    `close(0)`, so one it awaits waits for that same callback; refusing them there stays the root conventions' Future
+    improvement. The docs say "before its first `await`" only of a callback the core runs in its drain.
+    `MockProducer` shares the producer's native layer, so its callbacks go through the same run queue (entry 30 says
+    what changes there): a callback that waits for its turn runs after the `completeNext()` or `errorNext()` that
+    completed its record returned, so its throw is kept as a rejection is, as Python's `AsyncMockProducer` keeps a
+    callback task's error; the addon holds its function strongly from the moment it waits, so `clear()` leaves it to
+    run, as Java's mock ran the callback of every record it completed; and with `autoComplete` a callback that awaits
+    a `send()` it made never settles, the nested record's callback waiting for its turn behind it.

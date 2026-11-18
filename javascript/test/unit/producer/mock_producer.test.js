@@ -581,7 +581,7 @@ test('two failing callbacks: both errors are raised, oldest first, one per later
   await producer.close();
 });
 
-test('two rejections inside one flush(): it waits for every callback, rejects with the oldest (the first to reject), and keeps the other', async () => {
+test("two rejections inside one flush(): the callbacks run one at a time, it waits for each, rejects with the oldest (the first callback's), and keeps the other", async () => {
   const first = new Error('first');
   const second = new Error('second');
   const producer = buildMockProducer(false);
@@ -590,28 +590,251 @@ test('two rejections inside one flush(): it waits for every callback, rejects wi
   const gate = new Promise((resolve) => {
     release = () => resolve(undefined);
   });
-  // The first callback rejects late, the second at once, a third resolves late.
-  await producer.send({ record: record1, callback: () => gate.then(() => Promise.reject(first)) });
-  await producer.send({ record: record2, callback: () => Promise.reject(second) });
+  /** @type {string[]} */
+  const ran = [];
+  // The first callback rejects late, the second at once, a third resolves late:
+  // each starts only once the one before it settled.
+  await producer.send({
+    record: record1,
+    callback: () => {
+      ran.push('first');
+      return gate.then(() => Promise.reject(first));
+    },
+  });
+  await producer.send({
+    record: record2,
+    callback: () => {
+      ran.push('second');
+      return Promise.reject(second);
+    },
+  });
   let slowDone = false;
   const slow = await producer.send({
     record: record1,
-    callback: () =>
-      new Promise((resolve) => setTimeout(resolve, 30)).then(() => {
+    callback: () => {
+      ran.push('slow');
+      return new Promise((resolve) => setTimeout(resolve, 30)).then(() => {
         slowDone = true;
-      }),
+      });
+    },
   });
   let settled = false;
   const flushing = producer.flush().finally(() => {
     settled = true;
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(settled, false, 'flush() waits for the callbacks it started');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(settled, false, 'flush() waits for the callbacks it completed');
+  assert.deepEqual(ran, ['first'], "the later callbacks wait for the first one's Promise");
+  assert.equal(slow.isDone(), false);
   release();
-  await assert.rejects(flushing, (e) => e === second);
+  await assert.rejects(flushing, (e) => e === first);
+  assert.deepEqual(ran, ['first', 'second', 'slow']);
   assert.equal(slowDone, true);
   assert.equal(slow.isDone(), true);
-  await assert.rejects(producer.close(), (e) => e === first);
+  await assert.rejects(producer.close(), (e) => e === second);
+});
+
+// The callbacks run one at a time, in completion order, as KafkaProducer's do
+// (javascript/CLAUDE.md, rule 6; DECISIONS.md, entry 34): the mock's go
+// through the same native run queue. Java's run one after another on the
+// thread that completes their records.
+test("callbacks run one at a time in completion order, as on KafkaProducer: a later record's callback waits for an earlier one's Promise", async () => {
+  for (const autoComplete of [false, true]) {
+    const producer = buildMockProducer(autoComplete);
+    /** @type {() => void} */
+    let release = () => {};
+    const released = new Promise((resolve) => {
+      release = () => resolve(undefined);
+    });
+    /** @type {string[]} */
+    const events = [];
+    /** @type {Array<Promise<AnyFuture>>} */
+    const sends = [];
+    for (let i = 0; i < 3; i++) {
+      const sending = producer.send({
+        record: record1,
+        callback: async () => {
+          events.push(`start ${i}`);
+          // The first holds back until released; the later ones take less
+          // time the later they come, so run together they would end in
+          // reverse order.
+          if (i === 0) await released;
+          else await new Promise((resolve) => setTimeout(resolve, (3 - i) * 20));
+          events.push(`end ${i}`);
+        },
+      });
+      sending.catch(() => {});
+      sends.push(sending);
+    }
+    if (!autoComplete) {
+      for (const sending of sends) await sending;
+      // Each completeNext() returns before a later record's callback runs.
+      for (let i = 0; i < 3; i++) assert.equal(producer.completeNext(), true);
+    }
+    let flushed = false;
+    const flushing = producer.flush().then(() => {
+      flushed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(events, ['start 0'], `autoComplete ${autoComplete}: the later callbacks wait for the first one's Promise`);
+    assert.equal(flushed, false, `autoComplete ${autoComplete}: flush() waits for the callbacks waiting for their turn`);
+    release();
+    await flushing;
+    assert.deepEqual(events, ['start 0', 'end 0', 'start 1', 'end 1', 'start 2', 'end 2']);
+    for (const sending of sends) assert.equal((await sending).isDone(), true);
+    await producer.close();
+  }
+});
+
+test('with autoComplete, a send() whose callback waits for its turn settles once that callback ran, rejecting with its error', async () => {
+  const boom = new Error('second');
+  const producer = buildMockProducer(true);
+  /** @type {() => void} */
+  let release = () => {};
+  const released = new Promise((resolve) => {
+    release = () => resolve(undefined);
+  });
+  const first = producer.send({ record: record1, callback: () => released });
+  let secondSettled = false;
+  const second = producer.send({
+    record: record2,
+    callback: () => {
+      throw boom;
+    },
+  });
+  second.then(
+    () => (secondSettled = true),
+    () => (secondSettled = true),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(secondSettled, false, "the second send() waits for its callback, which waits for the first one's Promise");
+  release();
+  await first;
+  await assert.rejects(second, (e) => e === boom);
+  // Raised once, by its own send().
+  await producer.send(record1);
+  await producer.close();
+});
+
+test('a callback that waited for its turn runs after the call that completed its record returned: what it throws is kept for the next send(), once', async () => {
+  // Java's completeNext() runs the callback inside it and throws what it
+  // throws. Here the callback waits for an earlier callback's Promise, so it
+  // runs once that settled, after completeNext() or errorNext() returned: its
+  // throw is kept, as a rejection is (Python's AsyncMockProducer keeps a
+  // callback task's error the same way).
+  for (const completing of ['completeNext', 'errorNext']) {
+    const late = new Error(`late ${completing}`);
+    const producer = buildMockProducer(false);
+    /** @type {() => void} */
+    let release = () => {};
+    const released = new Promise((resolve) => {
+      release = () => resolve(undefined);
+    });
+    await producer.send({ record: record1, callback: () => released });
+    const second = await producer.send({
+      record: record2,
+      callback: () => {
+        throw late;
+      },
+    });
+    assert.equal(producer.completeNext(), true);
+    // The call completing the second record returns before its callback runs.
+    if (completing === 'completeNext') assert.equal(producer.completeNext(), true);
+    else assert.equal(producer.errorNext(new KafkaError('delivery')), true);
+    assert.equal(second.isDone(), false);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(second.isDone(), true);
+    // A completing call in between does not drop it.
+    assert.equal(producer.completeNext(), false);
+    await assert.rejects(producer.send(record1), (e) => e === late, completing);
+    // Raised once.
+    await producer.send(record1);
+    await producer.flush();
+    await producer.close();
+  }
+});
+
+test('clear() keeps the callback of a completed record that waits for its turn: it runs in its turn, once, and its future completes', () => {
+  // Java's clear() drops the completions of the sends still waiting; a record
+  // completeNext() completed has had its callback run. Here the callback
+  // waits for an earlier callback's Promise when clear() lets the mock's hold
+  // on it go: the addon holds it until it runs, through collections.
+  const r = spawnSync(
+    process.execPath,
+    [
+      '--expose-gc',
+      '-e',
+      `
+    const { MockProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    (async () => {
+      const p = new MockProducer();
+      const record = new ProducerRecord({ topic: 't', value: Buffer.from('v') });
+      let release;
+      const released = new Promise((resolve) => (release = resolve));
+      await p.send({ record, callback: () => released });
+      let ran = 0;
+      const second = await p.send({ record, callback: () => { ran++; } });
+      p.completeNext();
+      p.completeNext();
+      p.clear();
+      for (let i = 0; i < 5; i++) {
+        global.gc();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      console.log(JSON.stringify({ ran, done: second.isDone() }));
+      await p.close();
+    })();
+  `,
+    ],
+    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 30000, env: { ...process.env, ...POISON } },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').pop() ?? ''), { ran: 1, done: true });
+});
+
+test('close() and flush() made from a callback that waited for its turn wait for that callback, as after its first await: awaited there, they never settle', async () => {
+  // Before its first await, a callback the core runs in its drain skips the
+  // wait of a close(); one that waited for its turn behind an earlier
+  // callback's Promise runs outside that drain, so the core waits for it.
+  for (const call of ['close', 'flush']) {
+    const producer = buildMockProducer(false);
+    /** @type {() => void} */
+    let release = () => {};
+    const released = new Promise((resolve) => {
+      release = () => resolve(undefined);
+    });
+    /** @type {string | null} */
+    let seen = null;
+    /** @type {Promise<void> | null} */
+    let made = null;
+    await producer.send({ record: record1, callback: () => released });
+    await producer.send({
+      record: record2,
+      callback: async () => {
+        const calling = call === 'close' ? producer.close() : producer.flush();
+        made = calling;
+        seen = await Promise.race([
+          calling.then(
+            () => 'settled',
+            () => 'settled',
+          ),
+          new Promise((resolve) => setTimeout(() => resolve('pending'), 100)),
+        ]);
+      },
+    });
+    producer.completeNext();
+    producer.completeNext();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(seen, 'pending', `${call}: it waits for the callback that awaits it`);
+    // Once the callback settled, it settles too.
+    assert.ok(made !== null);
+    await made;
+    await cleanup(producer);
+  }
 });
 
 test('flush() over a fast rejection and a slow resolution settles only after both', async () => {
@@ -642,17 +865,30 @@ function blockUntilFlushed(/** @type {MockProducer<unknown, unknown>} */ produce
   assert.equal(producer.flushed(), true, "the core's mock flushed within 5 s");
 }
 
-test('a callback that awaits a nested send() before it fails rejects its own send(), not a later call', async () => {
+test('a callback that fails after a nested send() rejects its own send(), not a later call', async () => {
   for (const nestedFirst of [true, false]) {
     const outerError = new Error('outer');
     const producer = buildMockProducer(true);
     /** @type {Promise<unknown> | null} */
     let nested = null;
+    /** @type {string | null} */
+    let nestedWhileOuterRan = null;
     const outer = producer.send({
       record: record1,
       callback: nestedFirst
         ? async () => {
-            await producer.send(record2);
+            // The nested record's callback waits for its turn behind this
+            // callback's Promise, and its send() for that callback: awaited
+            // here it would never settle. It is still pending when this
+            // callback fails.
+            nested = producer.send(record2);
+            nestedWhileOuterRan = await Promise.race([
+              nested.then(
+                () => 'settled',
+                () => 'settled',
+              ),
+              new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+            ]);
             throw outerError;
           }
         : () => {
@@ -665,6 +901,7 @@ test('a callback that awaits a nested send() before it fails rejects its own sen
     outer.catch(() => {});
     await assert.rejects(outer, (e) => e === outerError);
     if (nested !== null) await nested;
+    if (nestedFirst) assert.equal(nestedWhileOuterRan, 'pending');
     // Nothing was kept for an unrelated call.
     await producer.send(record2);
     await producer.flush();
@@ -718,8 +955,9 @@ test("a completing call made from a callback keeps an earlier callback's throw f
 test("a send() from a callback's synchronous part rejects with its own callback's throw or rejection, as Java's nested send() throws it", async () => {
   // Java's MockProducer#send with autoComplete runs Completion#complete, which
   // calls onCompletion with no try, inside the nested send(). The callback
-  // queue does not nest, so the nested record's callback runs once the outer
-  // callback returned; the nested send() waits for it.
+  // queue does not nest, and the callbacks run one at a time, so the nested
+  // record's callback runs once the outer callback, and the Promise it
+  // returned, settled; the nested send() waits for it.
   for (const shape of ['throws', 'rejects']) {
     for (const outerAwaits of [true, false]) {
       const nestedError = new Error(`nested callback ${shape}`);
@@ -732,25 +970,33 @@ test("a send() from a callback's synchronous part rejects with its own callback'
       const producer = buildMockProducer(true);
       /** @type {Promise<unknown> | null} */
       let nested = null;
-      /** @type {unknown} */
-      let caught = null;
+      /** @type {string | null} */
+      let seenInside = null;
       await producer.send({
         record: record1,
         callback: outerAwaits
           ? async () => {
-              try {
-                await producer.send({ record: record2, callback: nestedCallback });
-              } catch (e) {
-                caught = e;
-              }
+              // Its callback runs in its turn, once this callback's Promise
+              // settled: awaited here, the nested send() would never settle.
+              const sending = producer.send({ record: record2, callback: nestedCallback });
+              nested = sending;
+              sending.catch(() => {});
+              seenInside = await Promise.race([
+                sending.then(
+                  () => 'settled',
+                  () => 'settled',
+                ),
+                new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+              ]);
             }
           : () => {
               nested = producer.send({ record: record2, callback: nestedCallback });
               nested.catch(() => {});
             },
       });
-      if (nested !== null) await assert.rejects(nested, (e) => e === nestedError);
-      else assert.equal(caught, nestedError, `${shape}: the awaited nested send() rejects with its own error`);
+      assert.ok(nested !== null);
+      await assert.rejects(nested, (e) => e === nestedError);
+      if (outerAwaits) assert.equal(seenInside, 'pending', `${shape}: the nested send() waits for the outer callback`);
       // No other call sees it.
       await producer.send(record2);
       await producer.flush();

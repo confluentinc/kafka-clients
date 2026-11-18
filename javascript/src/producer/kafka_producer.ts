@@ -562,16 +562,19 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * serializes. Why: the binding keeps no state, and the conversion runs in
    * JavaScript before the call reaches the core.)*
    *
-   * Inside a callback, before its first `await`, `flush()` of the same
-   * producer is refused, as Java's throws, and `close()` does not wait: it
-   * logs a warning and closes as `close({ timeout: 0 })`, as Java's does,
-   * failing the records still pending with "Producer is closed forcefully.".
-   * After the first `await`, `flush()` and `close()` wait for the callback
-   * itself and can hang, and so does awaiting the callback's own record's
-   * future, which completes only once the callback's Promise settles. A
-   * callback Promise that never settles has no time limit: it holds
-   * its record's future, the callbacks of the records after it, `flush()` and
-   * `close()`, `close({ timeout })` included.
+   * Inside a callback the core runs in its drain, before its first `await`,
+   * `flush()` of the same producer is refused, as Java's throws, and
+   * `close()` does not wait: it logs a warning and closes as
+   * `close({ timeout: 0 })`, as Java's does, failing the records still
+   * pending with "Producer is closed forcefully.". A callback that waited for
+   * its turn behind an earlier callback's Promise runs outside the drain, as
+   * after its first `await`. After the first `await`, `flush()` and `close()`
+   * wait for the callback itself and can hang, and so does awaiting the
+   * future of the callback's own record or of a record sent later, which
+   * completes only once its callback ran. A callback Promise that never
+   * settles has no time limit: it holds its record's future, the callbacks of
+   * the records after it, `flush()` and `close()`, `close({ timeout })`
+   * included.
    */
   send(options: {
     /** The record to send. */
@@ -1000,8 +1003,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    * is released when the producer is garbage collected. `await using` closes
    * a producer at the end of its scope (`[Symbol.asyncDispose]`). Called from
    * a send callback, the override above holds only before the callback's
-   * first `await`: after it, `close()` waits for that callback to settle, so
-   * a callback that awaits it never settles.
+   * first `await`, and only in a callback the core runs in its drain: after
+   * that `await`, or in a callback that waited for its turn behind an earlier
+   * callback's Promise, `close()` waits for that callback to settle, so a
+   * callback that awaits it never settles.
    */
   close(): Promise<void>;
   /**
@@ -1033,10 +1038,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *
    * @remarks A negative `timeout` is rejected by the client, with Java's
    * error, and changes nothing. A callback Promise that never settles holds
-   * the close past its timeout. Called from a callback before its first
-   * `await`, it is `close({ timeout: 0 })` and waits for no callback's
-   * Promise; after that `await`, it waits for the callback it is called from,
-   * so a callback that awaits it never settles.
+   * the close past its timeout. Called from a callback the core runs in its
+   * drain, before its first `await`, it is `close({ timeout: 0 })` and waits
+   * for no callback's Promise; after that `await`, or from a callback that
+   * waited for its turn behind an earlier callback's Promise, it waits for the
+   * callback it is called from, so a callback that awaits it never settles.
    */
   close(options: CloseArgs): Promise<void>;
   /**

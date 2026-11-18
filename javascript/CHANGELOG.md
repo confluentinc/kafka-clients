@@ -100,17 +100,24 @@ newer.
   out of the call that completed the record, as in Java, the record's future
   completing all the same (Java's stays incomplete), and `flush()`
   completing every waiting record before it rejects with the first throw
-  (Java's stops at it). A callback's Promise that rejects is the callback's
-  error too, never logged: `send()` with `autoComplete` waits for it and
-  rejects with it, and `flush()` rejects with it; after `completeNext()` or
-  `errorNext()` it is kept, oldest first, and the next `send()`, `flush()` or
-  `close()` rejects with the oldest, once; `flush()` and `close()` wait for
-  every callback Promise already started, `flush()` completing the waiting
-  records first even with a kept error. Only a record's own `send()` gets its
+  (Java's stops at it). The mock's callbacks run one at a time, in
+  completion order, as the producer's do: one that waits for its turn behind
+  an earlier callback's Promise runs once that settled, after `completeNext()`
+  or `errorNext()` returned, and what it throws is kept as a rejection is,
+  and `clear()` leaves it to run. A callback's Promise that rejects is the
+  callback's error too, never logged: `send()` with `autoComplete` waits for
+  it and rejects with it, and `flush()` rejects with it; after
+  `completeNext()` or `errorNext()` it is kept, oldest first, and the next
+  `send()`, `flush()` or `close()` rejects with the oldest, once; `flush()`
+  and `close()` wait for the callbacks waiting for their turn and every
+  callback Promise already started, `flush()` completing the waiting records
+  first even with a kept error. Only a record's own `send()` gets its
   callback's error, with `autoComplete` a `send()` made from a callback's
-  synchronous part settling after its own callback, which runs once the outer one returns. A
-  `close()` inside a callback, before its first `await`, does not wait for
-  the callbacks, as Python's async mock; after it, `close()` waits for that
+  synchronous part settling after its own callback, which runs in its turn
+  once the outer one settled, so a callback that awaits it never settles. A
+  `close()` inside a callback the core runs in its drain, before its first
+  `await`, does not wait for the callbacks, as Python's async mock; after
+  it, or from a callback that waited for its turn, `close()` waits for that
   callback, and a `flush()` from a callback does too, unless a flush error is
   set, which it rejects with at once, so a callback that awaits either
   otherwise never settles. A serializer's error, an

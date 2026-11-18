@@ -149,7 +149,8 @@ struct SendCtx {
     // completion may never come (Java's mock completes no send at close, and
     // clear() drops the waiting ones), so destroy frees it. Its `on_complete`
     // is weak: the MockProducer holds the function (src/producer/mock_producer.ts
-    // `#pending`), so an unreferenced closed mock is collected and destroyed.
+    // `#pending`), so an unreferenced closed mock is collected and destroyed;
+    // once its callback waits for its turn, it is strong (send_enqueue).
     int mock_pending;
     SendCtx* pend_prev;
     SendCtx* pend_next;
@@ -855,15 +856,23 @@ static int send_defer(napi_env env, SendCtx* ctx, napi_value promise, int64_t ca
 
 // Puts a delivered callback at the end of the run queue, with the
 // RecordMetadata and error it will receive (`argv`), kept in an array the
-// context references until it runs. Returns 0, or -1 when a Node-API call
-// failed (a JS exception may be pending).
+// context references until it runs. A mock's function, weak while src/ holds
+// it (SendCtx.mock_pending), is held strongly from now on: its record
+// completed, so it runs in its turn even once src/ let it go (clear() drops
+// the functions of the sends still waiting), as Java's MockProducer ran the
+// callback of every record it completed. Returns 0, or -1 when a Node-API
+// call failed (a JS exception may be pending).
 static int send_enqueue(napi_env env, SendCtx* ctx, napi_value* argv, int64_t callback_id) {
+    Producer* p = ctx->p;
     napi_value args;
     if (napi_create_array_with_length(env, 2, &args) != napi_ok || napi_set_element(env, args, 0, argv[0]) != napi_ok
         || napi_set_element(env, args, 1, argv[1]) != napi_ok
         || napi_create_reference(env, args, 1, &ctx->q_args) != napi_ok)
         return -1;
-    Producer* p = ctx->p;
+    if (p->mock != NULL && napi_reference_ref(env, ctx->on_complete, NULL) != napi_ok) {
+        delete_ref(env, &ctx->q_args);
+        return -1;
+    }
     ctx->callback_id = callback_id;
     ctx->queued = 1;
     ctx->run_next = NULL;
@@ -943,8 +952,9 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     int turn = ctx->turn;
     ctx->turn = 0;
     mock_pending_unlink(ctx);
-    // A mock's function is held weakly (SendCtx.mock_pending): once its
-    // MockProducer is gone, nothing runs.
+    // A mock's function is held weakly (SendCtx.mock_pending), until it
+    // waits for its turn (send_enqueue): once its MockProducer is gone,
+    // nothing runs.
     napi_value on_complete_fn = NULL;
     if (ctx->on_complete != NULL && napi_get_reference_value(env, ctx->on_complete, &on_complete_fn) != napi_ok) on_complete_fn = NULL;
     if (!p->queue.finalizing && on_complete_fn != NULL) {

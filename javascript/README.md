@@ -294,16 +294,18 @@ number, is awaited too, so the callback that runs next may have waited for
 its turn behind it. A callback that need not be awaited returns nothing:
 `({ exception }) => { ... }`.
 
-Inside a callback, before its first `await`, `flush()` of the same producer
-is refused, as Java's throws, and `close()` does not wait: as Java's, it logs
-a warning and closes as `close({ timeout: 0 })`, failing the records still
-pending with "Producer is closed forcefully.". After the first `await`,
-`flush()` and `close()` wait for the callback itself and can hang, and so
-does awaiting the callback's own record's future, which completes only once
-the callback's Promise settles. A callback Promise that
-never settles has no time limit, as in Java: it holds its record's future,
-the callbacks of the records after it, `flush()` and `close()`,
-`close({ timeout })` included.
+Inside a callback the core runs in its drain, before its first `await`,
+`flush()` of the same producer is refused, as Java's throws, and `close()`
+does not wait: as Java's, it logs a warning and closes as
+`close({ timeout: 0 })`, failing the records still pending with "Producer is
+closed forcefully.". A callback that waited for its turn behind an earlier
+callback's Promise runs once that settled, outside the drain, and is as
+after its first `await`. After the first `await`, `flush()` and `close()`
+wait for the callback itself and can hang, and so does awaiting the future of
+the callback's own record or of a record sent later, each of which completes
+only once its callback ran. A callback Promise that never settles has no time
+limit, as in Java: it holds its record's future, the callbacks of the records
+after it, `flush()` and `close()`, `close({ timeout })` included.
 
 ### Parameters by name
 
@@ -466,28 +468,37 @@ callback runs inside the mock call that completes its record (`send()` with
 throws comes out of that call, as in Java (its record's future still
 completes: Java's would stay incomplete, and `flush()` completes every waiting
 record before it rejects with the first throw, where Java's stops at it).
+The mock's callbacks run one at a time, in completion order, as the
+producer's do: one that waits for its turn behind an earlier callback's
+Promise runs once that settled, after `completeNext()` or `errorNext()`
+returned, and what it throws is kept, as a rejection is.
 A callback's Promise that rejects is the callback's error too, and nothing
 logs it: `send()` with `autoComplete` waits for it and rejects with it, and
 `flush()` rejects with it. After `completeNext()` or `errorNext()`, which
 return before the Promise settles, the error is kept, oldest first, and the
 next `send()`, `flush()` or `close()` rejects with the oldest, once, as
-Python's async mock does. `flush()` and `close()` wait for every callback
-Promise already started, so no error is lost; with a kept error, `flush()`
+Python's async mock does. `flush()` and `close()` wait for the callbacks
+waiting for their turn and every callback Promise already started, so no
+error is lost; with a kept error, `flush()`
 still completes the waiting records and waits for their callbacks before it
 rejects. Only a record's own `send()` gets its callback's error: a `send()`
 made inside a callback, or one that runs callbacks a pending `flush()`
 completed, leaves those errors to their own calls. With `autoComplete`, a
-`send()` made from a callback's synchronous part runs its own callback once that callback
-returns, and settles after it, rejecting with that callback's error, as
-Java's nested `send()` throws it; a `completeNext()` or `errorNext()` made
-there cannot wait, so the next record's callback runs once that callback
-returns and its throw comes out of the outer completing call. A `close()`
-called inside one of the mock's callbacks before its first `await` does not
-wait for the callbacks, as Python's async mock; after that `await`,
+`send()` made from a callback's synchronous part runs its own callback in its
+turn, once that callback and its Promise settled, and settles after it,
+rejecting with that callback's error, as Java's nested `send()` throws it, so
+a callback that awaits it never settles; a `completeNext()` or `errorNext()`
+made there cannot wait, so the next record's callback runs in its turn and
+its throw comes out of the outer completing call, or is kept when none runs
+it. A `close()` called inside one of the mock's callbacks before its first
+`await` does not wait for the callbacks, as Python's async mock, but only
+from a callback the core runs in its drain: one that waited for its turn is
+as after that `await`. After that `await`,
 `close()` waits for that callback, and a `flush()` from a callback does
 too, unless a flush error is set, which it rejects with at once, as Java's;
 so a callback that awaits either otherwise never settles (`KafkaProducer`
-refuses a `flush()` made before the first `await`).
+refuses a `flush()` made before the first `await`, from a callback the core
+runs in its drain).
 Java's public error fields are
 setters, and each call throws the very error it was given:
 
