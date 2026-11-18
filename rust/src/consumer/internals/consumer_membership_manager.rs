@@ -13,11 +13,13 @@
 // limitations under the License.
 
 //! `ConsumerMembershipManager` — KIP-848 consumer-group membership
-//! manager. Composes [`super::AbstractMembershipManager`]
-//! and supplies the Consumer-specific configuration (group instance
-//! ID, server assignor, rack ID), and the §31 reconcile pipeline
-//! (synchronous: it enqueues rebalance-listener callbacks and parks on
-//! their acks across background-loop iterations instead of awaiting them).
+//! manager. Composes [`super::AbstractMembershipManager`], which holds the
+//! group-agnostic state machine and the §31 reconcile chain
+//! ([`super::AbstractMembershipManager::maybe_reconcile`]), and supplies the
+//! Consumer-specific configuration (group instance ID, server assignor, rack
+//! ID) and the [`super::MembershipManagerHooks`] overrides: the
+//! rebalance-listener callback enqueues, the auto-commit before the
+//! rebalance, and the `PartitionsAssigned` event.
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager`.
