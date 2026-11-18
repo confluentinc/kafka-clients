@@ -383,6 +383,8 @@ impl Translator<'_> {
         let mut cur = String::new();
         let mut open = Open::Para;
         let mut lists: Vec<(bool, usize)> = Vec::new();
+        // The `href` of each open `<a>`, `None` for an anchor without one.
+        let mut links: Vec<Option<String>> = Vec::new();
         // The rows of the `<table>` being read, and whether a cell is open.
         let mut table: Option<Vec<Vec<String>>> = None;
         let mut in_cell = false;
@@ -463,12 +465,24 @@ impl Translator<'_> {
                         "li" | "dt" | "dd" => {
                             flush(&mut cur, &mut open, &mut out);
                             if !closing {
+                                // A nested list is indented under its parent item's text.
+                                let depth = lists.len().saturating_sub(1);
+                                let outer: String = lists[..depth]
+                                    .iter()
+                                    .map(|(ordered, n)| {
+                                        if *ordered {
+                                            " ".repeat(format!("{n}. ").len())
+                                        } else {
+                                            "  ".into()
+                                        }
+                                    })
+                                    .collect();
                                 let marker = match lists.last_mut() {
                                     Some((true, n)) => {
                                         *n += 1;
-                                        format!("{n}. ")
+                                        format!("{outer}{n}. ")
                                     },
-                                    _ => "- ".to_string(),
+                                    _ => format!("{outer}- "),
                                 };
                                 open = Open::Item(marker);
                             }
@@ -487,6 +501,20 @@ impl Translator<'_> {
                             let after = &body[close..];
                             i += end + close + after.find('>').map_or(after.len(), |g| g + 1);
                             continue;
+                        },
+                        // `<a href="u">t</a>` as the Markdown link `[t](u)`; an
+                        // anchor without `href` keeps its text only.
+                        "a" if !closing => {
+                            let href = attribute(&rest[..end], "href");
+                            if href.is_some() {
+                                cur.push('[');
+                            }
+                            links.push(href);
+                        },
+                        "a" => {
+                            if let Some(Some(href)) = links.pop() {
+                                cur.push_str(&format!("]({href})"));
+                            }
                         },
                         "b" | "strong" => cur.push_str("**"),
                         "i" | "em" => cur.push('*'),
@@ -708,6 +736,20 @@ fn html_tag(s: &str) -> Option<(String, bool, usize)> {
         .collect::<String>()
         .to_ascii_lowercase();
     Some((name, closing, end + 1))
+}
+
+/// The value of attribute `name` in HTML start tag `tag` (`<a href="u">`).
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(&format!("{name}="))? + name.len() + 1;
+    let rest = &tag[at..];
+    let quote = rest.chars().next()?;
+    let value = if quote == '"' || quote == '\'' {
+        &rest[1..rest[1..].find(quote)? + 1]
+    } else {
+        rest.split(|c: char| c.is_whitespace() || c == '>').next()?
+    };
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// The HTML entity at the start of `s`, decoded, and its length.
@@ -1082,6 +1124,15 @@ mod tests {
             "Either:\n\n- a\n- b\n\nAfter."
         );
         assert_eq!(rustdoc("<ol><li>first<li>second</ol>"), "1. first\n2. second");
+        // A nested list is indented under its parent item; a link keeps its target.
+        assert_eq!(
+            rustdoc("<ul><li>a<ol><li>x</li><li>y</li></ol></li><li>b</li></ul>"),
+            "- a\n  1. x\n  2. y\n- b"
+        );
+        assert_eq!(
+            rustdoc("See <a href=\"https://kafka.apache.org/x\">the docs</a> and <a name=\"n\">here</a>."),
+            "See [the docs](https://kafka.apache.org/x) and here."
+        );
         // An `<li>` outside any list (`ProducerRecord`'s class doc) is a bullet.
         assert_eq!(rustdoc("Cases:\n<li>one</li>\n<li>two</li>"), "Cases:\n\n- one\n- two");
     }
@@ -1214,7 +1265,7 @@ mod tests {
     fn test_see_tag() {
         assert_eq!(
             rustdoc("Body.\n@see #close()\n@see KafkaConsumer#poll(Duration) polling\n@see \"The docs\"\n@see <a href=\"https://kafka.apache.org\">Kafka</a>"),
-            "Body.\n\n# See also\n\n- `Self::close`\n- polling\n- The docs\n- Kafka"
+            "Body.\n\n# See also\n\n- `Self::close`\n- polling\n- The docs\n- [Kafka](https://kafka.apache.org)"
         );
     }
 

@@ -1,0 +1,58 @@
+{
+  ".": {
+    "types": "./dist/index.d.ts",
+    "default": "./dist/index.js"
+  },
+  "./common": {
+    "types": "./dist/common/index.d.ts",
+    "default": "./dist/common/index.js"
+  },
+  "./common/config": {
+    "types": "./dist/common/config/index.d.ts",
+    "default": "./dist/common/config/index.js"
+  },
+  "./common/errors": {
+    "types": "./dist/common/errors/index.d.ts",
+    "default": "./dist/common/errors/index.js"
+  },
+  "./common/header": {
+    "types": "./dist/common/header/index.d.ts",
+    "default": "./dist/common/header/index.js"
+  },
+  "./common/metrics": {
+    "types": "./dist/common/metrics/index.d.ts",
+    "default": "./dist/common/metrics/index.js"
+  },
+  "./common/network": {
+    "types": "./dist/common/network/index.d.ts",
+    "default": "./dist/common/network/index.js"
+  },
+  "./common/protocol": {
+    "types": "./dist/common/protocol/index.d.ts",
+    "default": "./dist/common/protocol/index.js"
+  },
+  "./common/protocol/types": {
+    "types": "./dist/common/protocol/types/index.d.ts",
+    "default": "./dist/common/protocol/types/index.js"
+  },
+  "./common/requests": {
+    "types": "./dist/common/requests/index.d.ts",
+    "default": "./dist/common/requests/index.js"
+  },
+  "./common/security": {
+    "types": "./dist/common/security/index.d.ts",
+    "default": "./dist/common/security/index.js"
+  },
+  "./common/security/auth": {
+    "types": "./dist/common/security/auth/index.d.ts",
+    "default": "./dist/common/security/auth/index.js"
+  },
+  "./consumer": {
+    "types": "./dist/consumer/index.d.ts",
+    "default": "./dist/consumer/index.js"
+  },
+  "./producer": {
+    "types": "./dist/producer/index.d.ts",
+    "default": "./dist/producer/index.js"
+  }
+}
