@@ -397,6 +397,19 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
     ///
     /// Java: `protected CompletableFuture<Void> signalPartitionsLost(Set<TopicPartition>)`,
     /// whose base body returns `CompletableFuture.completedFuture(null)`.
+    /// Signals that the member is leaving the group so that group-type actions
+    /// can run (the consumer releases its assignment through
+    /// `onPartitionsRevoked` / `onPartitionsLost`). Returns the ack the leave
+    /// waits on before clearing the assignment, or `None` (Java's completed
+    /// future).
+    ///
+    /// Java: `protected CompletableFuture<Void> signalMemberLeavingGroup()`,
+    /// whose base body returns `CompletableFuture.completedFuture(null)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#signalMemberLeavingGroup")]
+    fn signal_member_leaving_group(&self, _current_time_ms: i64) -> Result<Option<SignalAck>, Error> {
+        Ok(None)
+    }
+
     /// Signals that reconciliation has started so that group-type actions can
     /// run (the consumer's auto-commit before the rebalance). Returns the ack
     /// the reconciliation waits on before revoking, or `None` (Java's
@@ -633,6 +646,21 @@ pub(crate) struct AbstractMembershipManager {
     /// drive does a single atomic load and skips the `pending_release` mutex
     /// when no release callback is in flight.
     pending_release_flag: std::sync::atomic::AtomicBool,
+    /// The ack of the release callback an `unsubscribe()` leave enqueued
+    /// ([`MembershipManagerHooks::signal_member_leaving_group`]), while the member waits in
+    /// `PREPARE_LEAVING` for it. Java chains `clearAssignmentAndLeaveGroup()`
+    /// on that callback's future with `whenComplete`, which runs on the
+    /// network thread when the callback-completed event is processed — i.e.
+    /// serialized with the heartbeat manager's poll. The app side returns
+    /// this ack inside that same event, and the processor drives this slot
+    /// when it reaches it (`ConsumerMembershipManager::consumer_rebalance_listener_callback_completed`),
+    /// before any request manager polls, so `PREPARE_LEAVING -> LEAVING`
+    /// keeps the event's queue position and can never land in the middle of
+    /// a heartbeat build.
+    pending_leave_callback: Mutex<Option<SignalAck>>,
+    /// Lock-free mirror of `pending_leave_callback.is_some()`, so the
+    /// steady-state bg loop pays one atomic load.
+    pending_leave_callback_flag: std::sync::atomic::AtomicBool,
 }
 
 impl AbstractMembershipManager {
@@ -683,6 +711,8 @@ impl AbstractMembershipManager {
             pending_reconcile_flag: std::sync::atomic::AtomicBool::new(false),
             pending_release: Mutex::new(None),
             pending_release_flag: std::sync::atomic::AtomicBool::new(false),
+            pending_leave_callback: Mutex::new(None),
+            pending_leave_callback_flag: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2555,6 +2585,287 @@ impl AbstractMembershipManager {
             self.mark_reconciliation_completed();
         }
         Ok(())
+    }
+
+    /// Transition to `PREPARE_LEAVING`, then to `LEAVING` once the assignment
+    /// is released, and set the membership operation to perform on close.
+    /// Invoked by `Consumer::close(...)`.
+    ///
+    /// Returns the future that completes when the leave operation completes
+    /// (see [`Self::leave_group_with_run_callbacks`]). It runs no rebalance
+    /// callbacks, so the whole operation up to `LEAVING` is synchronous.
+    ///
+    /// Java: `AbstractMembershipManager.leaveGroupOnClose(GroupMembershipOperation)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroupOnClose")]
+    pub(crate) fn leave_group_on_close<H: MembershipManagerHooks>(
+        &self,
+        hooks: &H,
+        membership_operation: GroupMembershipOperation,
+        current_time_ms: i64,
+    ) -> Result<KafkaFutureImpl<()>, Error> {
+        self.set_leave_group_operation(membership_operation);
+        self.leave_group_with_run_callbacks(hooks, false, current_time_ms)
+    }
+
+    /// Transition to `PREPARE_LEAVING` to release the assignment, then to
+    /// `LEAVING` to send the heartbeat that leaves the group. Invoked by
+    /// `Consumer::unsubscribe()`. Runs the rebalance callbacks (see
+    /// [`Self::leave_group_with_run_callbacks`]).
+    ///
+    /// Java: `AbstractMembershipManager.leaveGroup()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroup")]
+    pub(crate) fn leave_group<H: MembershipManagerHooks>(
+        &self,
+        hooks: &H,
+        current_time_ms: i64,
+    ) -> Result<KafkaFutureImpl<()>, Error> {
+        self.leave_group_with_run_callbacks(hooks, true, current_time_ms)
+    }
+
+    /// Java: `AbstractMembershipManager.leaveGroup(boolean runCallbacks)`.
+    /// The shared body of `leave_group` / `leave_group_on_close`, run
+    /// synchronously on the background task, as Java runs it inside
+    /// `ApplicationEventProcessor.process(...)` on the network thread — so the
+    /// heartbeat manager's poll in the same `run_once` already sees the member
+    /// leaving and builds the leave heartbeat.
+    ///
+    /// 1. Not in the group: clear and unsubscribe (no heartbeat needed;
+    ///    `FENCED` is reset to `UNSUBSCRIBED` after clearing the assignment)
+    ///    and return an already completed future.
+    /// 2. Already leaving (`PREPARE_LEAVING` / `LEAVING`): return the existing
+    ///    leave-in-progress future, which completes when the ongoing leave
+    ///    operation completes.
+    /// 3. Otherwise transition to `PREPARE_LEAVING` and store a new
+    ///    leave-in-progress future. With `run_callbacks`, enqueue the
+    ///    callback releasing the assignment
+    ///    ([`MembershipManagerHooks::signal_member_leaving_group`]). If one was enqueued, its
+    ///    ack is stored for the bg loop, which runs
+    ///    `clear_assignment_and_leave_group` once the ack arrives
+    ///    ([`Self::drive_pending_leave_callback`]; Java chains that step with
+    ///    `callbackResult.whenComplete(...)`); otherwise the member clears its
+    ///    assignment and moves to `LEAVING` right here.
+    ///
+    /// The returned future completes only through
+    /// `maybe_complete_leave_in_progress()`: when the response to the leave
+    /// heartbeat is received (success or failure), when the leave heartbeat
+    /// could not be sent, or when the member is fenced or fails while
+    /// leaving. Rust returns the completable handle so the caller can chain
+    /// the event completion with `when_complete`, mirroring Java's
+    /// `future.whenComplete(complete(event.future()))`; callers never
+    /// complete it themselves.
+    fn leave_group_with_run_callbacks<H: MembershipManagerHooks>(
+        &self,
+        hooks: &H,
+        run_callbacks: bool,
+        current_time_ms: i64,
+    ) -> Result<KafkaFutureImpl<()>, Error> {
+        // Step 1: already-out-of-group fast path.
+        let pre_state = self.state();
+        if matches!(
+            pre_state,
+            MemberState::Unsubscribed | MemberState::Fenced | MemberState::Fatal | MemberState::Stale
+        ) {
+            if pre_state == MemberState::Fenced {
+                self.clear_assignment();
+                let mut guard = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.transition_to(MemberState::Unsubscribed)?;
+            }
+            {
+                let mut subs = match self.subscriptions.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                subs.unsubscribe();
+            }
+            {
+                let guard = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.notify_assignment_change(&std::collections::HashSet::new());
+            }
+            let completed = KafkaFutureImpl::new();
+            completed.complete(());
+            return Ok(completed);
+        }
+
+        // Steps 2 and 3 under one guard, so the state check, the transition
+        // and the future registration are atomic with respect to the
+        // completion sites (which take the future under the same guard).
+        let leave_result = {
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if matches!(guard.state, MemberState::PrepareLeaving | MemberState::Leaving) {
+                // Member already leaving. No-op and return the existing leave
+                // group future that will complete when the ongoing leave
+                // operation completes.
+                log::debug!("Leave group operation already in progress for member {}", guard.member_id);
+                // Deviation: Java's `leaveGroupInProgress.get()` throws
+                // `NoSuchElementException` when the member is leaving with no
+                // future registered. This is reachable when an invalid-epoch
+                // heartbeat response arrives while the member is
+                // PREPARE_LEAVING: `onHeartbeatSuccess` takes and completes the
+                // future but the state stays PREPARE_LEAVING, so a second
+                // `unsubscribe()` or a `close()` lands here. Java 4.4's
+                // `ConsumerNetworkThread.processApplicationEvents` catches the
+                // throwable and fails the event at once (`unsubscribe()` then
+                // throws a `KafkaException`; `close()` logs "Failed to leave
+                // group while closing consumer"). Rust deliberately registers a
+                // fresh future instead, so the caller waits for the ongoing
+                // leave to end and then succeeds.
+                let in_progress = guard.leave_group_in_progress.get_or_insert_with(KafkaFutureImpl::new);
+                return Ok(in_progress.clone());
+            }
+            guard.transition_to(MemberState::PrepareLeaving)?;
+            let leave_result = KafkaFutureImpl::new();
+            guard.leave_group_in_progress = Some(leave_result.clone());
+            leave_result
+        };
+
+        if run_callbacks {
+            match hooks.signal_member_leaving_group(current_time_ms) {
+                Ok(Some(ack_rx)) => {
+                    self.store_pending_leave_callback(ack_rx);
+                    return Ok(leave_result);
+                },
+                Ok(None) => {
+                    log::info!(
+                        "Member {} completed callback to release assignment. It will proceed to clear \
+                         its assignment and send a leave group heartbeat",
+                        self.member_id()
+                    );
+                },
+                Err(e) => {
+                    log::error!(
+                        "Member {} callback to release assignment failed. It will proceed to clear its \
+                         assignment and send a leave group heartbeat: {}",
+                        self.member_id(),
+                        e
+                    );
+                },
+            }
+        } else {
+            log::debug!(
+                "Member {} attempting to leave has no rebalance callbacks, so it will clear assignments \
+                 and transition to send heartbeat to leave group.",
+                self.member_id()
+            );
+        }
+        self.clear_assignment_and_leave_group(hooks)?;
+
+        // Return future to indicate that the leave group is done when the
+        // callbacks complete, and the transition to send the heartbeat has
+        // been made.
+        Ok(leave_result)
+    }
+
+    /// `true` while an `unsubscribe()` leave waits in `PREPARE_LEAVING` for
+    /// its release callback's ack. Lock-free.
+    pub(crate) fn has_pending_leave_callback(&self) -> bool {
+        self.pending_leave_callback_flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A second leave can only store over an older, still-pending ack after
+    /// the first leave ended without it (fenced or failed while
+    /// PREPARE_LEAVING, then rejoined). Replacing it drops only that stale
+    /// clear-and-leave step — the first leave's future was already completed
+    /// by the fence / fatal transition. Java would still run the stale step
+    /// and move the new leave to LEAVING before its own callback ran.
+    fn store_pending_leave_callback(&self, ack_rx: SignalAck) {
+        let mut guard = match self.pending_leave_callback.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some(ack_rx);
+        self.pending_leave_callback_flag
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The step Java chains on the leave callback with
+    /// `callbackResult.whenComplete(...)` in `leaveGroup(boolean)`: once the
+    /// ack of the callback [`Self::leave_group`] enqueued has arrived, clear
+    /// the assignment and transition to `LEAVING`, whether the callback failed
+    /// or succeeded. While the ack is pending this is a no-op (`try_recv`, no
+    /// await), so the bg loop keeps spinning (§31).
+    ///
+    /// The app side returns the ack inside a
+    /// `ConsumerRebalanceListenerCallbackCompleted` application event, and
+    /// the processor drives this right after completing it
+    /// (`ConsumerMembershipManager::consumer_rebalance_listener_callback_completed`) — where
+    /// Java runs the `whenComplete`, on the network thread while processing
+    /// the callback-completed event. That is in Phase 1 of `run_once`, before
+    /// the request managers poll, so the heartbeat manager's poll in the same
+    /// iteration builds the leave heartbeat. The bg loop also drives it
+    /// around each drained event, which only matters for an ack dropped with
+    /// no completed event to carry it (the callback event was dropped before
+    /// the app ran the listener, or processing the completed event panicked):
+    /// the ack then reads as closed. An error-completed ack — e.g. the
+    /// interrupt error sent when the caller's future was dropped mid-listener
+    /// — still clears the assignment and leaves, as Java's `whenComplete`
+    /// does on error.
+    pub(crate) fn drive_pending_leave_callback<H: MembershipManagerHooks>(&self, hooks: &H) -> Result<(), Error> {
+        let pending = {
+            let mut guard = match self.pending_leave_callback.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            self.pending_leave_callback_flag
+                .store(false, std::sync::atomic::Ordering::Release);
+            guard.take()
+        };
+        let Some(mut ack_rx) = pending else {
+            return Ok(());
+        };
+        match ack_rx.try_recv() {
+            Ok(Ok(())) => log::info!(
+                "Member {} completed callback to release assignment. It will proceed to clear its \
+                 assignment and send a leave group heartbeat",
+                self.member_id()
+            ),
+            Ok(Err(e)) => log::error!(
+                "Member {} callback to release assignment failed. It will proceed to clear its \
+                 assignment and send a leave group heartbeat: {}",
+                self.member_id(),
+                e
+            ),
+            Err(oneshot::error::TryRecvError::Closed) => log::error!(
+                "Member {} callback to release assignment failed. It will proceed to clear its \
+                 assignment and send a leave group heartbeat: rebalance listener ack receiver \
+                 dropped before completion",
+                self.member_id()
+            ),
+            Err(oneshot::error::TryRecvError::Empty) => {
+                // Ack not ready — keep waiting (the loop continues).
+                self.store_pending_leave_callback(ack_rx);
+                return Ok(());
+            },
+        }
+        // Clear the assignment, no matter if the callback execution failed or
+        // succeeded.
+        self.clear_assignment_and_leave_group(hooks)
+    }
+
+    /// Java: `AbstractMembershipManager.clearAssignmentAndLeaveGroup()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#clearAssignmentAndLeaveGroup")]
+    fn clear_assignment_and_leave_group<H: MembershipManagerHooks>(&self, hooks: &H) -> Result<(), Error> {
+        {
+            let mut subs = match self.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.unsubscribe();
+        }
+        self.clear_assignment();
+
+        // Transition to ensure that a heartbeat request is sent out to
+        // effectively leave the group (even in the case where the member had
+        // no assignment to release or when the callback execution failed.)
+        self.transition_to_sending_leave_group(hooks.leave_group_epoch(), false)
     }
 
     /// Java: `onHeartbeatFailure(boolean retriable)` shared bookkeeping.
