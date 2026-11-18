@@ -90,8 +90,20 @@ async function main() {
   }
   console.log('deep imports fail');
 
-  // The one addon loaded is the platform package's.
-  const addons = Object.keys(require.cache).filter((file) => file.endsWith('.node'));
+  // The one addon loaded is the platform package's. The client loads it with
+  // process.dlopen, an instance of each copy of the package's own, which no
+  // require() cache lists: the process's shared objects do (the report's
+  // network section excluded, so no DNS lookup can block it), as in
+  // package-smoke.js.
+  const previous = process.report.excludeNetwork;
+  let objects;
+  try {
+    process.report.excludeNetwork = true;
+    objects = process.report.getReport().sharedObjects;
+  } finally {
+    process.report.excludeNetwork = previous;
+  }
+  const addons = objects.filter((file) => file.endsWith('.node'));
   assert.equal(addons.length, 1, `the addons loaded are ${addons}`);
   const platformDir = path.dirname(fs.realpathSync(addons[0]));
   assert.equal(path.basename(addons[0]), ADDON);

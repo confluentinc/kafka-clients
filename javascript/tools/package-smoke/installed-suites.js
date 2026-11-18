@@ -34,7 +34,7 @@
 //     package, which Node finds in <project>/node_modules.
 // Then Jest runs the unit and typing projects there. One test is left out,
 // as it asserts the repository's own build: "this checkout loads its
-// development build".
+// development build, as an instance of its own".
 //
 // Usage: node installed-suites.js --project <dir>
 // It exits with Jest's status.
@@ -52,7 +52,7 @@ const REPO = path.dirname(JS);
 const COPIED = ['test', 'scripts', 'grpc-server', 'verifiable_clients', 'examples', 'jest.config.cjs', 'tsconfig.json'];
 // Neither copied nor linked: the repository's build and its addon.
 const LEFT_OUT = ['dist', 'native', 'build', 'node_modules', 'package.json', 'package-lock.json'];
-const REPOSITORY_ONLY = ['this checkout loads its development build'];
+const REPOSITORY_ONLY = ['this checkout loads its development build, as an instance of its own'];
 
 /**
  * @param {string[]} argv the arguments
