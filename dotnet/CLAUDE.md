@@ -1273,10 +1273,14 @@ concurrent-access null — the producer ABI documents none, it takes the core `M
 so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
 producer metrics only, none of Java's network-client metrics: no connection, request, I/O or
 authentication metrics, no per-node metrics and no `app-info` *(recorded gap; Python's binding
-returns the same set. Why: the core registers none of them. Goes when: the core does)*) and the two
-metric-subscription methods. `BeginTransaction` is not on this list: it waits while the core drains
+returns the same set. Why: the core registers none of them. Goes when: the core does)*).
+`BeginTransaction` is not on this list: it waits while the core drains
 the queued sends, so it is a `Task` on `IAsyncProducer` (§4 **Producer transactions**).
-Everything else is async.
+Everything else is async. Java's three KIP-714 members, `clientInstanceId(Duration)`,
+`registerMetricForSubscription(KafkaMetric)` and `unregisterMetricFromSubscription(KafkaMetric)`,
+are on neither the producer nor the consumer, sync or async *(recorded gap, as Python's, whose
+producer module lists the three as not generated. Why: the C ABI has no entry point for them. Goes
+when: it has)*.
 
 ⚠ **`Seek` / `CurrentLag` (M19/P1, decision 22, ledger 103).** Both block in Java (an
 `addAndGet` event round-trip). `IAsyncConsumer.Seek` returns a `Task` over `seek_*_cb`, as
