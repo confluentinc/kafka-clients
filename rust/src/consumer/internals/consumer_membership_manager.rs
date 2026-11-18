@@ -36,7 +36,6 @@ use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::GroupMembershipOperation;
 use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-#[cfg(test)]
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
 
@@ -425,6 +424,98 @@ impl ConsumerMembershipManager {
         self.drive_pending_leave_callback()
     }
 
+    /// Enqueues the §31 `RebalanceListenerCallbackNeeded` event and
+    /// returns the ack [`oneshot::Receiver`] **without awaiting it**
+    /// (Phase 41b), so the caller (the bg loop's `reconcile`, a release
+    /// transition, or a leave) can store it and return — leaving the loop free to keep spinning while the app side
+    /// runs the listener. Returns `Ok(None)` when no listener is
+    /// registered (Java's `subscriptions.rebalanceListener().isPresent()`
+    /// guard), in which
+    /// case the caller proceeds as if the callback completed successfully.
+    ///
+    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
+    /// behind the listener-presence checks of
+    /// `ConsumerMembershipManager#invokeOnPartitions{Revoked,Lost}Callback`.
+    ///
+    /// `MutexGuard`s are never held across an `.await` (this method does
+    /// not await at all).
+    fn enqueue_rebalance_callback(
+        &self,
+        method: ConsumerRebalanceListenerMethodName,
+        partitions: Vec<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
+        self.enqueue_rebalance_callback_with_ack_through_application_events(method, partitions, false, current_time_ms)
+    }
+
+    /// [`Self::enqueue_rebalance_callback`] for the callback a leave
+    /// enqueues, with `ack_through_application_events` set on the event
+    /// (see [`BackgroundEvent::PartitionsRemoved`]): the app side returns the
+    /// ack through the application-event queue, so it takes effect in FIFO
+    /// order with the events the listener submitted.
+    fn enqueue_rebalance_callback_with_ack_through_application_events(
+        &self,
+        method: ConsumerRebalanceListenerMethodName,
+        partitions: Vec<TopicPartition>,
+        ack_through_application_events: bool,
+        current_time_ms: i64,
+    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
+        let listener_present = {
+            let subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.rebalance_listener().is_some()
+        };
+        if !listener_present {
+            return Ok(None);
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        let event = BackgroundEvent::PartitionsRemoved {
+            method_name: method,
+            partitions,
+            ack: ack_tx,
+            ack_through_application_events,
+        };
+        self.abstract_mm.background_event_handler.add(event, current_time_ms)?;
+        Ok(Some(ack_rx))
+    }
+
+    /// Enqueue a [`BackgroundEvent::PartitionsAssigned`] to the app thread
+    /// and return the ack [`oneshot::Receiver`] **without awaiting it**
+    /// (AK 4.3.1, KAFKA-20106).
+    ///
+    /// Unlike [`Self::enqueue_rebalance_callback`], there is NO
+    /// listener-present short-circuit: the event is sent even when no
+    /// listener is registered, because the app side must ALWAYS apply the
+    /// new assignment to the subscription state within `poll()` (via an
+    /// `ApplyAssignmentEvent`) so `consumer.assignment()` changes only there.
+    /// The app side completes the ack after applying the assignment and,
+    /// if a listener exists, running `on_partitions_assigned`.
+    ///
+    /// Java: `ConsumerMembershipManager.enqueuePartitionsAssignedEvent(
+    /// fullAssignment, addedPartitions)` →
+    /// `signalPartitionsAssigned(assignedPartitions, addedPartitions)`.
+    ///
+    /// `MutexGuard`s are never held across an `.await` (this method does
+    /// not await at all).
+    fn enqueue_partitions_assigned_event(
+        &self,
+        assigned_partitions: Vec<TopicPartition>,
+        added_partitions: Vec<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        let event = BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack: ack_tx };
+        self.abstract_mm.background_event_handler.add(event, current_time_ms)?;
+        log::debug!(
+            "The event to update the new assignment and trigger onPartitionsAssigned callback if \
+             needed has been enqueued successfully to be sent to the app thread."
+        );
+        Ok(ack_rx)
+    }
+
     /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)` (inherited
     /// from `AbstractMembershipManager`).
     pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
@@ -544,7 +635,7 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         // The ack travels back through the application-event queue (Java's
         // `ConsumerRebalanceListenerCallbackCompletedEvent`), so the step
         // chained on it runs after every event the listener submitted.
-        self.abstract_mm.enqueue_rebalance_callback_with_ack_through_application_events(
+        self.enqueue_rebalance_callback_with_ack_through_application_events(
             method,
             dropped_partitions,
             true,
@@ -584,7 +675,7 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         partitions_revoked: Vec<TopicPartition>,
         current_time_ms: i64,
     ) -> Result<Option<SignalAck>, Error> {
-        self.abstract_mm.enqueue_rebalance_callback(
+        self.enqueue_rebalance_callback(
             ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             partitions_revoked,
             current_time_ms,
@@ -602,8 +693,7 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         added_partitions: Vec<TopicPartition>,
         current_time_ms: i64,
     ) -> Result<Option<SignalAck>, Error> {
-        self.abstract_mm
-            .enqueue_partitions_assigned_event(assigned_partitions, added_partitions, current_time_ms)
+        self.enqueue_partitions_assigned_event(assigned_partitions, added_partitions, current_time_ms)
             .map(Some)
     }
 
@@ -644,7 +734,7 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
                 log::warn!("mark_pending_revocation failed for lost partitions: {}", e);
             }
         }
-        self.abstract_mm.enqueue_rebalance_callback(
+        self.enqueue_rebalance_callback(
             ConsumerRebalanceListenerMethodName::OnPartitionsLost,
             partitions,
             current_time_ms,
