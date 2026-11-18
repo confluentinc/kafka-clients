@@ -14,6 +14,15 @@ export class ConfigError extends KafkaError {
         name?: never;
     });
     constructor(message: string | null);
+    constructor(options: {
+        name: string; /** Java's `Object value`. */
+        value: unknown;
+    });
+    constructor(options: {
+        name: string; /** Java's `Object value`. */
+        value: unknown; /** The message; `null` reads as `''`. */
+        message: string | null;
+    });
 }
 
 // @public

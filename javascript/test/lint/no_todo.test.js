@@ -16,7 +16,6 @@
 
 // H1 check-no-todo (scripts/lint/rules/no_todo.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const path = require('node:path');
@@ -30,7 +29,7 @@ test('a clean project passes, every file counted', () => {
     ...CLAUDE_MD,
     'src/a.ts': 'export const a = 1;\n',
     'native/a.c': 'int a;\n',
-    'Makefile': 'all:\n',
+    Makefile: 'all:\n',
     'release/notes.txt': 'done\n',
     'node_modules/x/y.js': `// ${TODO_MARK} in a dependency\n`,
   });
@@ -45,7 +44,7 @@ test('each marker is a finding with its file and line, in code, comments and str
     'src/a.ts': `export const a = 1;\n// ${TODO_MARK}: later\nconst s = '${FIXME_MARK}';\n`,
     'tools/t.js': `x(); /* ${FIXME_MARK} */\n`,
     'examples/e.js': `// ${TODO_MARK}S and ${TODO_MARK}x are not the marker; a${TODO_MARK} neither\n`,
-    'Makefile': `# ${TODO_MARK}\n`,
+    Makefile: `# ${TODO_MARK}\n`,
   });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 1);
@@ -127,7 +126,10 @@ test("CLAUDE.md's rule sentence is exempt, wherever it wraps; any other marker o
   let r = lint(project({ 'CLAUDE.md': claude, 'src/a.ts': 'export {};\n' }), [RULE]);
   assert.equal(r.status, 0, r.text);
   assert.ok(r.out.includes('✅ check-no-todo: 2 item(s) checked'), r.text);
-  r = lint(project({ 'CLAUDE.md': `${claude}\n${TODO_MARK}: write this section.\n`, 'src/CLAUDE.md': `No ${TODO_MARK} or ${FIXME_MARK}.\n` }), [RULE]);
+  r = lint(
+    project({ 'CLAUDE.md': `${claude}\n${TODO_MARK}: write this section.\n`, 'src/CLAUDE.md': `No ${TODO_MARK} or ${FIXME_MARK}.\n` }),
+    [RULE],
+  );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     `CLAUDE.md:6: \`${TODO_MARK}\` marker: finish the work or delete the note`,

@@ -18,7 +18,6 @@
 // .js and .d.ts starts with its source's licence header, the source maps
 // shifted to match, and a source without the header fails the build.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -61,6 +60,10 @@ const OPENJDK = [
   '// questions.',
 ];
 
+/**
+ * @param {Array<string>} sourceHeader
+ * @returns {string}
+ */
 function fixture(sourceHeader) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dist-headers-'));
   fs.mkdirSync(path.join(dir, 'src'));
@@ -73,6 +76,7 @@ function fixture(sourceHeader) {
   return dir;
 }
 
+/** @param {string} dir */
 const run = (dir) => spawnSync(process.execPath, [SCRIPT, path.join(dir, 'src'), path.join(dir, 'dist')], { encoding: 'utf8' });
 
 test('the header goes first in the .js and the .d.ts, and the maps follow it', () => {
@@ -80,7 +84,7 @@ test('the header goes first in the .js and the .d.ts, and the maps follow it', (
   try {
     const r = run(dir);
     assert.equal(r.status, 0, r.stderr);
-    const read = (f) => fs.readFileSync(path.join(dir, 'dist', f), 'utf8');
+    const read = (/** @type {string} */ f) => fs.readFileSync(path.join(dir, 'dist', f), 'utf8');
     assert.equal(read('a.js'), [...HEADER, '"use strict";', 'exports.a = 1;', ''].join('\n'));
     assert.equal(read('a.d.ts'), [...HEADER, 'export declare const a = 1;', ''].join('\n'));
     assert.equal(JSON.parse(read('a.js.map')).mappings, `${'B;'.repeat(13)}A;C`);
@@ -100,7 +104,7 @@ test("OpenJDK's header, which the root allows for a translation from OpenJDK, go
     try {
       const r = run(dir);
       assert.equal(r.status, 0, r.stderr);
-      const read = (f) => fs.readFileSync(path.join(dir, 'dist', f), 'utf8');
+      const read = (/** @type {string} */ f) => fs.readFileSync(path.join(dir, 'dist', f), 'utf8');
       assert.equal(read('a.js'), [...header, '"use strict";', 'exports.a = 1;', ''].join('\n'));
       assert.equal(read('a.d.ts'), [...header, 'export declare const a = 1;', ''].join('\n'));
       assert.equal(JSON.parse(read('a.js.map')).mappings, `${'B;'.repeat(header.length)}A;C`);

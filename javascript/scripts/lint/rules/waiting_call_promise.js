@@ -45,9 +45,7 @@ const { nativeUses, reachedBodies } = require('../native_uses');
  * returns at once, so theirs does. Each with its reason; an entry that
  * matches nothing is a finding.
  */
-const DEPENDANTS = [
-  { key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" },
-];
+const DEPENDANTS = [{ key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" }];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */
 function callGraph(ctx) {

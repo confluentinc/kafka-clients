@@ -92,7 +92,10 @@ function departure(code, opaque) {
 function statementAt(code, source, at) {
   const rest = code.slice(at);
   const end = /[;{]/.exec(rest);
-  return source.slice(at, at + (end ? end.index + 1 : rest.length)).replace(/\s+/g, ' ').trim();
+  return source
+    .slice(at, at + (end ? end.index + 1 : rest.length))
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 module.exports = {
@@ -115,7 +118,11 @@ module.exports = {
     for (const [, { hook, body }] of [...hooks].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       checked += 1;
       if (!body) {
-        findings.push({ kind: 'notify-hook-missing', subject: hook, message: 'is installed as a notify hook but defined in no native/*.c' });
+        findings.push({
+          kind: 'notify-hook-missing',
+          subject: hook,
+          message: 'is installed as a notify hook but defined in no native/*.c',
+        });
         continue;
       }
       const own = calls.filter((c) => c.file === body.file && c.function === hook);
@@ -142,19 +149,31 @@ module.exports = {
       const before = findings.length;
       for (const c of tsfn) {
         if (c.args[c.args.length - 1] !== 'napi_tsfn_nonblocking') {
-          findings.push({ kind: 'notify-blocking', subject: `${c.file}:${c.line}`, message: `${hook} calls the threadsafe function ${c.args[c.args.length - 1]}, not napi_tsfn_nonblocking` });
+          findings.push({
+            kind: 'notify-blocking',
+            subject: `${c.file}:${c.line}`,
+            message: `${hook} calls the threadsafe function ${c.args[c.args.length - 1]}, not napi_tsfn_nonblocking`,
+          });
         }
       }
       // The guard is the positive test of the flag itself (`if (q->notify_open)`, the call braced or not: what else
       // its block holds is notify-body's), never a negated one.
       if (tsfn.length > 1 || !/if\s*\(\s*(\w+\s*(->|\.)\s*)*notify_open\s*\)\s*(\{[^{}]*?)?napi_call_threadsafe_function\s*\(/.test(code)) {
-        findings.push({ kind: 'notify-unguarded', subject: hook, message: 'calls the threadsafe function other than once, under if (…notify_open)' });
+        findings.push({
+          kind: 'notify-unguarded',
+          subject: hook,
+          message: 'calls the threadsafe function other than once, under if (…notify_open)',
+        });
       }
       const lock = code.search(/pthread_mutex_lock\s*\([^)]*notify_mtx/);
       const unlock = code.search(/pthread_mutex_unlock\s*\([^)]*notify_mtx/);
       const call = code.search(/napi_call_threadsafe_function\s*\(/);
       if (lock < 0 || unlock < 0 || !(lock < call && call < unlock)) {
-        findings.push({ kind: 'notify-unlocked', subject: hook, message: 'calls the threadsafe function outside a notify_mtx lock / unlock' });
+        findings.push({
+          kind: 'notify-unlocked',
+          subject: hook,
+          message: 'calls the threadsafe function outside a notify_mtx lock / unlock',
+        });
       }
       // The rest of the shape: no other statement, anywhere in the body.
       const off = findings.length === before && own.every((c) => ALLOWED_CALLS.has(c.name)) ? departure(code, opaque) : null;

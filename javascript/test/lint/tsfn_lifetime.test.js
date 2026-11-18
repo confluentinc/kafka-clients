@@ -16,7 +16,6 @@
 
 // check-tsfn-lifetime (scripts/lint/rules/tsfn_lifetime.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { project, lint, findings } = require('./_project');
@@ -72,7 +71,13 @@ const CLOSE =
   '  return NULL;\n' +
   '}\n';
 
-/** The fixture with `producer` in place of the producer's source (`QUEUE` the queue's unless given). */
+/**
+ * The fixture with `producer` in place of the producer's source (`QUEUE` the queue's unless given).
+ *
+ * @param {string} producer
+ * @param {string} [queue]
+ * @returns {import('./_project').Report}
+ */
 function run(producer, queue = QUEUE) {
   return lint(project({ 'confluent_kafka_bindings.h': HEADER, 'native/callback_queue.c': queue, 'native/producer.c': producer }), [RULE]);
 }
@@ -98,37 +103,57 @@ test('a reference or an unreference outside the hold update, or none in it, is a
     "native/producer.c:32: unreferences the thread-safe function in idle, not in the hold update (cbq_hold_update): the hold is decided in one place, from the client's open state and its calls waiting for their answer",
   ]);
   // The unreference cbq_closed made before calls were counted.
-  r = run(FLUSH_COMPLETE + FLUSH + CLOSE, QUEUE.replace('  q->self_strong = 0;\n', '  q->self_strong = 0;\n  napi_unref_threadsafe_function(env, q->tsfn);\n'));
+  r = run(
+    FLUSH_COMPLETE + FLUSH + CLOSE,
+    QUEUE.replace('  q->self_strong = 0;\n', '  q->self_strong = 0;\n  napi_unref_threadsafe_function(env, q->tsfn);\n'),
+  );
   assert.deepEqual(findings(r), [
     "native/callback_queue.c:17: unreferences the thread-safe function in cbq_closed, not in the hold update (cbq_hold_update): the hold is decided in one place, from the client's open state and its calls waiting for their answer",
   ]);
-  r = run(FLUSH_COMPLETE + FLUSH + CLOSE, QUEUE.replace('  if (hold) napi_ref_threadsafe_function(env, q->tsfn);\n  else ', '  if (!hold) '));
-  assert.deepEqual(findings(r), ['cbq_hold_update: calls no napi_ref_threadsafe_function: a call made on a closed client would not hold Node until its answer']);
+  r = run(
+    FLUSH_COMPLETE + FLUSH + CLOSE,
+    QUEUE.replace('  if (hold) napi_ref_threadsafe_function(env, q->tsfn);\n  else ', '  if (!hold) '),
+  );
+  assert.deepEqual(findings(r), [
+    'cbq_hold_update: calls no napi_ref_threadsafe_function: a call made on a closed client would not hold Node until its answer',
+  ]);
   r = run(FLUSH_COMPLETE + FLUSH + CLOSE, QUEUE.replace('\n  else napi_unref_threadsafe_function(env, q->tsfn);', ''));
   assert.deepEqual(findings(r), ['cbq_hold_update: calls no napi_unref_threadsafe_function: a closed client would keep Node running']);
 });
 
 test('cbq_closed called before the core answered the close, outside the close completion, is a finding', () => {
-  const r = run(FLUSH_COMPLETE + FLUSH.replace('  cbq_call_begin(env, &p->queue);\n', '  cbq_closed(env, &p->queue);\n  cbq_call_begin(env, &p->queue);\n') + CLOSE);
+  const r = run(
+    FLUSH_COMPLETE +
+      FLUSH.replace('  cbq_call_begin(env, &p->queue);\n', '  cbq_closed(env, &p->queue);\n  cbq_call_begin(env, &p->queue);\n') +
+      CLOSE,
+  );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     "native/producer.c:8: calls cbq_closed in js_flush, not in a close completion (close_on_complete): the open client's hold ends only once the core answered the close",
   ]);
 });
 
-const UNCOUNTED = 'js_flush calls kafka_x_P_flush_cb with no cbq_call_begin as the statement right before it: the call is not counted, so its answer may come once nothing holds Node';
-const STRAY_BEGIN = 'calls cbq_call_begin other than as the whole statement right before its own kafka_*_cb( call, in the same block: it may count a call not made, or miss one made, so the count holds Node forever or lets it go too soon';
+const UNCOUNTED =
+  'js_flush calls kafka_x_P_flush_cb with no cbq_call_begin as the statement right before it: the call is not counted, so its answer may come once nothing holds Node';
+const STRAY_BEGIN =
+  'calls cbq_call_begin other than as the whole statement right before its own kafka_*_cb( call, in the same block: it may count a call not made, or miss one made, so the count holds Node forever or lets it go too soon';
 
 test('a _cb call not right after a cbq_call_begin of its own, or a cbq_call_begin anywhere else, is a finding', () => {
   let r = run(FLUSH_COMPLETE + FLUSH.replace('  cbq_call_begin(env, &p->queue);\n', '') + CLOSE);
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [`native/producer.c:8: ${UNCOUNTED}`]);
-  const flush = (body) => FLUSH_COMPLETE + FLUSH.replace('  cbq_call_begin(env, &p->queue);\n  kafka_x_P_flush_cb(p->view, flush_on_complete, ctx);\n', body) + CLOSE;
+  const flush = (/** @type {string} */ body) =>
+    FLUSH_COMPLETE +
+    FLUSH.replace('  cbq_call_begin(env, &p->queue);\n  kafka_x_P_flush_cb(p->view, flush_on_complete, ctx);\n', body) +
+    CLOSE;
   const CALL = '  kafka_x_P_flush_cb(p->view, flush_on_complete, ctx);\n';
   // The begin moved above an early return: the count stays up when it returns.
   r = run(
     FLUSH_COMPLETE +
-      FLUSH.replace('  if (p == NULL) return NULL;\n  cbq_call_begin(env, &p->queue);\n', '  cbq_call_begin(env, &p->queue);\n  if (p == NULL) return NULL;\n') +
+      FLUSH.replace(
+        '  if (p == NULL) return NULL;\n  cbq_call_begin(env, &p->queue);\n',
+        '  cbq_call_begin(env, &p->queue);\n  if (p == NULL) return NULL;\n',
+      ) +
       CLOSE,
   );
   assert.deepEqual(findings(r), [`native/producer.c:7: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`]);
@@ -142,45 +167,76 @@ test('a _cb call not right after a cbq_call_begin of its own, or a cbq_call_begi
   r = run(flush(`  cbq_call_begin(env, &p->queue);\n  cbq_call_begin(env, &p->queue);\n${CALL}`));
   assert.deepEqual(findings(r), [`native/producer.c:8: js_flush ${STRAY_BEGIN}`]);
   // Under a condition the call is not under, braced or not, or the call under one the begin is not under.
-  for (const [body, found] of [
-    [`  if (p->owners > 2) cbq_call_begin(env, &p->queue);\n${CALL}`, [`native/producer.c:8: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`]],
-    [`  if (p->owners > 2) {\n    cbq_call_begin(env, &p->queue);\n  }\n${CALL}`, [`native/producer.c:9: js_flush ${STRAY_BEGIN}`, `native/producer.c:11: ${UNCOUNTED}`]],
-    [`  cbq_call_begin(env, &p->queue);\n  if (p->owners > 2) ${CALL.trimStart()}`, [`native/producer.c:8: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`]],
-  ]) {
+  /** @type {[string, string[]][]} */
+  const conditions = [
+    [
+      `  if (p->owners > 2) cbq_call_begin(env, &p->queue);\n${CALL}`,
+      [`native/producer.c:8: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`],
+    ],
+    [
+      `  if (p->owners > 2) {\n    cbq_call_begin(env, &p->queue);\n  }\n${CALL}`,
+      [`native/producer.c:9: js_flush ${STRAY_BEGIN}`, `native/producer.c:11: ${UNCOUNTED}`],
+    ],
+    [
+      `  cbq_call_begin(env, &p->queue);\n  if (p->owners > 2) ${CALL.trimStart()}`,
+      [`native/producer.c:8: js_flush ${STRAY_BEGIN}`, `native/producer.c:9: ${UNCOUNTED}`],
+    ],
+  ];
+  for (const [body, found] of conditions) {
     r = run(flush(body));
     assert.deepEqual(findings(r), found);
   }
   // In a function that makes no _cb call.
-  r = run(FLUSH_COMPLETE + FLUSH + CLOSE + 'void js_pump(napi_env env, P* p) {\n  cbq_drain(env, &p->queue);\n  cbq_call_begin(env, &p->queue);\n}\n');
+  r = run(
+    FLUSH_COMPLETE +
+      FLUSH +
+      CLOSE +
+      'void js_pump(napi_env env, P* p) {\n  cbq_drain(env, &p->queue);\n  cbq_call_begin(env, &p->queue);\n}\n',
+  );
   assert.deepEqual(findings(r), [`native/producer.c:30: js_pump ${STRAY_BEGIN}`]);
 });
 
 test('a completion that does not end its count once, last, on every path, or an end anywhere else, is a finding', () => {
-  const ending = (body) => FLUSH_COMPLETE.replace('  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n  cbq_call_end(env, &p->queue);\n', body);
+  const ending = (/** @type {string} */ body) =>
+    FLUSH_COMPLETE.replace('  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n  cbq_call_end(env, &p->queue);\n', body);
   // None, and two.
   let r = run(ending('  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n') + FLUSH + CLOSE);
   assert.equal(r.status, 1);
-  assert.deepEqual(findings(r), ['native/producer.c:1: the completion flush_on_complete calls cbq_call_end 0 time(s), not once: each counted call ends exactly once']);
-  r = run(ending('  cbq_call_end(env, &p->queue);\n  call_ref(env, ctx->done, 1, &arg, NULL);\n  cbq_call_end(env, &p->queue);\n') + FLUSH + CLOSE);
-  assert.deepEqual(findings(r), ['native/producer.c:1: the completion flush_on_complete calls cbq_call_end 2 time(s), not once: each counted call ends exactly once']);
+  assert.deepEqual(findings(r), [
+    'native/producer.c:1: the completion flush_on_complete calls cbq_call_end 0 time(s), not once: each counted call ends exactly once',
+  ]);
+  r = run(
+    ending('  cbq_call_end(env, &p->queue);\n  call_ref(env, ctx->done, 1, &arg, NULL);\n  cbq_call_end(env, &p->queue);\n') +
+      FLUSH +
+      CLOSE,
+  );
+  assert.deepEqual(findings(r), [
+    'native/producer.c:1: the completion flush_on_complete calls cbq_call_end 2 time(s), not once: each counted call ends exactly once',
+  ]);
   // Before the JS callback.
   r = run(ending('  cbq_call_end(env, &p->queue);\n  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n') + FLUSH + CLOSE);
   assert.deepEqual(findings(r), [
     'native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line 2) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release may follow it',
   ]);
   // Under a condition, braced or not.
-  for (const [body, line] of [
+  /** @type {[string, number][]} */
+  const conditions = [
     ['  call_ref(env, ctx->done, 1, &arg, NULL);\n  if (ctx->done != NULL) cbq_call_end(env, &p->queue);\n', 3],
     ['  call_ref(env, ctx->done, 1, &arg, NULL);\n  if (ctx->done != NULL) {\n    cbq_call_end(env, &p->queue);\n  }\n', 4],
-  ]) {
+  ];
+  for (const [body, line] of conditions) {
     r = run(ending(body) + FLUSH + CLOSE);
     assert.deepEqual(findings(r), [
       `native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line ${line}) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release may follow it`,
     ]);
   }
   // An early return skips it.
-  r = run(ending('  if (ctx == NULL) return;\n  call_ref(env, ctx->done, 1, &arg, NULL);\n  cbq_call_end(env, &p->queue);\n') + FLUSH + CLOSE);
-  assert.deepEqual(findings(r), ['native/producer.c:1: the completion flush_on_complete has a return: a path that returns skips its cbq_call_end (line 4)']);
+  r = run(
+    ending('  if (ctx == NULL) return;\n  call_ref(env, ctx->done, 1, &arg, NULL);\n  cbq_call_end(env, &p->queue);\n') + FLUSH + CLOSE,
+  );
+  assert.deepEqual(findings(r), [
+    'native/producer.c:1: the completion flush_on_complete has a return: a path that returns skips its cbq_call_end (line 4)',
+  ]);
   // In a function no _cb call is handed, the delivery callback's, or through a helper the completion calls.
   r = run(
     FLUSH_COMPLETE +

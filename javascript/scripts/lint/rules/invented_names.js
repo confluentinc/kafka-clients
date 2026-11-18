@@ -133,7 +133,12 @@ module.exports = {
       }
       const tagged = name === undefined ? shortName(cls) : `${shortName(cls)}#${name}`;
       if (found === tagged) {
-        findings.push({ kind: 'java-unused', subject, at, message: `javaTargets ${target} names what the convention finds: drop the entry` });
+        findings.push({
+          kind: 'java-unused',
+          subject,
+          at,
+          message: `javaTargets ${target} names what the convention finds: drop the entry`,
+        });
       } else if (found !== null) {
         findings.push({
           kind: 'java-remap',
@@ -150,7 +155,13 @@ module.exports = {
       const found = convention && convention.cls ? shortName(convention.cls) : convention ? convention.fqn : null;
       const key = itemKey(item);
       judge(key, key, atNode(ctx, item.node), item.tags, found);
-      if (item.tags.jsOnly && !item.tags.java && (item.kind === 'type' || item.kind === 'interface') && isOptionsType(item) && !item.name.endsWith('Args')) {
+      if (
+        item.tags.jsOnly &&
+        !item.tags.java &&
+        (item.kind === 'type' || item.kind === 'interface') &&
+        isOptionsType(item) &&
+        !item.name.endsWith('Args')
+      ) {
         findings.push({
           kind: 'args-name',
           subject: key,

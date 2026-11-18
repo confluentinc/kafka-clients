@@ -21,7 +21,6 @@
 // stand-in for grpc-js's call objects, and a whole producer workload against
 // an unreachable broker. Needs the compiled library (dist/).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 
@@ -29,16 +28,33 @@ const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 
 const { ChaosWorkloadService, EventStream, RecordOutcomes, keyOf, valueOf } = require('../chaos_workload');
 
-/** The translation grpc_translate.js makes, reduced to what these tests read. */
+/**
+ * The translation grpc_translate.js makes, reduced to what these tests read.
+ *
+ * @param {unknown} error the error, always an Error here
+ * @returns {{ code: number, message: string }}
+ */
 function errorToProto(error) {
-  return { code: error instanceof KafkaError ? -1 : -4, message: error && error.message };
+  return { code: error instanceof KafkaError ? -1 : -4, message: error instanceof Error ? error.message : String(error) };
 }
+
+/**
+ * An event the service writes, with the fields these tests read.
+ *
+ * @typedef {{ sent?: { index: number }, send_failed?: { index: number }, producer_stats?: { sent: number, elapsed_seconds: number }, failed?: unknown }} Event
+ */
+/** @typedef {{ events: Event[] }} Message */
 
 /** A stand-in for grpc-js's ServerWritableStream. */
 class FakeCall extends EventEmitter {
+  /**
+   * @param {unknown} request
+   * @param {{ writable?: (count: number) => boolean }} [options]
+   */
   constructor(request, { writable = () => true } = {}) {
     super();
     this.request = request;
+    /** @type {Message[]} */
     this.writes = [];
     this.ended = false;
     this.metadataSent = false;
@@ -49,6 +65,10 @@ class FakeCall extends EventEmitter {
     this.metadataSent = true;
   }
 
+  /**
+   * @param {Message} message
+   * @returns {boolean}
+   */
   write(message) {
     assert.equal(this.ended, false, 'write after end');
     this.writes.push(message);
@@ -66,10 +86,16 @@ class FakeCall extends EventEmitter {
   }
 }
 
+/** @returns {Promise<void>} */
 function turn() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * @param {(call: { request: unknown }, callback: (error: unknown, response: unknown) => void) => void} handler
+ * @param {unknown} request
+ * @returns {Promise<unknown>}
+ */
 function unary(handler, request) {
   return new Promise((resolve, reject) => {
     handler({ request }, (error, response) => (error ? reject(error) : resolve(response)));
@@ -89,24 +115,27 @@ test('the value is the index zero-padded to msg_size, or cut to it', () => {
 });
 
 test('a delivery is reported with its partition and offset', () => {
+  /** @type {unknown[]} */
   const events = [];
-  const outcomes = new RecordOutcomes((e) => events.push(e), 'w', errorToProto);
+  const outcomes = new RecordOutcomes((/** @type {unknown} */ e) => events.push(e), 'w', errorToProto);
   const { callback } = outcomes.onDelivery(3);
   callback({ metadata: { partition: 2, offset: 40 }, exception: null });
   assert.deepEqual(events, [{ delivered: { index: 3, partition: 2, offset: 40 } }]);
 });
 
 test('a failed delivery is reported with its error', () => {
+  /** @type {unknown[]} */
   const events = [];
-  const outcomes = new RecordOutcomes((e) => events.push(e), 'w', errorToProto);
+  const outcomes = new RecordOutcomes((/** @type {unknown} */ e) => events.push(e), 'w', errorToProto);
   const { callback } = outcomes.onDelivery(1);
   callback({ metadata: { partition: -1, offset: -1 }, exception: new KafkaError('boom') });
   assert.deepEqual(events, [{ send_failed: { index: 1, error: { code: -1, message: 'boom' } } }]);
 });
 
 test('a second callback for one record is reported too', () => {
+  /** @type {unknown[]} */
   const events = [];
-  const outcomes = new RecordOutcomes((e) => events.push(e), 'w', errorToProto);
+  const outcomes = new RecordOutcomes((/** @type {unknown} */ e) => events.push(e), 'w', errorToProto);
   const { callback } = outcomes.onDelivery(0);
   callback({ metadata: { partition: 0, offset: 1 }, exception: null });
   callback({ metadata: { partition: 0, offset: 2 }, exception: null });
@@ -114,8 +143,9 @@ test('a second callback for one record is reported too', () => {
 });
 
 test('a rejected send settles its record once: the later callback is absorbed', () => {
+  /** @type {unknown[]} */
   const events = [];
-  const outcomes = new RecordOutcomes((e) => events.push(e), 'w', errorToProto);
+  const outcomes = new RecordOutcomes((/** @type {unknown} */ e) => events.push(e), 'w', errorToProto);
   const { callback, state } = outcomes.onDelivery(4);
   outcomes.sendRejected(4, state, new KafkaError('rejected'));
   callback({ metadata: { partition: 0, offset: 9 }, exception: null });
@@ -126,8 +156,9 @@ test('a rejected send settles its record once: the later callback is absorbed', 
 });
 
 test('a rejection after the callback settled the record is not reported', () => {
+  /** @type {unknown[]} */
   const events = [];
-  const outcomes = new RecordOutcomes((e) => events.push(e), 'w', errorToProto);
+  const outcomes = new RecordOutcomes((/** @type {unknown} */ e) => events.push(e), 'w', errorToProto);
   const { callback, state } = outcomes.onDelivery(5);
   callback({ metadata: { partition: 0, offset: 1 }, exception: null });
   outcomes.sendRejected(5, state, new KafkaError('late'));
@@ -135,8 +166,9 @@ test('a rejection after the callback settled the record is not reported', () => 
 });
 
 test('a callback with neither metadata nor error is the server reporting a failure', () => {
+  /** @type {unknown[]} */
   const events = [];
-  const outcomes = new RecordOutcomes((e) => events.push(e), 'w', errorToProto);
+  const outcomes = new RecordOutcomes((/** @type {unknown} */ e) => events.push(e), 'w', errorToProto);
   outcomes.onDelivery(6).callback({ metadata: null, exception: null });
   assert.deepEqual(events, [
     {
@@ -209,13 +241,20 @@ test('the service has no RunConsumer: the binding has no consumer', () => {
 });
 
 test('the service needs the error translation', () => {
+  // @ts-expect-error no errorToProto, which the constructor takes: it throws TypeError
   assert.throws(() => new ChaosWorkloadService({}), { name: 'TypeError', message: 'errorToProto must be a function' });
 });
 
-/** Waits until `call` has ended, or fails after `ms`. */
+/**
+ * Waits until `call` has ended, or fails after `ms`.
+ *
+ * @param {FakeCall} call
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
 function ended(call, ms) {
   if (call.ended) return Promise.resolve();
-  return new Promise((resolve, reject) => {
+  return new Promise((/** @type {(value?: void) => void} */ resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('the stream did not end')), ms);
     call.once('ended', () => {
       clearTimeout(timer);
@@ -241,9 +280,7 @@ test('a producer workload streams its records, a marker, its stats, then Finishe
   const duplicate = new FakeCall({ workload_id: 'p1', config: UNREACHABLE, topic: 'chaos-t' });
   handlers.RunProducer(duplicate);
   assert.equal(duplicate.ended, true);
-  assert.deepEqual(duplicate.events(), [
-    { failed: { error: { code: -3, message: "js server: workload_id 'p1' is already running" } } },
-  ]);
+  assert.deepEqual(duplicate.events(), [{ failed: { error: { code: -3, message: "js server: workload_id 'p1' is already running" } } }]);
 
   await new Promise((resolve) => setTimeout(resolve, 600));
   assert.deepEqual(await unary(handlers.MarkWorkload, { workload_id: 'p1', marker: '7' }), { found: true });
@@ -254,20 +291,24 @@ test('a producer workload streams its records, a marker, its stats, then Finishe
   const kinds = events.map((event) => Object.keys(event)[0]);
   assert.deepEqual(kinds.slice(-2), ['producer_stats', 'finished']);
   assert.ok(kinds.includes('marker'));
-  const sentIndexes = events.filter((e) => e.sent).map((e) => e.sent.index);
+  const sentIndexes = events.flatMap((e) => (e.sent ? [e.sent.index] : []));
   assert.deepEqual(
     sentIndexes,
     sentIndexes.map((_, i) => i),
   );
   // No broker: every record sent fails, after its Sent, once.
-  const failedIndexes = events.filter((e) => e.send_failed).map((e) => e.send_failed.index);
-  assert.deepEqual([...failedIndexes].sort((a, b) => a - b), sentIndexes);
+  const failedIndexes = events.flatMap((e) => (e.send_failed ? [e.send_failed.index] : []));
+  assert.deepEqual(
+    [...failedIndexes].sort((a, b) => a - b),
+    sentIndexes,
+  );
   for (const index of sentIndexes) {
     const sentAt = events.findIndex((e) => e.sent && e.sent.index === index);
     const settledAt = events.findIndex((e) => e.send_failed && e.send_failed.index === index);
     assert.ok(sentAt < settledAt, `record ${index} settled before its Sent`);
   }
   const stats = events[events.length - 2].producer_stats;
+  assert.ok(stats);
   assert.equal(stats.sent, sentIndexes.length);
   assert.ok(stats.elapsed_seconds > 0);
   // Gone once finished.
@@ -291,5 +332,7 @@ test('stopAll stops and drains every running workload', async () => {
   await new Promise((resolve) => setTimeout(resolve, 100));
   await service.stopAll();
   await ended(call, 30_000);
-  assert.equal(Object.keys(call.events().at(-1))[0], 'finished');
+  const last = call.events().at(-1);
+  assert.ok(last);
+  assert.equal(Object.keys(last)[0], 'finished');
 });

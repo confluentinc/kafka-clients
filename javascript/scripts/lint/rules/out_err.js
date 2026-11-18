@@ -39,7 +39,7 @@ const ALLOWED = [
     key: 'native/error.c:error_discard:kafka_common_Error_destroy_err#2',
     reason:
       'the end of the chain: the destroy of the panic error a failed destroy reported, whose own error ' +
-      'cannot be destroyed in turn without looping (the user\'s decision of 2026-11-06)',
+      "cannot be destroyed in turn without looping (the user's decision of 2026-11-06)",
   },
 ];
 const { scan, bareArg, signatureParams } = require('../c_source');
@@ -94,7 +94,7 @@ module.exports = {
       return pointers.has(c.name) ? pointers.get(c.name) : -1;
     };
     // The forwarders: native functions passing a slot parameter of theirs on as a slot, to a fixed point.
-    for (let grew = true; grew; ) {
+    for (let grew = true; grew;) {
       grew = false;
       for (const [key, fn] of bodies) {
         if (forwarders.has(key)) continue;
@@ -148,7 +148,11 @@ module.exports = {
       const after = noComments(c.file).slice(c.end, c.end + 400);
       const nextStatement = after.slice(0, after.indexOf(';', after.indexOf(';') + 1) + 1);
       const name = slot.replace(/^&\s*/, '');
-      if (slot.startsWith('&') && new RegExp(`ffi_take\\(\\s*&\\s*${name.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\\s*\\)`).test(nextStatement)) continue;
+      if (
+        slot.startsWith('&') &&
+        new RegExp(`ffi_take\\(\\s*&\\s*${name.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\\s*\\)`).test(nextStatement)
+      )
+        continue;
       findings.push({
         kind: 'out-err-unread',
         subject,

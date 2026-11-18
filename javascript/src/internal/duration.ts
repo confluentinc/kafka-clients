@@ -47,15 +47,16 @@ interface TemporalDurationLike {
 
 export function isTemporalDuration(value: unknown): value is TemporalDurationLike {
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { [Symbol.toStringTag]?: unknown })[Symbol.toStringTag] === 'Temporal.Duration'
+    typeof value === 'object' && value !== null && (value as { [Symbol.toStringTag]?: unknown })[Symbol.toStringTag] === 'Temporal.Duration'
   );
 }
 
 /**
  * Whether `value` is a timeout as a bare value takes it: a number, a
  * `Temporal.Duration` or `null` (the form matcher's test, src/internal/args.ts).
+ *
+ * @param value - the value to test
+ * @returns whether it is a timeout or null
  */
 export function isDurationOrNull(value: unknown): boolean {
   return value === null || typeof value === 'number' || isTemporalDuration(value);
