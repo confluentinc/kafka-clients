@@ -1179,7 +1179,7 @@ impl ProducerConfig {
             false,
             log_warnings,
             "ProducerConfig",
-            |originals| originals,
+            |originals| Ok(originals),
             |config| Self::post_process_parsed_config(config, resolved_client_id),
         )?;
         Self::from_abstract(config)
