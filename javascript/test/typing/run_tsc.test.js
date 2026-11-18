@@ -18,7 +18,6 @@
 // default compiler with no shell, a `TSC` override through the shell with
 // every argument quoted, so arguments reach the compiler literally.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const fs = require('node:fs');
@@ -30,7 +29,14 @@ const { ROOT, shellQuote } = require(SCRIPT);
 // Arguments a shell would split, substitute or unquote.
 const ARGS = ['a b', '$(echo substituted)', '`echo substituted`', "it's", '"double"', '$HOME', '', 'back\\slash'];
 
-/** Runs `fn` with `TSC` set to `value` (unset when undefined), restoring it after. */
+/**
+ * Runs `fn` with `TSC` set to `value` (unset when undefined), restoring it after.
+ *
+ * @template T
+ * @param {string | undefined} value
+ * @param {() => T} fn
+ * @returns {T}
+ */
 function withTsc(value, fn) {
   const saved = process.env.TSC;
   if (value === undefined) delete process.env.TSC;
@@ -63,12 +69,19 @@ test('a TSC override is a command line; every argument reaches the compiler lite
 });
 
 test('the default compiler is run directly, with no shell', () => {
+  /** @typedef {[string, Array<string>, {shell?: unknown}]} SpawnCall */
+  /** @type {Array<SpawnCall>} */
   const calls = [];
   const original = childProcess.spawnSync;
-  childProcess.spawnSync = (...callArgs) => {
-    calls.push(callArgs);
-    return { status: 0, stdout: 'ok', stderr: '' };
-  };
+  // A stub with only the fields runTsc reads: the test records the arguments runTsc passes.
+  childProcess.spawnSync = /** @type {typeof childProcess.spawnSync} */ (
+    /** @type {unknown} */ (
+      (/** @type {SpawnCall} */ ...callArgs) => {
+        calls.push(callArgs);
+        return { status: 0, stdout: 'ok', stderr: '' };
+      }
+    )
+  );
   // scripts/typescript.js reads spawnSync when it is loaded: load a fresh copy
   // that sees the stub.
   delete require.cache[SCRIPT];

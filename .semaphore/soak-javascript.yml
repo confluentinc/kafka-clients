@@ -1,0 +1,49 @@
+version: v1.0
+name: Soak of the JavaScript producer
+
+# Run as a Semaphore Task (the `soak-javascript` task in service.yml), weekly or
+# by hand. `make -C javascript soak` runs the Node.js producer's soak client
+# (javascript/verifiable_clients/soak/soakclient.js) for SOAK_HOURS hours
+# against a scratch broker and judges its steady state
+# (verifiable_clients/soak/soak_check.js): after the warm-up, the RSS, the
+# JavaScript heap and the external memory may not keep growing, the open file
+# descriptors and the threads stay flat, and every record's delivery callback
+# ran exactly once. A failed verdict fails the job; the report and the client's
+# metrics are pushed as the job's artifacts.
+#
+# This pipeline is not part of semaphore.yml, so none of its jobs is listed in
+# REQUIRED_CI_JOBS (create-release-tag.yml): a release does not wait for it.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+blocks:
+  - name: "Soak (Linux amd64)"
+    dependencies: []
+    # SOAK_HOURS (6 by default), plus the build and the shutdown.
+    execution_time_limit:
+      hours: 8
+    task:
+      env_vars:
+        # npm ci installs the devDependencies from the public registry; see
+        # "Verify language bindings (Linux amd64)" in semaphore.yml.
+        - name: NPM_CONFIG_REGISTRY
+          value: https://registry.npmjs.org/
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "soak-javascript (Linux amd64)"
+          commands:
+            - sem-version node 22
+            - (cd javascript && npm ci --no-audit --no-fund)
+            - make build-javascript
+            - make -C javascript soak SOAK_HOURS="${SOAK_HOURS:-6}"
+      epilogue:
+        always:
+          commands:
+            # The verdict (report.json) and the soak client's metrics windows
+            # (metrics.jsonl), when the run wrote them.
+            - '[ -d javascript/build/soak ] && artifact push job javascript/build/soak || true'

@@ -16,7 +16,6 @@
 
 // N8 check-no-binding-queue (scripts/lint/rules/no_binding_queue.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
@@ -33,7 +32,10 @@ test('no lock outside the queue, no store of records', () => {
 test('each finding kind, with its exact text', () => {
   const r = runN(RULE, {
     'native/producer.c': `static pthread_mutex_t producer_lock;\n${PRODUCER_C}`,
-    'src/producer/producer.ts': PRODUCER_TS.replace('export class Producer {', 'const MAX_RECORDS = 10;\nvoid MAX_RECORDS;\nexport class Producer {\n  #pending: unknown[] = [];\n  #byTopic = new Map<string, number>();'),
+    'src/producer/producer.ts': PRODUCER_TS.replace(
+      'export class Producer {',
+      'const MAX_RECORDS = 10;\nvoid MAX_RECORDS;\nexport class Producer {\n  #pending: unknown[] = [];\n  #byTopic = new Map<string, number>();',
+    ),
   });
   assert.deepEqual(findings(r), [
     'native/producer.c:1: declares the pthread_mutex_t producer_lock: no lock outside native/callback_queue.c',
@@ -60,7 +62,8 @@ test('the lock entry allows its one declaration; a module store and a parameter 
 });
 
 test('a private helper of src/ is read too; a generated module is not', () => {
-  const queue = 'export class SendQueue {\n  private readonly records: unknown[] = [];\n  push(r: unknown): void {\n    if (this.records.length < SEND_QUEUE_LIMIT) this.records.push(r);\n  }\n}\n';
+  const queue =
+    'export class SendQueue {\n  private readonly records: unknown[] = [];\n  push(r: unknown): void {\n    if (this.records.length < SEND_QUEUE_LIMIT) this.records.push(r);\n  }\n}\n';
   const r = runN(RULE, {
     'src/internal/send_queue.ts': `const SEND_QUEUE_LIMIT = 10000;\n${queue}`,
     'src/common/errors/_table.ts': '// GENERATED, DO NOT EDIT: by the test.\nexport const TABLE: string[] = [];\n',
@@ -72,7 +75,16 @@ test('a private helper of src/ is read too; a generated module is not', () => {
 });
 
 test('an allowlist entry that matches nothing is a finding', () => {
-  const r = runN(RULE, {}, { ALLOWED: [{ key: 'native/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }, { key: 'Producer.#gone', reason: 'the test' }] });
+  const r = runN(
+    RULE,
+    {},
+    {
+      ALLOWED: [
+        { key: 'native/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" },
+        { key: 'Producer.#gone', reason: 'the test' },
+      ],
+    },
+  );
   assert.deepEqual(findings(r), ['Producer.#gone: is allowed as the test, but nothing matches it any more: delete the entry']);
 });
 

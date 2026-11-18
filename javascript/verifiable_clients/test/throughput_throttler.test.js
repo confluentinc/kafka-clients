@@ -21,13 +21,19 @@
 // Python tests run throttle() on a thread and join it, these await its
 // Promise, racing it against a timer.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { ThroughputThrottler, LONG_MAX, NS_PER_SEC } = require('../throughput_throttler');
 
-/** Whether `promise` settled within `ms`. */
+/**
+ * Whether `promise` settled within `ms`.
+ *
+ * @param {Promise<unknown>} promise
+ * @param {number} ms
+ * @returns {Promise<boolean>}
+ */
 async function settlesWithin(promise, ms) {
+  /** @type {NodeJS.Timeout | undefined} */
   let timer;
   const timeout = new Promise((resolve) => {
     timer = setTimeout(() => resolve(false), ms);

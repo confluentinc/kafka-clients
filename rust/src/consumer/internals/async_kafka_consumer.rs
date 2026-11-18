@@ -3711,7 +3711,12 @@ where
         // the channel builder from `security.protocol` + `ssl.*` / `sasl.*`
         // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL). SASL mechanism PLAIN
         // only: `ConsumerConfig` already rejected any other one when it was
-        // built. Errors surface as a `Error` from the ctor (no panic).
+        // built. Errors surface as a `Error` from the ctor (no panic), in their
+        // final form (`ChannelBuilders::client_channel_builder`): a
+        // `sasl.jaas.config` Java rejects is Java's `KafkaException("Failed to
+        // create new NetworkClient")`, which Java's network thread hands to the
+        // constructor, any other failure a `ConfigError`. Same as
+        // `KafkaProducer::new` and `KafkaAdminClient`.
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol,
             Some(&config.ssl_config),
@@ -3719,15 +3724,7 @@ where
             None, // listener_name
             config.client_id(),
             log_context.clone(),
-        )
-        // Java's reachable failure here is `SslFactory.configure` throwing
-        // `ConfigException` (`org.apache.kafka.common.security.ssl.SslFactory#configure`) — the missing-argument
-        // `IllegalArgumentException`s in `ChannelBuilders.create` cannot be reached
-        // from a `ConsumerConfig`, which always supplies both sub-configs. So the
-        // class is `ConfigException`, inside the `KafkaException` hierarchy;
-        // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
-        // Same as `KafkaProducer::new` and `KafkaAdminClient`.
-        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
+        )?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,

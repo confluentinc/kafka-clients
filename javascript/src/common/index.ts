@@ -12,11 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.common this client has. Each
-// subpackage has its own import path (`@confluentinc/kafka-javascript/common/errors`),
-// which this index does not re-export.
+/**
+ * The public classes of Java's `org.apache.kafka.common` this client has.
+ * Each subpackage has its own import path
+ * (`@confluentinc/kafka-javascript/common/errors`), which this index does not
+ * re-export.
+ *
+ * Invented *(js-only)*: `TopicPartitionMap` and `TopicPartitionSet`, Java's
+ * `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns,
+ * and `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that
+ * `metrics()` returns: JavaScript has no value equality for map keys.
+ *
+ * @packageDocumentation
+ */
 
 export { KafkaFuture } from './kafka_future';
+export type { Metric } from './metric';
+export { MetricName } from './metric_name';
+export { MetricNameMap } from './metric_name_map';
+export { Node } from './node';
+export { PartitionInfo } from './partition_info';
+export { TopicPartition } from './topic_partition';
+export { TopicPartitionMap } from './topic_partition_map';
+export { TopicPartitionSet } from './topic_partition_set';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';

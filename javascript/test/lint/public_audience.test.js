@@ -16,7 +16,6 @@
 
 // J4 check-public-audience (scripts/lint/rules/public_audience.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
@@ -32,8 +31,8 @@ test('Public classes and their public members pass; an error class is exempt', (
   const classes = CLASSES.map((c) => (c.fqn.endsWith('FooException') ? { ...c, public_audience: false } : c));
   const r = lint(fixture({}, classes), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Rec, Mode, ProducerConfig, Callback, Header, Future; and the 24 members the J2 rule maps.
-  assert.ok(r.out.includes('✅ check-public-audience: 32 item(s) checked'), r.text);
+  // Rec, Mode, ProducerConfig, Callback, Header, Future; and the 25 members the J2 rule maps (setMode included).
+  assert.ok(r.out.includes('✅ check-public-audience: 33 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
@@ -60,7 +59,10 @@ test('each finding kind, with its exact text', () => {
 test('an invented export translates nothing, so it is not checked', () => {
   const invented = { ...INVENTED, 'src/producer/sealed.ts:Sealed': 'A JavaScript helper.' };
   const r = lint(
-    fixture({ 'src/producer/sealed.ts': '/** A JavaScript helper. */\nexport class Sealed {}\n', 'lint-mapping.json': mapping({ invented }) }),
+    fixture({
+      'src/producer/sealed.ts': '/** A JavaScript helper. */\nexport class Sealed {}\n',
+      'lint-mapping.json': mapping({ invented }),
+    }),
     [RULE],
   );
   assert.equal(r.status, 0, r.text);
@@ -73,7 +75,11 @@ test('cannot run without the Java index', () => {
 
 test('nothing translated fails: 0 items checked', () => {
   const r = lint(
-    project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex([javaClass('clients.producer.Rec')]), 'src/a.ts': 'export const a = 1;\n' }),
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([javaClass('clients.producer.Rec')]),
+      'src/a.ts': 'export const a = 1;\n',
+    }),
     [RULE],
   );
   assert.ok(r.err.includes('❌ check-public-audience: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);

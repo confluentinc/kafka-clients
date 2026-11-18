@@ -35,8 +35,11 @@ const PRECONDITIONS = [
   ['Invalid negative timeout', "Java's Timer; the consumer FFI checks a negative timeout"],
   ['Timeout must not be negative', "the core's _with_timeout check, which the consumer FFI reports"],
   ['is not safe for multi-threaded access', "the consumer's busy check, which the FFI reports (Q48)"],
-  ['invocation inside a callback is not permitted', "flush() inside a send callback, which the core refuses (Q46)"],
-  ['Consumer is not subscribed to any topics or assigned any partitions', "poll() on a consumer with nothing to fetch, which the core checks"],
+  ['invocation inside a callback is not permitted', 'flush() inside a send callback, which the core refuses (Q46)'],
+  [
+    'Consumer is not subscribed to any topics or assigned any partitions',
+    'poll() on a consumer with nothing to fetch, which the core checks',
+  ],
 ];
 
 module.exports = {

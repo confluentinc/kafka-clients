@@ -16,7 +16,6 @@
 
 // N1 check-out-err (scripts/lint/rules/out_err.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
@@ -58,7 +57,12 @@ test("a forwarded slot's callers are checked, through a function pointer too", (
   r = runN(RULE, { 'native/callback_queue.c': QUEUE_C.replace('q->execute(q->client, &ffi_err)', 'q->execute(q->client, NULL)') });
   assert.deepEqual(findings(r), ['native/callback_queue.c:cbq_drain:execute#1: gets NULL as its out_err (line 20)']);
   // A direct call of the forwarder.
-  r = runN(RULE, { 'native/producer.c': PRODUCER_C.replace('void js_pump(CallbackQueue* q) {\n', 'void js_pump(CallbackQueue* q) {\n    kafka_common_Error_t* e = NULL;\n    producer_execute(q, &e);\n') });
+  r = runN(RULE, {
+    'native/producer.c': PRODUCER_C.replace(
+      'void js_pump(CallbackQueue* q) {\n',
+      'void js_pump(CallbackQueue* q) {\n    kafka_common_Error_t* e = NULL;\n    producer_execute(q, &e);\n',
+    ),
+  });
   assert.deepEqual(findings(r), [
     'native/producer.c:js_pump:producer_execute#1: its out_err &e (line 40) is read by no FFI_ERR / FFI_SET / FFI_DISCARD, nor ffi_take in the next statement',
   ]);
@@ -77,12 +81,21 @@ test('inside FFI_ERR / FFI_SET / FFI_DISCARD the slot is &ffi_err, the one they 
 });
 
 test('an allowlist entry waives exactly its call site; one that waives nothing is a finding', () => {
-  const unread = { 'native/callback_queue.c': QUEUE_C.replace('    kafka_common_Error_t* panic = ffi_take(&ffi_err);\n    (void)panic;\n', '') };
-  let r = runN(RULE, unread, { ALLOWED: [{ key: 'native/callback_queue.c:error_discard:kafka_common_Error_destroy_err#1', reason: 'the test' }] });
+  const unread = {
+    'native/callback_queue.c': QUEUE_C.replace('    kafka_common_Error_t* panic = ffi_take(&ffi_err);\n    (void)panic;\n', ''),
+  };
+  let r = runN(RULE, unread, {
+    ALLOWED: [{ key: 'native/callback_queue.c:error_discard:kafka_common_Error_destroy_err#1', reason: 'the test' }],
+  });
   assert.equal(r.status, 0, r.text);
   r = runN(RULE, {}, { ALLOWED: [{ key: 'native/callback_queue.c:error_discard:kafka_common_Error_destroy_err#2', reason: 'the test' }] });
-  assert.deepEqual(findings(r), ['native/callback_queue.c:error_discard:kafka_common_Error_destroy_err#2: is allowed as the test, but nothing matches it any more: delete the entry']);
-  assert.deepEqual(require('../../scripts/lint/rules/out_err').ALLOWED.map((e) => e.key), ['native/error.c:error_discard:kafka_common_Error_destroy_err#2']);
+  assert.deepEqual(findings(r), [
+    'native/callback_queue.c:error_discard:kafka_common_Error_destroy_err#2: is allowed as the test, but nothing matches it any more: delete the entry',
+  ]);
+  assert.deepEqual(
+    require('../../scripts/lint/rules/out_err').ALLOWED.map((e) => e.key),
+    ['native/error.c:error_discard:kafka_common_Error_destroy_err#2'],
+  );
 });
 
 test('cannot run without the header or the C sources', () => {
@@ -93,6 +106,10 @@ test('cannot run without the header or the C sources', () => {
 });
 
 test('no call with an out_err fails: 0 items checked', () => {
-  const r = runN(RULE, { 'native/producer.c': 'void f(void) {}\n', 'native/callback_queue.c': 'void g(void) {}\n', 'native/record.c': 'void h(void) {}\n' });
+  const r = runN(RULE, {
+    'native/producer.c': 'void f(void) {}\n',
+    'native/callback_queue.c': 'void g(void) {}\n',
+    'native/record.c': 'void h(void) {}\n',
+  });
   assert.ok(r.err.includes('❌ check-out-err: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

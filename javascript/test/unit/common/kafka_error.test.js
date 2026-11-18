@@ -14,30 +14,33 @@
 
 'use strict';
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 const { errorFfiId } = require('../../../dist/internal/errors');
+const { ffiId } = require('../../_internal');
 
 test('an invalid config is a KafkaError with the core message', () => {
-  assert.throws(() => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:9092', acks: 'bogus' } }), (e) => {
-    assert.ok(e instanceof ConfigError);
-    assert.ok(e instanceof KafkaError);
-    assert.ok(e instanceof Error);
-    assert.equal(e.name, 'ConfigError');
-    assert.equal(e.message, 'Invalid value bogus for configuration acks: String must be one of: all, -1, 0, 1');
-    assert.equal(e.cause, undefined);
-    // The FFI id is private (`_ffiId`, left out of the declarations): only
-    // `name`, `message` and `cause` are public.
-    assert.equal(errorFfiId(e), -10);
-    assert.equal(ConfigError._ffiId, -10);
-    assert.ok(!Object.keys(e).includes('_ffiId'));
-    assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
-    return true;
-  });
+  assert.throws(
+    () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:9092', acks: 'bogus' } }),
+    (e) => {
+      assert.ok(e instanceof ConfigError);
+      assert.ok(e instanceof KafkaError);
+      assert.ok(e instanceof Error);
+      assert.equal(e.name, 'ConfigError');
+      assert.equal(e.message, 'Invalid value bogus for configuration acks: String must be one of: all, -1, 0, 1');
+      assert.equal(e.cause, undefined);
+      // The FFI id is private (`_ffiId`, left out of the declarations): only
+      // `name`, `message` and `cause` are public.
+      assert.equal(errorFfiId(e), -10);
+      assert.equal(ffiId(ConfigError), -10);
+      assert.ok(!Object.keys(e).includes('_ffiId'));
+      assert.ok(!('code' in e) && !('errorName' in e) && !('retriable' in e) && !('apiError' in e));
+      return true;
+    },
+  );
   assert.throws(() => new KafkaProducer({ configs: {} }), {
     name: 'ConfigError',
     message: 'Missing required configuration "bootstrap.servers" which has no default value.',
@@ -57,6 +60,7 @@ test('the cause chain follows Error_source', () => {
     (e) => {
       // A bare KafkaException: reported as UNKNOWN_SERVER_ERROR, but not an
       // ApiException, so not UnknownServerError.
+      assert.ok(e instanceof KafkaError);
       assert.equal(e.constructor, KafkaError);
       assert.equal(e.name, 'KafkaError');
       assert.equal(errorFfiId(e), -1);
@@ -86,12 +90,14 @@ test("Java's INSTANCE singletons: an instance of the class, built by Java's no-a
     assert.equal(cls.INSTANCE, instance);
     assert.throws(() => {
       'use strict';
+      // @ts-expect-error a write to Java's final field: the frozen class throws TypeError
       cls.INSTANCE = null;
     }, TypeError);
     assert.equal(cls.INSTANCE, instance);
   }
   // CoordinatorNotAvailableException's no-argument constructor is private:
   // only INSTANCE is built by it.
+  // @ts-expect-error no message: the form check throws IllegalArgumentError, as the no-argument constructor is private
   assert.throws(() => new errors.CoordinatorNotAvailableError(), {
     name: 'IllegalArgumentError',
     message: 'CoordinatorNotAvailableError() takes one of (message), ({ message, cause }); got ()',

@@ -21,7 +21,6 @@
 // runs end to end against an unreachable broker. Needs the compiled library
 // (dist/).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -77,7 +76,7 @@ test('the padding grows beyond the 10 KB profile', () => {
   assert.equal(new SoakRecord(1, 1765432100123).serialize(100000).length, 100000);
 });
 
-test('the padding is the Python soak\'s', () => {
+test("the padding is the Python soak's", () => {
   const payload = new SoakRecord(1, 2, 3).serialize(30).toString('latin1');
   assert.equal(payload, '1|2|3| SoakRecord nr #0 SoakRe');
 });
@@ -111,7 +110,7 @@ test('deserialize rejects null', () => {
 // Configuration
 // ---------------------------------------------------------------------------
 
-test('the producer configuration strips its prefix and drops the other clients\'', () => {
+test("the producer configuration strips its prefix and drops the other clients'", () => {
   const [conf, routed] = producerConfig({
     'bootstrap.servers': 'x',
     'producer.linger.ms': '5',
@@ -122,7 +121,7 @@ test('the producer configuration strips its prefix and drops the other clients\'
   assert.deepEqual(routed, []);
 });
 
-test('the consumer\'s unprefixed keys are routed away', () => {
+test("the consumer's unprefixed keys are routed away", () => {
   const [conf, routed] = producerConfig({ 'bootstrap.servers': 'x', 'group.id': 'g', 'linger.ms': '5', 'group.protocol': 'consumer' });
   assert.deepEqual(routed, ['group.id', 'group.protocol']);
   assert.deepEqual(conf, { 'bootstrap.servers': 'x', 'linger.ms': '5' });
@@ -144,8 +143,9 @@ test('shared connection keys stay with the producer', () => {
   assert.deepEqual(producerConfig(shared), [shared, []]);
 });
 
-test('the command line takes the Python soak\'s flags and defaults', () => {
-  const args = parseArgs(['-i', 'soak1', '-t', 'topic']);
+test("the command line takes the Python soak's flags and defaults", () => {
+  // The tool's argument parser carries no types: its result is read as a record.
+  const args = /** @type {Record<string, unknown>} */ (parseArgs(['-i', 'soak1', '-t', 'topic']));
   assert.deepEqual(
     [args.testid, args.topic, args.rate, args.payloadSize, args.maxSendAttempts, args.runtimeSeconds, args.shutdownTimeout],
     ['soak1', 'topic', 80, 50, 10, 0, 60],
@@ -184,7 +184,7 @@ test('a latency bucket adds the percentiles', () => {
   assert.deepEqual([record.p50, record.p90, record.p99, record.p999], ['50', '90', '99', '100']);
 });
 
-test('the metrics file holds one window per line in the Python soak\'s schema', () => {
+test("the metrics file holds one window per line in the Python soak's schema", () => {
   const file = path.join(tmpDir(), 'm.jsonl');
   const metrics = new SoakMetrics({ path: file, baseTags: { host: 'h', testid: 't', variant: 'v' }, prefix: METRIC_PFX });
   metrics.incrCounter('producer.send', 2);
@@ -199,8 +199,19 @@ test('the metrics file holds one window per line in the Python soak\'s schema', 
     .filter((l) => l !== '')
     .map((l) => JSON.parse(l));
   assert.deepEqual(Object.keys(first), [
-    'rss', 'cpu', 'latency', 'bytes', 'messages', 'window_start_ms', 'window_end_ms',
-    'measurement_start_ms', 'measurement_end_ms', 'prefix', 'tags', 'counters', 'gauges',
+    'rss',
+    'cpu',
+    'latency',
+    'bytes',
+    'messages',
+    'window_start_ms',
+    'window_end_ms',
+    'measurement_start_ms',
+    'measurement_end_ms',
+    'prefix',
+    'tags',
+    'counters',
+    'gauges',
   ]);
   assert.equal(first.prefix, 'kafka.client.soak.rust_javascript.');
   assert.deepEqual(first.counters, { 'producer.send': { total: 2, delta: 2 } });
@@ -213,6 +224,12 @@ test('the metrics file holds one window per line in the Python soak\'s schema', 
 // Delivery accounting
 // ---------------------------------------------------------------------------
 
+/**
+ * A SoakClient over `mock`.
+ *
+ * @param {MockProducer} mock
+ * @param {Record<string, unknown>} [overrides] arguments over the defaults
+ */
 function soakOver(mock, overrides = {}) {
   const args = {
     testid: 't',
@@ -224,7 +241,11 @@ function soakOver(mock, overrides = {}) {
     metricsFile: null,
     ...overrides,
   };
-  return new SoakClient(args, { 'bootstrap.servers': 'x' }, { createProducer: () => mock });
+  // The stand-in has the members the soak client calls, not a KafkaProducer's others.
+  const producer = /** @type {import('@confluentinc/kafka-javascript/producer').KafkaProducer<Uint8Array, Uint8Array>} */ (
+    /** @type {unknown} */ (mock)
+  );
+  return new SoakClient(args, { 'bootstrap.servers': 'x' }, { createProducer: () => producer });
 }
 
 test('every delivered record is counted once and the run passes', async () => {
@@ -249,6 +270,7 @@ test('a second callback for a record fails the run', async () => {
   await soak.produceRecord();
   const [completion] = mock.pending;
   assert.ok(mock.completeNext());
+  assert.ok(completion.callback);
   completion.callback({ metadata: { topic: 'soak-t', partition: 0, offset: 7 }, exception: null });
   assert.equal(soak.duplicateReports, 1);
   assert.equal(soak.verdict(), 'FAIL (1 duplicate delivery report(s))');
@@ -290,12 +312,13 @@ test('a non-retriable rejection gives the record up at once', async () => {
   assert.equal(soak.verdict(), 'PASS');
 });
 
-test('a delivered offset at or below the partition\'s last one is a regression', async () => {
+test("a delivered offset at or below the partition's last one is a regression", async () => {
   const mock = new MockProducer({ autoComplete: false });
   const soak = soakOver(mock);
   await soak.produceRecord();
   await soak.produceRecord();
   const [a, b] = mock.pending.splice(0);
+  assert.ok(a.callback && b.callback);
   b.callback({ metadata: { topic: 'soak-t', partition: 0, offset: 10 }, exception: null });
   a.callback({ metadata: { topic: 'soak-t', partition: 0, offset: 9 }, exception: null });
   assert.equal(soak.offsetRegressions, 1);
@@ -324,11 +347,10 @@ test('the script with a configuration the client rejects exits EXIT_FATAL', () =
   const dir = tmpDir();
   const conf = path.join(dir, 'c.config');
   fs.writeFileSync(conf, 'bootstrap.servers=localhost:1\nacks=sometimes\n');
-  const result = spawnSync(
-    process.execPath,
-    [SCRIPT, '-i', 's', '-t', 't', '-f', conf, '--metrics-file', path.join(dir, 'm.jsonl')],
-    { encoding: 'utf8', timeout: 30_000 },
-  );
+  const result = spawnSync(process.execPath, [SCRIPT, '-i', 's', '-t', 't', '-f', conf, '--metrics-file', path.join(dir, 'm.jsonl')], {
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
   assert.equal(result.status, EXIT_FATAL, result.stderr);
   assert.ok(result.stderr.startsWith('soakclient: fatal startup error: ConfigError: '), result.stderr);
 });
@@ -342,7 +364,23 @@ test('the script runs for --runtime-seconds against an unreachable broker and ac
   const metrics = path.join(dir, 'm.jsonl');
   const result = spawnSync(
     process.execPath,
-    [SCRIPT, '-i', 's', '-t', 'soak-t', '-r', '10', '-f', conf, '--metrics-file', metrics, '--metrics-interval', '0.5', '--runtime-seconds', '2'],
+    [
+      SCRIPT,
+      '-i',
+      's',
+      '-t',
+      'soak-t',
+      '-r',
+      '10',
+      '-f',
+      conf,
+      '--metrics-file',
+      metrics,
+      '--metrics-interval',
+      '0.5',
+      '--runtime-seconds',
+      '2',
+    ],
     { encoding: 'utf8', timeout: 60_000 },
   );
   assert.equal(result.status, EXIT_OK, result.stderr);

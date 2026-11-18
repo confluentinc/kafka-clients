@@ -39,7 +39,9 @@ import type { RecordMetadata } from './record_metadata';
  * `close()` covering the record returns, only once it settled, as they wait
  * for a Java callback to return. A rejection is handled as a throw: the
  * producer logs it, as Java logs a throwing `onCompletion`, and it reaches no
- * caller. A callback's Promise must not wait for a `flush()` or `close()` of
+ * caller, except the callback a serializer's `ApiError` runs inside `send()`,
+ * whose throw or rejection rejects `send()`, as Java's `onCompletion` throws
+ * out of `send()` there. A callback's Promise must not wait for a `flush()` or `close()` of
  * its own producer, which wait for it; Java refuses `flush()` inside a
  * callback for the same reason. Callbacks run one at a time, in the order
  * their records complete, as Java's run one after another on its I/O thread:

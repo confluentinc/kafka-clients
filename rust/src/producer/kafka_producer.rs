@@ -1046,7 +1046,12 @@ impl<K, V> KafkaProducer<K, V> {
         //    ProducerMetadata extends Metadata.
         let shared_metadata = metadata.metadata_arc();
 
-        // 7. Create Selector + NetworkClient
+        // 7. Create Selector + NetworkClient. The channel builder's errors are
+        //    in their final form (`ChannelBuilders::client_channel_builder`): a
+        //    `sasl.jaas.config` Java rejects is Java's `KafkaException("Failed
+        //    to create new NetworkClient")` around its `IllegalArgumentException`
+        //    (`ClientUtils#createNetworkClient`), any other failure, such as
+        //    `SslFactory.configure`'s `ConfigException`, a `ConfigError`.
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol,
             Some(&config.ssl_config),
@@ -1054,14 +1059,7 @@ impl<K, V> KafkaProducer<K, V> {
             None,
             &config.client_id,
             log_context.clone(),
-        )
-        // Java's reachable failure here is `SslFactory.configure` throwing
-        // `ConfigException` (`SslFactory#configure`) — the missing-argument
-        // `IllegalArgumentException`s in `ChannelBuilders.create` cannot be reached
-        // from a `ProducerConfig`, which always supplies both sub-configs. So the
-        // class is `ConfigException`, inside the `KafkaException` hierarchy;
-        // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
-        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {}", e)))?;
+        )?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -9457,6 +9455,37 @@ mod tests {
         });
 
         MockPartitioner::reset_counters();
+    }
+
+    /// `sasl.jaas.config` is parsed with Java's `JaasConfig` grammar when the
+    /// channel builder of a SASL protocol is created, so the values Kafka
+    /// 4.4.0's `KafkaProducer` refuses fail construction with its error chain.
+    /// Under `PLAINTEXT` the value is never read, and the producer is built, as
+    /// in Java.
+    #[tokio::test]
+    async fn test_construction_parses_sasl_jaas_config_as_java_does() {
+        use crate::common::security::jaas_context::tests::{
+            CLIENT_CONSTRUCTION_REFUSALS, assert_sasl_jaas_config_refusal,
+        };
+
+        for (jaas, message) in CLIENT_CONSTRUCTION_REFUSALS {
+            let props = |protocol| {
+                guard_props(&[
+                    ("security.protocol", protocol),
+                    ("sasl.mechanism", "PLAIN"),
+                    ("sasl.jaas.config", jaas),
+                ])
+            };
+            let config = ProducerConfig::new(&props("SASL_PLAINTEXT")).expect("valid config");
+            let error = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .expect_err("Java refuses the value");
+            assert_sasl_jaas_config_refusal(&error, "Failed to construct kafka producer", message);
+
+            let config = ProducerConfig::new(&props("PLAINTEXT")).expect("valid config");
+            let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+                .unwrap_or_else(|e| panic!("PLAINTEXT does not read {jaas:?}: {e:?}"));
+            producer.close_with_timeout(Duration::ZERO).await.expect("close");
+        }
     }
 
     /// Java wraps the whole constructor in `catch (Throwable t)` and rethrows

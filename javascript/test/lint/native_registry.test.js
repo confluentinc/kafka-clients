@@ -16,7 +16,6 @@
 
 // A2 check-native-registry (scripts/lint/rules/native_registry.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
@@ -27,17 +26,30 @@ const RULE = 'check-native-registry';
 const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, ...FILES, ...files });
 
 test('registrations and uses agree, and only the loader and src/internal/native.ts touch the addon', () => {
-  const r = lint(fixture({ 'src/internal/native_loader.ts': "export const ADDON_FILE = 'x.node';\n", 'src/producer/index.ts': "export { Producer } from './producer';\n" }), [RULE]);
+  const r = lint(
+    fixture({
+      'src/internal/native_loader.ts': "export const ADDON_FILE = 'x.node';\n",
+      'src/producer/index.ts': "export { Producer } from './producer';\n",
+    }),
+    [RULE],
+  );
   assert.equal(r.status, 0, r.text);
-  // 4 registrations (probe, a test-only one), 3 uses, 4 src/ files.
-  assert.ok(r.out.includes('✅ check-native-registry: 11 item(s) checked'), r.text);
+  // 8 registrations (probe, headerStats, producerStats, errorStats and
+  // recordSpy, the test-only ones), 3 uses, 4 src/ files.
+  assert.ok(r.out.includes('✅ check-native-registry: 15 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
   const r = lint(
     fixture({
-      'native/addon.c': ADDON.replace('        {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},\n', '').replace('{"setFactories"', '{"extra", NULL, js_extra, NULL, NULL, NULL, napi_default, NULL},\n        {"setFactories"'),
-      'src/producer/producer.ts': PRODUCER_TS.replace('native.pump();', "native.pump();\n    native.setFactories();\n    void require('../internal/native_loader');\n    void 'addon.node';\n    void `${String(native)}/other.node`;"),
+      'native/addon.c': ADDON.replace('        {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},\n', '').replace(
+        '{"setFactories"',
+        '{"extra", NULL, js_extra, NULL, NULL, NULL, napi_default, NULL},\n        {"setFactories"',
+      ),
+      'src/producer/producer.ts': PRODUCER_TS.replace(
+        'native.pump();',
+        "native.pump();\n    native.setFactories();\n    void require('../internal/native_loader');\n    void 'addon.node';\n    void `${String(native)}/other.node`;",
+      ),
       'src/producer/index.ts': "import '../internal/native';\nexport { Producer } from './producer';\n",
     }),
     [RULE],
@@ -62,11 +74,15 @@ test('the test-only entry also needs its test to call the registration', () => {
 });
 
 test('a use through an alias of the handle counts', () => {
-  const r = lint(fixture({ 'src/producer/producer.ts': PRODUCER_TS.replace('    native.pump();', '    const n = native;\n    n.pump();') }), [RULE]);
+  const r = lint(
+    fixture({ 'src/producer/producer.ts': PRODUCER_TS.replace('    native.pump();', '    const n = native;\n    n.pump();') }),
+    [RULE],
+  );
   assert.equal(r.status, 0, r.text);
 });
 
 test('cannot run without the C sources', () => {
+  /** @type {Record<string, string | undefined>} */
   const files = { ...FILES };
   delete files['native/addon.c'];
   delete files['native/producer.c'];

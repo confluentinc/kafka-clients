@@ -149,11 +149,13 @@ function readReports(dir) {
 /** The names whose text differs between two report sets, or that only one has. */
 function differences(baseline, current) {
   const names = [...new Set([...baseline.keys(), ...current.keys()])].sort();
-  return names.filter((name) => baseline.get(name) !== current.get(name)).map((name) => {
-    if (!baseline.has(name)) return `${name}: new`;
-    if (!current.has(name)) return `${name}: gone`;
-    return `${name}: changed`;
-  });
+  return names
+    .filter((name) => baseline.get(name) !== current.get(name))
+    .map((name) => {
+      if (!baseline.has(name)) return `${name}: new`;
+      if (!current.has(name)) return `${name}: gone`;
+      return `${name}: changed`;
+    });
 }
 
 /**
