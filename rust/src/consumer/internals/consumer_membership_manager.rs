@@ -46,6 +46,7 @@ use super::MemberState;
 use super::PollResult;
 use super::RequestManager;
 use super::SubscriptionState;
+use super::abstract_membership_manager::{PendingReconcile, SignalAck};
 use super::metrics::ConsumerRebalanceMetricsManager;
 use super::metrics::RebalanceMetricsManager;
 use super::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
@@ -81,60 +82,6 @@ pub(crate) struct ConsumerMembershipManager {
     /// wiring up the full commit pipeline; Phase 10 wires it through
     /// the supplier.
     pub(crate) commit_request_manager: Option<Arc<CommitRequestManager>>,
-    /// Phase 41b — non-blocking reconcile callback state.
-    ///
-    /// Java's `maybeReconcile` fires the §31 rebalance-listener callback
-    /// and returns; `revokeAndAssign(...).whenComplete(...)` resumes the
-    /// post-callback steps when the callback future completes, while the
-    /// `ConsumerNetworkThread` keeps spinning. Rust collapses Java's
-    /// `whenComplete` chain into an explicit cross-iteration state: when a
-    /// reconcile callback is in flight, the manager stores the ack
-    /// [`tokio::sync::oneshot::Receiver`] plus the data needed to resume
-    /// here, and the bg loop's `reconcile` entry `try_recv`s it each
-    /// iteration (alloc-free, non-blocking) — so the loop is NOT frozen on
-    /// the ack. The membership state stays `RECONCILING`
-    /// (`reconciliation_in_progress = true`) until the callback completes.
-    ///
-    /// `None` in steady state (no rebalance). Guarded by
-    /// [`Self::pending_reconcile_flag`] so the steady-state `reconcile`
-    /// entry never locks this mutex (Perf Contract item 1).
-    pending_reconcile: Mutex<Option<PendingReconcile>>,
-    /// Lock-free fast-path mirror of `pending_reconcile.is_some()`. The
-    /// steady-state `reconcile` entry does a single `Relaxed` load and, when
-    /// `false` (no rebalance in flight), skips the `pending_reconcile` lock
-    /// entirely — so the only added per-iteration cost in steady state is
-    /// this one atomic load (Perf Contract item 1: no new lock, no alloc, no
-    /// Arc clone). Set/cleared in lockstep with `pending_reconcile` under
-    /// its mutex.
-    pending_reconcile_flag: std::sync::atomic::AtomicBool,
-    /// Phase 41 (Issue 2) — non-blocking release-path callback state.
-    ///
-    /// `transition_to_fenced` / `transition_to_fatal` / `transition_to_stale`
-    /// each release the assignment via an `onPartitionsLost` callback. Java
-    /// fires that callback and resumes the post-callback steps
-    /// (`clearAssignment` + the type-specific tail) from
-    /// `callbackResult.whenComplete(...)`, while the `ConsumerNetworkThread`
-    /// keeps spinning. Before Phase 41 the Rust translation awaited the ack
-    /// inline inside these methods, which — because they run inline in
-    /// `run_once` Phase 2.4 — froze the bg loop for the whole callback (any
-    /// reentrant handle op submitted from `on_partitions_lost` would deadlock
-    /// until its API timeout, see COMMENTS.41 Issue 2).
-    ///
-    /// The release transitions now enqueue the §31 callback and store the ack
-    /// [`oneshot::Receiver`] plus the resume-tail discriminator here, returning
-    /// so the loop keeps spinning. The bg loop's Phase 2.4 drives this each
-    /// iteration via [`Self::drive_pending_release`] (alloc-free `try_recv`),
-    /// resuming the type-specific tail only when the app side has run the
-    /// `onPartitionsLost` listener and sent the ack.
-    ///
-    /// `None` in steady state. Guarded by [`Self::pending_release_flag`] so the
-    /// steady-state Phase 2.4 never locks this mutex (Perf Contract item 1).
-    pending_release: Mutex<Option<PendingRelease>>,
-    /// Lock-free fast-path mirror of `pending_release.is_some()`, analogous to
-    /// [`Self::pending_reconcile_flag`]. The steady-state Phase 2.4 release
-    /// drive does a single atomic load and skips the `pending_release` mutex
-    /// when no release callback is in flight.
-    pending_release_flag: std::sync::atomic::AtomicBool,
     /// The ack of the release callback an `unsubscribe()` leave enqueued
     /// ([`Self::signal_member_leaving_group`]), while the member waits in
     /// `PREPARE_LEAVING` for it. Java chains `clearAssignmentAndLeaveGroup()`
@@ -156,94 +103,6 @@ pub(crate) struct ConsumerMembershipManager {
 /// leave enqueued to release the assignment (§31). Stands in for the
 /// `CompletableFuture<Void>` Java's `signalMemberLeavingGroup()` returns.
 pub(crate) type LeaveCallbackAck = oneshot::Receiver<Result<(), Error>>;
-
-/// Cross-iteration state for a reconcile callback awaiting its app-side
-/// ack (Phase 41b). Mirrors the resume points of Java's
-/// `revokeAndAssign(...).whenComplete(...)` chain.
-enum PendingReconcile {
-    /// The auto-commit-before-rebalance was TRIGGERED (`reconcile` step 8a,
-    /// `signalReconciliationStarted()` → `maybeAutoCommitSyncBeforeRebalance`)
-    /// and we are awaiting its result [`oneshot::Receiver`]. On completion we
-    /// resume at step 8b (abort check → `onPartitionsRevoked` enqueue),
-    /// mirroring Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager#maybeReconcile`).
-    ///
-    /// Milestone-12 divergence fix (PR #176): Java's `whenComplete` runs the
-    /// continuation when the commit resolves while the `ConsumerNetworkThread`
-    /// keeps spinning and `markReconciliationCheckCompleted()` has ALREADY
-    /// fired (`ApplicationEventProcessor#process(AsyncPollEvent)`). The pre-fix Rust
-    /// awaited `commit_rx` inline inside `reconcile()`, so the AsyncPoll task
-    /// only marked `reconciliation_check_complete` after the commit resolved,
-    /// stalling `poll()` (empty returns) during a slow pre-rebalance commit
-    /// even for RETAINED partitions. Storing this leg lets `reconcile()` return
-    /// immediately (member stays `RECONCILING`), so the mark fires right away
-    /// and retained-partition fetching proceeds; the bg loop `try_recv`s the
-    /// commit result on a later iteration (§31 — never awaited).
-    AwaitingCommit {
-        commit_rx: oneshot::Receiver<Result<(), Error>>,
-        resolved: Vec<(Uuid, String, Vec<i32>)>,
-        resolved_assignment: LocalAssignment,
-        assigned_topic_partitions: Vec<TopicPartition>,
-        added: HashSet<TopicPartition>,
-        revoked: HashSet<TopicPartition>,
-        current_time_ms: i64,
-    },
-    /// `onPartitionsRevoked` was enqueued (`reconcile` step 9). On ack we
-    /// resume at step 10 (abort check → assign-callback enqueue).
-    AfterRevoke {
-        ack_rx: oneshot::Receiver<Result<(), Error>>,
-        resolved: Vec<(Uuid, String, Vec<i32>)>,
-        resolved_assignment: LocalAssignment,
-        assigned_topic_partitions: Vec<TopicPartition>,
-        added: HashSet<TopicPartition>,
-        current_time_ms: i64,
-    },
-    /// `onPartitionsAssigned` was enqueued (`reconcile` step 13). On ack we
-    /// resume at step 14 (enable-partitions / failure path → ACKNOWLEDGING).
-    AfterAssign {
-        ack_rx: oneshot::Receiver<Result<(), Error>>,
-        resolved: Vec<(Uuid, String, Vec<i32>)>,
-        resolved_assignment: LocalAssignment,
-        assigned_topic_partitions: Vec<TopicPartition>,
-        added: HashSet<TopicPartition>,
-        current_time_ms: i64,
-    },
-}
-
-/// Cross-iteration state for a release-path `onPartitionsLost` callback
-/// awaiting its app-side ack (Phase 41, Issue 2). Mirrors the
-/// `callbackResult.whenComplete(...)` tail of Java's `transitionToFenced` /
-/// `transitionToFatal` / `transitionToStale`. Each variant carries the ack
-/// receiver and identifies the type-specific tail to run once the listener
-/// returns. Unlike [`PendingReconcile`], there is no revoke→assign
-/// sequencing — `onPartitionsLost` is a single callback.
-enum PendingRelease {
-    /// `transitionToFenced` release tail: `clearAssignment()` then, if still
-    /// `FENCED`, `transitionToJoining()`.
-    Fenced {
-        ack_rx: oneshot::Receiver<Result<(), Error>>,
-    },
-    /// `transitionToFatal` release tail: `clearAssignment()`.
-    Fatal {
-        ack_rx: oneshot::Receiver<Result<(), Error>>,
-    },
-    /// `transitionToStale` release tail: `clearAssignment()`, clear the
-    /// release-pending flag, and (if a timer reset requested a rejoin while
-    /// the release was in flight) `transitionToJoining()`.
-    Stale {
-        ack_rx: oneshot::Receiver<Result<(), Error>>,
-    },
-}
-
-/// Discriminator for the release-tail to run in
-/// [`ConsumerMembershipManager::drive_pending_release`], decoupled from the
-/// owned ack receiver so the `try_recv` / store-back handling stays uniform.
-#[derive(Clone, Copy)]
-enum ReleaseKind {
-    Fenced,
-    Fatal,
-    Stale,
-}
 
 impl ConsumerMembershipManager {
     /// Java constructor (the test-visible 13-arg variant). Drops
@@ -284,10 +143,6 @@ impl ConsumerMembershipManager {
             rebalance_timeout_ms,
             server_assignor,
             commit_request_manager,
-            pending_reconcile: Mutex::new(None),
-            pending_reconcile_flag: std::sync::atomic::AtomicBool::new(false),
-            pending_release: Mutex::new(None),
-            pending_release_flag: std::sync::atomic::AtomicBool::new(false),
             pending_leave_callback: Mutex::new(None),
             pending_leave_callback_flag: std::sync::atomic::AtomicBool::new(false),
         }
@@ -347,7 +202,13 @@ impl ConsumerMembershipManager {
         self.abstract_mm.current_assignment()
     }
 
-    /// Java: `transitionToJoining()`.
+    /// Java: `transitionToJoining()` (inherited; "Visible for testing"). The
+    /// production paths run inside the base and call
+    /// [`AbstractMembershipManager::transition_to_joining`] directly.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "production callers live in AbstractMembershipManager")
+    )]
     pub(crate) fn transition_to_joining(&self) -> Result<(), Error> {
         self.abstract_mm.transition_to_joining(self.join_group_epoch())
     }
@@ -358,262 +219,20 @@ impl ConsumerMembershipManager {
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
     }
 
-    /// Java: `transitionToFatal()` (override that wires Consumer-specific
-    /// follow-on actions). The flow mirrors Java exactly:
-    ///
-    /// 1. Transition to `FATAL` on the abstract membership state (this
-    ///    runs `notifyEpochChange(Optional.empty())` and logs).
-    /// 2. If the previous state was already out of the group
-    ///    (`UNSUBSCRIBED`, `PREPARE_LEAVING`, `LEAVING`), skip the
-    ///    `onPartitionsLost` callback — Java's `transitionToFatal`
-    ///    early-returns in that case because there's nothing to
-    ///    release.
-    /// 3. Otherwise enqueue `onPartitionsLost` via the §31 handshake to
-    ///    release the assignment, **non-blockingly** (Phase 41, Issue 2):
-    ///    store a [`PendingRelease::Fatal`] and return so the bg loop keeps
-    ///    spinning. The release tail (step 4) runs in
-    ///    [`Self::drive_pending_release`] once the listener acks.
-    /// 4. Clear the assignment (Java: `clearAssignment()`).
-    ///
-    /// Phase 41, Issue 1: a release transition that interleaves with an
-    /// in-flight reconcile callback **abandons** the stale `pending_reconcile`
-    /// (mirroring Java dropping the in-flight reconcile future when the
-    /// member leaves `RECONCILING`), so a fresh post-rejoin reconcile can
-    /// start immediately instead of being gated on the stale ack draining.
+    /// Java: `transitionToFatal()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn transition_to_fatal(&self, current_time_ms: i64) -> Result<(), Error> {
-        // Issue 1: abandon any in-flight reconcile — the member is leaving
-        // RECONCILING, so the stored reconcile continuation is stale.
-        self.clear_pending_reconcile();
-
-        let previous_state = self.abstract_mm.transition_to_fatal()?;
-
-        // If we were UNSUBSCRIBED / LEAVING / PREPARE_LEAVING, Java's
-        // semantics are: no onPartitionsLost callback, and the ongoing leave
-        // (if any) is completed — Java's `maybeCompleteLeaveInProgress()` in
-        // both the "already left" and the "was leaving" branches of
-        // `AbstractMembershipManager#transitionToFatal`.
-        if matches!(
-            previous_state,
-            MemberState::Unsubscribed | MemberState::Leaving | MemberState::PrepareLeaving
-        ) {
-            if previous_state != MemberState::Unsubscribed {
-                log::info!(
-                    "Member {} with epoch {} was leaving the group with state {} when it got a fatal error \
-                     from the broker. It will discard the ongoing leave and remain in fatal state.",
-                    self.member_id(),
-                    self.member_epoch(),
-                    previous_state
-                );
-            }
-            self.abstract_mm.maybe_complete_leave_in_progress();
-            return Ok(());
-        }
-
-        // Enqueue onPartitionsLost via the §31 handshake to release
-        // assignment, non-blockingly. When no listener is registered or no
-        // partitions are owned, the callback is a completed no-op and we run
-        // the release tail inline.
-        let partitions = {
-            let subs = match self.abstract_mm.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            subs.assigned_partitions().into_iter().collect::<Vec<_>>()
-        };
-        let ack = self.enqueue_release_callback(partitions, current_time_ms)?;
-        match ack {
-            Some(ack_rx) => {
-                self.store_pending_release(PendingRelease::Fatal { ack_rx });
-                Ok(())
-            },
-            None => {
-                self.continue_after_fatal_release();
-                Ok(())
-            },
-        }
+        self.abstract_mm.transition_to_fatal(self, current_time_ms)
     }
 
-    /// Release tail of `transition_to_fatal` (Java's `whenComplete`):
-    /// `clearAssignment()`. Synchronous.
-    fn continue_after_fatal_release(&self) {
-        self.abstract_mm.clear_assignment();
-    }
-
-    /// Java: `transitionToFenced()`. Same shape as `transition_to_fatal`
-    /// but transitions to FENCED and then JOINING after the listener
-    /// completes (so the member rejoins).
+    /// Java: `transitionToFenced()` (inherited from `AbstractMembershipManager`).
     pub(crate) fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), Error> {
-        // Issue 1: abandon any in-flight reconcile — the member is leaving
-        // RECONCILING, so the stored reconcile continuation is stale.
-        self.clear_pending_reconcile();
-
-        let pre_state = {
-            let guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.state
-        };
-
-        // Handle Java's "already leaving / unsubscribed" short-circuit.
-        match pre_state {
-            MemberState::PrepareLeaving => {
-                // Java (`AbstractMembershipManager#transitionToFenced`): briefly go
-                // through LEAVING (clear epoch, notify listeners), then
-                // UNSUBSCRIBED, and complete the ongoing leave operation. An
-                // `on_partitions_revoked` callback still in flight for the
-                // leave finds the member UNSUBSCRIBED when it completes and
-                // sends no leave heartbeat.
-                self.transition_to_sending_leave_group(false)?;
-                {
-                    let mut guard = match self.abstract_mm.inner.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    guard.transition_to(MemberState::Unsubscribed)?;
-                }
-                self.abstract_mm.maybe_complete_leave_in_progress();
-                return Ok(());
-            },
-            MemberState::Leaving => {
-                // Java (`AbstractMembershipManager#transitionToFenced`): no leave
-                // request is needed once fenced; complete the ongoing leave
-                // operation.
-                {
-                    let mut guard = match self.abstract_mm.inner.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    guard.transition_to(MemberState::Unsubscribed)?;
-                }
-                self.abstract_mm.maybe_complete_leave_in_progress();
-                return Ok(());
-            },
-            MemberState::Unsubscribed => {
-                log::debug!("Member got fenced but it already left the group, so it won't attempt to rejoin.");
-                return Ok(());
-            },
-            _ => {},
-        }
-
-        // Normal fence flow.
-        {
-            let mut guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.transition_to(MemberState::Fenced)?;
-            // resetEpoch -> updateMemberEpoch(joinGroupEpoch()).
-            guard.update_member_epoch(self.join_group_epoch());
-        }
-
-        // Enqueue onPartitionsLost non-blockingly (Phase 41, Issue 2).
-        let partitions = {
-            let subs = match self.abstract_mm.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            subs.assigned_partitions().into_iter().collect::<Vec<_>>()
-        };
-        let ack = self.enqueue_release_callback(partitions, current_time_ms)?;
-        match ack {
-            Some(ack_rx) => {
-                self.store_pending_release(PendingRelease::Fenced { ack_rx });
-                Ok(())
-            },
-            None => self.continue_after_fenced_release(),
-        }
+        self.abstract_mm.transition_to_fenced(self, current_time_ms)
     }
 
-    /// Release tail of `transition_to_fenced` (Java's `whenComplete`):
-    /// `clearAssignment()` then, if still `FENCED`, `transitionToJoining()`.
-    fn continue_after_fenced_release(&self) -> Result<(), Error> {
-        self.abstract_mm.clear_assignment();
-
-        // Now transition to JOINING if still FENCED.
-        let still_fenced = {
-            let guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.state == MemberState::Fenced
-        };
-        if still_fenced {
-            self.transition_to_joining()?;
-        }
-        Ok(())
-    }
-
-    /// Release the assignment held by a member that has just transitioned
-    /// to STALE because of an expired poll timer, then (if a timer reset
-    /// already requested it) rejoin.
-    ///
-    /// Java: the async tail of `AbstractMembershipManager#transitionToStale`:
-    ///
-    /// ```java
-    /// CompletableFuture<Void> callbackResult = signalPartitionsLost(subscriptions.assignedPartitions());
-    /// staleMemberAssignmentRelease = callbackResult.whenComplete((result, error) -> {
-    ///     ...
-    ///     clearAssignment();
-    /// });
-    /// ```
-    ///
-    /// The STATE transition to STALE itself happens synchronously inside
-    /// `AbstractMembershipManager::on_heartbeat_request_generated` (mirroring
-    /// Java's `transitionTo(STALE)` at the top of `transitionToStale`); this
-    /// method performs only the release half, which is async because it
-    /// awaits the §31 `onPartitionsLost` listener.
-    ///
-    /// The release-pending flag (set when STALE was entered) is cleared at
-    /// the end; if `maybe_rejoin_stale_member` was called while the release
-    /// was in flight, the member is transitioned to JOINING now — exactly
-    /// Java's `staleMemberAssignmentRelease.whenComplete(__ -> transitionToJoining())`.
+    /// Java: `transitionToStale()` (inherited from `AbstractMembershipManager`):
+    /// the release half; see [`AbstractMembershipManager::transition_to_stale`].
     pub(crate) fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), Error> {
-        // Issue 1: abandon any in-flight reconcile — the member is leaving
-        // RECONCILING, so the stored reconcile continuation is stale.
-        self.clear_pending_reconcile();
-
-        // Release assignment via onPartitionsLost (Java's
-        // `signalPartitionsLost(subscriptions.assignedPartitions())`),
-        // enqueued non-blockingly (Phase 41, Issue 2).
-        let partitions = {
-            let subs = match self.abstract_mm.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            subs.assigned_partitions().into_iter().collect::<Vec<_>>()
-        };
-        let ack = self.enqueue_release_callback(partitions, current_time_ms)?;
-        match ack {
-            Some(ack_rx) => {
-                self.store_pending_release(PendingRelease::Stale { ack_rx });
-                Ok(())
-            },
-            None => self.continue_after_stale_release(),
-        }
-    }
-
-    /// Release tail of `transition_to_stale` (Java's
-    /// `staleMemberAssignmentRelease.whenComplete(...)`): `clearAssignment()`,
-    /// clear the release-pending flag, and (if a timer reset requested a
-    /// rejoin while the release was in flight) `transitionToJoining()`.
-    fn continue_after_stale_release(&self) -> Result<(), Error> {
-        self.abstract_mm.clear_assignment();
-
-        let rejoin = {
-            let mut guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.stale_assignment_release_pending = false;
-            let rejoin = guard.stale_rejoin_requested && guard.state == MemberState::Stale;
-            guard.stale_rejoin_requested = false;
-            rejoin
-        };
-        if rejoin {
-            self.transition_to_joining()?;
-        }
-        Ok(())
+        self.abstract_mm.transition_to_stale(self, current_time_ms)
     }
 
     /// Reconcile the target assignment per §31.
@@ -866,7 +485,7 @@ impl ConsumerMembershipManager {
                     // Genuinely in-flight — store the leg and return so the bg
                     // loop keeps spinning; `drive_pending_reconcile` resumes at
                     // step 8b when the commit resolves. Member stays RECONCILING.
-                    self.store_pending(PendingReconcile::AwaitingCommit {
+                    self.abstract_mm.store_pending(PendingReconcile::AwaitingCommit {
                         commit_rx,
                         resolved,
                         resolved_assignment,
@@ -991,7 +610,7 @@ impl ConsumerMembershipManager {
                 // Store the pending state and return so the bg loop keeps
                 // spinning; the next `reconcile` entry will `try_recv` this
                 // and resume at step 10. The member stays RECONCILING.
-                self.store_pending(PendingReconcile::AfterRevoke {
+                self.abstract_mm.store_pending(PendingReconcile::AfterRevoke {
                     ack_rx,
                     resolved,
                     resolved_assignment,
@@ -1049,76 +668,6 @@ impl ConsumerMembershipManager {
         err
     }
 
-    /// `true` when a reconcile rebalance callback is awaiting its ack.
-    ///
-    /// Lock-free: reads the [`Self::pending_reconcile_flag`] atomic only.
-    /// This is the steady-state `reconcile` entry check — no mutex lock when
-    /// no rebalance is in flight (Perf Contract item 1).
-    pub(crate) fn has_pending_reconcile(&self) -> bool {
-        self.pending_reconcile_flag.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Stores the cross-iteration pending-callback state (Phase 41b) and
-    /// sets the lock-free flag in lockstep.
-    fn store_pending(&self, pending: PendingReconcile) {
-        let mut guard = match self.pending_reconcile.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *guard = Some(pending);
-        self.pending_reconcile_flag.store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Phase 41, Issue 1: abandon any in-flight reconcile callback state.
-    ///
-    /// Called by the release transitions (`transition_to_fenced/fatal/stale`)
-    /// when the member leaves `RECONCILING`. Java drops the in-flight
-    /// `revokeAndAssign(...)` future implicitly: the next `whenComplete`
-    /// callback that fires runs `maybeAbortReconciliation()`, which aborts
-    /// because `state != RECONCILING`. Rust collapses Java's `whenComplete`
-    /// chain into the explicit stored [`PendingReconcile`], so we must drop it
-    /// here — otherwise the stale continuation would (a) keep the `reconcile`
-    /// entry short-circuiting to `drive_pending_reconcile` until the stale ack
-    /// drains, gating a fresh post-rejoin reconcile, and (b) leave a load-bearing
-    /// dependency on the abort-check + un-cleared `reconciliation_in_progress`
-    /// for correctness (COMMENTS.41 Issue 1).
-    ///
-    /// Dropping the [`oneshot::Receiver`] also signals the app side (the ack
-    /// `Sender::send` becomes a no-op), matching "the reconcile future is
-    /// abandoned". `reconciliation_in_progress` is left to the subsequent
-    /// state transition / `maybe_abort_reconciliation`, exactly as Java does
-    /// not clear it inside `transitionTo*`.
-    fn clear_pending_reconcile(&self) {
-        // Always take the lock (no flag fast-path): the release transitions
-        // that call this are rare, and a lock-free flag read would race the
-        // `drive_pending_reconcile` take/store-back window (where the flag is
-        // transiently `false` while the value is owned by the driver) — in
-        // the bg loop reconcile and the transitions run on the same task and
-        // never overlap, but the component tests drive them from separate
-        // tasks, so the unconditional lock keeps the clear deterministic.
-        let had_pending = {
-            let mut guard = match self.pending_reconcile.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let had = guard.is_some();
-            *guard = None;
-            self.pending_reconcile_flag.store(false, std::sync::atomic::Ordering::Release);
-            had
-        };
-        // The abandoned reconcile's continuation will never run its
-        // `mark_reconciliation_completed` (Java's `revokeAndAssign`
-        // `whenComplete` → `maybeAbortReconciliation` clearing
-        // `reconciliationInProgress`). Clear it eagerly here so a fresh
-        // post-rejoin reconcile is not blocked by `reconciliationInProgress`
-        // still being `true`. Only when we actually dropped a pending state,
-        // to avoid disturbing a reconcile that is mid-flight but has not yet
-        // parked (synchronous window inside a single `reconcile` call).
-        if had_pending {
-            self.abstract_mm.mark_reconciliation_completed();
-        }
-    }
-
     /// Apply the assignment update to the subscription state (AK 4.3.1,
     /// KAFKA-20106). Called from the background task when processing an
     /// [`crate::consumer::internals::events::ApplicationEvent::ApplyAssignment`]
@@ -1159,146 +708,22 @@ impl ConsumerMembershipManager {
         Ok(())
     }
 
-    /// Enqueue the release-path `onPartitionsLost` callback (Phase 41,
-    /// Issue 2). This is the Rust analog of Java's
-    /// `ConsumerMembershipManager.signalPartitionsLost(partitionsLost)`.
-    ///
-    /// AK 4.3.1 (KAFKA-20321): mark the lost partitions as pending
-    /// revocation to stop fetching from them (no new fetches sent out, and
-    /// no in-flight fetch responses processed) BEFORE invoking the
-    /// `onPartitionsLost` callback. Java:
-    ///   `markPendingRevocationToPauseFetching(partitionsLost);`
-    ///   `return invokeOnPartitionsLostCallback(partitionsLost);`
-    ///
-    /// Returns `Ok(None)` when there is nothing to release (no owned
-    /// partitions) or no listener is registered — in which case the caller
-    /// runs the release tail inline. Otherwise returns the ack
-    /// [`oneshot::Receiver`] for the bg loop to drive. (The pending-revocation
-    /// marking still happens when there is a non-empty set to release, even
-    /// if no listener is registered — it precedes the listener check, exactly
-    /// as in Java's `signalPartitionsLost`.)
-    fn enqueue_release_callback(
-        &self,
-        partitions: Vec<TopicPartition>,
-        current_time_ms: i64,
-    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
-        if partitions.is_empty() {
-            return Ok(None);
-        }
-        // AK 4.3.1 (KAFKA-20321): pause fetching for the lost partitions
-        // before running the callback.
-        {
-            let mut subs = match self.abstract_mm.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            if let Err(e) = subs.mark_pending_revocation(&partitions) {
-                log::warn!("mark_pending_revocation failed for lost partitions: {}", e);
-            }
-        }
-        self.abstract_mm.enqueue_rebalance_callback(
-            ConsumerRebalanceListenerMethodName::OnPartitionsLost,
-            partitions,
-            current_time_ms,
-        )
+    /// `true` when a reconcile rebalance callback is awaiting its ack. See
+    /// [`AbstractMembershipManager::has_pending_reconcile`].
+    pub(crate) fn has_pending_reconcile(&self) -> bool {
+        self.abstract_mm.has_pending_reconcile()
     }
 
     /// `true` when a release-path `onPartitionsLost` callback is awaiting its
-    /// ack. Lock-free: reads [`Self::pending_release_flag`] only (steady-state
-    /// Phase 2.4 entry check — Perf Contract item 1).
+    /// ack. See [`AbstractMembershipManager::has_pending_release`].
     pub(crate) fn has_pending_release(&self) -> bool {
-        self.pending_release_flag.load(std::sync::atomic::Ordering::Acquire)
+        self.abstract_mm.has_pending_release()
     }
 
-    /// Stores the cross-iteration pending release-callback state and sets the
-    /// lock-free flag in lockstep.
-    fn store_pending_release(&self, pending: PendingRelease) {
-        let mut guard = match self.pending_release.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        *guard = Some(pending);
-        self.pending_release_flag.store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Drives a pending release-path `onPartitionsLost` callback
-    /// non-blockingly: `try_recv`s the stored ack receiver and, when it has
-    /// resolved, runs the type-specific release tail. While the ack is pending
-    /// this is a no-op. Driven from the bg loop's Phase 2.4 once per iteration.
-    ///
-    /// A listener error is logged and the release tail still runs — Java's
-    /// `whenComplete` logs the `onPartitionsLost` error and proceeds with
-    /// `clearAssignment()` (and the fence/stale rejoin) regardless.
+    /// Drives a pending release-path callback; see
+    /// [`AbstractMembershipManager::drive_pending_release`].
     pub(crate) async fn drive_pending_release(&self) -> Result<(), Error> {
-        // Pop under the lock, then `try_recv` outside it (no guard across the
-        // resumed work). If the ack is not ready, put it back.
-        let pending = {
-            let mut guard = match self.pending_release.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            self.pending_release_flag.store(false, std::sync::atomic::Ordering::Release);
-            guard.take()
-        };
-        let Some(pending) = pending else {
-            return Ok(());
-        };
-
-        // Destructure by value to own the receiver + a kind discriminator.
-        let (mut ack_rx, kind, log_ctx): (oneshot::Receiver<Result<(), Error>>, ReleaseKind, &'static str) =
-            match pending {
-                PendingRelease::Fenced { ack_rx } => {
-                    (ack_rx, ReleaseKind::Fenced, "got fenced. Member will rejoin the group anyways")
-                },
-                PendingRelease::Fatal { ack_rx } => (ack_rx, ReleaseKind::Fatal, "failed with fatal error"),
-                PendingRelease::Stale { ack_rx } => {
-                    (ack_rx, ReleaseKind::Stale, "left group due to expired poll timer")
-                },
-            };
-
-        match ack_rx.try_recv() {
-            Ok(result) => {
-                if let Err(e) = result {
-                    log::error!(
-                        "onPartitionsLost callback invocation failed while releasing assignment after member {log_ctx}: {e}"
-                    );
-                }
-                match kind {
-                    ReleaseKind::Fenced => self.continue_after_fenced_release(),
-                    ReleaseKind::Fatal => {
-                        self.continue_after_fatal_release();
-                        Ok(())
-                    },
-                    ReleaseKind::Stale => self.continue_after_stale_release(),
-                }
-            },
-            Err(oneshot::error::TryRecvError::Empty) => {
-                // Ack not ready — keep waiting (loop continues).
-                let put_back = match kind {
-                    ReleaseKind::Fenced => PendingRelease::Fenced { ack_rx },
-                    ReleaseKind::Fatal => PendingRelease::Fatal { ack_rx },
-                    ReleaseKind::Stale => PendingRelease::Stale { ack_rx },
-                };
-                self.store_pending_release(put_back);
-                Ok(())
-            },
-            Err(oneshot::error::TryRecvError::Closed) => {
-                // App side dropped the receiver before responding. Java logs
-                // and proceeds with the release tail anyway; do the same so
-                // the member is not stranded holding the released assignment.
-                log::error!(
-                    "Rebalance listener ack receiver dropped before completion while releasing assignment after member {log_ctx}; proceeding with the release"
-                );
-                match kind {
-                    ReleaseKind::Fenced => self.continue_after_fenced_release(),
-                    ReleaseKind::Fatal => {
-                        self.continue_after_fatal_release();
-                        Ok(())
-                    },
-                    ReleaseKind::Stale => self.continue_after_stale_release(),
-                }
-            },
-        }
+        self.abstract_mm.drive_pending_release(self).await
     }
 
     /// Drives a pending reconcile callback non-blockingly: `try_recv`s the
@@ -1315,13 +740,15 @@ impl ConsumerMembershipManager {
         // then `try_recv`. If the ack is
         // not ready, put it back and return.
         let pending = {
-            let mut guard = match self.pending_reconcile.lock() {
+            let mut guard = match self.abstract_mm.pending_reconcile.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
             // Clear the flag in lockstep with taking the state. If the ack
             // is not ready, `store_pending` below re-sets both.
-            self.pending_reconcile_flag.store(false, std::sync::atomic::Ordering::Release);
+            self.abstract_mm
+                .pending_reconcile_flag
+                .store(false, std::sync::atomic::Ordering::Release);
             guard.take()
         };
         let Some(pending) = pending else {
@@ -1358,7 +785,7 @@ impl ConsumerMembershipManager {
                     Err(oneshot::error::TryRecvError::Empty) => {
                         // Commit still in flight — put the leg back and return
                         // (loop keeps spinning). Member stays RECONCILING.
-                        self.store_pending(PendingReconcile::AwaitingCommit {
+                        self.abstract_mm.store_pending(PendingReconcile::AwaitingCommit {
                             commit_rx,
                             resolved,
                             resolved_assignment,
@@ -1422,7 +849,7 @@ impl ConsumerMembershipManager {
                     },
                     Err(oneshot::error::TryRecvError::Empty) => {
                         // Ack not ready — keep waiting (loop continues).
-                        self.store_pending(PendingReconcile::AfterRevoke {
+                        self.abstract_mm.store_pending(PendingReconcile::AfterRevoke {
                             ack_rx,
                             resolved,
                             resolved_assignment,
@@ -1457,7 +884,7 @@ impl ConsumerMembershipManager {
                     current_time_ms,
                 ),
                 Err(oneshot::error::TryRecvError::Empty) => {
-                    self.store_pending(PendingReconcile::AfterAssign {
+                    self.abstract_mm.store_pending(PendingReconcile::AfterAssign {
                         ack_rx,
                         resolved,
                         resolved_assignment,
@@ -1518,7 +945,7 @@ impl ConsumerMembershipManager {
             .abstract_mm
             .enqueue_partitions_assigned_event(assigned_topic_partitions.clone(), added_vec, current_time_ms)
             .map_err(|e| self.fail_reconciliation(e))?;
-        self.store_pending(PendingReconcile::AfterAssign {
+        self.abstract_mm.store_pending(PendingReconcile::AfterAssign {
             ack_rx,
             resolved,
             resolved_assignment,
@@ -2137,6 +1564,50 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
             new_assignment.insert(topic_partition.topic_id, partitions);
         }
         Some(new_assignment)
+    }
+
+    /// Enqueue the release-path `onPartitionsLost` callback (Phase 41,
+    /// Issue 2). Java: `ConsumerMembershipManager.signalPartitionsLost(partitionsLost)`.
+    ///
+    /// AK 4.3.1 (KAFKA-20321): mark the lost partitions as pending
+    /// revocation to stop fetching from them (no new fetches sent out, and
+    /// no in-flight fetch responses processed) BEFORE invoking the
+    /// `onPartitionsLost` callback. Java:
+    ///   `markPendingRevocationToPauseFetching(partitionsLost);`
+    ///   `return invokeOnPartitionsLostCallback(partitionsLost);`
+    ///
+    /// Returns `Ok(None)` when there is nothing to release (no owned
+    /// partitions) or no listener is registered — in which case the caller
+    /// runs the release tail inline. Otherwise returns the ack
+    /// [`oneshot::Receiver`] for the bg loop to drive. (The pending-revocation
+    /// marking still happens when there is a non-empty set to release, even
+    /// if no listener is registered — it precedes the listener check, exactly
+    /// as in Java's `signalPartitionsLost`.)
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalPartitionsLost")]
+    fn signal_partitions_lost(
+        &self,
+        partitions: Vec<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<Option<SignalAck>, Error> {
+        if partitions.is_empty() {
+            return Ok(None);
+        }
+        // AK 4.3.1 (KAFKA-20321): pause fetching for the lost partitions
+        // before running the callback.
+        {
+            let mut subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if let Err(e) = subs.mark_pending_revocation(&partitions) {
+                log::warn!("mark_pending_revocation failed for lost partitions: {}", e);
+            }
+        }
+        self.abstract_mm.enqueue_rebalance_callback(
+            ConsumerRebalanceListenerMethodName::OnPartitionsLost,
+            partitions,
+            current_time_ms,
+        )
     }
 
     /// Java: `joinGroupEpoch()` — 0 for the consumer group protocol.
@@ -3477,7 +2948,7 @@ mod tests {
     /// flight — Milestone-12 divergence fix, PR #176). Distinguishes it from
     /// the `AfterRevoke` / `AfterAssign` callback legs.
     fn pending_reconcile_is_awaiting_commit(mgr: &ConsumerMembershipManager) -> bool {
-        let guard = mgr.pending_reconcile.lock().unwrap();
+        let guard = mgr.abstract_mm.pending_reconcile.lock().unwrap();
         matches!(*guard, Some(PendingReconcile::AwaitingCommit { .. }))
     }
 
