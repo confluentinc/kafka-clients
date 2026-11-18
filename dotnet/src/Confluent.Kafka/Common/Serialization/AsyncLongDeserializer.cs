@@ -35,5 +35,5 @@ public sealed class AsyncLongDeserializer : IAsyncDeserializer<long?>, IAsyncBui
     /// <inheritdoc/>
     public ValueTask<long?> Deserialize(
         string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
-        new ValueTask<long?>(_inner.Deserialize(topic, headers, data));
+        new ValueTask<long?>(_inner.Deserialize(topic, headers, data.Span));
 }

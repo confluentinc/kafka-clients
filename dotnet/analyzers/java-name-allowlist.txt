@@ -294,25 +294,30 @@ default M:Confluent.Kafka.Admin.IAsyncAdmin.UpdateFeatures(System.Collections.Ge
 
 # Java's ByteBuffer serde family is named after ReadOnlyMemory, the .NET type that stands for Java's ByteBuffer
 # (M23/P7, ledger 540): ByteBufferSerializer, ByteBufferDeserializer, Serdes.ByteBufferSerde and Serdes.ByteBuffer().
+# java-name-pairs.txt pairs the three types, so their members are compared with Java's.
 unmatched T:Confluent.Kafka.Common.Serialization.ReadOnlyMemoryDeserializer
 unmatched T:Confluent.Kafka.Common.Serialization.ReadOnlyMemorySerializer
 unmatched T:Confluent.Kafka.Common.Serialization.Serdes.ReadOnlyMemorySerde
-missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$ByteBufferSerde
 unmatched M:Confluent.Kafka.Common.Serialization.Serdes.ReadOnlyMemory
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#ByteBuffer()
 
-# Java's deserialize(String, Headers, ByteBuffer): its overrides on the built-in deserializers. .NET passes the bytes
-# as one ReadOnlySpan<byte> form, for byte[] and ByteBuffer alike (ledger 458), so the built-in deserializers and
-# IDeserializerWithHeaders carry the byte[] form only. Java's default on Deserializer is DeserializerExtensions'
-# Deserialize over a ReadOnlyMemory<byte> (M23/P7, ledger 536), which IDeserializerWithReadOnlyMemory replaces: the form
-# that may keep the bytes, which Java's ByteBuffer form may. Its name comes from its .NET parameter, where the analyzer
-# derives IDeserializerWithHeaders for both of Java's defaults.
+# Java's deserialize(String, Headers, ByteBuffer): its default on Deserializer and its overrides on the built-in
+# deserializers. .NET passes the bytes as one ReadOnlySpan<byte> form, for byte[] and ByteBuffer alike (ledger 458), so
+# DeserializerExtensions, the built-in deserializers and IDeserializerWithHeaders carry the byte[] form only.
+# IDeserializerWithReadOnlyMemory (M23/P7, ledger 536) replaces Java's default without an extension: the form that may
+# keep the bytes, which Java's ByteBuffer form may. A second extension, over a ReadOnlyMemory<byte>, would make a call
+# with an array or an array segment ambiguous with the one over a span. The interface's name comes from its .NET
+# parameter, where the analyzer derives IDeserializerWithHeaders for both of Java's defaults.
+# ReadOnlyMemoryDeserializer's memory form is Java's ByteBuffer override; the analyzer pairs it with the byte[] default
+# it tries first, which leaves the ByteBuffer one listed.
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
 unmatched T:Confluent.Kafka.Common.Serialization.IDeserializerWithReadOnlyMemory`1
 missing T:Confluent.Kafka.Common.Serialization.BooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.DoubleDeserializer org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.FloatDeserializer org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.IntegerDeserializer org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.LongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.ReadOnlyMemoryDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.ShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.StringDeserializer org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.UUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,Headers,ByteBuffer)
@@ -345,7 +350,7 @@ overload M:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1.Deserialize
 unmatched T:Confluent.Kafka.Common.Serialization.IAsyncDeserializerWithRetention`1
 
 # The asynchronous classes of Java's ByteBuffer serde family, named as the synchronous ones are (M23/P7, ledger 538,
-# 540).
+# 540), and compared with Java through the synchronous classes' pairs.
 unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer
 unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer
 
@@ -370,6 +375,9 @@ missing T:Confluent.Kafka.Common.Serialization.AsyncIntegerSerializer org.apache
 missing T:Confluent.Kafka.Common.Serialization.AsyncLongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncLongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,byte[])
 missing T:Confluent.Kafka.Common.Serialization.AsyncLongSerializer org.apache.kafka.common.serialization.LongSerializer#serialize(String,Long)
+missing T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,byte[])
+missing T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer org.apache.kafka.common.serialization.ByteBufferSerializer#serialize(String,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,byte[])
 missing T:Confluent.Kafka.Common.Serialization.AsyncShortSerializer org.apache.kafka.common.serialization.ShortSerializer#serialize(String,Short)
@@ -394,6 +402,8 @@ overload M:Confluent.Kafka.Common.Serialization.AsyncIntegerDeserializer.Deseria
 overload M:Confluent.Kafka.Common.Serialization.AsyncIntegerSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Int32},System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Common.Serialization.AsyncLongDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Common.Serialization.AsyncLongSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Int64},System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.ReadOnlyMemory{System.Byte}},System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Common.Serialization.AsyncShortDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Common.Serialization.AsyncShortSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Int16},System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)

@@ -394,7 +394,7 @@ public sealed class AsyncSerializationTests
             Assert.Equal(javaBytes, serializer.Serialize(Topic, headers, value)!.Value.ToArray());
             Assert.Equal(javaBytes, Completed(asyncSerializer.Serialize(Topic, headers, value, token))!.Value.ToArray());
 
-            Assert.Equal(comparable(value), comparable(deserializer.Deserialize(Topic, headers, data)));
+            Assert.Equal(comparable(value), comparable(deserializer.Deserialize(Topic, headers, data.Span)));
             Assert.Equal(comparable(value), comparable(Completed(asyncDeserializer.Deserialize(Topic, headers, data, token))));
         }
     }
@@ -417,7 +417,7 @@ public sealed class AsyncSerializationTests
         Headers headers = new Headers();
         ReadOnlyMemory<byte> data = bytes;
 
-        TException sync = Assert.Throws<TException>(() => { _ = deserializer.Deserialize(Topic, headers, data); });
+        TException sync = Assert.Throws<TException>(() => { _ = deserializer.Deserialize(Topic, headers, data.Span); });
         Assert.Equal(message, sync.Message);
 
         foreach (CancellationToken token in s_tokens)

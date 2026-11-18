@@ -35,5 +35,5 @@ public sealed class AsyncByteArrayDeserializer : IAsyncDeserializer<byte[]>, IAs
     /// <inheritdoc/>
     public ValueTask<byte[]?> Deserialize(
         string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
-        new ValueTask<byte[]?>(_inner.Deserialize(topic, headers, data));
+        new ValueTask<byte[]?>(_inner.Deserialize(topic, headers, data.Span));
 }

@@ -35,5 +35,5 @@ public sealed class AsyncIntegerDeserializer : IAsyncDeserializer<int?>, IAsyncB
     /// <inheritdoc/>
     public ValueTask<int?> Deserialize(
         string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
-        new ValueTask<int?>(_inner.Deserialize(topic, headers, data));
+        new ValueTask<int?>(_inner.Deserialize(topic, headers, data.Span));
 }

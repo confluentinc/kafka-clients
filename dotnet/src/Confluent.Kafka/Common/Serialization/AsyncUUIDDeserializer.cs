@@ -39,5 +39,5 @@ public sealed class AsyncUUIDDeserializer : IAsyncDeserializerWithConfigure<Guid
     /// <inheritdoc/>
     public ValueTask<Guid?> Deserialize(
         string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
-        new ValueTask<Guid?>(_inner.Deserialize(topic, headers, data));
+        new ValueTask<Guid?>(_inner.Deserialize(topic, headers, data.Span));
 }
