@@ -140,6 +140,7 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
     {
         Exception? thrown = null;
         int posted = 0;
+        bool contextKept = true;
         Thread thread = new Thread(
             () =>
             {
@@ -159,6 +160,7 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
                     UnpumpedContext context = new UnpumpedContext();
                     SynchronizationContext.SetSynchronizationContext(context);
                     guarded();
+                    contextKept = ReferenceEquals(SynchronizationContext.Current, context);
                     posted = context.Posted;
                 }
                 else
@@ -184,6 +186,7 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(thrown).Throw();
         }
 
+        Assert.True(contextKept, "The call left its thread without the synchronization context it had.");
         return posted;
     }
 
