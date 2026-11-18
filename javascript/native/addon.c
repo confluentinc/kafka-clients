@@ -17,6 +17,15 @@
 // function. The public JS surface lives in src/; the addon exports only what
 // src/ calls, all of it registered here.
 
+// dladdr and Dl_info (addon_pin_loaded) are a GNU extension that glibc's
+// <dlfcn.h> declares only under _GNU_SOURCE, and binding.gyp compiles with
+// -std=c11, which defines no feature macro: without this the addon does not
+// compile on Linux. It must come before the first #include. macOS declares them
+// without it.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdio.h>

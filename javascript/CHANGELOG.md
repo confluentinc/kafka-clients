@@ -203,6 +203,9 @@ newer.
   running until its answer, as Java's call returns: a send's hand-over,
   `flush()`, `close()` and the waits of a record's future, whose answers may
   come after the close's.
+- The addon builds on Linux. It uses `dladdr`, which glibc declares only
+  under `_GNU_SOURCE`, and compiles with `-std=c11`, which defines no feature
+  macro, so it used to fail to compile there; it now defines `_GNU_SOURCE`.
 
 ### Known limitations
 

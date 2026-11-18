@@ -208,3 +208,21 @@ test('the addon declares no prototype of its own for a kafka_* function, and bui
     assert.ok(gyp.split(flag).length - 1 >= 2, `native/binding.gyp does not pass ${flag} on both platforms`);
   }
 });
+
+test('a source using a GNU extension of glibc defines _GNU_SOURCE before its first #include, so it builds on Linux', () => {
+  // native/binding.gyp compiles with -std=c11, which defines no feature macro,
+  // and glibc's <dlfcn.h> declares dladdr and Dl_info only under _GNU_SOURCE:
+  // without it the addon builds on macOS and not on Linux.
+  const gyp = fs.readFileSync(path.join(NATIVE, 'binding.gyp'), 'utf8');
+  assert.match(gyp, /"-std=c11"/, 'native/binding.gyp compiles with -std=c11');
+  let users = 0;
+  for (const source of sources.filter((f) => f.endsWith('.c'))) {
+    const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
+    if (!/\b(?:dladdr|Dl_info)\b/.test(code)) continue;
+    users += 1;
+    const define = code.search(/^[ \t]*#[ \t]*define[ \t]+_GNU_SOURCE\b/m);
+    const include = code.search(/^[ \t]*#[ \t]*include\b/m);
+    assert.ok(define >= 0 && (include < 0 || define < include), `native/${source} uses dladdr or Dl_info without #define _GNU_SOURCE before its first #include`);
+  }
+  assert.ok(users > 0, 'no native source uses dladdr: the check has nothing to check');
+});
