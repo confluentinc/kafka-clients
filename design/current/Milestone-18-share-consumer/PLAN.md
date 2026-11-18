@@ -329,3 +329,33 @@ shape: `Acknowledgements` and the wire types are offset-based, so this holds nat
 Checked and *not* a decision: sharing the background task. `ConsumerNetworkThread` is generic only
 over `KafkaClient`, and `ApplicationEventProcessor` is not consumer-typed, so the share managers plug
 in as Java does (§3 item 2).
+
+## 8. Consumer gaps found during M18
+
+These are pre-existing divergences from Java in the consumer, found while preparing the share consumer.
+
+| Item | Found in | Disposition |
+|---|---|---|
+| `AbstractMembershipManager#revokePartitions` never translated. The reconcile path only marks partitions pending revocation; it skips `retainAll(assignedPartitions)`, the paused-partition log (`signalPartitionsBeingRevoked`) and the FATAL abort. The leave path (`ConsumerMembershipManager#signalMemberLeavingGroup`, epoch > 0) doesn't mark pending revocation at all. | Critic 240 (P4a) | **Fixed in P4b** in the shared base, as its own commit labelled as a consumer behaviour change (user, 2026-11-19). The share manager reaches the same method. |
+| `signalReconciliationCompleting` runs after `transitionTo(ACKNOWLEDGING)`; Java runs it before (`AbstractMembershipManager#maybeReconcile` completion), and Java's `reconciliationInProgress &&` guard is missing. | Critic 240 (P4a) | Consumer follow-up (the share hook is a no-op), not M18 |
+| Backtest candidates S1-2/3/4, S2-3, S2-4, S5-1, S5-2 (`backtest-report.md`) | Critic 202 | Unverified; consumer follow-up backlog |
+
+**Why `revokePartitions` was missed.** Java has had the method since at least 4.1, and Milestone 8
+translated from 4.2. The name appears in no Rust file, plan or review before M18, so it was never
+consciously deferred.
+- **M8 Phase 11** moved `markPendingRevocation` into the rebalance-callback path when it translated
+  listener invocation. The method's other steps had no home in the new shape and were dropped
+  silently.
+- **Later reshapes** — Phase 41 (non-blocking acks), M13's KAFKA-20106 handshake and #279 (one
+  reconcile driver) — were each written against the existing Rust code rather than Java's method,
+  so the gap carried forward.
+- **The tests didn't catch it.** The translated
+  `testRevokePartitionsUsesTopicNamesLocalCacheWhenMetadataNotAvailable` exercises the path but
+  asserts only the topic-name cache.
+- **The process didn't catch it.** DoD §2 ("are all methods implemented?") is checked by reading,
+  class by class, and a method that is restructured away leaves nothing to notice.
+
+**Process fix (pilot, from P4b on).** Each phase's Critic gets a per-class **method-coverage
+table**: every Java method of each translated class maps to a Rust function (by name or
+`#[doc(alias)]`) or to a stated reason. An unmapped method is a finding. A later `xtask` report could
+mechanise this.
