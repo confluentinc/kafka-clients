@@ -17,7 +17,7 @@ construction with `confluent_kafka.UnsupportedOperationError`.
 ## Tests
 
 From the repository root, with the root venv set up (`make init`) and the Rust
-library and the extension built (`make build-python`):
+library and the extension built (`make -C python build`):
 
     . venv/bin/activate
     pip install './python[dev]'      # mypy and pytest

@@ -54,7 +54,7 @@ in-suite pytest entry produces inside the broker container). ``COMPRESSION_TYPE`
 
 Run modes:
   * Manual / full:  ``python consumer_performance_test.py`` (env-driven), via the
-    ``make consumer-perf-test-python`` target. Exits non-zero if ``P99_LIMIT_MS``
+    ``make -C python consumer-perf-test`` target. Exits non-zero if ``P99_LIMIT_MS``
     is set and the measured p99 exceeds it.
   * In-suite / short: ``pytest`` collects ``test_consumer_e2e_latency`` which
     spins a Kafka broker via testcontainers, produces a short burst inside the

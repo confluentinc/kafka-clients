@@ -105,7 +105,7 @@ Two ways to run:
     ``python -m pytest test/performance/transactional_producer_performance_test.py``
   * As an env-driven benchmark (long runs, external broker):
     ``python transactional_producer_performance_test.py`` (set env vars first),
-    or via the ``make transactional-producer-perf-test-python`` target.
+    or via the ``make -C python transactional-producer-perf-test`` target.
 """
 
 import asyncio

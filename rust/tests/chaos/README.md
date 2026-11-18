@@ -673,10 +673,11 @@ cargo xtask chaos --scenario simple_flow_clean_broker_roll
 - **Docker** running (the harness manages `kafka-*` containers on a private
   network; image `apache/kafka:4.2.0`).
 - For `python` / `python-async` / `c` / `dotnet` / `dotnet-async` workloads,
-  the gRPC-server images: `make build-grpc-images-c`,
-  `make build-grpc-images-python`, `make build-grpc-images-dotnet` (built
+  the gRPC-server images: `make build-grpc-images` at the repository root, or
+  one binding's with `make -C c grpc-image`, `make -C python grpc-image
+  grpc-image-async`, `make -C dotnet grpc-image grpc-image-async` (built
   once; reused across runs). For a natively launched .NET server
-  (`MULTILANG_BACKEND_MODE=native`), `make build-grpc-native-dotnet` instead.
+  (`MULTILANG_BACKEND_MODE=native`), `make -C dotnet grpc-native` instead.
 
 The harness is excluded from `cargo test` (`test = false` in `Cargo.toml`
 plus `#[ignore]` on every scenario) because it is slow and destructive to its

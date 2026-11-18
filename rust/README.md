@@ -114,13 +114,13 @@ cargo test --all-features -- --skip __grpc   # everything, minus the gRPC arms
 ```
 
 The `__grpc_python` / `__grpc_c` arms of the multilanguage suite need the
-bindings' gRPC images; the repository root's `make test-integration-python` and
-`make test-integration-c` build those first.
+bindings' gRPC images; `make -C python test-integration` and
+`make -C c test-integration`, from the repository root, build those first.
 
 ## Make targets
 
-`Makefile` wraps the commands above with the flags CI uses. The repository
-root's Makefile delegates to it, and it can be run directly:
+`Makefile` wraps the commands above with the flags CI uses. Run it here, or as
+`make -C rust <target>` from the repository root:
 
 ```bash
 make build                # release build, feature ffi
@@ -129,6 +129,7 @@ make test-all-features    # all features, skipping the gRPC arms
 make test-integration     # functional integration suite (Docker)
 make test-integration-perf
 make format-check lint doc-check
+make verify               # what CI runs on Linux; verify-macos on macOS
 make clean
 ```
 
