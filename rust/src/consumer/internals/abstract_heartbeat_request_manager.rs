@@ -221,12 +221,12 @@ pub(crate) trait HeartbeatRequestManagerHooks: Send + 'static {
     fn should_send_leave_heartbeat_now(&self) -> bool;
 }
 
-/// Shared heartbeat lifecycle state composed by
-/// [`super::ConsumerHeartbeatRequestManager`].
+/// Shared heartbeat lifecycle state, generic over the group type's heartbeat
+/// response `R` and composed by each subclass (the consumer's
+/// [`super::ConsumerHeartbeatRequestManager`], and the share consumer's).
 ///
-/// All fields are `pub(crate)` so the composing manager (single subclass
-/// in scope) can mutate them directly. This matches Java's `protected`
-/// semantics.
+/// Fields are `pub(crate)` so the composing subclass can read and mutate
+/// them directly. This matches Java's `protected` semantics.
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager")]
 pub(crate) struct AbstractHeartbeatRequestManager<R> {
     /// Max time allowed between invocations of `poll`, from
