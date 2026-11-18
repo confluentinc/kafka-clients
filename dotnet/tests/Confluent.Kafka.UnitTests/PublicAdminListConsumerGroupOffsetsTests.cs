@@ -208,7 +208,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             });
         Assert.Equal("groupSpecs", missingSpecs.ParamName);
 
-        ArgumentException nullSpec = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullSpec = Assert.Throws<ArgumentNullException>(
             () =>
             {
                 admin.ListConsumerGroupOffsets(
@@ -219,12 +219,12 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             });
         Assert.Equal("groupSpecs", nullSpec.ParamName);
         Assert.Contains(
-            "The spec for group id 'p5-lcgo-bad' must not be null.",
+            "groupSpecs must not contain null",
             nullSpec.Message,
             StringComparison.Ordinal);
 
         // A default(TopicPartition) has a null Topic, which the ABI would read as an absent name.
-        ArgumentException nullTopic = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
             () =>
             {
                 admin.ListConsumerGroupOffsets(
@@ -235,10 +235,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     });
             });
         Assert.Equal("groupSpecs", nullTopic.ParamName);
-        Assert.Contains(
-            "must not select a topic partition with a null topic",
-            nullTopic.Message,
-            StringComparison.Ordinal);
+        Assert.StartsWith(
+            "groupSpecs must not contain a TopicPartition with a null topic", nullTopic.Message, StringComparison.Ordinal);
     }
 
     [Fact]

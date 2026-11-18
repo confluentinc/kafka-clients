@@ -40,8 +40,12 @@ public sealed class PublicAdminConfigsShapeParityTests
     [Fact]
     public void IAdmin_TheTwoNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        MethodInfo describe = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeConfigs))!;
-        MethodInfo alter = typeof(IAdmin).GetMethod(nameof(IAdmin.IncrementalAlterConfigs))!;
+        MethodInfo describe = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DescribeConfigs),
+            new[] { typeof(IReadOnlyCollection<ConfigResource>), typeof(DescribeConfigsOptions) })!;
+        MethodInfo alter = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.IncrementalAlterConfigs),
+            new[] { typeof(IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>), typeof(AlterConfigsOptions) })!;
 
         Assert.Equal(typeof(DescribeConfigsResult), describe.ReturnType);
 
@@ -65,8 +69,11 @@ public sealed class PublicAdminConfigsShapeParityTests
             ParameterInfo[] parameters = rpc.GetParameters();
             Assert.False(parameters[0].IsOptional, $"{rpc.Name}'s input must be required");
             Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(parameters[0]));
-            Assert.True(parameters[1].IsOptional, $"{rpc.Name}'s options must be optional");
-            Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(parameters[1]));
+            Assert.False(parameters[1].IsOptional, $"{rpc.Name}'s options must be required");
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(parameters[1]));
+            MethodInfo? shortForm = typeof(IAdmin).GetMethod(rpc.Name, new[] { parameters[0].ParameterType });
+            Assert.NotNull(shortForm);
+            Assert.Equal(rpc.ReturnType, shortForm!.ReturnType);
         }
 
         Assert.Empty(

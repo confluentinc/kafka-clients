@@ -272,7 +272,7 @@ public sealed class JavaNameAnalyzerTests
             {
                 public sealed class {|#0:MockConsumer|}
                 {
-                    public void EnforceRebalance(string reason = null)
+                    public void {|#1:EnforceRebalance|}(string reason = null)
                     {
                     }
                 }
@@ -286,7 +286,66 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.clients.consumer.MockConsumer\tinstance\tenforceRebalance(String reason, int x)\n"),
             Name(0, "missing T:Confluent.Kafka.Consumer.MockConsumer org.apache.kafka.clients.consumer.MockConsumer"
                 + "#enforceRebalance(String,int): has no counterpart of Java's org.apache.kafka.clients.consumer.MockConsumer"
-                + "#enforceRebalance(String,int)"));
+                + "#enforceRebalance(String,int)"),
+            Name(1, "optional M:Confluent.Kafka.Consumer.MockConsumer.EnforceRebalance(System.String): has the optional "
+                + "parameter(s) reason; declare each overload as its own member"));
+
+    [Fact]
+    public Task AnOptionalParameter_IsReported_ExceptALastCancellationToken() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Node
+                {
+                    public {|#0:Node|}(int id, string host = "")
+                    {
+                    }
+
+                    public string Host() => "";
+
+                    public Task Close(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+                    internal void Reset(int id = 0)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode(int id)\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode(int id, String host)\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tclose()\n"),
+            Name(0, "optional M:Confluent.Kafka.Common.Node.#ctor(System.Int32,System.String): has the optional parameter(s) "
+                + "host; declare each overload as its own member"));
+
+    [Fact]
+    public Task AnOptionalParameterOnATypeJavaDoesNotHave_IsReported_UnlessListed() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public class {|#0:Widget|}
+                {
+                    protected void {|#1:Resize|}(int width, int height = 0)
+                    {
+                    }
+
+                    public void Frob(bool quick = false)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(Node, baseline: "optional M:Confluent.Kafka.Common.Widget.Frob(System.Boolean)\n"),
+            Name(0, "unmatched T:Confluent.Kafka.Common.Widget: Java has no type of this name, so its members are not checked"),
+            Name(1, "optional M:Confluent.Kafka.Common.Widget.Resize(System.Int32,System.Int32): has the optional "
+                + "parameter(s) height; declare each overload as its own member"));
 
     [Fact]
     public Task ParameterNames_FollowJava_TheInterfaceDeclarationFirst() =>
@@ -538,6 +597,8 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.Node\tinstance\track()\n"),
             Name(0, "parameter M:Confluent.Kafka.Common.Node.Port(System.Int32): adds the .NET-only parameter(s) timeoutMs to "
                 + "Java's Node.port()"),
+            Name(0, "optional M:Confluent.Kafka.Common.Node.Port(System.Int32): has the optional parameter(s) timeoutMs; "
+                + "declare each overload as its own member"),
             Name(1, "overload M:Confluent.Kafka.Common.Node.Rack(System.Threading.CancellationToken): Java's Node.rack has no "
                 + "overload with 1 parameter(s)"),
             Name(2, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#rack(): has no counterpart of Java's "
@@ -560,7 +621,9 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.common.Node\tNode()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost(int id)\n"),
             Name(0, "parameter M:Confluent.Kafka.Common.Node.Host(System.Int32,System.Boolean): names its parameters (nodeId) "
-                + "where Java's Node.host names them (id), and adds the .NET-only parameter(s) quick"));
+                + "where Java's Node.host names them (id), and adds the .NET-only parameter(s) quick"),
+            Name(0, "optional M:Confluent.Kafka.Common.Node.Host(System.Int32,System.Boolean): has the optional parameter(s) "
+                + "quick; declare each overload as its own member"));
 
     [Fact]
     public Task OverloadsWithTheSameNamesAndOtherTypes_AreEachChecked_AndJavasPairsWithTheSyncForm() =>
@@ -1843,7 +1906,7 @@ public sealed class JavaNameAnalyzerTests
                     {
                     }
 
-                    public int Reassignments(IReadOnlyCollection<int>? partitions = null, object? options = null) => 0;
+                    public int Reassignments(IReadOnlyCollection<int>? partitions, object? options) => 0;
 
                     public int Deserialize(string topic, ReadOnlySpan<byte> data) => 0;
                 }

@@ -20,7 +20,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.DescribeDelegationToken"/> — Java's
+/// Options for <see cref="IAdmin.DescribeDelegationToken(DescribeDelegationTokenOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenOptions</c>.
 /// </summary>
 public sealed class DescribeDelegationTokenOptions

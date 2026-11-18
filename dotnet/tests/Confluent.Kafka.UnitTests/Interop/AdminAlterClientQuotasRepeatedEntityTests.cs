@@ -55,7 +55,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(
-            admin.AlterClientQuotas(new[] { Alteration("dup", 1d), Alteration("dup", 2d) }, options: null));
+            admin.AlterClientQuotas(new[] { Alteration("dup", 1d), Alteration("dup", 2d) }, options: new AlterClientQuotasOptions()));
 
         Assert.Equal(Entity("dup"), Assert.Single(result.Values()).Key);
         await AssertNotImplemented(result.Values()[Entity("dup")]);
@@ -70,7 +70,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
         ClientQuotaAlteration.Op[] noOps = Array.Empty<ClientQuotaAlteration.Op>();
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(admin.AlterClientQuotas(
             new[] { new ClientQuotaAlteration(EmptyEntity(), noOps), new ClientQuotaAlteration(EmptyEntity(), noOps) },
-            options: null));
+            options: new AlterClientQuotasOptions()));
 
         Assert.Equal(EmptyEntity(), Assert.Single(result.Values()).Key);
         await AssertNotImplemented(result.Values()[EmptyEntity()]);
@@ -84,7 +84,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
 
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(admin.AlterClientQuotas(
             new[] { Alteration("a", 1d), Alteration(null, 2d), Alteration("a", 3d), Alteration(string.Empty, 4d) },
-            options: null));
+            options: new AlterClientQuotasOptions()));
 
         Assert.Equal(3, result.Values().Count);
         Assert.Contains(Entity("a"), result.Values().Keys);

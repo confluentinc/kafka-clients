@@ -22,7 +22,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeAcls"/> — Java's
+/// The result of <see cref="IAdmin.DescribeAcls(AclBindingFilter, DescribeAclsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeAclsResult</c>: one future over the matching ACLs.
 /// </summary>
 /// <remarks>

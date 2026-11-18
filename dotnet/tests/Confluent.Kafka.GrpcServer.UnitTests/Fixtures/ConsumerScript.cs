@@ -19,7 +19,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Consumer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
@@ -37,8 +36,6 @@ internal sealed class ConsumerScript
     private bool _disposedAsync;
 
     internal IReadOnlyDictionary<string, object?>? Config { get; set; }
-
-    internal ConsumerHandle? Handle { get; set; }
 
     internal bool DisposedAsync
     {

@@ -290,8 +290,7 @@ internal sealed partial class NativeAdminClient
         {
             if (alteration is null)
             {
-                throw new ArgumentException(
-                    "The SCRAM credential alterations must not contain a null element.", nameof(alterations));
+                throw new ArgumentNullException(nameof(alterations), "alterations must not contain null");
             }
 
             AdminStrings.Validate(alteration.User(), nameof(alterations));

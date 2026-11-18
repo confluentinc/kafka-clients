@@ -341,7 +341,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         try
         {
             consumer.Assign(new[] { s_tp0 });
-            consumer.CommitAsync(Offsets(5));
+            consumer.CommitAsync(Offsets(5), null);
 
             CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
             Assert.True(registration.IsReleased);

@@ -93,9 +93,8 @@ public sealed class ListGroupsOptions
     /// </summary>
     /// <param name="protocolTypes">The protocol types, or <see langword="null"/> or empty for all.</param>
     /// <returns>This instance, so calls can be chained.</returns>
-    /// <exception cref="ArgumentException">
-    /// The collection contains a <see langword="null"/> element, which Java's
-    /// <c>Set.copyOf</c> rejects.
+    /// <exception cref="ArgumentNullException">
+    /// The collection contains a <see langword="null"/> element, which Java's <c>Set.copyOf</c> rejects.
     /// </exception>
     public ListGroupsOptions WithProtocolTypes(IReadOnlyCollection<string>? protocolTypes)
     {
@@ -180,9 +179,7 @@ public sealed class ListGroupsOptions
         {
             if (protocolType is null)
             {
-                throw new ArgumentException(
-                    "A protocol type must not be null; Java's Set.copyOf rejects a null element.",
-                    nameof(protocolTypes));
+                throw new ArgumentNullException(nameof(protocolTypes), "protocolTypes must not contain null");
             }
 
             deduplicated.Add(protocolType);

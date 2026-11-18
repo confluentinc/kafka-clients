@@ -32,8 +32,8 @@
 #       Checks the package: its file name, the exact list of its entries and how they are stored,
 #       its nuspec, its assemblies, and each native library as `native` does.
 #
-# --dev is for a package built from a developer's or a CI job's own native (make
-# package-check-dotnet): the platform floors are not checked, since that native was not built for
+# --dev is for a package built from a developer's or a CI job's own native (make -C
+# dotnet package-check-dotnet): the platform floors are not checked, since that native was not built for
 # them. A release package is never checked with --dev.
 #
 # The checks read the files as NuGet and the dynamic loaders do, and refuse what those would read
@@ -56,7 +56,7 @@ PROPS = "dotnet/Directory.Build.props"
 # -alpha.N, -beta.N or -rc.N then optionally by .dev.M, a dev build. NuGet puts a dev build after
 # the version it extends (4.4.0-alpha.1 < 4.4.0-alpha.1.dev.1 < 4.4.0-alpha.2), so the dev builds
 # that lead up to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M. The dotnet/v<version> tag pattern of
-# semaphore.yml is this pattern after its prefix.
+# release.yml is this pattern after its prefix.
 VERSION_PATTERN = (r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
                    r"(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?")
 # The package id is shared with confluent-kafka-dotnet, whose versions are 2.x: this client's

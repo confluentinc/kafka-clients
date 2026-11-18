@@ -172,7 +172,7 @@ public sealed class AdminConfigsMarshalTests
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         Config config = await TestTimeout.Run(
-            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values()[resource].Get(),
+            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions())).Values()[resource].Get(),
             s_deadline);
 
         Assert.Equal(2, config.Entries().Count);
@@ -197,7 +197,7 @@ public sealed class AdminConfigsMarshalTests
         ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         ConfigResource missing = new ConfigResource(ConfigResourceType.TOPIC, "cfg-absent-topic");
         AsyncDescribeConfigsResult result =
-            AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { present, missing }, null));
+            AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { present, missing }, new DescribeConfigsOptions()));
 
         Assert.NotNull(await TestTimeout.Run(() => result.Values()[present].Get(), s_deadline));
 
@@ -255,7 +255,7 @@ public sealed class AdminConfigsMarshalTests
     private static Task CreateTopic(NativeAdminClient admin, Dictionary<string, string>? configs) =>
         TestTimeout.Run(
             () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(
-                new[] { new NewTopic(Topic, 1, 1).Configs(configs) }, null)).All().Get(),
+                new[] { new NewTopic(Topic, 1, 1).Configs(configs) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
     private static IntPtr Singleton(SingletonAccessor accessor)

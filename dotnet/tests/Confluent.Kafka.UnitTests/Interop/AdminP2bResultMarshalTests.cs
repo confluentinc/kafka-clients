@@ -76,7 +76,7 @@ public sealed class AdminP2bResultMarshalTests
                 [a1] = RecordsToDelete.BeforeOffset(2),
                 [b0] = RecordsToDelete.BeforeOffset(3),
             },
-            null);
+            new DeleteRecordsOptions());
 
         Assert.Equal(new HashSet<TopicPartition> { a0, a1, b0 }, new HashSet<TopicPartition>(deleted.LowWatermarks.Keys));
         Assert.Equal(3, deleted.LowWatermarks.Values.Distinct().Count());

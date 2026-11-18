@@ -341,7 +341,7 @@ public class PublicClientQuotaTypesTests
             "components",
             Assert.Throws<ArgumentNullException>(() => ClientQuotaFilter.ContainsOnly(null!)).ParamName);
 
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
             () => ClientQuotaFilter.Contains(new ClientQuotaFilterComponent[] { null! }));
 
         Assert.StartsWith("components must not contain null", ex.Message, StringComparison.Ordinal);
@@ -427,7 +427,7 @@ public class PublicClientQuotaTypesTests
             "ops",
             Assert.Throws<ArgumentNullException>(() => new ClientQuotaAlteration(entity, null!)).ParamName);
 
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
             () => new ClientQuotaAlteration(entity, new ClientQuotaAlteration.Op[] { null! }));
 
         Assert.StartsWith("ops must not contain null", ex.Message, StringComparison.Ordinal);

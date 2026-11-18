@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.CreateAcls"/> — Java's
+/// The result of <see cref="IAsyncAdmin.CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.CreateAclsResult</c>: one future per ACL binding.
 /// </summary>
 /// <remarks>

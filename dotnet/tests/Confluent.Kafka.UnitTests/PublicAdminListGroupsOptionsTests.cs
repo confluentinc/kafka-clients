@@ -200,10 +200,10 @@ public sealed class PublicAdminListGroupsOptionsTests
     {
         ListGroupsOptions options = new ListGroupsOptions();
 
-        ArgumentException error = Assert.Throws<ArgumentException>(
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(
             () => options.WithProtocolTypes(new[] { "consumer", null! }));
 
-        Assert.Contains("must not be null", error.Message, StringComparison.Ordinal);
+        Assert.StartsWith("protocolTypes must not contain null", error.Message, StringComparison.Ordinal);
 
         Assert.Empty(options.ProtocolTypes());
     }

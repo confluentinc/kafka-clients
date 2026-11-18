@@ -18,7 +18,7 @@ namespace Confluent.Kafka.Common;
 
 /// <summary>
 /// The kind of leader election to conduct — Java's <c>org.apache.kafka.common.ElectionType</c>,
-/// passed to <see cref="Admin.IAdmin.ElectLeaders"/>.
+/// passed to <see cref="Admin.IAdmin.ElectLeaders(ElectionType, System.Collections.Generic.IReadOnlyCollection{TopicPartition}, Admin.ElectLeadersOptions)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Common;
 /// <para>
 /// Java's <c>value</c> field is not ported: a cast gives the value. Java's static
 /// <c>valueOf(byte)</c> is <see cref="ElectionTypeMethods.ValueOf"/>.
-/// <see cref="Admin.IAdmin.ElectLeaders"/> reads a value cast in from outside the two members as
+/// <see cref="Admin.IAdmin.ElectLeaders(ElectionType, System.Collections.Generic.IReadOnlyCollection{TopicPartition}, Admin.ElectLeadersOptions)"/> reads a value cast in from outside the two members as
 /// <see cref="ElectionTypeMethods.ValueOf"/> reads it, and throws its <see cref="IllegalArgumentException"/>:
 /// <c>Value &lt;value&gt; must be one of [PREFERRED, UNCLEAN]</c>, with the whole number for one outside a byte.
 /// </para>

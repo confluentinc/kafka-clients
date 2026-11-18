@@ -225,16 +225,18 @@ public sealed class PublicConsumerPartitionOpsTests
     }
 
     [Fact]
-    public async Task Ops_ElementWithNullTopic_ThrowArgumentException()
+    public async Task Ops_ElementWithNullTopic_ThrowArgumentNull()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         TopicPartition[] withNullTopic = { default };
 
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Assign(withNullTopic));
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToBeginning(withNullTopic));
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToEnd(withNullTopic));
+        ArgumentNullException assign = await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Assign(withNullTopic));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.SeekToBeginning(withNullTopic));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.SeekToEnd(withNullTopic));
+        Assert.Contains(
+            "partitions must not contain a TopicPartition with a null topic", assign.Message, StringComparison.Ordinal);
     }
 
     // Java's SubscriptionState.assignedState throws for a partition that is not assigned, which a null topic never is.

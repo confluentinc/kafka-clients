@@ -98,20 +98,17 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     [Fact]
-    public async Task ListConfigResources_NullOrEmptyFilter_MeansEverySupportedType()
+    public async Task ListConfigResources_EmptyFilter_MeansEverySupportedType()
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> byDefault =
             await TestTimeout.Run(() => admin.ListConfigResources().All().Get(), s_deadline);
-        IReadOnlyCollection<ConfigResource> explicitNull =
-            await TestTimeout.Run(() => admin.ListConfigResources(null).All().Get(), s_deadline);
         IReadOnlyCollection<ConfigResource> empty = await TestTimeout.Run(
-            () => admin.ListConfigResources(Array.Empty<ConfigResourceType>()).All().Get(), s_deadline);
+            () => admin.ListConfigResources(Array.Empty<ConfigResourceType>(), new ListConfigResourcesOptions()).All().Get(), s_deadline);
 
         Assert.NotEmpty(byDefault);
-        Assert.Equal(Sorted(byDefault), Sorted(explicitNull));
         Assert.Equal(Sorted(byDefault), Sorted(empty));
 
         // A one-broker mock reports its broker's config and logger resources even with no topics.
@@ -128,13 +125,13 @@ public sealed class PublicAdminClusterConfigResourcesTests
             () => admin.CreateTopics(new[] { new NewTopic("p3-topic", 1, 1) }).All().Get(), s_deadline);
 
         IReadOnlyCollection<ConfigResource> topics = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.TOPIC }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.TOPIC }, new ListConfigResourcesOptions()).All().Get(), s_deadline);
         Assert.Equal(
             new ConfigResource(ConfigResourceType.TOPIC, "p3-topic"),
             Assert.Single(topics));
 
         IReadOnlyCollection<ConfigResource> brokers = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }, new ListConfigResourcesOptions()).All().Get(), s_deadline);
         Assert.DoesNotContain(brokers, resource => resource.Type() == ConfigResourceType.TOPIC);
         Assert.Contains(brokers, resource => resource.Type() == ConfigResourceType.BROKER);
     }
@@ -146,10 +143,11 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> once = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }, new ListConfigResourcesOptions()).All().Get(), s_deadline);
         IReadOnlyCollection<ConfigResource> repeated = await TestTimeout.Run(
             () => admin.ListConfigResources(
-                new[] { ConfigResourceType.BROKER, ConfigResourceType.BROKER, ConfigResourceType.BROKER }).All().Get(),
+                new[] { ConfigResourceType.BROKER, ConfigResourceType.BROKER, ConfigResourceType.BROKER },
+                new ListConfigResourcesOptions()).All().Get(),
             s_deadline);
 
         Assert.Equal(once, repeated);
@@ -240,7 +238,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Null(Record.Exception(
             () => admin.DescribeCluster(new DescribeClusterOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
-            () => admin.ListConfigResources(null, new ListConfigResourcesOptions().TimeoutMs(-5))));
+            () => admin.ListConfigResources(
+                Array.Empty<ConfigResourceType>(), new ListConfigResourcesOptions().TimeoutMs(-5))));
     }
 
     [Fact]

@@ -48,11 +48,11 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, null)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
         AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(
-            TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: null));
+            TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: new DescribeTopicsOptions()));
 
         TopicDescription present = await TestTimeout.Run(
             () => result.TopicNameValues()!["cp3-present"].Get(), s_deadline);
@@ -71,12 +71,12 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created =
-            AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, null));
+            AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, new CreateTopicsOptions()));
         Uuid id = await TestTimeout.Run(() => created.TopicId("cp3-by-id").Get(), s_deadline);
         Assert.NotEqual(Uuid.ZERO_UUID, id);
 
         AsyncDescribeTopicsResult result =
-            AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null));
+            AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: new DescribeTopicsOptions()));
 
         TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues()![id].Get(), s_deadline);
         Assert.Equal(id, description.TopicId());
@@ -90,7 +90,7 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, null)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "cp3-cfg");
@@ -98,7 +98,7 @@ public sealed class AdminP9PerKeyStage2Tests
         ConfigResource absent = new ConfigResource(ConfigResourceType.TOPIC, "cp3-cfg-absent");
 
         AsyncDescribeConfigsResult result =
-            AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic, broker, absent }, options: null));
+            AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic, broker, absent }, options: new DescribeConfigsOptions()));
 
         Assert.NotNull(await TestTimeout.Run(() => result.Values()[topic].Get(), s_deadline));
         Assert.NotNull(await TestTimeout.Run(() => result.Values()[broker].Get(), s_deadline));
@@ -116,11 +116,11 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, null)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, new CreateTopicsOptions())).All().Get(),
             s_deadline);
 
         // Requested in descending order, so a reader that took a key for a position would swap them.
-        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(new[] { 1, 0 }, options: null));
+        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(new[] { 1, 0 }, options: new DescribeLogDirsOptions()));
 
         Assert.Equal(2, result.Descriptions().Count);
         Assert.Contains(0, result.Descriptions().Keys);
@@ -197,7 +197,7 @@ public sealed class AdminP9PerKeyStage2Tests
             case Rpc.DescribeTopicsByName:
                 {
                     AsyncDescribeTopicsResult result =
-                        AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: null));
+                        AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: new DescribeTopicsOptions()));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> entry in result.TopicNameValues()!)
                     {
                         awaitables.Add(() => entry.Value.Get());
@@ -215,7 +215,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     }
 
                     AsyncDescribeTopicsResult result =
-                        AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: null));
+                        AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: new DescribeTopicsOptions()));
                     foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> entry in result.TopicIdValues()!)
                     {
                         awaitables.Add(() => entry.Value.Get());
@@ -232,7 +232,7 @@ public sealed class AdminP9PerKeyStage2Tests
                         resources.Add(new ConfigResource(ConfigResourceType.TOPIC, key));
                     }
 
-                    AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(resources, options: null));
+                    AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(resources, options: new DescribeConfigsOptions()));
                     foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> entry in result.Values())
                     {
                         awaitables.Add(() => entry.Value.Get());
@@ -249,7 +249,7 @@ public sealed class AdminP9PerKeyStage2Tests
                         brokers.Add(i);
                     }
 
-                    AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(brokers, options: null));
+                    AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(brokers, options: new DescribeLogDirsOptions()));
                     foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> entry
                         in result.Descriptions())
                     {
@@ -262,7 +262,7 @@ public sealed class AdminP9PerKeyStage2Tests
             case Rpc.DescribeConsumerGroups:
                 {
                     AsyncDescribeConsumerGroupsResult result =
-                        AsyncDescribeConsumerGroupsResult.OfClient(admin.DescribeConsumerGroups(keys, options: null));
+                        AsyncDescribeConsumerGroupsResult.OfClient(admin.DescribeConsumerGroups(keys, options: new DescribeConsumerGroupsOptions()));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> entry
                         in result.DescribedGroups())
                     {
@@ -275,7 +275,7 @@ public sealed class AdminP9PerKeyStage2Tests
             case Rpc.DescribeClassicGroups:
                 {
                     AsyncDescribeClassicGroupsResult result =
-                        AsyncDescribeClassicGroupsResult.OfClient(admin.DescribeClassicGroups(keys, options: null));
+                        AsyncDescribeClassicGroupsResult.OfClient(admin.DescribeClassicGroups(keys, options: new DescribeClassicGroupsOptions()));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> entry
                         in result.DescribedGroups())
                     {
@@ -295,7 +295,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     }
 
                     AsyncListConsumerGroupOffsetsResult result =
-                        AsyncListConsumerGroupOffsetsResult.OfClient(admin.ListConsumerGroupOffsets(specs, options: null));
+                        AsyncListConsumerGroupOffsetsResult.OfClient(admin.ListConsumerGroupOffsets(specs, options: new ListConsumerGroupOffsetsOptions()));
                     foreach (string key in specs.Keys)
                     {
                         string captured = key;
@@ -307,7 +307,7 @@ public sealed class AdminP9PerKeyStage2Tests
 
             case Rpc.DescribeTransactions:
                 {
-                    AsyncDescribeTransactionsResult result = AsyncDescribeTransactionsResult.OfClient(admin.DescribeTransactions(keys, options: null));
+                    AsyncDescribeTransactionsResult result = AsyncDescribeTransactionsResult.OfClient(admin.DescribeTransactions(keys, options: new DescribeTransactionsOptions()));
                     foreach (string key in keys)
                     {
                         string captured = key;
@@ -319,7 +319,7 @@ public sealed class AdminP9PerKeyStage2Tests
 
             default:
                 {
-                    AsyncFenceProducersResult result = AsyncFenceProducersResult.OfClient(admin.FenceProducers(keys, options: null));
+                    AsyncFenceProducersResult result = AsyncFenceProducersResult.OfClient(admin.FenceProducers(keys, options: new FenceProducersOptions()));
                     foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.FencedProducers())
                     {
                         awaitables.Add(() => entry.Value.Get());

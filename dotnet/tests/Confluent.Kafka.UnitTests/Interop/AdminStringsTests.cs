@@ -128,12 +128,12 @@ public sealed class AdminStringsTests
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.CreateTopics(
                 new[] { new NewTopic("ok", 1, 1), new NewTopic("a\0b", 1, 1) },
-                null));
+                new CreateTopicsOptions()));
 
             Assert.Equal("newTopics", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
             await TestTimeout.Run(
-                () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("ok", 1, 1) }, null)).All().Get(),
+                () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("ok", 1, 1) }, new CreateTopicsOptions())).All().Get(),
                 s_deadline);
         }
         finally
@@ -149,18 +149,18 @@ public sealed class AdminStringsTests
         try
         {
             await TestTimeout.Run(
-                () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("fine", 1, 1) }, null)).All().Get(),
+                () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("fine", 1, 1) }, new CreateTopicsOptions())).All().Get(),
                 s_deadline);
 
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { "fine", "x\0" }),
-                options: null));
+                options: new DeleteTopicsOptions()));
 
             Assert.Equal("topics", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
             await TestTimeout.Run(
                 () => AsyncDeleteTopicsResult.OfClient(
-                    admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "fine" }), options: null)).All().Get(),
+                    admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "fine" }), options: new DeleteTopicsOptions())).All().Get(),
                 s_deadline);
         }
         finally
@@ -177,25 +177,25 @@ public sealed class AdminStringsTests
         {
             ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "b5-configs");
             await TestTimeout.Run(
-                () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("b5-configs", 1, 1) }, null)).All().Get(),
+                () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("b5-configs", 1, 1) }, new CreateTopicsOptions())).All().Get(),
                 s_deadline);
 
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.IncrementalAlterConfigs(
                 SetOp(topic, "retention.ms", "10\u0000tail"),
-                options: null));
+                options: new AlterConfigsOptions()));
 
             Assert.Equal("configs", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
             Config before = await TestTimeout.Run(
-                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values()[topic].Get(),
+                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, new DescribeConfigsOptions())).Values()[topic].Get(),
                 s_deadline);
             Assert.Null(before.Get("retention.ms"));
 
             await TestTimeout.Run(
-                () => AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(SetOp(topic, "retention.ms", "1000"), null)).All().Get(),
+                () => AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(SetOp(topic, "retention.ms", "1000"), new AlterConfigsOptions())).All().Get(),
                 s_deadline);
             Config config = await TestTimeout.Run(
-                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values()[topic].Get(),
+                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, new DescribeConfigsOptions())).Values()[topic].Get(),
                 s_deadline);
             Assert.Equal("1000", config.Get("retention.ms")!.Value());
         }
@@ -236,13 +236,13 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
-                () => admin.DescribeClientQuotas(UserFilter("ali\u0000ce"), options: null));
+                () => admin.DescribeClientQuotas(UserFilter("ali\u0000ce"), options: new DescribeClientQuotasOptions()));
 
             Assert.Equal("filter", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncDescribeClientQuotasResult result =
-                AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: null));
+                AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: new DescribeClientQuotasOptions()));
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
             Assert.Equal("Not implement yet", failure.Message);
@@ -285,7 +285,7 @@ public sealed class AdminStringsTests
         try
         {
             AsyncDescribeUserScramCredentialsResult result =
-                AsyncDescribeUserScramCredentialsResult.OfClient(admin.DescribeUserScramCredentials(new[] { "alice" }, null));
+                AsyncDescribeUserScramCredentialsResult.OfClient(admin.DescribeUserScramCredentials(new[] { "alice" }, new DescribeUserScramCredentialsOptions()));
 
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = result.Description("ali\0ce"); });
 
@@ -334,7 +334,7 @@ public sealed class AdminStringsTests
 
     private static Task<long> EarliestOffset(NativeAdminClient admin, TopicPartition partition) =>
         Task.FromResult(admin
-            .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, null)
+            .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, new ListOffsetsOptions())
             .Futures[partition].Get(s_deadline).Offset());
 
     private static SafeAdminClientHandle HandleOf(NativeAdminClient native) =>

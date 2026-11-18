@@ -168,7 +168,9 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
 
     public IReadOnlyCollection<TopicPartition> Paused() => _inner.Paused();
 
-    public void EnforceRebalance(string? reason = null) => _inner.EnforceRebalance(reason);
+    public void EnforceRebalance() => _inner.EnforceRebalance();
+
+    public void EnforceRebalance(string? reason) => _inner.EnforceRebalance(reason);
 
     public void CommitAsync()
     {
@@ -182,7 +184,7 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
         _inner.CommitAsync(callback);
     }
 
-    public void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IOffsetCommitCallback? callback = null)
+    public void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IOffsetCommitCallback? callback)
     {
         _script.OnCall("CommitAsync(offsets)");
         _inner.CommitAsync(offsets, callback);
@@ -195,13 +197,6 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     public long? CurrentLag(TopicPartition partition) => _inner.CurrentLag(partition);
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
-
-    public ConsumerHandle Handle()
-    {
-        ConsumerHandle handle = _inner.Handle();
-        _script.Handle = handle;
-        return handle;
-    }
 
     public void Dispose()
     {

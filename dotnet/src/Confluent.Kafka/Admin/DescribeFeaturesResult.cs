@@ -21,7 +21,7 @@ using Metadata = Confluent.Kafka.Admin.FeatureMetadata;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeFeatures"/> — Java's
+/// The result of <see cref="IAdmin.DescribeFeatures(DescribeFeaturesOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeFeaturesResult</c>: one future over the whole feature
 /// metadata.
 /// </summary>

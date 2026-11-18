@@ -22,7 +22,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.ListOffsets"/> — Java's
+/// The result of <see cref="IAsyncAdmin.ListOffsets(IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.ListOffsetsResult</c>: one future per partition.
 /// </summary>
 /// <remarks>

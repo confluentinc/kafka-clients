@@ -147,7 +147,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
             () => { admin.DescribeClassicGroups(null!); });
         Assert.Equal("groupIds", missing.ParamName);
 
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(
             () => { admin.DescribeClassicGroups(new string?[] { "p5-dclg-null", null }!); });
         Assert.Equal("groupIds", nullElement.ParamName);
     }

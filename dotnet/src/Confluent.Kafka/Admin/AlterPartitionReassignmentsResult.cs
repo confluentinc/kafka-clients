@@ -20,7 +20,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.AlterPartitionReassignments"/> — Java's
+/// The result of <see cref="IAdmin.AlterPartitionReassignments(IReadOnlyDictionary{TopicPartition, NewPartitionReassignment}, AlterPartitionReassignmentsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult</c>: one future per
 /// partition.
 /// </summary>
