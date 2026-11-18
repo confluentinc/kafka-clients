@@ -79,6 +79,48 @@ lint-cpp: build-rust-all-features
 verify-cpp: build-rust-all-features
 	$(MAKE) -C cpp $(ROOTS) verify
 
+# The Debian packages of the C core and the C++ binding (packaging/debian), built
+# in a container of the release they are for, so each gets that release's glibc
+# floor. They are built from the working tree's tracked files (`git stash
+# create`, which changes nothing) into build/deb/<distro>/<revision>/, with
+# lintian's report (initial-upload-closes-no-bugs suppressed: it asks for the ITP
+# bug of an upload to the Debian archive, which these are not). DEB_REVISION is
+# the Debian revision; DEB_MAINTAINER fills the Maintainer field, the builder by
+# default. The toolchain and the crates are cached in the Docker volumes
+# confluent-kafka-deb-rustup and -cargo.
+DISTRO ?= ubuntu:24.04
+DEB_REVISION ?= 1
+DEB_MAINTAINER ?= $(shell git config user.name) <$(shell git config user.email)>
+DEB_OUT = $(CURDIR)/build/deb/$(subst :,-,$(DISTRO))/$(DEB_REVISION)
+package-deb:
+	mkdir -p $(DEB_OUT)
+	tree=$$(git stash create); git archive --format=tar --prefix=src/ $${tree:-HEAD} > $(DEB_OUT)/source.tar
+	docker run --rm -v $(DEB_OUT):/out \
+		-v confluent-kafka-deb-rustup:/root/.rustup -v confluent-kafka-deb-cargo:/root/.cargo \
+		-e DEB_REVISION=$(DEB_REVISION) -e "DEB_MAINTAINER=$(DEB_MAINTAINER)" -e OWNER=$$(id -u):$$(id -g) \
+		$(DISTRO) sh -euc '\
+		export DEBIAN_FRONTEND=noninteractive; \
+		. /etc/os-release; \
+		apt-get update -qq; \
+		apt-get install -y -qq --no-install-recommends build-essential debhelper lintian cmake ninja-build \
+			perl nasm pkgconf curl ca-certificates >/dev/null; \
+		[ -x /root/.cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal \
+			--default-toolchain none; \
+		export PATH=/root/.cargo/bin:$$PATH; \
+		mkdir /build; tar -xf /out/source.tar -C /build; cd /build/src; \
+		(cd rust && rustup toolchain install); \
+		cp -r packaging/debian debian; \
+		sed -i "s|@MAINTAINER@|$$DEB_MAINTAINER|" debian/control; \
+		version=$$(sed -n "s/^version = \"\(.*\)\"/\1/p" rust/Cargo.toml | head -1); \
+		printf "confluent-kafka (%s-%s) %s; urgency=medium\n\n  * Built from the repository.\n\n -- %s  %s\n" \
+			"$$version" "$$DEB_REVISION" "$$VERSION_CODENAME" "$$DEB_MAINTAINER" "$$(date -R)" > debian/changelog; \
+		dpkg-buildpackage -b -uc -us; \
+		cp ../*.deb ../*.changes ../*.buildinfo /out/; \
+		cp ../*.ddeb /out/ 2>/dev/null || true; \
+		lintian --info --suppress-tags initial-upload-closes-no-bugs ../*.changes > /out/lintian.txt 2>&1 || true; \
+		chown -R "$$OWNER" /out'
+	ls -l $(DEB_OUT)
+
 init-venv:
 	[ -d venv ] || python3 -m venv venv
 	@if venv/bin/python -m pip show -q confluent-kafka >/dev/null 2>&1; then \

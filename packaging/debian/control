@@ -1,0 +1,60 @@
+Source: confluent-kafka
+Section: libs
+Priority: optional
+Maintainer: @MAINTAINER@
+Build-Depends: debhelper-compat (= 13),
+               cmake,
+               ninja-build,
+               g++,
+               perl,
+               nasm [amd64],
+               pkgconf
+Standards-Version: 4.7.0
+Homepage: https://github.com/confluentinc/kafka-clients
+Rules-Requires-Root: no
+
+Package: libconfluent-kafka0
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Confluent Kafka client - C library
+ The Apache Kafka client of Confluent, written in Rust: producer, consumer
+ and admin client behind a C API.
+ .
+ This package contains the shared library.
+
+Package: libconfluent-kafka-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libconfluent-kafka0 (= ${binary:Version}), ${misc:Depends}
+Description: Confluent Kafka client - C development files
+ The Apache Kafka client of Confluent, written in Rust: producer, consumer
+ and admin client behind a C API.
+ .
+ This package contains the C headers, the static library and the pkg-config
+ file.
+
+Package: libconfluent-kafka-cpp0.1
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Confluent Kafka client - C++ library
+ The C++ binding of Confluent's Apache Kafka client, over its C library,
+ with the API of the Java client.
+ .
+ This package contains the shared library.
+
+Package: libconfluent-kafka-cpp-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libconfluent-kafka-cpp0.1 (= ${binary:Version}),
+         libconfluent-kafka-dev (>= ${core:Version}),
+         ${misc:Depends}
+Description: Confluent Kafka client - C++ development files
+ The C++ binding of Confluent's Apache Kafka client, over its C library,
+ with the API of the Java client.
+ .
+ This package contains the C++ headers, the static library, the CMake
+ package and the pkg-config file.

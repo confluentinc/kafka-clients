@@ -148,7 +148,15 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    (in `verify`); the `package_config` test installs the build tree and runs `test/package`, a
    program built with `find_package`, over each library.
 5. `cargo xtask install-c` (the core with its soname, links, static library, headers and
-   `confluent-kafka.pc`) and the `api-compat` rule that a C ABI break raises `C_ABI_MAJOR`.
+   `confluent-kafka.pc`) and the `api-compat` rule that a C ABI break raises `C_ABI_MAJOR`. Done:
+   one `cargo rustc --release --features ffi --lib -- --print=native-static-libs` build in
+   `target/package/` (never `target/release`, where a library with a soname would make the
+   repository's own builds look for a file cargo does not write), then
+   `libconfluent_kafka.so.0.<version>` with its `.so.0` and `.so` links, the static library, both
+   headers and `confluent-kafka.pc`, rustc's native libraries as `Libs.private`
+   (`-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` on Linux). `api-compat` refuses a C break the
+   version allows when `C_ABI_MAJOR` is not raised over the baseline's (a baseline from before the
+   soname has none to keep).
 6. `abi-check` on the real shared library, with the `SOVERSION` rule. Done: each tree's library is
    built by its own CMake (Debug, against `CORE_LIB_DIR`) and compared by `abidiff
    --no-added-syms` with the public headers given; a break under an unchanged `SOVERSION` is a
@@ -159,7 +167,20 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    the order (the API inventory).
 7. `packaging/debian/`: one source package, `libconfluent-kafka0`, `libconfluent-kafka-dev`,
    `libconfluent-kafka-cpp0.1`, `libconfluent-kafka-cpp-dev`, built per distro release in its
-   container; the upgrade checked by running a program built against the old package.
+   container; the upgrade checked by running a program built against the old package. Done:
+   `make package-deb DISTRO=ubuntu:24.04 [DEB_REVISION=n]` at the root. The core is staged in
+   `debian/core` (the binary targets' `dh_prep` clears `debian/tmp`) and copied in at install;
+   the C++ packages carry the binding's version (`dh_gencontrol -v`); `shlibs` with `-V` instead
+   of a symbols file, as the C exports change with the experimental FFI; line tables for the
+   core's `-dbgsym`. `install-c` removes the LLVM bitcode rustc embeds in the static library
+   (196 of 261 MB; `-dev` 52 → 9.7 MB). On Ubuntu 24.04: runtime 5.5 MB, C++ runtime 31 KB, core
+   floor glibc 2.38; lintian reports no error or warning (`initial-upload-closes-no-bugs`
+   suppressed, it is for the Debian archive; a readelf parse note on the 81 205-section static
+   library is lintian's own). Checked in a fresh container: a program built with `find_package`
+   against revision 1, after `apt install` of a revision 2 whose `to_string(Node)` changed,
+   prints the new text from its shared build and the old from its static one, neither rebuilt.
+   Not done: the crates' licenses in `debian/copyright` (they are linked into the core),
+   vendoring the crates for the Debian archive, CI jobs.
 
 ## Next
 
