@@ -145,9 +145,15 @@ These decide every question, in this order:
    (`send_ctx_maybe_destroy_future`): once the callback reported, the last
    wait completed and JS recorded the delivery (or was never handed the
    slot), giving the slot back then. A context whose delivery reached no JS
-   while JS holds its slot (an environment teardown, or a callback Promise
-   the destroy reported as returned, which a completed close rules out) is
-   kept, so the slot never names freed memory. Only a future with no native
+   while JS holds its slot (an environment teardown) is kept, so the slot
+   never names freed memory. A callback Promise still pending when the
+   finalizer destroys a closed producer is not such a case, although a
+   completed close does not rule it out (a `close()` made from the callback
+   before its first `await` closes at once, the Promise still pending): the
+   destroy reports it as returned (rule 6), and JS holds its future no more,
+   since a `KafkaFuture` holding a slot holds the handle object being
+   finalized, so its future, slot and context are freed as a recorded
+   one's are (`send_report_awaiting`). Only a future with no native
    handle (`allOf()`, `completedFuture()`, the dependants) runs a JS timer,
    for a timed `get`.
 

@@ -257,9 +257,12 @@ static void send_ctx_free(napi_env env, SendCtx* ctx) {
     delete_ref(env, &ctx->on_handover);
     delete_ref(env, &ctx->on_complete);
     // A future JS still holds and never recorded the delivery of (its
-    // callback reached no JS: an environment teardown, or a callback Promise
-    // the destroy reported as returned, which a completed close rules out)
-    // stays readable through the handle JS has, so its context is kept.
+    // callback reached no JS: an environment teardown) stays readable through
+    // the handle JS has, so its context is kept. A callback Promise the
+    // destroy reported as returned is not such a case, although a completed
+    // close does not rule it out (a close() made from the callback before its
+    // first await closes at once, the Promise still pending): JS holds none of
+    // those futures any more (send_report_awaiting).
     if (ctx->future != NULL && ctx->js_holds && !ctx->js_settled) return;
     send_ctx_destroy_future(env, ctx);
     free(ctx);
@@ -521,9 +524,17 @@ static void send_awaited_report(napi_env env, SendCtx* ctx, const char* thrown) 
 
 // Reports every awaited callback as returned, before the producer is
 // destroyed (producer_destroy, from the handle object's finalizer): no JS
-// will settle them, and destroy refuses a report once it began.
+// will settle them, and destroy refuses a report once it began. Nor does JS
+// hold their futures any more: a KafkaFuture holding a slot holds the handle
+// object, which is being finalized. So each future is destroyed, and its slot
+// given back, as a recorded one is, once its last wait completed; kept, it
+// would stay with its context and slot for good.
 static void send_report_awaiting(napi_env env, Producer* p) {
-    while (p->awaiting != NULL) send_awaited_report(env, p->awaiting, NULL);
+    while (p->awaiting != NULL) {
+        SendCtx* ctx = p->awaiting;
+        ctx->js_holds = 0;
+        send_awaited_report(env, ctx, NULL);
+    }
 }
 
 // The function a callback's Promise calls once settled, as both its handlers

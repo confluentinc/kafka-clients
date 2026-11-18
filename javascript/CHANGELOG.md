@@ -206,6 +206,10 @@ newer.
 - The addon builds on Linux. It uses `dladdr`, which glibc declares only
   under `_GNU_SOURCE`, and compiles with `-std=c11`, which defines no feature
   macro, so it used to fail to compile there; it now defines `_GNU_SOURCE`.
+- A closed producer collected while a callback's Promise was still pending
+  (a `close()` made from the callback before its first `await` closes at
+  once) frees what the record held natively: its send context, its slot and
+  its native future used to stay allocated for good.
 
 ### Known limitations
 
