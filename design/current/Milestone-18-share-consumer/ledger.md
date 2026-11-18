@@ -23,22 +23,22 @@ Conventions:
 
 | Java file | Lines | Phase | PR | Rust target | Visibility | Status |
 |---|---|---|---|---|---|---|
-| `common/requests/ShareFetchRequest.java` | 241 | P1 | A | `common/requests/share_fetch_request.rs` | crate | todo |
-| `common/requests/ShareFetchResponse.java` | 215 | P1 | A | `common/requests/share_fetch_response.rs` | crate | todo |
-| `common/requests/ShareAcknowledgeRequest.java` | 120 | P1 | A | `common/requests/share_acknowledge_request.rs` | crate | todo |
-| `common/requests/ShareAcknowledgeResponse.java` | 146 | P1 | A | `common/requests/share_acknowledge_response.rs` | crate | todo |
-| `common/requests/ShareGroupHeartbeatRequest.java` | 80 | P1 | A | `common/requests/share_group_heartbeat_request.rs` | crate | todo |
-| `common/requests/ShareGroupHeartbeatResponse.java` | 88 | P1 | A | `common/requests/share_group_heartbeat_response.rs` | crate | todo |
-| `common/requests/ShareGroupDescribeRequest.java` | 96 | P1 | A | `common/requests/share_group_describe_request.rs` | crate | todo |
-| `common/requests/ShareGroupDescribeResponse.java` | 77 | P1 | A | `common/requests/share_group_describe_response.rs` | crate | todo |
-| `common/requests/ShareRequestMetadata.java` | 115 | P1 | A | `common/requests/share_request_metadata.rs` | crate | todo |
-| `common/requests/DescribeShareGroupOffsetsRequest.java` | 93 | P1 (used by P9) | A | `common/requests/describe_share_group_offsets_request.rs` | crate | todo |
-| `common/requests/DescribeShareGroupOffsetsResponse.java` | 103 | P1 (used by P9) | A | `common/requests/describe_share_group_offsets_response.rs` | crate | todo |
-| `common/requests/AlterShareGroupOffsetsRequest.java` | 94 | P1 (used by P9) | A | `common/requests/alter_share_group_offsets_request.rs` | crate | todo |
-| `common/requests/AlterShareGroupOffsetsResponse.java` | 113 | P1 (used by P9) | A | `common/requests/alter_share_group_offsets_response.rs` | crate | todo |
-| `common/requests/DeleteShareGroupOffsetsRequest.java` | 96 | P1 (used by P9) | A | `common/requests/delete_share_group_offsets_request.rs` | crate | todo |
-| `common/requests/DeleteShareGroupOffsetsResponse.java` | 65 | P1 (used by P9) | A | `common/requests/delete_share_group_offsets_response.rs` | crate | todo |
-| `ConcreteRequest` / `ConcreteResponse` arms (Java `AbstractRequest#parseRequest`, `AbstractResponse#parseResponse` share cases) for the 7 client APIs above | edits | P1 | A | `common/requests/abstract_request.rs`, `abstract_response.rs` | crate | todo |
+| `common/requests/ShareFetchRequest.java` | 241 | P1 | A | `common/requests/share_fetch_request.rs` | crate | done |
+| `common/requests/ShareFetchResponse.java` | 215 | P1 | A | `common/requests/share_fetch_response.rs` | crate | done |
+| `common/requests/ShareAcknowledgeRequest.java` | 120 | P1 | A | `common/requests/share_acknowledge_request.rs` | crate | done |
+| `common/requests/ShareAcknowledgeResponse.java` | 146 | P1 | A | `common/requests/share_acknowledge_response.rs` | crate | done |
+| `common/requests/ShareGroupHeartbeatRequest.java` | 80 | P1 | A | `common/requests/share_group_heartbeat_request.rs` | crate | done |
+| `common/requests/ShareGroupHeartbeatResponse.java` | 88 | P1 | A | `common/requests/share_group_heartbeat_response.rs` | crate | done |
+| `common/requests/ShareGroupDescribeRequest.java` | 96 | P1 | A | `common/requests/share_group_describe_request.rs` | crate | done |
+| `common/requests/ShareGroupDescribeResponse.java` | 77 | P1 | A | `common/requests/share_group_describe_response.rs` | crate | done |
+| `common/requests/ShareRequestMetadata.java` | 115 | P1 | A | `common/requests/share_request_metadata.rs` | crate | done |
+| `common/requests/DescribeShareGroupOffsetsRequest.java` | 93 | P1 (used by P9) | A | `common/requests/describe_share_group_offsets_request.rs` | crate | done |
+| `common/requests/DescribeShareGroupOffsetsResponse.java` | 103 | P1 (used by P9) | A | `common/requests/describe_share_group_offsets_response.rs` | crate | done |
+| `common/requests/AlterShareGroupOffsetsRequest.java` | 94 | P1 (used by P9) | A | `common/requests/alter_share_group_offsets_request.rs` | crate | done |
+| `common/requests/AlterShareGroupOffsetsResponse.java` | 113 | P1 (used by P9) | A | `common/requests/alter_share_group_offsets_response.rs` | crate | done |
+| `common/requests/DeleteShareGroupOffsetsRequest.java` | 96 | P1 (used by P9) | A | `common/requests/delete_share_group_offsets_request.rs` | crate | done |
+| `common/requests/DeleteShareGroupOffsetsResponse.java` | 65 | P1 (used by P9) | A | `common/requests/delete_share_group_offsets_response.rs` | crate | done |
+| `ConcreteRequest` / `ConcreteResponse` arms (Java `AbstractRequest#parseRequest`, `AbstractResponse#parseResponse` share cases) for the 7 client APIs above | edits | P1 | A | `common/requests/abstract_request.rs`, `abstract_response.rs` | crate | done (every match arm, incl. `parse_request` / `parse` and the schema-derived `should_client_throttle` arm; the 7 response types join `RequestResponseTest#testClientThrottlesResponsesWithThrottleTime`) |
 | Inter-broker share-state wrappers (`Initialize/Read/Write/DeleteShareGroupState*`, `ReadShareGroupStateSummary*`, 10 files) | — | — | — | — | — | skipped: `ApiKeys` marks them `cluster_action` (broker-to-broker); no client code sends them. Re-check at P11 that no client test needs their `ConcreteResponse` arm. |
 
 The three admin share-offsets request/response pairs (6 files) are **missing from PLAN §4 P1**,
@@ -186,8 +186,8 @@ test file uses `@RepeatedTest`, `@Disabled` or `@Flaky`.
 
 | Java test | Share content | Phase | PR | Status |
 |---|---|---|---|---|
-| `common/requests/RequestResponseTest#testShareFetchResponseShouldNotHaveNullRecords` | 1 `@Test` | P1 | A | todo |
-| `RequestResponseTest#testSerialization` / `#testErrorCountsIncludesNone` share arms | `createShare{GroupHeartbeat,GroupDescribe,Fetch,Acknowledge}{Request,Response}` and `create{Describe,Alter,Delete}ShareGroupOffsets{Request,Response}` helpers; 4 `errorCounts` asserts (heartbeat 1, describe 1, fetch 2, acknowledge 2) | P1 | A | todo — Rust distributes `RequestResponseTest` per wrapper file (see `txn_offset_commit_request.rs`), so each new wrapper file carries its serialization + error-count cases |
+| `common/requests/RequestResponseTest#testShareFetchResponseShouldNotHaveNullRecords` | 1 `@Test` | P1 | A | done: `share_fetch_response.rs::test_share_fetch_response_should_not_have_null_records` |
+| `RequestResponseTest#testSerialization` / `#testErrorCountsIncludesNone` share arms | `createShare{GroupHeartbeat,GroupDescribe,Fetch,Acknowledge}{Request,Response}` and `create{Describe,Alter,Delete}ShareGroupOffsets{Request,Response}` helpers; 4 `errorCounts` asserts (heartbeat 1, describe 1, fetch 2, acknowledge 2) | P1 | A | done — distributed per wrapper file: each `*_request.rs` has `test_serialization_all_versions` (`checkRequest` + `checkErrorResponse`), each `*_response.rs` has the `checkResponse` half; the 4 `errorCounts` asserts are `test_error_counts_includes_none` in the heartbeat, describe, fetch and acknowledge response files. The private `checkRequest` / `checkResponse` / `checkErrorResponse` helpers live once in the test-only `common/requests/request_response_test.rs`. Every wrapper also has a hand-derived byte-level vector test. |
 | `consumer/internals/events/ApplicationEventProcessorTest#testSharePollEventCallsShareManagers` | 1 `@Test` (`setupShareProcessor()` used twice: the fixture + this test) | P6 | C | todo |
 | `consumer/internals/WakeupTriggerTest#testWakeupFromShareFetchAction` | 1 `@Test` | P6 | C | todo — the Rust `WakeupTrigger` collapses Java's `FetchAction` / `ShareFetchAction` into "the await `select!`s on the token" (`wakeup_trigger.rs` module doc), so the test becomes "a share `poll` blocked on the share fetch buffer returns `Wakeup`"; record as a deviation at the test |
 | `consumer/internals/metrics/AsyncConsumerMetricsTest` | 11 tests parameterised by `groupNameProvider` = {`CONSUMER_METRIC_GROUP`, `CONSUMER_SHARE_METRIC_GROUP`} | — | — | exists: `async_consumer_metrics.rs` `group_name_provider()` already loops both groups |
@@ -270,3 +270,4 @@ share code gets a row. A phase cannot close with an unowned row.
 
 | Item | Where in the code | Owning phase | Reason |
 |---|---|---|---|
+| `ShareFetchRequest` `Builder::build_version` compares the acquire mode against a local `SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID` (`0`, Java `ShareAcquireMode.BATCH_OPTIMIZED.id()`) instead of `ShareAcquireMode` | `rust/src/common/requests/share_fetch_request.rs` (`SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID`) | P3a | `ShareAcquireMode` is translated in P2, in parallel with P1; P3a is the first phase that depends on both. Replace the constant with the P2 type's id and delete it. Behaviour is identical meanwhile. |
