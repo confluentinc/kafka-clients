@@ -437,10 +437,30 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
     )]
     fn signal_reconciliation_completing(&self, _current_time_ms: i64) {}
 
-    /// Signals that the reconciliation revokes `partitions_revoked` so that
-    /// group-type actions can run (the consumer's `onPartitionsRevoked`).
-    /// Returns the ack the reconciliation waits on before assigning, or
-    /// `None` (Java's completed future). Only called with a non-empty set.
+    /// Signals that `partitions_to_revoke` are about to be revoked so that
+    /// group-type actions can run (the consumer logs the paused partitions
+    /// whose pause flag the revocation drops). Called by
+    /// [`AbstractMembershipManager::revoke_partitions`] before the partitions
+    /// are marked pending revocation. The base does nothing.
+    ///
+    /// Java: `public void signalPartitionsBeingRevoked(Set<TopicPartition>)`
+    /// (an empty body).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#signalPartitionsBeingRevoked")]
+    fn signal_partitions_being_revoked(&self, _partitions_to_revoke: &[TopicPartition]) {}
+
+    /// Signals that `partitions_revoked` have been revoked so that group-type
+    /// actions can run (the consumer's `onPartitionsRevoked`). Called by
+    /// [`AbstractMembershipManager::revoke_partitions`], possibly with an
+    /// empty set. Returns the ack the caller waits on, or `None` (Java's
+    /// completed future).
+    ///
+    /// `ack_through_application_events` is Rust-only (DoD §7): it tells the
+    /// consumer which way the app side returns the callback's ack, and is the
+    /// value of the `BackgroundEvent::PartitionsRemoved` field of the same
+    /// name. A leave (`signalMemberLeavingGroup`) passes `true`, the reconcile
+    /// chain `false`. Java returns every callback through the application
+    /// queue and has no such parameter; a group type without callbacks
+    /// ignores it.
     ///
     /// Java: `public CompletableFuture<Void> signalPartitionsRevoked(Set<TopicPartition>)`,
     /// whose base body returns `CompletableFuture.completedFuture(null)`.
@@ -448,6 +468,7 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
     fn signal_partitions_revoked(
         &self,
         _partitions_revoked: Vec<TopicPartition>,
+        _ack_through_application_events: bool,
         _current_time_ms: i64,
     ) -> Result<Option<SignalAck>, Error> {
         Ok(None)
@@ -529,6 +550,9 @@ pub(crate) enum PendingReconcile {
     /// resume at step 10 (abort check → assign-callback enqueue).
     AfterRevoke {
         ack_rx: oneshot::Receiver<Result<(), Error>>,
+        /// The partitions `revokePartitions` passed to the callback, for
+        /// Java's failure log line.
+        revoked_partitions: Vec<TopicPartition>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
@@ -2005,17 +2029,12 @@ impl AbstractMembershipManager {
             revoked
         );
 
-        // 8. Mark partitions pending revocation to stop fetching.
+        // 8. Mark partitions as pending revocation to stop fetching from the
+        // partitions (no new fetches sent out, and no in-flight fetches
+        // responses processed).
         {
-            let mut subs = match self.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
             let revoked_vec: Vec<TopicPartition> = revoked.iter().cloned().collect();
-            // Java: subscriptions.markPendingRevocation(revokedPartitions).
-            if let Err(e) = subs.mark_pending_revocation(&revoked_vec) {
-                log::warn!("mark_pending_revocation failed: {}", e);
-            }
+            self.mark_pending_revocation_to_pause_fetching(&revoked_vec);
         }
 
         // 8a. Java `signalReconciliationStarted()` →
@@ -2166,18 +2185,16 @@ impl AbstractMembershipManager {
             return Ok(());
         }
 
-        // 9. §31: enqueue onPartitionsRevoked. Phase 41b — do NOT await
-        // the ack inline (that would freeze the bg loop, blocker b). Java
-        // guards on `!partitionsRevoked.isEmpty() && listener.isPresent()`;
-        // the Rust translation enqueues when non-empty and the app side is
-        // responsible for the listener-present short-circuit (returned as
-        // `None` here when no listener is registered).
-        let revoke_ack = if revoked.is_empty() {
-            None
+        // 9. Java `revokeAndAssign`: `revokePartitions(revokedPartitions)`
+        // when there is something to revoke, else a completed future. The
+        // §31 `onPartitionsRevoked` enqueue happens inside it. Phase 41b — do
+        // NOT await the ack inline (that would freeze the bg loop); a failed
+        // revocation (the FATAL abort, or a failed enqueue) is the error arm
+        // of Java's `reconciliationResult.whenComplete`.
+        let (revoked_partitions, revoke_ack) = if revoked.is_empty() {
+            (Vec::new(), None)
         } else {
-            let revoked_vec: Vec<TopicPartition> = revoked.iter().cloned().collect();
-            hooks
-                .signal_partitions_revoked(revoked_vec, current_time_ms)
+            self.revoke_partitions(hooks, &revoked, false, current_time_ms)
                 .map_err(|e| self.fail_reconciliation(e))?
         };
 
@@ -2188,6 +2205,7 @@ impl AbstractMembershipManager {
                 // and resume at step 10. The member stays RECONCILING.
                 self.store_pending(PendingReconcile::AfterRevoke {
                     ack_rx,
+                    revoked_partitions,
                     resolved,
                     resolved_assignment,
                     assigned_topic_partitions,
@@ -2243,6 +2261,129 @@ impl AbstractMembershipManager {
         log::error!("Reconciliation failed: {err}");
         self.mark_reconciliation_completed();
         err
+    }
+
+    /// Revokes `partitions_to_revoke`:
+    ///
+    /// - keeps only the partitions that are still assigned;
+    /// - signals the group type that they are being revoked
+    ///   ([`MembershipManagerHooks::signal_partitions_being_revoked`]);
+    /// - marks them pending revocation to stop fetching from them;
+    /// - aborts, with an error, if the member hit a fatal error meanwhile;
+    /// - otherwise signals the revocation
+    ///   ([`MembershipManagerHooks::signal_partitions_revoked`], the
+    ///   consumer's `onPartitionsRevoked`).
+    ///
+    /// Returns the partitions actually revoked and the ack of the revocation
+    /// signal (`None` is Java's completed future). The ack is never awaited
+    /// here (§31): the reconcile chain stores it as
+    /// [`PendingReconcile::AfterRevoke`], a leave as its pending leave
+    /// callback. `ack_through_application_events` is forwarded to the hook
+    /// (see there).
+    ///
+    /// Java's `revocationResult` logs a failed callback and fails with its
+    /// error. Rust logs that line where the ack is consumed: the reconcile
+    /// chain logs Java's message when resuming
+    /// [`PendingReconcile::AfterRevoke`]; a leave logs the `leaveGroup`
+    /// release-failure line in [`Self::drive_pending_leave_callback`], which
+    /// Java also logs, without the extra revocation line.
+    ///
+    /// Java: `CompletableFuture<Void> revokePartitions(Set<TopicPartition>)`
+    /// (package-private, called by `revokeAndAssign` and by
+    /// `ConsumerMembershipManager#invokeOnPartitionsRevokedOrLostToReleaseAssignment`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#revokePartitions")]
+    pub(crate) fn revoke_partitions<H: MembershipManagerHooks>(
+        &self,
+        hooks: &H,
+        partitions_to_revoke: &HashSet<TopicPartition>,
+        ack_through_application_events: bool,
+        current_time_ms: i64,
+    ) -> Result<(Vec<TopicPartition>, Option<SignalAck>), Error> {
+        // Ensure the set of partitions to revoke are still assigned.
+        let revoked_partitions: Vec<TopicPartition> = {
+            let subs = match self.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let assigned = subs.assigned_partitions();
+            partitions_to_revoke
+                .iter()
+                .filter(|tp| assigned.contains(*tp))
+                .cloned()
+                .collect()
+        };
+        log::info!("Revoking previously assigned partitions {revoked_partitions:?}");
+
+        hooks.signal_partitions_being_revoked(&revoked_partitions);
+
+        // Mark partitions as pending revocation to stop fetching from the
+        // partitions (no new fetches sent out, and no in-flight fetches
+        // responses processed).
+        self.mark_pending_revocation_to_pause_fetching(&revoked_partitions);
+
+        // At this point we expect to be in a middle of a revocation triggered
+        // from RECONCILING or PREPARE_LEAVING, but it could be the case that
+        // the member received a fatal error while waiting for the commit to
+        // complete. Check if that's the case and abort the revocation.
+        {
+            let guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if guard.state == MemberState::Fatal {
+                let error_msg = format!(
+                    "Member {} with epoch {} received a fatal error while waiting for a revocation commit to \
+                     complete. Will abort revocation without triggering user callback.",
+                    guard.member_id, guard.member_epoch
+                );
+                log::debug!("{error_msg}");
+                return Err(Error::kafka_message(error_msg));
+            }
+        }
+
+        let ack = hooks.signal_partitions_revoked(
+            revoked_partitions.clone(),
+            ack_through_application_events,
+            current_time_ms,
+        )?;
+        Ok((revoked_partitions, ack))
+    }
+
+    /// Marks `partitions_to_revoke` as pending revocation, to stop fetching
+    /// while waiting for the commit offsets request to complete, and ensure
+    /// the application's position doesn't get ahead of the committed
+    /// positions. This mark ensures that:
+    ///
+    /// - no new fetches are sent out for the partitions being revoked;
+    /// - previous in-flight fetch requests that may complete while the
+    ///   partitions are being revoked are not processed.
+    ///
+    /// Java's `SubscriptionState#markPendingRevocation` throws for a
+    /// partition that is not assigned; every caller passes assigned
+    /// partitions, and Rust logs the error instead of failing the caller.
+    ///
+    /// Java: `protected void markPendingRevocationToPauseFetching(Set<TopicPartition>)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#markPendingRevocationToPauseFetching"
+    )]
+    pub(crate) fn mark_pending_revocation_to_pause_fetching(&self, partitions_to_revoke: &[TopicPartition]) {
+        // When asynchronously committing offsets prior to the revocation of a
+        // set of partitions, there will be a window of time between when the
+        // offset commit is sent and when it returns and revocation completes.
+        // It is possible for pending fetches for these partitions to return
+        // during this time, which means the application's position may get
+        // ahead of the committed position prior to revocation. This can cause
+        // duplicate consumption. To prevent this, we mark the partitions as
+        // "pending revocation," which stops the Fetcher from sending new
+        // fetches or returning data from previous fetches to the user.
+        log::debug!("Marking partitions pending for revocation: {partitions_to_revoke:?}");
+        let mut subs = match self.subscriptions.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Err(e) = subs.mark_pending_revocation(partitions_to_revoke) {
+            log::warn!("mark_pending_revocation failed: {e}");
+        }
     }
 
     /// Drives a pending reconcile callback non-blockingly: `try_recv`s the
@@ -2336,6 +2477,7 @@ impl AbstractMembershipManager {
             },
             PendingReconcile::AfterRevoke {
                 mut ack_rx,
+                revoked_partitions,
                 resolved,
                 resolved_assignment,
                 assigned_topic_partitions,
@@ -2347,7 +2489,11 @@ impl AbstractMembershipManager {
                         let result = match result {
                             Ok(()) => Ok(()),
                             Err(e) => {
-                                log::error!("onPartitionsRevoked callback failed: {}", e);
+                                // Java: `revokePartitions`'s `whenComplete`.
+                                log::error!(
+                                    "onPartitionsRevoked callback invocation failed for partitions \
+                                     {revoked_partitions:?}: {e}"
+                                );
                                 // Java: member stays RECONCILING after a
                                 // callback failure; surface the error so the
                                 // bg task can observe it (Java's
@@ -2371,6 +2517,7 @@ impl AbstractMembershipManager {
                         // Ack not ready — keep waiting (loop continues).
                         self.store_pending(PendingReconcile::AfterRevoke {
                             ack_rx,
+                            revoked_partitions,
                             resolved,
                             resolved_assignment,
                             assigned_topic_partitions,

@@ -4,6 +4,31 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 
 ## [Unreleased]
 
+### Consumer
+
+- Fix: partition revocation now follows Java 4.4.0's
+  `AbstractMembershipManager#revokePartitions`, which the consumer had not
+  translated. No API or signature changes. What changes:
+  - `onPartitionsRevoked` receives only the partitions still assigned when it
+    runs. During a rebalance that waits on the pre-revocation auto-commit, a
+    partition that left the assignment meanwhile is no longer passed.
+  - An INFO log ("The pause flag in partitions [...] will be removed due to
+    revocation.") names paused partitions whose pause flag the revocation
+    drops, and an INFO log ("Revoking previously assigned partitions [...]")
+    precedes each revocation.
+  - On `unsubscribe` / `close` while still in the group (member epoch > 0),
+    the partitions being released are marked pending revocation before
+    `onPartitionsRevoked` runs: fetching for them stops and in-flight fetch
+    responses for them are discarded. Positions are unchanged, so committing
+    inside the callback still works.
+  - A failed `onPartitionsRevoked` during a rebalance is logged with Java's
+    message ("onPartitionsRevoked callback invocation failed for partitions
+    [...]").
+  - A revocation reached by a member in the fatal state fails without
+    calling `onPartitionsRevoked`, as in Java. The rebalance already stopped
+    before the revocation when the member failed during the pre-revocation
+    commit, so this changes no outcome today.
+
 ### C FFI
 
 - A NULL mandatory argument (a handle, a string, a list, a map, an element, a

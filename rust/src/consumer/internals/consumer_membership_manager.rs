@@ -611,6 +611,9 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
 
     /// Java: `ConsumerMembershipManager.invokeOnPartitionsRevokedOrLostToReleaseAssignment()`,
     /// reached through `signalMemberLeavingGroup()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#invokeOnPartitionsRevokedOrLostToReleaseAssignment"
+    )]
     ///
     /// Choose between `onPartitionsRevoked` and `onPartitionsLost`
     /// based on the current member epoch. From Java:
@@ -619,6 +622,11 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
     /// > invoke onPartitionsRevoked. ... If the member is not part of
     /// > the group anymore (epoch <= 0), this will invoke
     /// > onPartitionsLost.
+    ///
+    /// The revoke branch goes through
+    /// [`AbstractMembershipManager::revoke_partitions`], as Java's calls
+    /// `revokePartitions(droppedPartitions)`: the partitions are marked
+    /// pending revocation before the callback.
     ///
     /// Non-blocking, like Java's (which returns the callback's
     /// `CompletableFuture`): the §31 `RebalanceListenerCallbackNeeded` event
@@ -653,20 +661,24 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
             return Ok(None);
         }
 
-        let method = if member_epoch > 0 {
-            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked
-        } else {
-            ConsumerRebalanceListenerMethodName::OnPartitionsLost
-        };
         // The ack travels back through the application-event queue (Java's
         // `ConsumerRebalanceListenerCallbackCompletedEvent`), so the step
         // chained on it runs after every event the listener submitted.
-        self.enqueue_rebalance_callback_with_ack_through_application_events(
-            method,
-            dropped_partitions,
-            true,
-            current_time_ms,
-        )
+        if member_epoch > 0 {
+            // Member is part of the group. Invoke onPartitionsRevoked.
+            let dropped: HashSet<TopicPartition> = dropped_partitions.into_iter().collect();
+            self.abstract_mm
+                .revoke_partitions(self, &dropped, true, current_time_ms)
+                .map(|(_, ack)| ack)
+        } else {
+            // Member is not part of the group anymore. Invoke onPartitionsLost.
+            self.enqueue_rebalance_callback_with_ack_through_application_events(
+                ConsumerRebalanceListenerMethodName::OnPartitionsLost,
+                dropped_partitions,
+                true,
+                current_time_ms,
+            )
+        }
     }
 
     /// Java: `signalReconciliationStarted()` →
@@ -692,18 +704,50 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         }
     }
 
+    /// Java: `signalPartitionsBeingRevoked(partitionsToRevoke)` →
+    /// `logPausedPartitionsBeingRevoked`: log the partitions being revoked
+    /// that were already paused, since the pause flag will be effectively
+    /// lost.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalPartitionsBeingRevoked")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#logPausedPartitionsBeingRevoked"
+    )]
+    fn signal_partitions_being_revoked(&self, partitions_to_revoke: &[TopicPartition]) {
+        let revoke_paused_partitions: Vec<TopicPartition> = {
+            let subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let paused = subs.paused_partitions();
+            partitions_to_revoke.iter().filter(|tp| paused.contains(*tp)).cloned().collect()
+        };
+        if !revoke_paused_partitions.is_empty() {
+            log::info!("The pause flag in partitions {revoke_paused_partitions:?} will be removed due to revocation.");
+        }
+    }
+
     /// Java: `signalPartitionsRevoked(partitionsRevoked)` →
-    /// `invokeOnPartitionsRevokedCallback`: enqueue `onPartitionsRevoked` when
-    /// a listener is registered.
+    /// `invokeOnPartitionsRevokedCallback`: enqueue `onPartitionsRevoked`
+    /// when the set is non-empty and a listener is registered ("This should
+    /// not trigger the callback if partitionsRevoked is empty, to keep the
+    /// current behaviour").
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalPartitionsRevoked")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#invokeOnPartitionsRevokedCallback"
+    )]
     fn signal_partitions_revoked(
         &self,
         partitions_revoked: Vec<TopicPartition>,
+        ack_through_application_events: bool,
         current_time_ms: i64,
     ) -> Result<Option<SignalAck>, Error> {
-        self.enqueue_rebalance_callback(
+        if partitions_revoked.is_empty() {
+            return Ok(None);
+        }
+        self.enqueue_rebalance_callback_with_ack_through_application_events(
             ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             partitions_revoked,
+            ack_through_application_events,
             current_time_ms,
         )
     }
@@ -751,15 +795,7 @@ impl MembershipManagerHooks for ConsumerMembershipManager {
         }
         // AK 4.3.1 (KAFKA-20321): pause fetching for the lost partitions
         // before running the callback.
-        {
-            let mut subs = match self.abstract_mm.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            if let Err(e) = subs.mark_pending_revocation(&partitions) {
-                log::warn!("mark_pending_revocation failed for lost partitions: {}", e);
-            }
-        }
+        self.abstract_mm.mark_pending_revocation_to_pause_fetching(&partitions);
         self.enqueue_rebalance_callback(
             ConsumerRebalanceListenerMethodName::OnPartitionsLost,
             partitions,
@@ -2494,6 +2530,12 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         assert!(!reconciliation_in_progress(&mgr));
         assert!(mgr.current_assignment().is_none() || mgr.current_assignment().partitions.is_empty());
+        // verify(subscriptionState, times(2)).markPendingRevocation(Set.of(topic1-0)):
+        // once by `maybeReconcile`, once by `revokePartitions`.
+        assert_eq!(
+            pending_revocation_marks(&mgr),
+            vec![vec![tp("topic1", 0)], vec![tp("topic1", 0)]]
+        );
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
     }
@@ -2513,27 +2555,53 @@ mod tests {
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
         mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // A consumed position, so the auto-commit before the rebalance sends a
+        // request whose completion the test controls (Java's pending
+        // `commitResult`).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
 
         receive_empty_assignment(&mgr);
         assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!reconciliation_in_progress(&mgr), "verifyReconciliationNotTriggered");
+        mgr.reconcile(0, true).unwrap();
 
-        // The commit-manager auto-commit future resolves immediately
-        // (no offsets to commit), so the reconcile proceeds and the
-        // revocation completes. With no listener registered, the §31
-        // revoke handshake short-circuits — but AK 4.3.1 still enqueues a
-        // PartitionsAssigned event (empty), which the app applies + acks.
-        mgr.reconcile(0, true).unwrap();
-        let env = rx.recv().await.expect("PartitionsAssigned event (sent even with no listener)");
-        match env.event {
-            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
-                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
-                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
-                ack.send(Ok(())).unwrap();
-            },
-            other => panic!("unexpected event: {other:?}"),
+        // Member stays in RECONCILING while the commit request hasn't completed.
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        // Partitions should be still owned by the member.
+        assert_eq!(
+            mgr.abstract_mm.subscriptions.lock().unwrap().assigned_partitions(),
+            HashSet::from([tp("topic1", 0)])
+        );
+        // Java's `InOrder`: the first markPendingRevocation precedes the commit.
+        assert_eq!(pending_revocation_marks(&mgr), vec![vec![tp("topic1", 0)]]);
+
+        // Complete commit request.
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        let offsets = commit_mgr
+            .first_unsent_commit_offsets_for_test()
+            .expect("auto-commit request sent");
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(offsets));
+        // The commit result reaches the reconcile through a spawned
+        // continuation; drive the reconcile until it has resumed.
+        while pending_reconcile_is_awaiting_commit(&mgr) {
+            tokio::task::yield_now().await;
+            mgr.reconcile(0, true).unwrap();
         }
-        mgr.reconcile(0, true).unwrap();
+        process_assignment_event_no_callback(&mgr, &mut rx, &[], &[]).await;
+        // ... and the second (`revokePartitions`) follows it.
+        assert_eq!(
+            pending_revocation_marks(&mgr),
+            vec![vec![tp("topic1", 0)], vec![tp("topic1", 0)]]
+        );
+
+        // testRevocationOfAllPartitionsCompleted.
         assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(mgr.current_assignment().partitions.is_empty());
+        assert!(!reconciliation_in_progress(&mgr));
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
     }
@@ -2598,6 +2666,9 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
+        // The reconcile marked the partition before sending the commit, and
+        // has not resumed yet (this task has not yielded since failing it).
+        assert_eq!(pending_revocation_marks(&mgr), vec![vec![tp("topic1", 0)]]);
 
         // Reconcile proceeds past the failed commit and enqueues the
         // PartitionsAssigned event (empty, sent even with no listener).
@@ -2617,6 +2688,11 @@ mod tests {
         // failed commit, reaching ACKNOWLEDGING with everything revoked.
         bg.await.unwrap().unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
+        // verify(subscriptionState, times(2)).markPendingRevocation(Set.of(topic1-0)).
+        assert_eq!(
+            pending_revocation_marks(&mgr),
+            vec![vec![tp("topic1", 0)], vec![tp("topic1", 0)]]
+        );
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
     }
@@ -2965,77 +3041,114 @@ mod tests {
     /// revocation of one of its partitions completes using the LOCAL
     /// cache even when the topic is no longer present in metadata — no
     /// metadata update is requested.
+    ///
+    /// As in Java no rebalance listener is registered (Java's mocked
+    /// `rebalanceListener()` returns `Optional.empty()`), so only the
+    /// `PartitionsAssigned` events reach the app side. Java's Mockito
+    /// `verify(subscriptionState, times(n)).markPendingRevocation(set)` reads
+    /// the real `SubscriptionState`'s test-only call record.
     #[tokio::test]
     async fn revoke_partitions_uses_topic_names_local_cache_when_metadata_not_available() {
-        let (mgr, mut rx) = make(None, None, None);
+        let (mgr, mut rx) = make_without_listener(None, None, None);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
         mgr.transition_to_joining().unwrap();
         let topic_id = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic_id)]);
+        let update_requests_before = mgr.abstract_mm.metadata.request_update_call_count_for_test();
 
-        // Reconcile {0, 1}.
+        // Member received assignment to reconcile.
         receive_assignment(&mgr, topic_id, vec![0, 1]);
-        let mgr = Arc::new(mgr);
-        reconcile_and_complete_callback(
-            mgr.clone(),
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(!reconciliation_in_progress(&mgr), "verifyReconciliationNotTriggered");
+        mgr.reconcile(0, true).unwrap();
+        process_assignment_event_no_callback(
+            &mgr,
             &mut rx,
-            true,
-            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0), tp("topic1", 1)],
             &[tp("topic1", 0), tp("topic1", 1)],
         )
         .await;
+        // verify(subscriptionState).markPendingRevocation(Set.of())
+        assert_eq!(pending_revocation_marks(&mgr), vec![Vec::<TopicPartition>::new()]);
+
+        // Member should complete reconciliation.
         assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert_eq!(mgr.current_assignment().partitions, HashMap::from([(topic_id, vec![0, 1])]));
+        assert!(!reconciliation_in_progress(&mgr));
+
+        // mockAckSent.
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Stable);
-        // topic1 is now in the local cache.
-        assert!(
-            mgr.abstract_mm
-                .inner
-                .lock()
-                .unwrap()
-                .assigned_topic_names_cache
-                .contains_key(&topic_id),
-            "topic name should have been cached during reconciliation",
-        );
 
-        // Make metadata no longer contain topic1 (simulate eviction):
-        // seed a different topic. The local cache must be used for the
-        // revocation. Reset update_requested by reading current state.
+        // Revocation of topic not found in metadata cache.
         let other = Uuid::random_uuid();
         seed_metadata(&mgr, &[("other", other)]);
-        // Clear any pending update flag from prior reconcile so we can
-        // assert no NEW update is requested by the revocation path.
-        let _ = mgr.abstract_mm.metadata.update_requested();
 
-        // Revoke partition 0, keep partition 1. This reconcile fires TWO
-        // callbacks: onPartitionsRevoked({0}) then onPartitionsAssigned({})
-        // (added is empty since {1} is already owned).
+        // Revoke one of the 2 partitions.
         receive_assignment(&mgr, topic_id, vec![1]);
-        assert_eq!(mgr.state(), MemberState::Reconciling);
-        let mgr_clone = mgr.clone();
-        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
-        expect_callback(
-            &mut rx,
-            None,
-            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-            &[tp("topic1", 0)],
-            Ok(()),
-        )
-        .await;
-        expect_callback(
-            &mut rx,
-            Some(&*mgr),
-            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
-            &[],
-            Ok(()),
-        )
-        .await;
-        bg.await.unwrap().unwrap();
-        // Revocation completed using the LOCAL topic-name cache (topic1
-        // was resolved from cache/retained metadata, no failure).
-        // testRevocationCompleted: ACKNOWLEDGING, remaining {1}.
+        mgr.reconcile(0, true).unwrap();
+        process_assignment_event_no_callback(&mgr, &mut rx, &[tp("topic1", 1)], &[]).await;
+        // verify(subscriptionState, times(2)).markPendingRevocation(Set.of(topic1-0)):
+        // once by `maybeReconcile`, once by `revokePartitions`.
+        assert_eq!(
+            pending_revocation_marks(&mgr),
+            vec![vec![], vec![tp("topic1", 0)], vec![tp("topic1", 0)]]
+        );
+
+        // Revocation should complete without requesting any metadata update
+        // given that the topic received in target assignment should exist in
+        // local topic name cache.
+        assert_eq!(
+            mgr.abstract_mm.metadata.request_update_call_count_for_test(),
+            update_requests_before
+        );
+
+        // testRevocationCompleted(membershipManager, [topic1-1]).
         assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert_eq!(mgr.current_assignment().partitions, HashMap::from([(topic_id, vec![1])]));
+        assert!(!reconciliation_in_progress(&mgr));
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 1)]));
+    }
+
+    /// The partitions of every `SubscriptionState::mark_pending_revocation`
+    /// call so far (Java's `verify(subscriptionState).markPendingRevocation`).
+    fn pending_revocation_marks(mgr: &ConsumerMembershipManager) -> Vec<Vec<TopicPartition>> {
+        mgr.abstract_mm
+            .subscriptions
+            .lock()
+            .unwrap()
+            .pending_revocation_marks_for_test()
+            .to_vec()
+    }
+
+    /// Java's `processAssignmentEventNoCallback`: the app side applies the
+    /// `PartitionsAssigned` event without a listener and acks it; the next
+    /// reconcile consumes the ack. Asserts the event carried
+    /// `expected_assigned` / `expected_added` (Java's
+    /// `verify(subscriptionState).assignFromSubscribedAwaitingCallback(assigned, added)`).
+    async fn process_assignment_event_no_callback(
+        mgr: &ConsumerMembershipManager,
+        rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+        expected_assigned: &[TopicPartition],
+        expected_added: &[TopicPartition],
+    ) {
+        let env = rx.recv().await.expect("PartitionsAssigned event (sent even with no listener)");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                let added_set: HashSet<TopicPartition> = added_partitions.iter().cloned().collect();
+                assert_eq!(assigned_set, expected_assigned.iter().cloned().collect::<HashSet<_>>());
+                assert_eq!(added_set, expected_added.iter().cloned().collect::<HashSet<_>>());
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        mgr.reconcile(0, true).unwrap();
     }
 
     // ---------------------------------------------------------------
@@ -5785,5 +5898,162 @@ mod tests {
              reconciliation (onPartitionsRevoked enqueue) waits for the network poll timeout; Java resumes it \
              from the commit future's whenComplete inside client.poll",
         );
+    }
+
+    // ---------------------------------------------------------------
+    // `AbstractMembershipManager#revokePartitions` (Milestone 18 P4b). Java
+    // has no test of its own for the method; these pin each of its steps
+    // against the Java body, on the real `SubscriptionState`.
+    // ---------------------------------------------------------------
+
+    /// A STABLE member (epoch 1, `NoopListener`) subscribed to `topic1` and
+    /// owning `owned`, each at position 0 (so fetchable until marked). The
+    /// pending-revocation marks of the join's reconciliation are cleared.
+    async fn stable_member_owning(
+        owned: &[TopicPartition],
+    ) -> (
+        Arc<ConsumerMembershipManager>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) {
+        let (mgr, rx) = create_member_in_stable_state(None).await;
+        subscribe_with_topics(&mgr, &["topic1"]);
+        mock_owned_partitions(&mgr, owned);
+        let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        for tp in owned {
+            subs.seek(tp, 0).unwrap();
+            assert!(subs.is_fetchable(tp), "precondition: {tp} fetchable");
+        }
+        subs.clear_pending_revocation_marks_for_test();
+        drop(subs);
+        (mgr, rx)
+    }
+
+    /// `revokePartitions` keeps only the partitions still assigned
+    /// (`revokedPartitions.retainAll(subscriptions.assignedPartitions())`),
+    /// marks them pending revocation, and passes them to
+    /// `signalPartitionsRevoked` (`onPartitionsRevoked`).
+    #[tokio::test]
+    async fn revoke_partitions_revokes_only_still_assigned_partitions() {
+        let (mgr, mut rx) = stable_member_owning(&[tp("topic1", 0)]).await;
+        let to_revoke = HashSet::from([tp("topic1", 0), tp("topic1", 9)]);
+
+        let (revoked, ack) = mgr.abstract_mm.revoke_partitions(&*mgr, &to_revoke, false, 0).unwrap();
+
+        assert_eq!(revoked, vec![tp("topic1", 0)]);
+        assert!(ack.is_some(), "a listener is registered: the callback ack is pending");
+        assert_eq!(pending_revocation_marks(&mgr), vec![vec![tp("topic1", 0)]]);
+        assert!(!mgr.abstract_mm.subscriptions.lock().unwrap().is_fetchable(&tp("topic1", 0)));
+        match rx.recv().await.expect("onPartitionsRevoked event").event {
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack_through_application_events, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                assert_eq!(partitions, vec![tp("topic1", 0)]);
+                assert!(!ack_through_application_events);
+            },
+            other => panic!("expected PartitionsRemoved(ON_PARTITIONS_REVOKED), got {other:?}"),
+        }
+    }
+
+    /// When none of the partitions is still assigned, `revokePartitions`
+    /// signals an empty revocation, which
+    /// `ConsumerMembershipManager#invokeOnPartitionsRevokedCallback` turns
+    /// into a completed future without a callback.
+    #[tokio::test]
+    async fn revoke_partitions_with_no_assigned_partition_triggers_no_callback() {
+        let (mgr, mut rx) = stable_member_owning(&[tp("topic1", 0)]).await;
+        let to_revoke = HashSet::from([tp("topic1", 9)]);
+
+        let (revoked, ack) = mgr.abstract_mm.revoke_partitions(&*mgr, &to_revoke, false, 0).unwrap();
+
+        assert!(revoked.is_empty());
+        assert!(ack.is_none());
+        assert_eq!(pending_revocation_marks(&mgr), vec![Vec::<TopicPartition>::new()]);
+        assert!(mgr.abstract_mm.subscriptions.lock().unwrap().is_fetchable(&tp("topic1", 0)));
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+    }
+
+    /// A member that hit a fatal error aborts the revocation with Java's
+    /// `KafkaException` message, after marking the partitions pending
+    /// revocation and without triggering the user callback.
+    #[tokio::test]
+    async fn revoke_partitions_aborts_without_callback_when_member_is_fatal() {
+        let (mgr, mut rx) = stable_member_owning(&[tp("topic1", 0)]).await;
+        let (member_id, member_epoch) = {
+            let mut inner = mgr.abstract_mm.inner.lock().unwrap();
+            // Java's test seam is a mock; the state is set directly here.
+            inner.state = MemberState::Fatal;
+            (inner.member_id.clone(), inner.member_epoch)
+        };
+        let to_revoke = HashSet::from([tp("topic1", 0)]);
+
+        let err = mgr.abstract_mm.revoke_partitions(&*mgr, &to_revoke, false, 0).unwrap_err();
+
+        assert!(
+            matches!(err, Error::KafkaError(_)),
+            "expected a bare KafkaException, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Member {member_id} with epoch {member_epoch} received a fatal error while waiting for a \
+                 revocation commit to complete. Will abort revocation without triggering user callback."
+            )
+        );
+        assert_eq!(pending_revocation_marks(&mgr), vec![vec![tp("topic1", 0)]]);
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+    }
+
+    /// A leave while still in the group (epoch > 0) releases the assignment
+    /// through `revokePartitions`
+    /// (`ConsumerMembershipManager#invokeOnPartitionsRevokedOrLostToReleaseAssignment`):
+    /// the partitions are marked pending revocation (fetching stops) before
+    /// `onPartitionsRevoked` runs, and the callback ack returns through the
+    /// application-event queue.
+    #[tokio::test]
+    async fn leave_group_in_group_marks_pending_revocation_before_on_partitions_revoked() {
+        let (mgr, mut rx) = stable_member_owning(&[tp("topic1", 0), tp("topic1", 1)]).await;
+        assert!(mgr.member_epoch() > 0);
+
+        let leave_result = mgr.leave_group(0).unwrap();
+
+        assert!(!leave_result.is_done());
+        assert!(mgr.has_pending_leave_callback());
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        assert_eq!(pending_revocation_marks(&mgr), vec![vec![tp("topic1", 0), tp("topic1", 1)]]);
+        {
+            let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert!(!subs.is_fetchable(&tp("topic1", 0)));
+            assert!(!subs.is_fetchable(&tp("topic1", 1)));
+            // Positions are kept, so the callback can still commit them.
+            assert!(subs.position(&tp("topic1", 0)).unwrap().is_some());
+        }
+        match rx.recv().await.expect("onPartitionsRevoked event").event {
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack_through_application_events, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                let got: HashSet<TopicPartition> = partitions.into_iter().collect();
+                assert_eq!(got, HashSet::from([tp("topic1", 0), tp("topic1", 1)]));
+                assert!(ack_through_application_events);
+            },
+            other => panic!("expected PartitionsRemoved(ON_PARTITIONS_REVOKED), got {other:?}"),
+        }
+    }
+
+    /// A leave after the member lost its epoch (epoch <= 0) releases the
+    /// assignment through `onPartitionsLost`, not `revokePartitions`, so the
+    /// leave itself marks nothing.
+    #[tokio::test]
+    async fn leave_group_out_of_group_invokes_on_partitions_lost_without_revocation_mark() {
+        let (mgr, mut rx) = stable_member_owning(&[tp("topic1", 0)]).await;
+        mgr.abstract_mm.inner.lock().unwrap().member_epoch = 0;
+
+        let _leave_result = mgr.leave_group(0).unwrap();
+
+        assert!(pending_revocation_marks(&mgr).is_empty());
+        match rx.recv().await.expect("onPartitionsLost event").event {
+            BackgroundEvent::PartitionsRemoved { method_name, ack_through_application_events, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+                assert!(ack_through_application_events);
+            },
+            other => panic!("expected PartitionsRemoved(ON_PARTITIONS_LOST), got {other:?}"),
+        }
     }
 }

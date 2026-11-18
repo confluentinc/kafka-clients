@@ -628,6 +628,14 @@ pub(crate) struct SubscriptionState {
     /// Monotonically-increasing id incremented after every assignment
     /// change. Wrapping addition matches Java's `int` overflow semantics.
     assignment_id: u32,
+    /// Test-only record of every [`Self::mark_pending_revocation`] call's
+    /// partitions (each sorted by topic, then partition), in call order. The
+    /// stand-in for the Java tests' Mockito
+    /// `verify(subscriptionState, times(n)).markPendingRevocation(set)`:
+    /// the pending flag itself is idempotent, so a real `SubscriptionState`
+    /// cannot show how often it was set.
+    #[cfg(test)]
+    pending_revocation_marks: Vec<Vec<TopicPartition>>,
 }
 
 impl SubscriptionState {
@@ -660,7 +668,22 @@ impl SubscriptionState {
             default_reset_strategy,
             rebalance_listener: None,
             assignment_id: 0,
+            #[cfg(test)]
+            pending_revocation_marks: Vec::new(),
         }
+    }
+
+    /// Test-only: the partitions of every [`Self::mark_pending_revocation`]
+    /// call so far, in call order (see the field).
+    #[cfg(test)]
+    pub(crate) fn pending_revocation_marks_for_test(&self) -> &[Vec<TopicPartition>] {
+        &self.pending_revocation_marks
+    }
+
+    /// Test-only: forget the recorded [`Self::mark_pending_revocation`] calls.
+    #[cfg(test)]
+    pub(crate) fn clear_pending_revocation_marks_for_test(&mut self) {
+        self.pending_revocation_marks.clear();
     }
 
     /// Monotonically-increasing id incremented after every assignment
@@ -1559,6 +1582,12 @@ impl SubscriptionState {
     /// Translates Java's `markPendingRevocation(Set<TopicPartition>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#markPendingRevocation")]
     pub(crate) fn mark_pending_revocation(&mut self, tps: &[TopicPartition]) -> Result<(), Error> {
+        #[cfg(test)]
+        {
+            let mut marked = tps.to_vec();
+            marked.sort_by(|a, b| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+            self.pending_revocation_marks.push(marked);
+        }
         for tp in tps {
             self.assigned_state_mut(tp)?.mark_pending_revocation();
         }
