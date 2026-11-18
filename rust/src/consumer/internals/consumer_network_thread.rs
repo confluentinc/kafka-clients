@@ -1593,7 +1593,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -1659,7 +1659,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -1742,7 +1742,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -1801,7 +1801,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -2724,7 +2724,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3051,7 +3051,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3119,7 +3119,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3408,7 +3408,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3566,7 +3566,7 @@ mod tests {
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3706,7 +3706,7 @@ mod tests {
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3816,7 +3816,7 @@ mod tests {
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -3949,7 +3949,7 @@ mod tests {
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -4427,7 +4427,7 @@ mod tests {
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -4586,7 +4586,7 @@ mod tests {
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),
@@ -4750,7 +4750,7 @@ mod tests {
         let time: Arc<MockTime> = Arc::new(mock_time(1_000));
         let processor = ApplicationEventProcessor::new(
             request_managers.clone(),
-            metadata.clone(),
+            metadata.metadata_arc(),
             subs.clone(),
             reaper.clone(),
             time.clone(),

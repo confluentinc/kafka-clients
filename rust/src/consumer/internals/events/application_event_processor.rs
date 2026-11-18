@@ -75,11 +75,11 @@ use std::sync::{Arc, Mutex};
 use super::ApplicationEvent;
 use super::CompletableEventReaper;
 use super::EventProcessor;
+use crate::Metadata;
 use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::RequestManagers;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 
@@ -96,10 +96,13 @@ pub(crate) struct ApplicationEventProcessor {
     /// field on the bg-thread; Rust wraps in `Arc<Mutex<...>>` so the
     /// bg-task `run_once` loop can also access the same instance.
     request_managers: Arc<Mutex<RequestManagers>>,
-    /// Consumer metadata — used for `requestUpdateForNewTopics()`,
-    /// `currentLeader(...)`, `updateLastSeenEpochIfNewer(...)`,
-    /// `updateVersion()`, and `fetch()` (`Cluster` snapshot).
-    metadata: Arc<ConsumerMetadata>,
+    /// Java: `private final Metadata metadata` — used for
+    /// `requestUpdateForNewTopics()`, `currentLeader(...)`,
+    /// `updateLastSeenEpochIfNewer(...)`, `updateVersion()`, and `fetch()`
+    /// (`Cluster` snapshot). The base type, as in Java: the consumer passes its
+    /// `ConsumerMetadata`'s inner `Metadata`, and the share consumer (which has
+    /// no `ConsumerMetadata`) its `ShareConsumerMetadata`'s.
+    metadata: Arc<Metadata>,
     /// Subscription state — guarded by `std::sync::Mutex` per
     /// `consumer-threading.md` §16.
     subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -146,7 +149,7 @@ impl ApplicationEventProcessor {
     )]
     pub(crate) fn new(
         request_managers: Arc<Mutex<RequestManagers>>,
-        metadata: Arc<ConsumerMetadata>,
+        metadata: Arc<Metadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         application_event_reaper: Arc<Mutex<CompletableEventReaper>>,
         time: Arc<dyn Time>,
@@ -1668,6 +1671,7 @@ mod tests {
     use crate::consumer::internals::CommitRequestManager;
     use crate::consumer::internals::ConsumerHeartbeatRequestManager;
     use crate::consumer::internals::ConsumerMembershipManager;
+    use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
     use crate::consumer::internals::CoordinatorRequestManager;
     use crate::consumer::internals::OffsetsRequestManager;
@@ -1806,7 +1810,7 @@ mod tests {
         let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
-            Arc::clone(&metadata),
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             Arc::clone(&reaper),
             Arc::new(crate::common::utils::SystemTime),
@@ -2778,7 +2782,7 @@ mod tests {
         let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let mut processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
-            Arc::clone(&metadata),
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             reaper,
             Arc::new(crate::common::utils::SystemTime),
@@ -4317,7 +4321,7 @@ mod tests {
         )));
         let processor = ApplicationEventProcessor::new(
             request_managers,
-            metadata,
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             Arc::new(Mutex::new(CompletableEventReaper::new())),
             Arc::new(crate::common::utils::SystemTime),

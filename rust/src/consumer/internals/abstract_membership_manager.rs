@@ -57,6 +57,7 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::Metadata;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
@@ -68,7 +69,6 @@ use crate::consumer::internals::events::BackgroundEventHandler;
 use crate::consumer::internals::metrics::RebalanceMetricsManager;
 
 use super::ConsumerMembershipManager;
-use super::ConsumerMetadata;
 use super::MemberState;
 use super::MemberStateListener;
 use super::SubscriptionState;
@@ -351,7 +351,10 @@ impl MembershipInner {
 pub(crate) struct AbstractMembershipManager {
     pub(crate) inner: Arc<Mutex<MembershipInner>>,
     pub(crate) subscriptions: Arc<Mutex<SubscriptionState>>,
-    pub(crate) metadata: Arc<ConsumerMetadata>,
+    /// Java: `private final Metadata metadata` — the base type, so the
+    /// consumer passes its `ConsumerMetadata`'s inner `Metadata` and the share
+    /// consumer its `ShareConsumerMetadata`'s.
+    pub(crate) metadata: Arc<Metadata>,
     pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
 }
 
@@ -364,7 +367,7 @@ impl AbstractMembershipManager {
     pub(crate) fn new(
         group_id: impl Into<String>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
-        metadata: Arc<ConsumerMetadata>,
+        metadata: Arc<Metadata>,
         background_event_handler: Arc<BackgroundEventHandler>,
         auto_commit_enabled: bool,
         metrics_manager: Option<Arc<dyn RebalanceMetricsManager>>,
@@ -609,7 +612,7 @@ impl AbstractMembershipManager {
             guard.current_target_assignment.partitions.clone()
         };
 
-        let topic_names = self.metadata.metadata_arc().topic_names();
+        let topic_names = self.metadata.topic_names();
         let mut resolved = Vec::with_capacity(target_partitions.len());
         let mut unresolved_count = 0usize;
         let mut to_cache: Vec<(Uuid, String)> = Vec::new();
@@ -649,7 +652,7 @@ impl AbstractMembershipManager {
 
         if unresolved_count > 0 {
             log::debug!("Topic IDs in target assignment were not found in metadata; requesting an update.");
-            self.metadata.metadata_arc().request_update(true);
+            self.metadata.request_update(true);
         }
         resolved
     }
@@ -1140,6 +1143,7 @@ mod tests {
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
     use crate::consumer::internals::AutoOffsetResetStrategy;
+    use crate::consumer::internals::ConsumerMetadata;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -1159,7 +1163,7 @@ mod tests {
 
     fn setup() -> (
         Arc<Mutex<SubscriptionState>>,
-        Arc<ConsumerMetadata>,
+        Arc<Metadata>,
         Arc<BackgroundEventHandler>,
         mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
@@ -1174,11 +1178,8 @@ mod tests {
             bootstrap_servers: vec!["localhost:9092".to_string()],
             ..ConsumerConfig::defaults()
         };
-        let metadata = Arc::new(ConsumerMetadata::with_config(
-            &config,
-            subs.clone(),
-            ClusterResourceListeners::new(),
-        ));
+        let metadata =
+            ConsumerMetadata::with_config(&config, subs.clone(), ClusterResourceListeners::new()).metadata_arc();
         let (tx, rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         (subs, metadata, beh, rx)

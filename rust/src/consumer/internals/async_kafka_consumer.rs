@@ -4220,7 +4220,7 @@ where
             Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let app_event_processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
-            Arc::clone(&metadata),
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             Arc::clone(&application_event_reaper),
             Arc::clone(&time),

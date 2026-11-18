@@ -275,7 +275,7 @@ impl ConsumerMembershipManager {
         let abstract_mm = AbstractMembershipManager::new(
             group_id,
             subscriptions,
-            metadata,
+            metadata.metadata_arc(),
             background_event_handler,
             auto_commit_enabled,
             metrics_manager.map(|m| m as Arc<dyn RebalanceMetricsManager>),
@@ -3444,7 +3444,6 @@ mod tests {
         let response = build_metadata_response(topics);
         mgr.abstract_mm
             .metadata
-            .metadata_arc()
             .update_with_current_request_version(&response, false, 1000);
     }
 
@@ -3456,7 +3455,7 @@ mod tests {
             guard.current_target_assignment.partitions.keys().copied().collect()
         };
         let resolved_ids: HashSet<Uuid> = {
-            let metadata_names = mgr.abstract_mm.metadata.metadata_arc().topic_names();
+            let metadata_names = mgr.abstract_mm.metadata.topic_names();
             let guard = mgr.abstract_mm.inner.lock().unwrap();
             target_ids
                 .iter()
@@ -4404,7 +4403,7 @@ mod tests {
         seed_metadata(&mgr, &[("other", other)]);
         // Clear any pending update flag from prior reconcile so we can
         // assert no NEW update is requested by the revocation path.
-        let _ = mgr.abstract_mm.metadata.metadata_arc().update_requested();
+        let _ = mgr.abstract_mm.metadata.update_requested();
 
         // Revoke partition 0, keep partition 1. This reconcile fires TWO
         // callbacks: onPartitionsRevoked({0}) then onPartitionsAssigned({})
@@ -4477,7 +4476,7 @@ mod tests {
         );
         assert_eq!(mgr.state(), MemberState::Reconciling);
         assert!(
-            mgr.abstract_mm.metadata.metadata_arc().update_requested(),
+            mgr.abstract_mm.metadata.update_requested(),
             "an unresolved topic id must trigger a metadata update request",
         );
 
@@ -4528,7 +4527,7 @@ mod tests {
         .await;
         // Reconciled what was resolvable, kept the unresolved + requested update.
         assert_eq!(mgr.state(), MemberState::Acknowledging);
-        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert!(mgr.abstract_mm.metadata.update_requested());
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
 
         // Ack -> back to RECONCILING (unresolved still pending).
@@ -4561,7 +4560,7 @@ mod tests {
         let resolved = mgr.abstract_mm.find_resolvable_assignment_and_trigger_metadata_update();
         assert!(resolved.is_empty());
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic_id]));
-        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert!(mgr.abstract_mm.metadata.update_requested());
 
         // Metadata discovered -> reconcile completes.
         seed_metadata(&mgr, &[("topic1", topic_id)]);
@@ -4591,7 +4590,7 @@ mod tests {
         receive_assignment(&mgr, topic_id, vec![0, 1]);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
-        let metadata = mgr.abstract_mm.metadata.metadata_arc();
+        let metadata = Arc::clone(&mgr.abstract_mm.metadata);
 
         // First resolution attempt: unresolved -> request update.
         // Java asserts `verify(metadata).requestUpdate(anyBoolean())` here.
@@ -4669,7 +4668,7 @@ mod tests {
         mgr.reconcile(0, true).unwrap();
         assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
         assert_eq!(mgr.state(), MemberState::Acknowledging);
-        assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
+        assert!(mgr.abstract_mm.metadata.update_requested());
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Reconciling);
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
