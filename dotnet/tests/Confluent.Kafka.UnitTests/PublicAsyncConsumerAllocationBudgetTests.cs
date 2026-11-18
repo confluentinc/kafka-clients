@@ -31,13 +31,16 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The async <c>Poll</c>'s per-record receive allocation on <see cref="AsyncMockConsumer{TKey, TValue}"/>: with the
-/// built-in deserializers it stays within the sync <c>Poll</c>'s budget, and an awaited deserializer adds one small
-/// manager per key or value with bytes, and no copy of them.
+/// built-in deserializers it stays within its measured budget, less than one object over the sync <c>Poll</c>'s
+/// cost, and an awaited deserializer adds one small manager per key or value with bytes, and no copy of them.
 /// </summary>
 /// <remarks>
 /// The copy-out runs on a pool thread. A built-in runs no user code there, so its test reads the process-wide counter,
-/// in a collection that runs alone, and keeps the best of several attempts. An awaited deserializer that completes
-/// at once runs the whole copy-out on one thread, so its tests read that thread's counter from inside the key's calls.
+/// in a collection that runs alone, and keeps the best of several attempts; what other threads allocate meanwhile
+/// is spread over two thousand records, so it moves the result by about 1 B and one more object per record (24 B or
+/// more) is caught. That test cannot tell which object was added, and a cost paid once per poll cancels in it. An
+/// awaited deserializer that completes at once runs the whole copy-out on one thread, so its tests read that thread's
+/// counter from inside the key's calls and their bounds are exact.
 /// </remarks>
 [Collection(SerialMemoryMeasurementCollection.Name)]
 public sealed class PublicAsyncConsumerAllocationBudgetTests
@@ -53,11 +56,16 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
     private const int LargeSize = 64 * 1024;
     private const int RecordCount = 64;
 
-    // The sync Poll's budget (PublicSyncConsumerAllocationBudgetTests): the async Poll runs the same copy-out.
-    private const long PerRecordBudgetBytes = 448;
+    // The measured 263 B or 264 B (net8.0, net10.0; the sync Poll's copy-out, with the built-in deserializers called
+    // without awaiting) plus 8 B, less than one more object.
+    private const long PerRecordBudgetBytes = 272;
 
     // A manager holds a reference, a pointer, a length and a flag: 40 B on a 64-bit runtime.
-    private const long ManagerBudgetBytes = 64;
+    private const long ManagerBytes = 40;
+
+    // On an unoptimized (Debug) library each awaited call's state machine is a heap object although the deserializer
+    // completes at once: the measured 112 B per key or value with bytes (net8.0, net10.0).
+    private const long UnoptimizedAwaitedCallBytes = 112;
 
     private const int Attempts = 8;
 
@@ -71,8 +79,8 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
             await MeasureBuiltInPoll(recordCount: 8, key, value);
         }
 
-        const int smallCount = 16;
-        const int largeCount = 256;
+        const int smallCount = 64;
+        const int largeCount = 2112;
         long smallBytes = long.MaxValue;
         long largeBytes = long.MaxValue;
         for (int attempt = 0; attempt < Attempts; attempt++)
@@ -85,7 +93,7 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
 
         Assert.True(
             perRecord <= PerRecordBudgetBytes,
-            $"Per-record receive-path allocation {perRecord} B exceeded the sync Poll's copy-out budget " +
+            $"Per-record receive-path allocation {perRecord} B exceeded the measured budget " +
             $"{PerRecordBudgetBytes} B (small={smallBytes} B/{smallCount} rec, large={largeBytes} B/{largeCount} rec, " +
             $"best of {Attempts}): the built-in deserializers are called without awaiting, so nothing is added " +
             "per record.");
@@ -100,12 +108,15 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
         long filledBytes = await MeasureAwaitedPoll(RecordCount, KeySize);
 
         long managersPerRecord = (filledBytes - emptyBytes) / (RecordCount - 1);
+        long budget = LibraryBuild.IsOptimized
+            ? 2 * ManagerBytes
+            : 2 * (ManagerBytes + UnoptimizedAwaitedCallBytes);
 
         Assert.True(
-            managersPerRecord > 0 && managersPerRecord <= 2 * ManagerBudgetBytes,
+            managersPerRecord > 0 && managersPerRecord <= budget,
             $"A record with a key and a value cost {managersPerRecord} B more than one with both empty (budget " +
-            $"{2 * ManagerBudgetBytes} B for the two managers; empty={emptyBytes} B, filled={filledBytes} B over " +
-            $"{RecordCount - 1} records).");
+            $"{budget} B for the two managers, optimized library: {LibraryBuild.IsOptimized}; empty={emptyBytes} B, " +
+            $"filled={filledBytes} B over {RecordCount - 1} records).");
     }
 
     [Fact]

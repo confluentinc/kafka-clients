@@ -87,8 +87,10 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// leaves the consumer open. So a deserializer shared with another client, or used after the close, sees it
     /// disposed. A disposal that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
     /// <c>Close</c> and <c>DisposeAsync</c> await a <c>DisposeAsync()</c>; the synchronous <c>Dispose()</c>, and this
-    /// constructor when the core fails to build the consumer, call it and wait for it on their own thread, so a
-    /// deserializer's <c>DisposeAsync()</c> must not need that thread to complete. When a <c>Poll</c> is still
+    /// constructor when the core fails to build the consumer, call it and wait for it on their own thread, so
+    /// <c>await using</c> or <c>DisposeAsync()</c> is the form to prefer. A deserializer's <c>DisposeAsync()</c> is
+    /// always called with no synchronization context and with the default task scheduler current, so an
+    /// <c>await</c> in it never needs the thread that waits. When a <c>Poll</c> is still
     /// deserializing, <c>Close</c> or <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers
     /// after it ends.
     /// </remarks>
@@ -348,6 +350,12 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Prefer <c>await using</c> or <see cref="DisposeAsync"/>: this call blocks its thread until the consumer is
+    /// closed and its deserializers are disposed. A deserializer that is <see cref="IAsyncDisposable"/> is disposed
+    /// through its <c>DisposeAsync()</c>, called with no synchronization context and with the default task scheduler
+    /// current, which this call then waits for.
+    /// </remarks>
     public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>

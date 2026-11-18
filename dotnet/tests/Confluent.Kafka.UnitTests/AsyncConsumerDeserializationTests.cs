@@ -501,6 +501,58 @@ public sealed class AsyncConsumerDeserializationTests
 
     private static string Text(ReadOnlyMemory<byte> data) => Encoding.UTF8.GetString(data.ToArray());
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ARetainedBatch_ReportsTheBytesOfItsKeysAndValues_AsMemoryPressure(bool awaits)
+    {
+        AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            new AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                new RetainingDeserializer(awaits), new RetainingDeserializer(awaits));
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await Ready(consumer);
+        consumer.AddRecord(Topic, 0, 0, Bytes("key-0"), Bytes("value-0"));
+        consumer.AddRecord(Topic, 0, 1, null, Bytes("second"));
+        consumer.AddRecord(Topic, 0, 2, Bytes("k2"), Array.Empty<byte>());
+
+        List<ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>> records = (await Poll(consumer)).ToList();
+
+        Assert.Equal(3, records.Count);
+        Assert.True(MemoryMarshal.TryGetMemoryManager(records[0].Value()!.Value, out BytesMemoryManager? first));
+        Assert.True(MemoryMarshal.TryGetMemoryManager(records[1].Value()!.Value, out BytesMemoryManager? second));
+        Assert.True(MemoryMarshal.TryGetMemoryManager(records[2].Key()!.Value, out BytesMemoryManager? third));
+        Assert.Same(first!.Batch, second!.Batch);
+        Assert.Same(first.Batch, third!.Batch);
+        Assert.Equal("key-0".Length + "value-0".Length + "second".Length + "k2".Length, first.Batch.Pressure);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ACallScopedBatch_ReportsNoMemoryPressure_AndIsReleasedOnceItsLastPinIs(bool awaits)
+    {
+        KeepingDeserializer values = new KeepingDeserializer(awaits);
+        AsyncMockConsumer<string, string> consumer =
+            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await Ready(consumer);
+        consumer.AddRecord(Topic, 0, 0, Bytes("key"), Bytes("kept"));
+
+        Assert.Equal("kept", Assert.Single(await Poll(consumer)).Value());
+
+        Assert.True(MemoryMarshal.TryGetMemoryManager(Assert.Single(values.Kept), out BytesMemoryManager? manager));
+        SafeConsumerRecordsHandle batch = manager!.Batch;
+        Assert.Equal(0, batch.Pressure);
+        Assert.Equal(2, values.Pins.Count);
+        values.Pins[0].Dispose();
+        Assert.False(batch.IsClosed);
+        Assert.Equal("kept", Read(values.Pins[1], 4));
+
+        values.Pins[1].Dispose();
+
+        Assert.True(batch.IsClosed);
+    }
+
     public enum Failure
     {
         Thrown,

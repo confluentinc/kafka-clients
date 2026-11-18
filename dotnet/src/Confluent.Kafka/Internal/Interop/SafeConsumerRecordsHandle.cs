@@ -99,6 +99,7 @@ internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
         if (_pressure > 0)
         {
             GC.RemoveMemoryPressure(_pressure);
+            _pressure = 0;
         }
 
         _released?.Invoke();

@@ -42,6 +42,8 @@ internal sealed unsafe class BytesMemoryManager : MemoryManager<byte>
         _length = length;
     }
 
+    internal SafeConsumerRecordsHandle Batch => _batch;
+
     internal ReadOnlyMemory<byte> ReadOnlyMemory => CreateMemory(_length);
 
     internal void Revoke() => _revoked = true;

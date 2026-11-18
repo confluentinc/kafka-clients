@@ -99,11 +99,36 @@ internal sealed class SerdeDisposal
 
         try
         {
-            await disposable.DisposeAsync().ConfigureAwait(false);
+            await Start(disposable).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             TraceDisposeFailure(serde, exception);
+        }
+    }
+
+    // A serde's DisposeAsync starts with no synchronization context and with the default task scheduler current. A
+    // synchronous Dispose of the client waits for it on the calling thread, which could never run a continuation that
+    // an await in the serde posted to that thread's own context or scheduler. The call stays on the calling thread, so
+    // the wait needs no pool thread of its own.
+    private static ValueTask Start(IAsyncDisposable disposable)
+    {
+        SynchronizationContext? context = SynchronizationContext.Current;
+        if (context is null && TaskScheduler.Current == TaskScheduler.Default)
+        {
+            return disposable.DisposeAsync();
+        }
+
+        SynchronizationContext.SetSynchronizationContext(null);
+        try
+        {
+            Task<ValueTask> start = new Task<ValueTask>(disposable.DisposeAsync);
+            start.RunSynchronously(TaskScheduler.Default);
+            return start.GetAwaiter().GetResult();
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
         }
     }
 
@@ -117,7 +142,7 @@ internal sealed class SerdeDisposal
 
         try
         {
-            ValueTask disposed = disposable.DisposeAsync();
+            ValueTask disposed = Start(disposable);
             if (disposed.IsCompleted)
             {
                 disposed.GetAwaiter().GetResult();
