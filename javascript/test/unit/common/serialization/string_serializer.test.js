@@ -239,3 +239,21 @@ test("stringSerializer takes Java's configure(configs, isKey) or nothing, and it
   // Java's StringSerializer has no close(): the producer runs Java's default.
   assert.equal(stringSerializer().close, undefined);
 });
+
+// The bytes Java's StringSerializer writes for each standard charset, read
+// from the vectors tools/java-vectors/JavaVectors.java wrote with Kafka's own
+// kafka-clients (test/java_vectors.json): lone surrogates, astral
+// characters, combining marks, right-to-left text and NUL included.
+test("the bytes match Java's StringSerializer for each standard charset, as Kafka's kafka-clients wrote them", () => {
+  /** @type {{ stringSerializer: Array<{ encoding: string, data: string, bytes: string }> }} */
+  const vectors = require('../../../java_vectors.json');
+  assert.ok(vectors.stringSerializer.length >= 60);
+  const wrong = vectors.stringSerializer.filter(({ encoding, data, bytes }) => {
+    const serializer = stringSerializer({ configs: { 'serializer.encoding': encoding }, isKey: false });
+    return serialize(serializer, data) !== bytes;
+  });
+  assert.deepEqual(
+    wrong.map((v) => `${v.encoding} ${JSON.stringify(v.data)}`),
+    [],
+  );
+});

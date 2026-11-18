@@ -35,6 +35,10 @@ const { Header } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { createFuture } = require('../../_internal');
+// Every probe child runs with the allocator's poisoning (freed memory filled,
+// guard pages around large blocks), so a use after free or a double free in
+// the native layer, at a collection or a destroy, fails the probe.
+const { POISON } = require('../../memory/_probe');
 
 /** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
 /** @typedef {import('@confluentinc/kafka-javascript/common/header').Headers} Headers */
@@ -662,7 +666,7 @@ test("close(Infinity) is no limit: Java's Long.MAX_VALUE milliseconds, as close(
       })();
     `,
     ],
-    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 60000, env: { ...process.env, RUST_LOG: 'info' } },
+    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 60000, env: { ...process.env, ...POISON, RUST_LOG: 'info' } },
   );
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'closed\n');
@@ -1203,7 +1207,7 @@ function runNode(script, timeout = 30000, flags = [], env = undefined) {
     cwd: path.join(__dirname, '..', '..', '..'),
     encoding: 'utf8',
     timeout,
-    env: env === undefined ? process.env : { ...process.env, ...env },
+    env: { ...process.env, ...POISON, ...env },
   });
   return { ...r, ms: Number((process.hrtime.bigint() - started) / 1000000n) };
 }
@@ -2916,3 +2920,440 @@ test('a send whose metadata wait times out leaves metadata-wait-time-ns-total at
     await producer.close();
   }
 });
+
+// kafka_Bytes_t's length is an int32_t: a key, a value or a header value of
+// 2^31 bytes or more is refused before it crosses, never wrapped to a short
+// or negative length that would send other bytes. The 2 GiB array is mapped
+// lazily (calloc-backed, never written); a machine that cannot map it skips.
+test('a key, a value and a header value of 2^31 bytes are refused with RangeError, with no callback and nothing pending', () => {
+  const r = runNode(`
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+    let huge;
+    try {
+      huge = new Uint8Array(2 ** 31);
+    } catch (e) {
+      console.log('skip', e.message);
+      process.exit(0);
+    }
+    const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
+    let callbacks = 0;
+    const callback = () => callbacks++;
+    (async () => {
+      for (const [what, record] of [
+        ['key', () => new ProducerRecord({ topic: 't', partition: 0, key: huge, value: null })],
+        ['value', () => new ProducerRecord({ topic: 't', partition: 0, key: null, value: huge })],
+      ]) {
+        await p.send({ record: record(), callback }).then(
+          () => console.log(what, 'accepted'),
+          (e) => console.log(what, e.constructor.name, e.message),
+        );
+      }
+      try {
+        new Header({ key: 'h', value: huge });
+        console.log('Header accepted');
+      } catch (e) {
+        console.log('Header', e.constructor.name, e.message);
+      }
+      try {
+        new Headers().add({ key: 'h', value: huge });
+        console.log('Headers.add accepted');
+      } catch (e) {
+        console.log('Headers.add', e.constructor.name, e.message);
+      }
+      const started = Date.now();
+      await p.close();
+      console.log('callbacks', callbacks, 'closed at once', Date.now() - started < 5000);
+    })();
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  if (r.stdout.startsWith('skip')) return;
+  const refused = 'RangeError a byte array crossing the C FFI is limited to 2^31 - 1 bytes';
+  assert.equal(r.stdout, `key ${refused}\nvalue ${refused}\nHeader ${refused}\nHeaders.add ${refused}\ncallbacks 0 closed at once true\n`);
+}, 60000);
+
+// One table over the completion paths a producer without a broker reaches:
+// how many times the callback runs, whether send() resolves or rejects, the
+// future's state and the error's class, message and cause. Java's contract
+// (KafkaProducer#doSend): an ApiException reaches the callback once and fails
+// the future while send() returns; any other throw is rethrown, with no
+// callback. A record taken by the core runs its callback exactly once.
+test('the completion matrix: each path runs the callback at most once and fails the future or send() as Java does', async () => {
+  const { SerializationError, TimeoutError } = errors;
+  /** @type {Serializer<string>} */
+  const plain = { serialize: ({ data }) => (data === null ? null : Buffer.from(data)) };
+  /**
+   * @typedef {{
+   *   name: string,
+   *   configs?: Record<string, unknown>,
+   *   serializer?: Serializer<string>,
+   *   before?: (p: KafkaProducer<string, string>) => Promise<void>,
+   *   callbacks: number,
+   *   send: 'resolves' | 'rejects',
+   *   error: Function,
+   *   message: string | RegExp,
+   *   cause?: Function,
+   * }} Path
+   */
+  /** @type {Path[]} */
+  const paths = [
+    { name: 'metadata timeout', callbacks: 1, send: 'resolves', error: TimeoutError, message: TIMEOUT_MESSAGE('matrix-metadata timeout') },
+    {
+      name: 'refused at hand-over, closed producer',
+      before: (p) => p.close(),
+      callbacks: 0,
+      send: 'rejects',
+      error: IllegalStateError,
+      message: CLOSED_MESSAGE,
+    },
+    {
+      name: 'serializer TypeError',
+      serializer: {
+        serialize: () => {
+          throw new TypeError('not a string');
+        },
+      },
+      callbacks: 0,
+      send: 'rejects',
+      error: SerializationError,
+      message: /^Can't convert value of class /,
+      cause: TypeError,
+    },
+    {
+      name: 'serializer rejection',
+      serializer: { serialize: () => Promise.reject(new RangeError('rejected')) },
+      callbacks: 0,
+      send: 'rejects',
+      error: RangeError,
+      message: 'rejected',
+    },
+    {
+      name: 'serializer ApiError',
+      serializer: {
+        serialize: () => {
+          throw new errors.InvalidTopicError('invalid');
+        },
+      },
+      callbacks: 1,
+      send: 'resolves',
+      error: errors.InvalidTopicError,
+      message: 'invalid',
+    },
+  ];
+  for (const path of paths) {
+    const producer = new KafkaProducer({
+      configs: { ...UNREACHABLE, ...path.configs },
+      keySerializer: plain,
+      valueSerializer: path.serializer ?? plain,
+    });
+    try {
+      if (path.before) await path.before(producer);
+      /** @type {Array<Error | null>} */
+      const calls = [];
+      const sending = producer.send({
+        record: new ProducerRecord({ topic: `matrix-${path.name}`, partition: 0, key: 'k', value: 'v' }),
+        callback: ({ exception }) => void calls.push(exception),
+      });
+      /** @type {Error | undefined} */
+      let failure;
+      if (path.send === 'rejects') {
+        await assert.rejects(sending, (/** @type {Error} */ e) => {
+          failure = e;
+          return true;
+        });
+      } else {
+        const future = await sending;
+        await assert.rejects(future.get(), (/** @type {ExecutionError} */ e) => {
+          assert.equal(e.constructor, ExecutionError, path.name);
+          failure = /** @type {Error} */ (e.cause);
+          return true;
+        });
+        assert.equal(future.isDone(), true, path.name);
+        assert.equal(future.isCompletedExceptionally(), true, path.name);
+        assert.equal(calls[0], failure, path.name);
+      }
+      // A late second callback would show here.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(calls.length, path.callbacks, `${path.name}: the callback ran ${calls.length} times`);
+      assert.ok(failure, path.name);
+      assert.equal(failure.constructor, path.error, `${path.name}: ${failure}`);
+      if (typeof path.message === 'string') assert.equal(failure.message, path.message, path.name);
+      else assert.match(failure.message, path.message, path.name);
+      if (path.cause) assert.equal(/** @type {Error} */ (failure.cause).constructor, path.cause, path.name);
+    } finally {
+      await producer.close();
+    }
+  }
+});
+
+// The core logs a callback's throw or rejection once per record, with its own
+// line (the producer logs a send callback's error, as Java's
+// ProducerBatch#completeFutureAndFireCallbacks logs "Error executing
+// user-provided callback on message for topic-partition"), and the record's
+// outcome does not change.
+test("a throwing and a rejecting callback are each logged once by the core, with Java's text, and change no outcome", () => {
+  const r = runNode(
+    `
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 300 } });
+    (async () => {
+      const thrown = await p.send({ record: new ProducerRecord({ topic: 'logged-throw', partition: 0, key: null, value: Buffer.from('v') }), callback: () => { throw new Error('boom-sync'); } });
+      const rejected = await p.send({ record: new ProducerRecord({ topic: 'logged-reject', partition: 0, key: null, value: Buffer.from('v') }), callback: async () => { throw new Error('boom-async'); } });
+      for (const f of [thrown, rejected]) await f.get().catch((e) => console.log(e.cause.constructor.name, e.cause.message));
+      await p.close();
+    })();
+  `,
+    60000,
+    ['--no-warnings'],
+    { RUST_LOG: 'warn' },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    'TimeoutError Topic logged-throw not present in metadata after 300 ms.\nTimeoutError Topic logged-reject not present in metadata after 300 ms.\n',
+  );
+  /** @param {string} tp @param {string} text */
+  const lines = (tp, text) =>
+    r.stderr
+      .split('\n')
+      .filter((l) => l.includes(`Error executing user-provided callback on message for topic-partition '${tp}'`) && l.includes(text));
+  assert.equal(lines('logged-throw-0', 'boom-sync').length, 1, r.stderr);
+  assert.equal(lines('logged-reject-0', 'boom-async').length, 1, r.stderr);
+});
+
+test('partitioner.type takes the three built-in partitioners; any other value is a ConfigError with the core text', async () => {
+  const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
+  for (const type of ['ConsistentRandomPartitioner', 'Murmur2RandomPartitioner', 'RoundRobinPartitioner']) {
+    await new KafkaProducer({ configs: { ...UNREACHABLE, 'partitioner.type': type } }).close();
+  }
+  for (const type of ['Bogus', 'murmur2', 'consistent_random', '']) {
+    assert.throws(() => new KafkaProducer({ configs: { ...UNREACHABLE, 'partitioner.type': type } }), {
+      constructor: ConfigError,
+      message: `Invalid value ${type} for configuration partitioner.type: Partitioner type ${type} is not supported; the supported types are ConsistentRandomPartitioner, Murmur2RandomPartitioner and RoundRobinPartitioner.`,
+    });
+  }
+});
+
+// MIGRATION.md: librdkafka's keys and a 1.x kafkaJS block reach the core as
+// unknown keys, listed in its one INFO line, and change nothing.
+test("librdkafka and 1.x keys are inert: listed as unused, and linger.ms keeps Java's default", () => {
+  const r = runNode(
+    `
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', 'queue.buffering.max.ms': 1000, 'message.timeout.ms': 5000, dr_cb: true, kafkaJS: { acks: 1 } } })
+      .close()
+      .then(() => console.log('closed'));
+  `,
+    60000,
+    ['--no-warnings'],
+    { RUST_LOG: 'info' },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'closed\n');
+  const unused = r.stderr.split('\n').filter((l) => l.includes('were supplied but are not used yet.'));
+  assert.equal(unused.length, 1, r.stderr);
+  for (const key of ['queue.buffering.max.ms', 'message.timeout.ms', 'dr_cb', 'kafkaJS']) assert.ok(unused[0].includes(key), unused[0]);
+  assert.match(r.stderr, /^\s*linger\.ms = 5$/m);
+});
+
+// `await using` (Node 24 and later): the scope's end closes the producer, and
+// a close that throws while the block throws gives a SuppressedError, as the
+// README says.
+(Number(process.versions.node.split('.')[0]) >= 24 ? test : test.skip)(
+  'await using closes the producer at the end of its scope; a failing close beside a throwing block is a SuppressedError',
+  () => {
+    const r = runNode(`
+    const { MockProducer } = require('@confluentinc/kafka-javascript/producer');
+    (async () => {
+      let kept;
+      {
+        await using p = new MockProducer();
+        kept = p;
+      }
+      console.log('closed', kept.closed());
+      const e1 = new Error('close failed');
+      const e2 = new Error('block failed');
+      let second;
+      try {
+        await using p = new MockProducer();
+        second = p;
+        p.setCloseException(e1);
+        throw e2;
+      } catch (e) {
+        console.log(e.constructor.name, e.error === e1, e.suppressed === e2);
+      }
+      // The failed close left the mock open, as Java's MockProducer#close
+      // throws before it closes, and an open mock holds Node: a close without
+      // the error closes it, so the process ends.
+      console.log('open after the failed close', !second.closed());
+      second.setCloseException(null);
+      await second.close();
+    })();
+  `);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'closed true\nSuppressedError true true\nopen after the failed close true\n');
+  },
+);
+
+// The security keys without a broker: the SSL store errors the core reports
+// when the producer is built, and the secrets that never reach a message, a
+// warning or a log line. The binding checks no value (root CLAUDE.md,
+// JavaScript Binding Conventions, Configuration): every text here is the
+// core's.
+{
+  const crypto = require('node:crypto');
+  const fs = require('node:fs');
+  const os = require('node:os');
+
+  /** @typedef {import('@confluentinc/kafka-javascript/producer').ProducerConfigs} ProducerConfigs */
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-ssl-config-'));
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  /**
+   * Asserts that building an SSL producer with `configs` throws Java's
+   * KafkaProducer#KafkaProducer wrapper, "Failed to construct kafka producer",
+   * whose cause is the core's ConfigError with `message`.
+   *
+   * @param {ProducerConfigs} configs
+   * @param {string} message
+   */
+  function assertConstructionFails(configs, message) {
+    assert.throws(
+      () => new KafkaProducer({ configs: { 'bootstrap.servers': 'localhost:1', 'security.protocol': 'SSL', ...configs } }),
+      (e) => {
+        assert.equal(/** @type {Error} */ (e).constructor, KafkaError);
+        assert.equal(/** @type {Error} */ (e).message, 'Failed to construct kafka producer');
+        const cause = /** @type {Error} */ (e).cause;
+        assert.ok(cause instanceof ConfigError, String(cause));
+        assert.equal(cause.message, message);
+        return true;
+      },
+    );
+  }
+
+  // Java's SslChannelBuilder#configure builds the SslFactory, which loads the
+  // stores, while KafkaProducer#KafkaProducer builds its channel builder, so a
+  // store that cannot be loaded fails the construction, never the first
+  // connection; KafkaProducer#KafkaProducer wraps the failure as
+  // KafkaException("Failed to construct kafka producer", t).
+  test('a missing truststore file fails the construction with the core ConfigError', () => {
+    const missing = path.join(dir, 'missing-truststore.pem');
+    assertConstructionFails(
+      { 'ssl.truststore.location': missing },
+      `Failed to create channel builder: Failed to open truststore file '${missing}': No such file or directory (os error 2)`,
+    );
+  });
+
+  test('a truststore file that is not PEM fails the construction with the core ConfigError', () => {
+    const notPem = path.join(dir, 'not-pem-truststore.txt');
+    fs.writeFileSync(notPem, 'this is not a certificate\n');
+    assertConstructionFails(
+      { 'ssl.truststore.location': notPem },
+      `Failed to create channel builder: No certificates found in truststore file '${notPem}'`,
+    );
+  });
+
+  test('an encrypted private key in the keystore file fails the construction with the core ConfigError', () => {
+    // A real encrypted PKCS#8 key, which Java's
+    // DefaultSslEngineFactory.PemStore#privateKey decrypts with ssl.key.password;
+    // the core does not decrypt it and reports it instead.
+    const { privateKey } = crypto.generateKeyPairSync('ec', {
+      namedCurve: 'prime256v1',
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem', cipher: 'aes-128-cbc', passphrase: 'key-secret' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    });
+    assert.ok(privateKey.startsWith('-----BEGIN ENCRYPTED PRIVATE KEY-----'));
+    const keystore = path.join(dir, 'encrypted-keystore.pem');
+    fs.writeFileSync(keystore, privateKey);
+    assertConstructionFails(
+      { 'ssl.keystore.location': keystore, 'ssl.keystore.type': 'PEM', 'ssl.key.password': 'key-secret' },
+      'Failed to create channel builder: Encrypted PEM private keys are not supported by this client; provide an unencrypted PKCS#8 key',
+    );
+  });
+
+  test('a JKS truststore type fails the construction with the core ConfigError', () => {
+    assertConstructionFails(
+      { 'ssl.truststore.type': 'JKS' },
+      'Failed to create channel builder: JKS format is not supported for truststore in Rust. ' +
+        'Convert to PEM format using: keytool -exportcert -alias <alias> -keystore <keystore.jks> -rfc',
+    );
+  });
+
+  // The two secrets: a store password given as a number, which the binding
+  // writes as its decimal text, and the password in a SASL/PLAIN JAAS line.
+  const NUMBER_PASSWORD = 987654321987;
+  const JAAS_PASSWORD = 'jaas-secret-7Q9xK';
+
+  test('a password never appears in an error message, a warning, a NODE_DEBUG line or a RUST_LOG=debug line', () => {
+    // Java's AbstractConfig#logAll prints a PASSWORD as [hidden], and
+    // ConfigDef.convertToString keeps a Password's value out of every text
+    // (org.apache.kafka.common.config.types.Password#toString). The child builds
+    // producers whose construction succeeds and producers whose construction
+    // fails, sends a record that times out on its metadata, and prints every
+    // error it catches, with its causes, and every warning.
+    const script = `
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    process.on('warning', (w) => console.log('warning', w.name, w.message));
+    const module = 'org.apache.kafka.common.security.plain.PlainLoginModule';
+    const jaas = [
+      module + ' required username="user" password="${JAAS_PASSWORD}";',
+      module + ' required username="user" password="${JAAS_PASSWORD};',
+      'password="${JAAS_PASSWORD}";',
+    ];
+    const print = (where, e) => {
+      for (let x = e; x; x = x.cause) console.log(where, x.name, x.message, String(x), x.stack);
+    };
+    (async () => {
+      for (const line of jaas) {
+        for (const protocol of ['SASL_PLAINTEXT', 'SASL_SSL']) {
+          let producer;
+          try {
+            producer = new KafkaProducer({
+              configs: {
+                'bootstrap.servers': 'localhost:1',
+                'security.protocol': protocol,
+                'sasl.mechanism': 'PLAIN',
+                'sasl.jaas.config': line,
+                'ssl.keystore.password': ${NUMBER_PASSWORD},
+                'ssl.truststore.password': ${NUMBER_PASSWORD},
+                'max.block.ms': 500,
+              },
+            });
+          } catch (e) {
+            print('construction', e);
+            continue;
+          }
+          try {
+            await (await producer.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') }))).get();
+          } catch (e) {
+            print('send', e);
+          }
+          await producer.close();
+        }
+      }
+      console.log('done');
+    })();
+  `;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      cwd: path.join(__dirname, '..', '..', '..'),
+      encoding: 'utf8',
+      timeout: 120000,
+      env: { ...process.env, ...POISON, NODE_DEBUG: 'confluent_kafka', RUST_LOG: 'debug' },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const output = r.stdout + r.stderr;
+    // Each channel was reached: the errors and the logs the secrets could be in.
+    assert.ok(r.stdout.endsWith('done\n'), r.stdout);
+    assert.ok(
+      r.stdout.includes('construction ConfigError Failed to create channel builder: SASL PLAIN authentication requires a password'),
+      r.stdout,
+    );
+    assert.ok(r.stdout.includes('send TimeoutError Topic t not present in metadata after 500 ms.'), r.stdout);
+    assert.ok(r.stderr.includes('CONFLUENT_KAFKA'), 'no NODE_DEBUG=confluent_kafka line');
+    assert.ok(/ DEBUG /.test(r.stderr), 'no RUST_LOG=debug line');
+    assert.ok(r.stderr.includes('sasl.jaas.config = [hidden]'), 'no ProducerConfig values dump');
+    assert.ok(!output.includes(JAAS_PASSWORD), 'the JAAS password reached the output');
+    assert.ok(!output.includes(String(NUMBER_PASSWORD)), 'the store password reached the output');
+  });
+}

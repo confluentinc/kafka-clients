@@ -1390,6 +1390,10 @@ blocks:
       env_vars:
         - name: NPM_PLATFORM
           value: linux-x64-gnu
+        # npm ci installs the devDependencies from the public registry; see
+        # "Verify Rust and language bindings (Linux amd64)" in semaphore.yml.
+        - name: NPM_CONFIG_REGISTRY
+          value: https://registry.npmjs.org/
       prologue:
         commands:
           - . .semaphore/job-start.sh
@@ -1397,10 +1401,27 @@ blocks:
         - name: "Test the packages (Linux amd64)"
           commands:
             - sem-version node 22
+            # The devDependencies (typescript, @types/node, jest): test-npm.sh
+            # type-checks a TypeScript consumer of the installed packages and
+            # runs the unit and typing tests against them; --ignore-scripts, as
+            # no install script of a dependency needs to run for either.
+            - (cd javascript && npm ci --no-audit --no-fund --ignore-scripts)
             # test-npm.sh takes a directory that holds the tarballs and nothing else.
             - artifact pull workflow npm/built --destination /tmp/packages
             - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
+        # The install and the smoke programs on the engines floor (22.14.0) and
+        # on Node.js 24 and 26, in almalinux:8, whose glibc 2.28 is the
+        # packages' floor (.semaphore/test-npm-node.sh), before the packages
+        # are recorded: javascript-post-install.yml checks them on these
+        # versions and images only after publishing.
+        - name: "Test the packages on other Node.js versions (Linux amd64)"
+          matrix:
+            - env_var: NODE_VERSION
+              values: ["22.14.0", "24", "26"]
+          commands:
+            - artifact pull workflow npm/built --destination /tmp/packages
+            - sh .semaphore/test-npm-node.sh /tmp/packages "${NPM_PLATFORM}" "${NODE_VERSION}" almalinux:8
 
   - name: "Release (JavaScript): package verification (macOS arm64)"
     dependencies: ["Release (JavaScript): pack"]
@@ -1415,6 +1436,10 @@ blocks:
       env_vars:
         - name: NPM_PLATFORM
           value: darwin-arm64
+        # npm ci installs the devDependencies from the public registry; see
+        # "Verify Rust and language bindings (Linux amd64)" in semaphore.yml.
+        - name: NPM_CONFIG_REGISTRY
+          value: https://registry.npmjs.org/
       prologue:
         commands:
           - . .semaphore/job-start.sh
@@ -1422,10 +1447,23 @@ blocks:
         - name: "Test the packages (macOS arm64)"
           commands:
             - sem-version node 22
+            # The devDependencies, as for Linux above.
+            - (cd javascript && npm ci --no-audit --no-fund --ignore-scripts)
             # test-npm.sh takes a directory that holds the tarballs and nothing else.
             - artifact pull workflow npm/built --destination /tmp/packages
             - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
+        # The install and the smoke programs on the engines floor (22.14.0) and
+        # on Node.js 24 and 26 (.semaphore/test-npm-node.sh), before the
+        # packages are recorded, as for Linux above.
+        - name: "Test the packages on other Node.js versions (macOS arm64)"
+          matrix:
+            - env_var: NODE_VERSION
+              values: ["22.14.0", "24", "26"]
+          commands:
+            - sem-version node "${NODE_VERSION}"
+            - artifact pull workflow npm/built --destination /tmp/packages
+            - sh .semaphore/test-npm-node.sh /tmp/packages "${NPM_PLATFORM}" "${NODE_VERSION}" --here
 
   - name: "Release (JavaScript): record"
     # Starts only when the packages were tested on every platform. The checks

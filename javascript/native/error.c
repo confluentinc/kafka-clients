@@ -18,6 +18,7 @@
 // subclass, or a Java built-in such as IllegalStateError). An OWNED error is
 // destroyed once read; a BORROWED one (a delivery callback's, a cause) never.
 
+#include <stdatomic.h>
 #include <stdlib.h>
 
 #include "util.h"
@@ -26,6 +27,27 @@
 // recursion.
 #define MAX_CAUSE_DEPTH 32
 
+// The counts errorStats() reads, for the memory tests (test/memory/): the
+// owned errors the addon received (from an out_err slot or a completion), the
+// ones it made itself, the ones it freed and the ones it gave the core, which
+// takes their ownership. Test-only.
+static atomic_long stat_errors_owned;
+static atomic_long stat_errors_made;
+static atomic_long stat_errors_freed;
+static atomic_long stat_errors_given;
+
+void error_stat_owned(const kafka_common_Error_t* e) {
+    if (e != NULL) atomic_fetch_add(&stat_errors_owned, 1);
+}
+
+void error_stat_made(const kafka_common_Error_t* e) {
+    if (e != NULL) atomic_fetch_add(&stat_errors_made, 1);
+}
+
+void error_stat_given(const kafka_common_Error_t* e) {
+    if (e != NULL) atomic_fetch_add(&stat_errors_given, 1);
+}
+
 void error_discard(kafka_common_Error_t* e) {
     if (e == NULL) return;
     kafka_common_Error_t* ffi_err = NULL;
@@ -33,7 +55,11 @@ void error_discard(kafka_common_Error_t* e) {
     // A panic inside the destroy is reported as one more owned error; freeing
     // that one cannot be retried further.
     kafka_common_Error_t* panic = ffi_take(&ffi_err);
-    if (panic != NULL) kafka_common_Error_destroy_err(panic, &ffi_err);
+    atomic_fetch_add(&stat_errors_freed, 1);
+    if (panic != NULL) {
+        kafka_common_Error_destroy_err(panic, &ffi_err);
+        atomic_fetch_add(&stat_errors_freed, 1);
+    }
 }
 
 void error_warn(napi_env env, int js, kafka_common_Error_t* e) {
@@ -508,4 +534,26 @@ napi_value js_set_factories(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_create_reference(env, argv[1], 1, &data->metadata_factory), NULL);
     NAPI_CHECK(env, napi_create_reference(env, argv[2], 1, &data->warn), NULL);
     return NULL;
+}
+
+static int stat_put(napi_env env, napi_value obj, const char* name, atomic_long* count) {
+    napi_value v;
+    return napi_create_int64(env, (int64_t)atomic_load(count), &v) == napi_ok
+                   && napi_set_named_property(env, obj, name, v) == napi_ok
+               ? 0
+               : -1;
+}
+
+// errorStats(): the counts of the owned errors received, made, freed and given
+// to the core. Test-only.
+napi_value js_error_stats(napi_env env, napi_callback_info info) {
+    (void)info;
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (stat_put(env, obj, "owned", &stat_errors_owned) || stat_put(env, obj, "made", &stat_errors_made)
+        || stat_put(env, obj, "freed", &stat_errors_freed) || stat_put(env, obj, "given", &stat_errors_given)) {
+        js_throw_last_napi_error(env, "errorStats");
+        return NULL;
+    }
+    return obj;
 }

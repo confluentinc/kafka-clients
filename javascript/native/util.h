@@ -43,9 +43,12 @@
 // The error a call stored in `*slot` (NULL if none), resetting the slot to
 // NULL: a `kafka_common_Error_t **out_err` must point at NULL on entry, so one
 // slot serves every call of a function.
+void error_stat_owned(const kafka_common_Error_t* e);
+
 static inline kafka_common_Error_t* ffi_take(kafka_common_Error_t** slot) {
     kafka_common_Error_t* e = *slot;
     *slot = NULL;
+    error_stat_owned(e);
     return e;
 }
 
@@ -107,6 +110,12 @@ napi_value error_take_to_js(napi_env env, kafka_common_Error_t* e);
 
 // Throws a KafkaError for an OWNED error, which is destroyed.
 void error_throw_owned(napi_env env, kafka_common_Error_t* e);
+
+// The counts errorStats() reads (test-only): an owned error received from
+// the core (ffi_take, and a completion's `error`), one the addon made itself,
+// and one whose ownership it gave the core. A no-op for NULL.
+void error_stat_made(const kafka_common_Error_t* e);
+void error_stat_given(const kafka_common_Error_t* e);
 
 // Destroys an OWNED error, swallowing a panic reported by the destroy itself.
 // Only where no JS can run (an environment teardown) or while converting an
@@ -292,6 +301,11 @@ kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, i
 // NULL with a TypeError pending when `value` is not one.
 kafka_common_header_internals_RecordHeaders_t* headers_handle(napi_env env, napi_value value);
 
+// Test-only: while a test armed recordSpy(), keeps what the record a send
+// built holds, read back, and whether its key and value are the memory of
+// the caller's typed arrays `key` and `value`. A no-op otherwise.
+void record_spy_capture(napi_env env, const kafka_producer_ProducerRecord_t* record, napi_value key, napi_value value);
+
 // producer.c: the JS value an error JS gave a mock carries, for the
 // LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
 // is not one (another callback's error) or its value is gone (the mock
@@ -302,6 +316,7 @@ napi_value injected_error_value(napi_env env, void* opaque);
 
 // error.c: setFactories(errorFactory, metadataFactory).
 napi_value js_set_factories(napi_env env, napi_callback_info info);
+napi_value js_error_stats(napi_env env, napi_callback_info info);
 
 // producer.c: the KafkaProducer handle.
 napi_value js_producer_create(napi_env env, napi_callback_info info);
@@ -319,6 +334,7 @@ napi_value js_producer_metrics(napi_env env, napi_callback_info info);
 napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);
+napi_value js_producer_stats(napi_env env, napi_callback_info info);
 
 // headers.c: Headers and Header over RecordHeaders and RecordHeader.
 napi_value js_headers_new(napi_env env, napi_callback_info info);
@@ -336,5 +352,6 @@ napi_value js_header_new(napi_env env, napi_callback_info info);
 napi_value js_header_key(napi_env env, napi_callback_info info);
 napi_value js_header_value(napi_env env, napi_callback_info info);
 napi_value js_header_stats(napi_env env, napi_callback_info info);
+napi_value js_record_spy(napi_env env, napi_callback_info info);
 
 #endif  // CONFLUENT_KAFKA_JS_UTIL_H

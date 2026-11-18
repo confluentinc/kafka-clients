@@ -371,6 +371,7 @@ constructor argument wins, and its config key is then ignored.
 `stringSerializer()` writes a string as Java's `StringSerializer` does, and
 goes in a config key without `()`:
 
+<!-- snippet: fragment -->
 ```js
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 
@@ -415,6 +416,7 @@ throws `TypeError`: encode it first. `Headers` keeps Java's methods: `add(header
 Where headers are taken (`ProducerRecord`'s `headers`, `new Headers(...)`),
 they are a `Headers` or an iterable of `Header`s, as Java takes them:
 
+<!-- snippet: fragment -->
 ```js
 const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
 const record = new ProducerRecord({
@@ -747,6 +749,7 @@ package root.
   object, so convert them to plain pairs first, and rebuild the record and
   its `Header`s on the other side:
 
+  <!-- snippet: fragment -->
   ```js
   // In a worker: plain data (Buffers and Uint8Arrays cross as Uint8Arrays).
   const message = {
@@ -775,6 +778,7 @@ file holding the client certificate chain and its private key) or inline
 `ssl.keystore.key`). SASL credentials go in `sasl.jaas.config`, the only way to
 give them:
 
+<!-- snippet: fragment -->
 ```js
 const producer = new KafkaProducer({
   configs: {
@@ -809,6 +813,7 @@ the fallback; an error has no other public field than `name`, `message` (Java's
 `instanceof` (or `name`), not `err.code` or `err.retriable`: a retriable error
 is an `instanceof RetriableError`, a broker error an `instanceof ApiError`.
 
+<!-- snippet: fragment -->
 ```js
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
 const { RetriableError } = require('@confluentinc/kafka-javascript/common/errors');

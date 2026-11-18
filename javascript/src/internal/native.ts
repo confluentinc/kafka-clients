@@ -102,6 +102,56 @@ interface HeaderStats {
   valueCopied: number;
 }
 
+/** The counts of native/producer.c, for the memory tests: each object or unit made, and freed or given back. */
+interface ProducerStats {
+  producersMade: number;
+  producersFreed: number;
+  // The units of a producer struct's `owners`: the handle object, the threadsafe function, each wait and deferral.
+  ownerUnitsTaken: number;
+  ownerUnitsReleased: number;
+  contextsMade: number;
+  contextsFreed: number;
+  slotsTaken: number;
+  slotsReturned: number;
+  futuresHeld: number;
+  futuresDestroyed: number;
+  waitsStarted: number;
+  waitsCompleted: number;
+  // A callback's Promise awaited: deferred, reported, and its function finalized.
+  deferralsMade: number;
+  deferralsReported: number;
+  deferralsReleased: number;
+  bufferRefsTaken: number;
+  bufferRefsReleased: number;
+  mockRecordsMade: number;
+  mockRecordsFreed: number;
+  injectedMade: number;
+  injectedFreed: number;
+}
+
+/** The counts of native/error.c, for the memory tests: owned errors received, made, freed and given to the core. */
+interface ErrorStats {
+  owned: number;
+  made: number;
+  freed: number;
+  given: number;
+}
+
+/** What a send built, read back from the native record (native/headers.c `record_spy_capture`), for the tests. */
+interface SpiedRecord {
+  topic: string;
+  partition: number;
+  timestamp: bigint;
+  key: Buffer | null;
+  value: Buffer | null;
+  // The key and value src/ passed the addon, and whether the record's key and value are their memory.
+  keyArg: Uint8Array | null;
+  valueArg: Uint8Array | null;
+  keyInPlace: boolean;
+  valueInPlace: boolean;
+  headers: [string, Buffer | null][];
+}
+
 /** The functions the addon registers (native/addon.c). */
 interface Native {
   probe(): boolean;
@@ -226,6 +276,12 @@ interface Native {
   headerValue(header: HeaderHandle): Buffer | null;
   // The counts of native/headers.c. Test-only.
   headerStats(): HeaderStats;
+  // The counts of native/producer.c. Test-only.
+  producerStats(): ProducerStats;
+  // The counts of native/error.c. Test-only.
+  errorStats(): ErrorStats;
+  // The records the sends built since the last call; arms the capture again for `arm`. Test-only.
+  recordSpy(arm: boolean): SpiedRecord[];
 }
 
 // Loads an addon instance of this copy of the package's own: process.dlopen

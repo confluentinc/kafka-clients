@@ -82,7 +82,14 @@ const KAFKA_LINE = new RegExp(`${KAFKA_SEGMENT.source.replace('^kafka$', '[\'"]k
  * @param {RegExp} [pattern]
  * @returns {boolean}
  */
-const namesKafka = (text, pattern = KAFKA_SEGMENT) => pattern.test(text.replace(RULE_MENTION, ''));
+const namesKafka = (text, pattern = KAFKA_SEGMENT) => pattern.test(text.replace(RULE_MENTION, '').replace(IMAGE_DIRECTORY, ''));
+
+/**
+ * A directory inside the apache/kafka broker image (`/opt/kafka/bin/...`,
+ * `/etc/kafka/secrets/...`), which the broker-backed tests name: a path in
+ * the container, not the kafka submodule.
+ */
+const IMAGE_DIRECTORY = /\/(?:opt|etc)\/kafka(?=\/)/g;
 
 /** The word `xtask`. */
 const XTASK = /\bxtask\b/;

@@ -609,3 +609,49 @@ test('toString follows Java', () => {
       'RecordHeader(key = b, value = [118])], isReadOnly = false), key=k, value=v, timestamp=5)',
   );
 });
+
+// toString() and hashCode() as Java's kafka-clients computes them, read from
+// test/java_vectors.json (tools/java-vectors/JavaVectors.java).
+test("toString() and hashCode() match Java's for records, record metadata and headers, as Kafka's kafka-clients wrote them", () => {
+  const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+  const { TopicPartition } = require('@confluentinc/kafka-javascript/common');
+  const { RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
+  /** @type {{ objects: Array<{ what: string, toString: string, hashCode?: number }> }} */
+  const vectors = require('../../java_vectors.json');
+  const headers = () => new Headers([new Header({ key: 'h', value: Buffer.from('v') }), new Header({ key: 'n', value: null })]);
+  /** @type {Record<string, () => { toString(): string, hashCode?: () => number }>} */
+  const made = {
+    'ProducerRecord(t, v)': () => new ProducerRecord({ topic: 't', value: 'v' }),
+    'ProducerRecord(t, 3, 42, k, v, headers)': () =>
+      new ProducerRecord({ topic: 't', partition: 3, timestamp: 42, key: 'k', value: 'v', headers: headers() }),
+    'ProducerRecord(t, null, null, null, null)': () =>
+      new ProducerRecord({ topic: 't', partition: null, timestamp: null, key: null, value: null }),
+    'RecordMetadata(t-1, 5, 7, 1000, 2, 3)': () =>
+      new RecordMetadata({
+        topicPartition: new TopicPartition({ topic: 't', partition: 1 }),
+        baseOffset: 5,
+        batchIndex: 7,
+        timestamp: 1000,
+        serializedKeySize: 2,
+        serializedValueSize: 3,
+      }),
+    'RecordMetadata(t-0, -1, 0, -1, -1, -1)': () =>
+      new RecordMetadata({
+        topicPartition: new TopicPartition({ topic: 't', partition: 0 }),
+        baseOffset: -1,
+        batchIndex: 0,
+        timestamp: -1,
+        serializedKeySize: -1,
+        serializedValueSize: -1,
+      }),
+    'RecordHeader(h, v)': () => new Header({ key: 'h', value: Buffer.from('v') }),
+    'RecordHeader(n, null)': () => new Header({ key: 'n', value: null }),
+    'RecordHeaders(h=v, n=null)': headers,
+  };
+  assert.deepEqual(vectors.objects.map((v) => v.what).sort(), Object.keys(made).sort());
+  for (const v of vectors.objects) {
+    const object = made[v.what]();
+    assert.equal(object.toString(), v.toString, v.what);
+    if (v.hashCode !== undefined) assert.equal(/** @type {() => number} */ (object.hashCode).call(object), v.hashCode, v.what);
+  }
+});

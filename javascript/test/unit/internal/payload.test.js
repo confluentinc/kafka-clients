@@ -553,3 +553,17 @@ test('CorrelationIdMismatchError keeps its message and is an IllegalStateError, 
   assert.ok(!(e instanceof KafkaError));
   assert.deepEqual([e.requestCorrelationId(), e.responseCorrelationId()], [7, 9]);
 });
+
+// The messages Java's kafka-clients builds from a payload, read from
+// test/java_vectors.json (tools/java-vectors/JavaVectors.java).
+test("an error built from its payload has the message Java's kafka-clients builds", () => {
+  const errors = require('@confluentinc/kafka-javascript/common/errors');
+  /** @type {{ errorMessages: Array<{ what: string, message: string }> }} */
+  const vectors = require('../../java_vectors.json');
+  /** @type {Record<string, () => Error>} */
+  const made = {
+    'TopicAuthorizationException(Set.of(t))': () => new errors.TopicAuthorizationError({ unauthorizedTopics: ['t'] }),
+    'InvalidTopicException(Set.of(t))': () => new errors.InvalidTopicError({ invalidTopics: ['t'] }),
+  };
+  for (const v of vectors.errorMessages) assert.equal(made[v.what]().message, v.message, v.what);
+});

@@ -332,4 +332,8 @@ function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-main();
+// Run as a program it serves; required (test/grpc_server/), it only hands out
+// the service, whose handlers the tests call in-process.
+if (require.main === module) main();
+
+module.exports = { ProducerService, selectsMock };

@@ -39,6 +39,10 @@ const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { RecordTooLargeError } = require('@confluentinc/kafka-javascript/common/errors');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { MockProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
+// Every probe child runs with the allocator's poisoning (freed memory filled,
+// guard pages around large blocks), so a use after free or a double free in
+// the native layer, at a collection or a destroy, fails the probe.
+const { POISON } = require('../../memory/_probe');
 
 /** @typedef {import('@confluentinc/kafka-javascript/common').KafkaFuture<unknown>} AnyFuture */
 /** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
@@ -897,7 +901,7 @@ test('the kept callback errors raise no unhandled rejection under --unhandled-re
     })();
   `,
     ],
-    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 30000 },
+    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 30000, env: { ...process.env, ...POISON } },
   );
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim(), 'done');
@@ -972,6 +976,7 @@ function runNode(script, timeout = 60000) {
     cwd: path.join(__dirname, '..', '..', '..'),
     encoding: 'utf8',
     timeout,
+    env: { ...process.env, ...POISON },
   });
 }
 

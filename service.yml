@@ -96,6 +96,26 @@ semaphore:
           required: true
           default_value: master
           description: The branch to bump and the PR's base.
+    - name: memory-javascript
+      branch: master
+      at: "0 3 * * *"
+      pipeline_file: .semaphore/memory-javascript.yml
+      description: Nightly (03:00 UTC), or by hand, run the Node.js client's native-memory checks on Linux amd64 -- the unit and memory Jest projects against the addon built with AddressSanitizer (make -C javascript test-asan), and the memory probes' mutants, each of which must make the probes that guard what it breaks fail (make -C javascript test-memory-mutation). Not part of the pull-request or release checks.
+    - name: chaos-javascript
+      branch: master
+      at: "0 2 * * 0"
+      pipeline_file: .semaphore/chaos-javascript.yml
+      description: Weekly (Sundays 02:00 UTC), or by hand, run the chaos harness (cargo xtask chaos, rust/tests/chaos) with the Node.js producer in its gRPC container and the Rust consumer on a three-broker cluster, twice (make chaos-javascript) -- leader changes and partition reassignments every cycle without broker restarts, then an unclean broker roll under the idempotent producer -- and fail when an acknowledged record is lost, duplicated or out of order. Not part of the pull-request or release checks.
+    - name: soak-javascript
+      branch: master
+      at: "0 2 * * 6"
+      pipeline_file: .semaphore/soak-javascript.yml
+      description: Weekly (Saturdays 02:00 UTC), or by hand, run the Node.js producer's soak client for SOAK_HOURS hours against a scratch broker (make -C javascript soak) and fail when its steady state does not hold -- the RSS, the JavaScript heap or the external memory still growing after the warm-up, open file descriptors or threads not flat, or a delivery callback that did not run exactly once. Not part of the pull-request or release checks.
+      parameters:
+        - name: SOAK_HOURS
+          required: false
+          default_value: '6'
+          description: How long the soak runs, in hours (the warm-up is its first 30 minutes).
     - name: javascript-post-install
       branch: master
       pipeline_file: .semaphore/javascript-post-install.yml

@@ -19,6 +19,7 @@
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
 	build-grpc-native-javascript test-integration-javascript-native \
+	chaos-javascript chaos-javascript-native \
 	pack-javascript package-check-javascript
 
 build: init-hooks build-all
@@ -145,22 +146,22 @@ test-javascript: build-javascript
 
 # The Node.js client's tests that need no broker, the part of `test` (and so
 # of `verify`): the static tests (header conformance, the package layout, the
-# release scripts), the unit tests, and the type checks, `tsc --strict` over
-# the sources (the build), over the type tests (test-typing, against the
-# compiled declarations) and over every test file (typecheck-tests), with the
-# interface check of the declarations and the exports map against the
-# committed API report (check-api). The type check of the tests reads the
-# compiled declarations, so it runs here, in the one sub-make that builds
-# dist/, never beside it: under `make -j` a second build would delete dist/
-# while these tests read it.
+# release scripts), the unit tests, the memory probes (test-memory), and the
+# type checks, `tsc --strict` over the sources (the build), over the type
+# tests (test-typing, against the compiled declarations) and over every test
+# file (typecheck-tests), with the interface check of the declarations and the
+# exports map against the committed API report (check-api). The type check of
+# the tests reads the compiled declarations, so it runs here, in the one
+# sub-make that builds dist/, never beside it: under `make -j` a second build
+# would delete dist/ while these tests read it.
 test-javascript-unit: build-javascript
-	$(MAKE) -C javascript test-static test-unit test-typing check-api typecheck-tests
+	$(MAKE) -C javascript test-static test-unit test-memory test-typing check-api typecheck-tests
 
-# macOS variant of test-javascript: the unit tests only, as python/'s
-# `verify-macos` runs pytest test/unit only. On macOS the gRPC multilanguage arm
-# runs natively instead (see verify-javascript-macos-docker).
+# macOS variant of test-javascript: the unit and memory tests only, as
+# python/'s `verify-macos` runs pytest test/unit only. On macOS the gRPC
+# multilanguage arm runs natively instead (see verify-javascript-macos-docker).
 test-javascript-macos-docker: build-javascript
-	$(MAKE) -C javascript test-unit
+	$(MAKE) -C javascript test-unit test-memory
 
 # The Node.js client's rule linter (ESLint, javascript/eslint.config.cjs, and
 # the runner, javascript/scripts/lint_rules.js) and its own tests; ESLint is a
@@ -192,11 +193,16 @@ test-integration-javascript:
 # CSASLTLS :9101), which INTEGRATION_TEST_PROTOCOL selects
 # (rust/tests/common/test_context.rs), as python/'s and c/'s
 # `test-integration-ssl` and `test-integration-sasl-ssl` do. They inherit the
-# non-Linux skip.
+# non-Linux skip. They also run the Node.js client's own broker-backed tests
+# over SSL and mTLS, and over SASL_PLAINTEXT and SASL_SSL with the
+# StandardAuthorizer (javascript/'s test-integration-ssl and
+# test-integration-sasl, each against a broker of its own).
 test-integration-javascript-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+	$(MAKE) -C javascript test-integration-ssl
 test-integration-javascript-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
+	$(MAKE) -C javascript test-integration-sasl
 
 # The `__grpc_js` arm with the gRPC server as a host process instead of a
 # container (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs):
@@ -209,6 +215,16 @@ build-grpc-native-javascript: build-javascript
 
 test-integration-javascript-native: build-grpc-native-javascript
 	$(MAKE) -C rust test-integration-grpc-js-native
+
+# The chaos runs of the Node.js producer (rust/Makefile `chaos-javascript`):
+# the container backend, and the same runs with the server as a host process.
+# Long and destructive to their own cluster, so not part of `verify`;
+# .semaphore/chaos-javascript.yml runs the first as a scheduled task.
+chaos-javascript: build-grpc-images-javascript
+	$(MAKE) -C rust chaos-javascript
+
+chaos-javascript-native: build-grpc-native-javascript
+	MULTILANG_BACKEND_MODE=native $(MAKE) -C rust chaos-javascript
 
 # The npm packages of the Node.js client, with this machine's addon only:
 # pack-javascript packs them into javascript/build/pack, and

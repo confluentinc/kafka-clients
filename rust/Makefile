@@ -36,7 +36,7 @@ CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc -
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
-	test-integration-grpc-js test-integration-grpc-js-native \
+	test-integration-grpc-js test-integration-grpc-js-native chaos-javascript \
 	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
 	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -289,6 +289,34 @@ test-integration-grpc-js-native:
 	MULTILANG_BACKEND_MODE=native \
 		cargo test --all-features --test integration -- __grpc_js \
 		$(JS_GRPC_SKIPS)
+
+# ── Chaos runs of the JavaScript producer ─────────────────────────────────
+#
+# `cargo xtask chaos` (tests/chaos/README.md) with the Node.js producer
+# (`producer:javascript`, served by javascript/grpc-server/grpc_server.js) and
+# the Rust consumer, on the harness's dedicated three-broker cluster, each run
+# ending in the conservation verdict. Two runs:
+#
+#   - leader movement without broker restarts: a preferred-leader change and a
+#     partition reassignment every cycle, at replication factor 2 so the
+#     reassignment moves data onto the third broker (Java's producer retries
+#     the NOT_LEADER_OR_FOLLOWER errors it meets with a metadata refresh);
+#   - an unclean broker roll (SIGKILL) under the workload's idempotent producer
+#     (acks=all, enable.idempotence=true): every acknowledged record is read
+#     back once, in order, per partition.
+#
+# The JavaScript backend runs in its container (the root
+# `chaos-javascript`, after `build-grpc-images-javascript`) or as a host
+# process (the root `chaos-javascript-native`, MULTILANG_BACKEND_MODE=native,
+# after `build-grpc-native-javascript`). A long run, so neither is part of
+# `verify` or of a pull request's CI; .semaphore/chaos-javascript.yml runs the
+# container form as a scheduled task (service.yml).
+CHAOS_JAVASCRIPT_WORKLOADS = --workload producer:javascript --workload consumer:rust --reports
+
+chaos-javascript:
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --no-broker-roll --change-leader \
+		--reassign-partitions --replication-factor 2 --cycles 3
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --unclean --cycles 3
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138

@@ -34,8 +34,9 @@ test('registrations and uses agree, and only the loader and src/internal/native.
     [RULE],
   );
   assert.equal(r.status, 0, r.text);
-  // 5 registrations (probe and headerStats, test-only ones), 3 uses, 4 src/ files.
-  assert.ok(r.out.includes('✅ check-native-registry: 12 item(s) checked'), r.text);
+  // 8 registrations (probe, headerStats, producerStats, errorStats and
+  // recordSpy, the test-only ones), 3 uses, 4 src/ files.
+  assert.ok(r.out.includes('✅ check-native-registry: 15 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {

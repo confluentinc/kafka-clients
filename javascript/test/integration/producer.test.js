@@ -29,6 +29,10 @@ const { stringSerializer } = require('@confluentinc/kafka-javascript/common/seri
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 const { createFuture } = require('../_internal');
+// Every probe child runs with the allocator's poisoning (freed memory filled,
+// guard pages around large blocks), so a use after free or a double free in
+// the native layer, at a collection or a destroy, fails the probe.
+const { POISON } = require('../memory/_probe');
 
 /** @typedef {import('@confluentinc/kafka-javascript/producer').Callback} Callback */
 /** @template T @typedef {import('@confluentinc/kafka-javascript/common/serialization').Serializer<T>} Serializer */
@@ -360,7 +364,7 @@ const N = 300;
       cwd: path.join(__dirname, '..', '..'),
       encoding: 'utf8',
       timeout: 170000,
-      env: { ...process.env, BOOTSTRAP, TOPIC: topic },
+      env: { ...process.env, ...POISON, BOOTSTRAP, TOPIC: topic },
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(
@@ -850,7 +854,7 @@ async function assertSendOrder(futures) {
       cwd: path.join(__dirname, '..', '..'),
       encoding: 'utf8',
       timeout: 90000,
-      env: { ...process.env, BOOTSTRAP, TOPIC: topic },
+      env: { ...process.env, ...POISON, BOOTSTRAP, TOPIC: topic },
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, 'done before delivery false\nalive 0\ndelivered 65536\n');
@@ -1732,6 +1736,31 @@ async function producerKnowing(configs, topic) {
   }
 }
 
+/**
+ * A producer of `configs` that knows `topic` and has its producer id: one
+ * record delivered to partition 0. An idempotent producer, the default, sends
+ * no record before its InitProducerId completes, and so expires none either
+ * (org.apache.kafka.clients.producer.internals.Sender#runOnce returns after
+ * maybeSendAndPollTransactionalRequest while the id is pending, before
+ * sendProducerData): a broker paused before then holds every record until it
+ * is back, in Java as here. The tests that pause the broker start from this.
+ *
+ * @param {Record<string, unknown>} configs
+ * @param {string} topic
+ */
+async function producerWithId(configs, topic) {
+  const producer = await producerKnowing(configs, topic);
+  try {
+    await (
+      await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('first') }))
+    ).get({ timeout: 30000 });
+  } catch (e) {
+    await producer.close({ timeout: 0 });
+    throw e;
+  }
+  return producer;
+}
+
 /** @param {string} topic */
 const kiloRecord = (topic) => new ProducerRecord({ topic, partition: 0, key: Buffer.from('key'), value: Buffer.alloc(1000) });
 
@@ -1783,6 +1812,9 @@ async function exhaustTheBuffer() {
         const cause = /** @type {Error} */ (e.cause);
         assert.equal(cause.constructor, BufferExhaustedError);
         assert.ok(cause instanceof TimeoutError);
+        // Kafka's TimeoutError of common/errors, never the root one, which a
+        // timed get() rejects with.
+        assert.ok(!(cause instanceof RootTimeoutError));
         assert.equal(cause, calls[0]);
         assert.equal(
           cause.message,
@@ -2015,4 +2047,1111 @@ test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool
     }
   },
   120000,
+);
+
+// The situations below go beyond Java's own tests: what a JS caller can do
+// to the bytes, the headers, the callbacks and the producer's lifetime, and
+// what a failing broker does to them. They use the protocol helper's topic
+// creation and container control (_fetch_records.js); a test that pauses or
+// restarts the broker runs only when the Makefile started it.
+
+const broker = require('./_fetch_records');
+const CONTAINER = broker.brokerContainer();
+const SKIP_CONTAINER = SKIP || CONTAINER === null;
+
+/**
+ * A new topic with `partitions` partitions and `configs`, every partition led.
+ *
+ * @param {string} what
+ * @param {{ partitions?: number, configs?: Record<string, string> }} [options]
+ */
+async function newTopic(what, options) {
+  const topic = freshTopic(what);
+  await broker.createTopic(BOOTSTRAP, topic, options);
+  return topic;
+}
+
+/**
+ * A promise that resolves after `ms` milliseconds.
+ *
+ * @param {number} ms
+ */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+(SKIP ? test.skip : test)(
+  'an empty key and value reach the broker as empty, not null; a null key and value as null',
+  async () => {
+    const topic = await newTopic('empty-null');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      const empty = await (
+        await producer.send(new ProducerRecord({ topic, partition: 0, key: Buffer.alloc(0), value: new Uint8Array(0) }))
+      ).get();
+      const nulls = await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: null }))).get();
+      assert.equal(empty.serializedKeySize, 0);
+      assert.equal(empty.serializedValueSize, 0);
+      assert.equal(nulls.serializedKeySize, -1);
+      assert.equal(nulls.serializedValueSize, -1);
+      const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
+      assert.equal(records.length, 2);
+      assert.ok(records[0].key !== null && records[0].value !== null, 'the empty key and value stay present');
+      assert.equal(records[0].key.length, 0);
+      assert.equal(records[0].value.length, 0);
+      assert.equal(records[1].key, null);
+      assert.equal(records[1].value, null, 'a null value is a tombstone');
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'acks 0 gives metadata with no offset; acks 1 and all give the offset',
+  async () => {
+    const topic = await newTopic('acks');
+    for (const acks of ['0', '1', 'all']) {
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks, 'enable.idempotence': acks === 'all' } });
+      try {
+        const metadata = await (
+          await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(acks) }))
+        ).get();
+        assert.equal(metadata.topic, topic);
+        assert.equal(metadata.partition, 0, `acks ${acks}`);
+        if (acks === '0') {
+          assert.equal(metadata.hasOffset, false);
+          assert.equal(metadata.offset, -1n);
+        } else {
+          assert.equal(metadata.hasOffset, true, `acks ${acks}`);
+          assert.ok(metadata.offset >= 0n, `acks ${acks}: offset ${metadata.offset}`);
+        }
+      } finally {
+        await producer.close();
+      }
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "a record over max.request.size or buffer.memory goes to the callback with RecordTooLargeError and Java's text; send() resolves",
+  async () => {
+    const { RecordTooLargeError } = require('@confluentinc/kafka-javascript/common/errors');
+    const topic = await newTopic('too-large');
+    const cases = [
+      {
+        configs: { 'max.request.size': 1048576 },
+        message:
+          /^The message is (\d+) bytes when serialized which is larger than 1048576, which is the value of the max\.request\.size configuration\.$/,
+      },
+      {
+        configs: { 'max.request.size': 4194304, 'buffer.memory': 1048576 },
+        message:
+          /^The message is (\d+) bytes when serialized which is larger than the total memory buffer you have configured with the buffer\.memory configuration\.$/,
+      },
+    ];
+    for (const { configs, message } of cases) {
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, ...configs } });
+      try {
+        /** @type {Array<Error | null>} */
+        const calls = [];
+        const future = await producer.send({
+          record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.alloc(1048577) }),
+          callback: ({ exception }) => void calls.push(exception),
+        });
+        await assert.rejects(future.get(), (e) => {
+          assert.ok(e instanceof ExecutionError);
+          const cause = /** @type {Error} */ (e.cause);
+          assert.equal(cause.constructor, RecordTooLargeError);
+          const match = message.exec(cause.message);
+          assert.ok(match, cause.message);
+          assert.ok(Number(match[1]) > 1048577, cause.message);
+          assert.equal(calls.length, 1);
+          assert.equal(calls[0], cause);
+          return true;
+        });
+        assert.equal(future.isDone(), true);
+        assert.equal(future.isCompletedExceptionally(), true);
+      } finally {
+        await producer.close();
+      }
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  '10,000 sends started without awaiting each, awaited together: each record lands once and each callback runs once',
+  async () => {
+    const topic = await newTopic('together', { partitions: 3 });
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      const count = 10000;
+      const callbacks = new Array(count).fill(0);
+      const sends = [];
+      for (let i = 0; i < count; i++) {
+        sends.push(
+          producer.send({
+            record: new ProducerRecord({ topic, key: null, value: Buffer.from(`v${i}`) }),
+            callback: () => void callbacks[i]++,
+          }),
+        );
+      }
+      const futures = await Promise.all(sends);
+      const metadata = await Promise.all(futures.map((f) => f.get()));
+      await producer.flush();
+      assert.ok(futures.every((f) => f.isDone() && !f.isCompletedExceptionally()));
+      assert.deepEqual(
+        callbacks.filter((n) => n !== 1),
+        [],
+      );
+      const values = [];
+      for (let partition = 0; partition < 3; partition++) {
+        for (const r of (await fetchRecords(BOOTSTRAP, topic, partition)).records) values.push(String(r.value));
+      }
+      assert.equal(values.length, count);
+      assert.equal(new Set(values).size, count);
+      assert.equal(new Set(metadata.map((m) => `${m.partition}:${m.offset}`)).size, count);
+    } finally {
+      await producer.close();
+    }
+  },
+  180000,
+);
+
+(SKIP ? test.skip : test)(
+  "LogAppendTime: the metadata's timestamp is the broker's append time, and the batch carries the LogAppendTime attribute",
+  async () => {
+    const topic = await newTopic('log-append', { configs: { 'message.timestamp.type': 'LogAppendTime' } });
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      const before = BigInt(Date.now());
+      const metadata = await (
+        await producer.send(new ProducerRecord({ topic, partition: 0, timestamp: 1000, key: null, value: Buffer.from('v') }))
+      ).get();
+      const after = BigInt(Date.now());
+      assert.equal(metadata.hasTimestamp, true);
+      assert.notEqual(metadata.timestamp, 1000n);
+      assert.ok(metadata.timestamp >= before - 5000n && metadata.timestamp <= after + 5000n, `timestamp ${metadata.timestamp}`);
+      const { batches } = await broker.fetchBatches(BOOTSTRAP, topic, 0);
+      assert.equal(batches.length, 1);
+      assert.equal(batches[0].logAppendTime, true);
+      assert.equal(batches[0].maxTimestamp, metadata.timestamp);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'a send waiting for a partition the metadata lacks does not hold back a later send; it lands once the topic grows',
+  async () => {
+    const topic = await newTopic('grow');
+    const producer = await producerKnowing({ 'max.block.ms': 60000 }, topic);
+    try {
+      let firstCallbacks = 0;
+      let secondCallbacks = 0;
+      let firstSettled = false;
+      const first = producer.send({
+        record: new ProducerRecord({ topic, partition: 1, key: null, value: Buffer.from('to-partition-1') }),
+        callback: () => void firstCallbacks++,
+      });
+      void first.then(() => (firstSettled = true));
+      const second = producer.send({
+        record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('to-partition-0') }),
+        callback: () => void secondCallbacks++,
+      });
+      const secondMetadata = await (await second).get({ timeout: 10000 });
+      assert.equal(secondMetadata.partition, 0);
+      assert.equal(firstSettled, false, 'the send to partition 1 still waits for its metadata');
+      await broker.createPartitions(BOOTSTRAP, topic, 2);
+      const [firstFuture] = await Promise.all([first, second]);
+      const firstMetadata = await firstFuture.get({ timeout: 60000 });
+      assert.equal(firstMetadata.partition, 1);
+      assert.equal(firstCallbacks, 1);
+      assert.equal(secondCallbacks, 1);
+    } finally {
+      await producer.close();
+    }
+  },
+  180000,
+);
+
+(SKIP ? test.skip : test)(
+  'a view at an offset of a large ArrayBuffer and a Buffer over a SharedArrayBuffer reach the broker as they were at the call',
+  () => {
+    const topic = freshTopic('views');
+    const script = `
+    const { Worker } = require('node:worker_threads');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP, 'linger.ms': 5000 } });
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    (async () => {
+      await (await producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: null, value: Buffer.from('warm-up') }))).get();
+      const backing = new ArrayBuffer(1024 * 1024);
+      new Uint8Array(backing).fill(0x2e);
+      const view = new Uint8Array(backing, 700000, 1000);
+      view.fill(0x56);
+      const shared = new SharedArrayBuffer(4096);
+      const refs = [];
+      const future = await (async () => {
+        const sharedBuffer = Buffer.from(shared, 0, 4096);
+        sharedBuffer.fill(0x41);
+        refs.push(new WeakRef(sharedBuffer));
+        return producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: view, value: sharedBuffer }));
+      })();
+      // send() settled: another thread may now change the shared memory, and
+      // this one the view.
+      await new Promise((resolve, reject) => {
+        const w = new Worker('const { workerData } = require("node:worker_threads"); new Uint8Array(workerData).fill(0x42);', { eval: true, workerData: shared });
+        w.on('exit', resolve);
+        w.on('error', reject);
+      });
+      view.fill(0x57);
+      await settle();
+      console.log('done before delivery', future.isDone());
+      console.log('shared Buffer alive', refs.filter((r) => r.deref() !== undefined).length);
+      const metadata = await future.get();
+      console.log('sizes', metadata.serializedKeySize, metadata.serializedValueSize);
+      await producer.close();
+    })();
+  `;
+    const r = spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', script], {
+      cwd: path.join(__dirname, '..', '..'),
+      encoding: 'utf8',
+      timeout: 90000,
+      env: { ...process.env, ...POISON, BOOTSTRAP, TOPIC: topic },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'done before delivery false\nshared Buffer alive 0\nsizes 1000 4096\n');
+    return fetchRecords(BOOTSTRAP, topic, 0).then(({ records }) => {
+      assert.equal(records.length, 2);
+      assert.deepEqual(records[1].key, Buffer.alloc(1000, 0x56));
+      assert.deepEqual(records[1].value, Buffer.alloc(4096, 0x41));
+    });
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "a serializer's fresh Buffer is borrowed until send() resolves and released before delivery; the broker gets its bytes",
+  () => {
+    const topic = freshTopic('serializer-borrow');
+    const script = `
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    let collected = 0;
+    const registry = new FinalizationRegistry(() => collected++);
+    let made = 0;
+    const valueSerializer = {
+      serialize: ({ data }) => {
+        if (data === null) return null;
+        const out = Buffer.alloc(1000, String(data).charCodeAt(0));
+        registry.register(out, made++);
+        return out;
+      },
+    };
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP, 'linger.ms': 5000 }, keySerializer: null, valueSerializer });
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    (async () => {
+      await (await producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: null, value: 'w' }))).get();
+      await settle();
+      const base = collected;
+      const futures = [];
+      for (const v of ['a', 'b', 'c']) futures.push(await producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: null, value: v })));
+      await settle();
+      console.log('done before delivery', futures.some((f) => f.isDone()));
+      console.log('collected', collected - base, 'of', made - 1);
+      for (const f of futures) await f.get();
+      await producer.close();
+    })();
+  `;
+    const r = spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', script], {
+      cwd: path.join(__dirname, '..', '..'),
+      encoding: 'utf8',
+      timeout: 90000,
+      env: { ...process.env, ...POISON, BOOTSTRAP, TOPIC: topic },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'done before delivery false\ncollected 3 of 3\n');
+    return fetchRecords(BOOTSTRAP, topic, 0).then(({ records }) => {
+      assert.deepEqual(
+        records.slice(1).map((rec) => rec.value),
+        ['a', 'b', 'c'].map((v) => Buffer.alloc(1000, v.charCodeAt(0))),
+      );
+    });
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "50 headers with repeated keys, a null value, an empty value, an emoji key and a lone surrogate key arrive in order, the keys as Java's UTF-8",
+  async () => {
+    const topic = await newTopic('headers-fidelity');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      /** @type {Array<[string, Buffer | null]>} */
+      const given = [];
+      for (let i = 0; i < 44; i++) given.push([`k${i % 5}`, Buffer.from(`v${i}`)]);
+      given.push(['null-value', null], ['empty-value', Buffer.alloc(0)], ['\u{1F680}', Buffer.from('rocket')]);
+      given.push(['a\uD800b', Buffer.from('lone')], ['k0', Buffer.from('last')], ['été', Buffer.from('accents')]);
+      assert.equal(given.length, 50);
+      const headers = given.map(([key, value]) => new Header({ key, value }));
+      await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('v'), headers }))).get();
+      const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
+      assert.equal(records.length, 1);
+      const got = records[0].headers;
+      assert.deepEqual(
+        got.map((h) => h.keyBytes),
+        given.map(([key]) => Buffer.from(key.replace('\uD800', '?'), 'utf8')),
+      );
+      assert.deepEqual(
+        got.map((h) => h.value),
+        given.map(([, value]) => value),
+      );
+      assert.equal(got[44].value, null, 'a null header value arrives with length -1');
+      assert.ok(got[45].value !== null && got[45].value.length === 0, 'an empty header value arrives with length 0');
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'an async serializer keeps the order of awaited sends; 500 sends in flight at once all deliver once',
+  async () => {
+    const topic = await newTopic('async-serializer');
+    let seed = 42;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    /** @type {Serializer<string>} */
+    const valueSerializer = {
+      serialize: ({ data }) =>
+        new Promise((resolve) => setTimeout(() => resolve(data === null ? null : Buffer.from(data)), Math.floor(random() * 6))),
+    };
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP }, keySerializer: null, valueSerializer });
+    try {
+      const futures = [];
+      for (let i = 0; i < 500; i++)
+        futures.push(await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: `a${i}` })));
+      await Promise.all(futures.map((f) => f.get()));
+      const inFlight = await Promise.all(
+        Array.from({ length: 500 }, (_, i) => producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: `b${i}` }))),
+      );
+      await Promise.all(inFlight.map((f) => f.get()));
+      const values = (await fetchRecords(BOOTSTRAP, topic, 0)).records.map((r) => String(r.value));
+      assert.deepEqual(
+        values.slice(0, 500),
+        Array.from({ length: 500 }, (_, i) => `a${i}`),
+      );
+      assert.deepEqual(values.slice(500).sort(), Array.from({ length: 500 }, (_, i) => `b${i}`).sort());
+    } finally {
+      await producer.close();
+    }
+  },
+  180000,
+);
+
+// Java runs a partition's callbacks in order on its one I/O thread. A JS
+// callback may return a Promise, which the core waits for before completing
+// that record's future; it does not wait for it before entering the next
+// record's callback (Python's and .NET's async callbacks run one at a time).
+// This pins both.
+(SKIP ? test.skip : test)(
+  "callbacks returning Promises that settle after random delays are entered in offset order, and each record's future waits for its own callback",
+  async () => {
+    const topic = await newTopic('promise-callbacks');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      let seed = 7;
+      const random = () => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed / 2147483648;
+      };
+      /** @type {bigint[]} */
+      const entered = [];
+      let running = 0;
+      let maxRunning = 0;
+      /** @type {number[]} */
+      const doneBeforeItsCallbackEnded = [];
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const futures = [];
+      for (let i = 0; i < 500; i++) {
+        const index = i;
+        futures.push(
+          await producer.send({
+            record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`v${i}`) }),
+            callback: async ({ metadata }) => {
+              entered.push(metadata.offset);
+              running++;
+              maxRunning = Math.max(maxRunning, running);
+              await sleep(Math.floor(random() * 4));
+              running--;
+              if (futures[index].isDone()) doneBeforeItsCallbackEnded.push(index);
+            },
+          }),
+        );
+      }
+      await Promise.all(futures.map((f) => f.get()));
+      assert.equal(entered.length, 500);
+      assert.deepEqual(
+        entered.filter((offset, i) => i > 0 && offset <= entered[i - 1]),
+        [],
+        'callbacks entered in offset order',
+      );
+      assert.ok(maxRunning > 1, 'the next callback is entered while the previous Promise is pending');
+      assert.deepEqual(doneBeforeItsCallbackEnded, [], "no future completes before its own callback's Promise settled");
+    } finally {
+      await producer.close();
+    }
+  },
+  180000,
+);
+
+(SKIP ? test.skip : test)(
+  'a callback may send, call partitionsFor() and metrics() before its first await, then await and send again',
+  async () => {
+    const topic = await newTopic('reentrant');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      /** @type {Record<string, number>} */
+      const callbacks = {};
+      /** @param {string} name */
+      const count = (name) => () => void (callbacks[name] = (callbacks[name] ?? 0) + 1);
+      /** @type {Promise<KafkaFuture<RecordMetadata>>[]} */
+      const nested = [];
+      /** @type {Promise<unknown> | undefined} */
+      let partitions;
+      /** @type {unknown} */
+      let metricsSeen;
+      /** @type {Promise<KafkaFuture<RecordMetadata>> | undefined} */
+      let afterAwait;
+      /** @type {Promise<void>} */
+      let callbackDone = Promise.resolve();
+      const outer = await producer.send({
+        record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('outer') }),
+        callback: ({ exception }) => {
+          assert.equal(exception, null);
+          nested.push(
+            producer.send({
+              record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('n1') }),
+              callback: count('n1'),
+            }),
+          );
+          nested.push(
+            producer.send({
+              record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('n2') }),
+              callback: count('n2'),
+            }),
+          );
+          partitions = producer.partitionsFor(topic);
+          metricsSeen = producer.metrics();
+          callbackDone = (async () => {
+            await sleep(10);
+            afterAwait = producer.send({
+              record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('after-await') }),
+              callback: count('after-await'),
+            });
+          })();
+          return callbackDone;
+        },
+      });
+      await outer.get();
+      await callbackDone;
+      assert.equal(nested.length, 2);
+      assert.ok(afterAwait);
+      const futures = await Promise.all([...nested, afterAwait]);
+      await Promise.all(futures.map((f) => f.get()));
+      assert.deepEqual(callbacks, { n1: 1, n2: 1, 'after-await': 1 });
+      assert.ok(Array.isArray(await partitions));
+      assert.ok(metricsSeen);
+      const values = (await fetchRecords(BOOTSTRAP, topic, 0)).records.map((r) => String(r.value));
+      assert.deepEqual(values, ['outer', 'n1', 'n2', 'after-await']);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+// Awaiting a later record's future inside a callback is an anti-pattern the
+// docs name. Its bounded form must recover: the wait answers (the later
+// record's value, or TimeoutError once 500 ms passed), the callback ends, and
+// the later record completes once, with its own callback.
+(SKIP ? test.skip : test)(
+  "a callback's bounded wait on a later record's future answers within its timeout, and that record still completes once",
+  async () => {
+    const topic = await newTopic('bounded-wait');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 50 } });
+    try {
+      /** @type {KafkaFuture<RecordMetadata> | undefined} */
+      let later;
+      /** @type {unknown} */
+      let waitOutcome;
+      let laterCallbacks = 0;
+      let waited = -1;
+      let firstCallbackEnded = false;
+      const first = await producer.send({
+        record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('first') }),
+        callback: async () => {
+          await sleep(0);
+          const started = Date.now();
+          try {
+            waitOutcome = await /** @type {KafkaFuture<RecordMetadata>} */ (later).get({ timeout: 500 });
+          } catch (e) {
+            waitOutcome = e;
+          }
+          waited = Date.now() - started;
+          firstCallbackEnded = true;
+        },
+      });
+      later = await producer.send({
+        record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('later') }),
+        callback: () => void laterCallbacks++,
+      });
+      await first.get({ timeout: 30000 });
+      const laterMetadata = await later.get({ timeout: 30000 });
+      assert.equal(firstCallbackEnded, true);
+      assert.ok(waited >= 0 && waited < 500 + 1000, `waited ${waited} ms`);
+      assert.ok(
+        waitOutcome instanceof RootTimeoutError || waitOutcome === laterMetadata,
+        `the bounded wait answered ${String(waitOutcome)}`,
+      );
+      assert.equal(laterMetadata.offset, 1n);
+      assert.equal(laterCallbacks, 1);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+// Where a keyed record lands, against the partitions Java's kafka-clients
+// computes (test/java_vectors.json, written by
+// tools/java-vectors/JavaVectors.java): Murmur2RandomPartitioner is Java's
+// BuiltInPartitioner#partitionForKey, toPositive(murmur2(key)) % n; the
+// default, ConsistentRandomPartitioner, is librdkafka's consistent_random,
+// CRC-32(key) % n, as MIGRATION.md promises; RoundRobinPartitioner ignores the
+// key and cycles. Keys sent one at a time, each send awaited.
+(SKIP ? test.skip : test)(
+  'keyed records land where the configured partitioner puts them: CRC-32 by default, murmur2 on request, round robin cycling',
+  async () => {
+    const zlib = require('node:zlib');
+    /** @type {{ murmur2: Array<{ key: string, partition12: number }> }} */
+    const vectors = require('../java_vectors.json');
+    const topic = await newTopic('placement', { partitions: 12 });
+    /** @type {Record<string, (key: string, i: number, first: number) => number>} */
+    const expected = {
+      default: (key) => zlib.crc32(Buffer.from(key, 'utf8')) % 12,
+      ConsistentRandomPartitioner: (key) => zlib.crc32(Buffer.from(key, 'utf8')) % 12,
+      Murmur2RandomPartitioner: (key) => /** @type {{ partition12: number }} */ (vectors.murmur2.find((v) => v.key === key)).partition12,
+      // Checked below: Java's RoundRobinPartitioner walks the topic's
+      // available partitions in the metadata's order, not by number.
+      RoundRobinPartitioner: () => -1,
+    };
+    for (const [type, partitionOf] of Object.entries(expected)) {
+      const configs = type === 'default' ? {} : { 'partitioner.type': type };
+      const producer = await producerKnowing(configs, topic);
+      try {
+        /** @type {Array<[string, number]>} */
+        const landed = [];
+        for (const { key } of vectors.murmur2) {
+          const m = await (
+            await producer.send(new ProducerRecord({ topic, key: Buffer.from(key, 'utf8'), value: Buffer.from(type) }))
+          ).get();
+          landed.push([key, m.partition]);
+        }
+        if (type === 'RoundRobinPartitioner') {
+          // Every 12 records in a row visit each partition once, in one order.
+          const cycle = landed.slice(0, 12).map(([, partition]) => partition);
+          assert.deepEqual(
+            [...cycle].sort((a, b) => a - b),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            `cycle ${cycle}`,
+          );
+          assert.deepEqual(
+            landed.filter(([, partition], i) => partition !== cycle[i % 12]),
+            [],
+            `${type}: the records that left the cycle ${cycle}`,
+          );
+        } else {
+          assert.deepEqual(
+            landed.filter(([key, partition], i) => partition !== partitionOf(key, i, 0)),
+            [],
+            `${type}: the records that landed elsewhere`,
+          );
+        }
+      } finally {
+        await producer.close();
+      }
+    }
+    // Null keys: the built-in partitioner's sticky choice moves to another
+    // partition between batches, so many small batches use many partitions.
+    const producer = await producerKnowing({ 'batch.size': 1, 'linger.ms': 0 }, topic);
+    try {
+      const partitions = new Set();
+      for (let i = 0; i < 200; i++) {
+        partitions.add((await (await producer.send(new ProducerRecord({ topic, key: null, value: Buffer.from('n') }))).get()).partition);
+      }
+      assert.ok(partitions.size > 1, `null keys used partitions ${[...partitions]}`);
+    } finally {
+      await producer.close();
+    }
+  },
+  300000,
+);
+
+/**
+ * Runs `body` with the broker container paused, unpausing it afterwards
+ * whatever happens.
+ *
+ * @template T
+ * @param {() => Promise<T>} body
+ * @returns {Promise<T>}
+ */
+async function withBrokerPaused(body) {
+  const container = /** @type {NonNullable<typeof CONTAINER>} */ (CONTAINER);
+  container.pause();
+  try {
+    return await body();
+  } finally {
+    container.unpause();
+    await broker.waitForBroker(BOOTSTRAP);
+  }
+}
+
+// Sender#sendProducerData fails each batch past delivery.timeout.ms with
+// Kafka's TimeoutException("Expiring N record(s) for <tp>:<ms> ms has passed
+// since batch creation. The request has not been sent, or no server response
+// has been received yet."), once, through the callback and the future.
+(SKIP_CONTAINER ? test.skip : test)(
+  "with the broker paused, each pending record expires once with Java's TimeoutError text, flush() resolves, and later sends deliver",
+  async () => {
+    const topic = await newTopic('expiry');
+    const producer = await producerWithId({ 'delivery.timeout.ms': 5000, 'request.timeout.ms': 2000, 'linger.ms': 0 }, topic);
+    try {
+      /** @type {Array<Array<Error | null>>} */
+      const calls = Array.from({ length: 50 }, () => []);
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const futures = [];
+      await withBrokerPaused(async () => {
+        for (let i = 0; i < 50; i++) {
+          futures.push(
+            await producer.send({
+              record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`expiring-${i}`) }),
+              callback: ({ exception }) => void calls[i].push(exception),
+            }),
+          );
+        }
+        await sleep(10000);
+        await producer.flush();
+      });
+      for (const [i, future] of futures.entries()) {
+        assert.equal(calls[i].length, 1, `record ${i}'s callback ran ${calls[i].length} times`);
+        const exception = calls[i][0];
+        assert.ok(exception instanceof TimeoutError, String(exception));
+        assert.match(
+          exception.message,
+          new RegExp(
+            `^Expiring \\d+ record\\(s\\) for ${topic}-0:\\d+ ms has passed since batch creation\\. The request has not been sent, or no server response has been received yet\\.$`,
+          ),
+        );
+        assert.equal(future.isCompletedExceptionally(), true);
+        await assert.rejects(future.get(), (e) => /** @type {Error} */ (e).cause === exception);
+      }
+      const after = await (
+        await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('after') }))
+      ).get({ timeout: 30000 });
+      assert.ok(after.offset >= 0n);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+// KafkaProducer#close(Duration): waits up to the timeout for the records it
+// can send, then forces the close (Sender#forceClose aborts every incomplete
+// batch with KafkaException "Producer is closed forcefully.").
+(SKIP_CONTAINER ? test.skip : test)(
+  'a timed close with records the broker cannot take resolves after about its timeout and fails them, each callback once',
+  async () => {
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    const topic = await newTopic('timed-close');
+    const producer = await producerWithId({ 'linger.ms': 0 }, topic);
+    /** @type {Array<Array<Error | null>>} */
+    const calls = Array.from({ length: 20 }, () => []);
+    await withBrokerPaused(async () => {
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const futures = [];
+      for (let i = 0; i < 20; i++) {
+        futures.push(
+          await producer.send({
+            record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`v${i}`) }),
+            callback: ({ exception }) => void calls[i].push(exception),
+          }),
+        );
+      }
+      const started = Date.now();
+      await producer.close({ timeout: 2000 });
+      const took = Date.now() - started;
+      assert.ok(took >= 1900 && took < 2000 + 3000, `close took ${took} ms`);
+      for (const [i, future] of futures.entries()) {
+        assert.equal(calls[i].length, 1, `record ${i}`);
+        const exception = calls[i][0];
+        assert.ok(exception instanceof KafkaError);
+        assert.equal(/** @type {Error} */ (exception).message, 'Producer is closed forcefully.');
+        assert.equal(future.isCompletedExceptionally(), true);
+      }
+    });
+  },
+  120000,
+);
+
+// Q21/Q61: no closed flag; close() and [Symbol.asyncDispose] at once each
+// go to the core, which tears down once.
+(SKIP_CONTAINER ? test.skip : test)(
+  'close(), close() and [Symbol.asyncDispose]() at once, with sends, a flush() and a partitionsFor() in flight, all settle once',
+  async () => {
+    const topic = await newTopic('concurrent-close');
+    const producer = await producerWithId(
+      { 'linger.ms': 1000, 'delivery.timeout.ms': 3000, 'request.timeout.ms': 1000, 'max.block.ms': 60000 },
+      topic,
+    );
+    const callbacks = new Array(100).fill(0);
+    /** @type {KafkaFuture<RecordMetadata>[]} */
+    const futures = [];
+    for (let i = 0; i < 100; i++) {
+      futures.push(
+        await producer.send({
+          record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`v${i}`) }),
+          callback: () => void callbacks[i]++,
+        }),
+      );
+    }
+    /** @type {PromiseSettledResult<unknown>[]} */
+    let settled = [];
+    await withBrokerPaused(async () => {
+      const flushing = producer.flush();
+      const partitions = producer.partitionsFor(freshTopic('unknown'));
+      const closes = [producer.close(), producer.close(), producer[Symbol.asyncDispose]()];
+      settled = await Promise.allSettled([...closes, flushing, partitions]);
+    });
+    assert.deepEqual(
+      settled.slice(0, 4).map((s) => s.status),
+      ['fulfilled', 'fulfilled', 'fulfilled', 'fulfilled'],
+      JSON.stringify(settled.map((s) => (s.status === 'rejected' ? String(s.reason) : 'ok'))),
+    );
+    assert.equal(settled[4].status, 'rejected', 'partitionsFor() of an unknown topic rejects at the close');
+    const reason = /** @type {PromiseRejectedResult} */ (settled[4]).reason;
+    assert.ok(reason instanceof Error);
+    console.log(`partitionsFor() rejected at the close with ${reason.constructor.name}: ${reason.message}`);
+    assert.deepEqual(
+      callbacks.filter((n) => n !== 1),
+      [],
+    );
+    assert.ok(futures.every((f) => f.isDone()));
+    await assert.rejects(producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('late') })), {
+      message: 'Cannot perform operation after producer has been closed',
+    });
+  },
+  120000,
+);
+
+// The idempotent producer across a broker restart: every awaited send lands
+// once, in send order, under one producer id with consecutive sequences.
+(SKIP_CONTAINER ? test.skip : test)(
+  'an idempotent producer sending through a broker restart writes every record once, in send order, with consecutive sequences',
+  async () => {
+    const topic = await newTopic('restart');
+    const producer = await producerKnowing({ 'enable.idempotence': true, acks: 'all', 'max.in.flight.requests.per.connection': 5 }, topic);
+    const container = /** @type {NonNullable<typeof CONTAINER>} */ (CONTAINER);
+    try {
+      const count = 10000;
+      const callbacks = new Array(count).fill(0);
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const futures = [];
+      /** @type {Promise<void> | undefined} */
+      let restarting;
+      for (let i = 0; i < count; i++) {
+        if (i === 3000) restarting = container.restart(BOOTSTRAP);
+        futures.push(
+          await producer.send({
+            record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(String(i)) }),
+            callback: () => void callbacks[i]++,
+          }),
+        );
+      }
+      await restarting;
+      const metadata = await Promise.all(futures.map((f) => f.get({ timeout: 120000 })));
+      assert.deepEqual(
+        callbacks.filter((n) => n !== 1),
+        [],
+      );
+      assert.deepEqual(
+        metadata.filter((m, i) => m.offset !== BigInt(i)),
+        [],
+        'contiguous offsets in send order',
+      );
+      const { batches } = await broker.fetchBatches(BOOTSTRAP, topic, 0);
+      const values = batches.flatMap((b) => (b.records ?? []).map((r) => String(r.value)));
+      assert.deepEqual(
+        values.filter((v, i) => v !== String(i)),
+        [],
+      );
+      assert.equal(values.length, count);
+      assert.equal(new Set(batches.map((b) => b.producerId)).size, 1, 'one producer id');
+      let next = 0;
+      for (const batch of batches) {
+        assert.equal(batch.baseSequence, next, `batch at offset ${batch.baseOffset}`);
+        next += batch.count;
+      }
+    } finally {
+      await producer.close();
+    }
+  },
+  300000,
+);
+
+// close({ timeout: 0 }) from ordinary code is Java's close(Duration.ZERO): no
+// "Overriding close timeout" warning, which Java's KafkaProducer#close logs
+// only for a close made from its own I/O thread (a callback).
+(SKIP ? test.skip : test)(
+  'close({ timeout: 0 }) from outside a callback fails the lingering records and logs no close-timeout override',
+  () => {
+    const topic = freshTopic('forced-outside');
+    const script = `
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': process.env.BOOTSTRAP, 'linger.ms': 60000, 'delivery.timeout.ms': 120000 } });
+    (async () => {
+      await (await producer.send(new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: null, value: Buffer.from('warm-up') }))).get();
+      const errors = [];
+      const futures = [];
+      for (let i = 0; i < 50; i++) {
+        futures.push(await producer.send({ record: new ProducerRecord({ topic: process.env.TOPIC, partition: 0, key: null, value: Buffer.from('v') }), callback: ({ exception }) => errors.push(exception && exception.message) }));
+      }
+      await producer.close({ timeout: 0 });
+      console.log('callbacks', errors.length, [...new Set(errors)].join('|'));
+      console.log('failed', futures.filter((f) => f.isCompletedExceptionally()).length);
+    })();
+  `;
+    const r = spawnSync(process.execPath, ['--no-warnings', '-e', script], {
+      cwd: path.join(__dirname, '..', '..'),
+      encoding: 'utf8',
+      timeout: 90000,
+      env: { ...process.env, ...POISON, BOOTSTRAP, TOPIC: topic, RUST_LOG: 'warn' },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'callbacks 50 Producer is closed forcefully.\nfailed 50\n');
+    assert.doesNotMatch(r.stderr, /Overriding close timeout/);
+  },
+  120000,
+);
+
+// The errors a producer meets in practice, each provoked for real: its class,
+// its parents (the instanceof chain of Java's extends), its name, its message,
+// its payload getters and the path it takes. An ApiError reaches the callback
+// once and fails the future while send() resolves (KafkaProducer#doSend);
+// anything else rejects the call. RecordTooLargeError, BufferExhaustedError,
+// InvalidTopicError, delivery expiry, the TLS and SASL errors and
+// BootstrapResolutionError have their own tests above and in ssl.test.js,
+// sasl.test.js and kafka_producer.test.js.
+(SKIP ? test.skip : test)(
+  'the errors a producer meets in practice keep their class, parents, name, message and path',
+  async () => {
+    const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+    const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
+    const errors = require('@confluentinc/kafka-javascript/common/errors');
+    const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
+    /**
+     * The outcome of one send: the error, the path it took and the callbacks.
+     *
+     * @param {KafkaProducer<any, any>} producer
+     * @param {ProducerRecord<any, any>} record
+     */
+    const sendOutcome = async (producer, record) => {
+      /** @type {Array<Error | null>} */
+      const calls = [];
+      try {
+        const future = await producer.send({ record, callback: ({ exception }) => void calls.push(exception) });
+        try {
+          await future.get({ timeout: 60000 });
+          return { path: 'delivered', error: null, calls };
+        } catch (e) {
+          assert.ok(e instanceof ExecutionError);
+          assert.equal(calls[0], e.cause);
+          return { path: 'callback and future', error: /** @type {Error} */ (e.cause), calls };
+        }
+      } catch (e) {
+        return { path: 'send() rejects', error: /** @type {Error} */ (e), calls };
+      }
+    };
+    /**
+     * @typedef {{ name: string, run: () => Promise<{ path: string, error: Error | null, calls: Array<Error | null> }>, cls: Function, parents: Function[], path: string, message: string | RegExp, check?: (e: any) => void }} Case
+     */
+    /** @type {Case[]} */
+    const cases = [
+      {
+        name: 'metadata timeout for a partition the topic lacks',
+        run: async () => {
+          const topic = await newTopic('err-partition');
+          const producer = await producerKnowing({ 'max.block.ms': 500 }, topic);
+          try {
+            return await sendOutcome(producer, new ProducerRecord({ topic, partition: 5, key: null, value: Buffer.from('v') }));
+          } finally {
+            await producer.close();
+          }
+        },
+        cls: errors.TimeoutError,
+        parents: [errors.RetriableError, errors.ApiError, KafkaError, Error],
+        path: 'callback and future',
+        message: /^Partition 5 of topic js-it-err-partition-\S+ with partition count 1 is not present in metadata after 500 ms\.$/,
+      },
+      {
+        name: 'a timestamp the topic refuses',
+        run: async () => {
+          const topic = await newTopic('err-timestamp', { configs: { 'message.timestamp.before.max.ms': '60000' } });
+          const producer = await producerKnowing({}, topic);
+          try {
+            return await sendOutcome(
+              producer,
+              new ProducerRecord({ topic, partition: 0, timestamp: 1000, key: null, value: Buffer.from('v') }),
+            );
+          } finally {
+            await producer.close();
+          }
+        },
+        cls: errors.InvalidTimestampError,
+        parents: [errors.ApiError, KafkaError, Error],
+        path: 'callback and future',
+        message: /^Timestamp 1000 of message with offset 0 is out of range\./,
+      },
+      {
+        name: 'a value the configured stringSerializer cannot convert',
+        run: async () => {
+          const producer = new KafkaProducer({
+            configs: { 'bootstrap.servers': BOOTSTRAP },
+            keySerializer: stringSerializer(),
+            valueSerializer: stringSerializer(),
+          });
+          try {
+            return await sendOutcome(
+              producer,
+              new ProducerRecord({ topic: freshTopic('err-serde'), partition: 0, key: 'k', value: /** @type {any} */ (Buffer.from('v')) }),
+            );
+          } finally {
+            await producer.close();
+          }
+        },
+        cls: errors.SerializationError,
+        parents: [KafkaError, Error],
+        path: 'send() rejects',
+        message: /^Can't convert value of class /,
+        check: (e) => assert.ok(e.cause instanceof TypeError),
+      },
+      {
+        name: 'a forced close of a lingering record',
+        run: async () => {
+          const topic = await newTopic('err-forced');
+          const producer = await producerKnowing({ 'linger.ms': 60000 }, topic);
+          const pending = sendOutcome(producer, new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('v') }));
+          await sleep(100);
+          await producer.close({ timeout: 0 });
+          return pending;
+        },
+        cls: KafkaError,
+        parents: [Error],
+        path: 'callback and future',
+        message: 'Producer is closed forcefully.',
+      },
+      {
+        name: 'a send after close',
+        run: async () => {
+          const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+          await producer.close();
+          return sendOutcome(
+            producer,
+            new ProducerRecord({ topic: freshTopic('err-closed'), partition: 0, key: null, value: Buffer.from('v') }),
+          );
+        },
+        cls: IllegalStateError,
+        parents: [Error],
+        path: 'send() rejects',
+        message: 'Cannot perform operation after producer has been closed',
+      },
+      {
+        name: 'a negative close timeout',
+        run: async () => {
+          const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+          try {
+            await producer.close({ timeout: -1 });
+            return { path: 'resolved', error: null, calls: [] };
+          } catch (e) {
+            return { path: 'close() rejects', error: /** @type {Error} */ (e), calls: [] };
+          } finally {
+            await producer.close();
+          }
+        },
+        cls: IllegalArgumentError,
+        parents: [RangeError, Error],
+        path: 'close() rejects',
+        message: 'The timeout cannot be negative.',
+      },
+      {
+        name: 'an acks value the core refuses',
+        run: async () => {
+          try {
+            new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: '2' } });
+            return { path: 'built', error: null, calls: [] };
+          } catch (e) {
+            return { path: 'the constructor throws', error: /** @type {Error} */ (e), calls: [] };
+          }
+        },
+        cls: ConfigError,
+        parents: [KafkaError, Error],
+        path: 'the constructor throws',
+        message: 'Invalid value 2 for configuration acks: String must be one of: all, -1, 0, 1',
+      },
+    ];
+    /** @type {string[]} */
+    const wrong = [];
+    for (const c of cases) {
+      const { path: taken, error, calls } = await c.run();
+      const problems = [];
+      if (!error) problems.push(`no error (${taken})`);
+      else {
+        if (error.constructor !== c.cls) problems.push(`class ${error.constructor.name}: ${error.message}`);
+        for (const parent of c.parents) if (!(error instanceof parent)) problems.push(`not an instance of ${parent.name}`);
+        if (error.name !== c.cls.name) problems.push(`name ${error.name}`);
+        if (typeof c.message === 'string' ? error.message !== c.message : !c.message.test(error.message))
+          problems.push(`message ${JSON.stringify(error.message)}`);
+        if (taken !== c.path) problems.push(`path ${taken}`);
+        if (taken === 'callback and future' && calls.length !== 1) problems.push(`callbacks ${calls.length}`);
+        if (taken === 'send() rejects' && calls.length !== 0) problems.push(`callbacks ${calls.length}`);
+        if (c.check) {
+          try {
+            c.check(error);
+          } catch (e) {
+            problems.push(String(e));
+          }
+        }
+      }
+      if (problems.length > 0) wrong.push(`${c.name}: ${problems.join('; ')}`);
+    }
+    assert.deepEqual(wrong, []);
+  },
+  300000,
 );

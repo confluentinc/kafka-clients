@@ -15,7 +15,7 @@
 'use strict';
 
 // A small client for the native rules' fixture projects: a header with a
-// waiting call and its `_cb` twin, an addon registering four functions, and
+// waiting call and its `_cb` twin, an addon registering its functions, and
 // a src/ calling them through the handle src/internal/native.ts exports.
 
 const HEADER = `void kafka_x_Producer_flush(const kafka_x_Producer_t *self_, kafka_common_Error_t **out_err);
@@ -35,10 +35,25 @@ static napi_value js_header_stats(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
+static napi_value js_producer_stats(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
+static napi_value js_error_stats(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
+static napi_value js_record_spy(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
 napi_value addon_init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
         {"headerStats", NULL, js_header_stats, NULL, NULL, NULL, napi_default, NULL},
+        {"producerStats", NULL, js_producer_stats, NULL, NULL, NULL, napi_default, NULL},
+        {"errorStats", NULL, js_error_stats, NULL, NULL, NULL, napi_default, NULL},
+        {"recordSpy", NULL, js_record_spy, NULL, NULL, NULL, napi_default, NULL},
         {"flush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
         {"pump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
         {"setFactories", NULL, js_setup, NULL, NULL, NULL, napi_default, NULL},
@@ -71,6 +86,9 @@ napi_value js_setup(napi_env env, napi_callback_info info) {
 const NATIVE_TS = `interface Native {
   probe(): boolean;
   headerStats(): object;
+  producerStats(): object;
+  errorStats(): object;
+  recordSpy(arm: boolean): object[];
   flush(done: () => void): void;
   pump(): void;
   setFactories(): void;
@@ -104,6 +122,9 @@ const FILES = {
   'src/producer/producer.ts': PRODUCER_TS,
   'test/unit/internal/native.test.js': "const native = require('../../../dist/internal/native');\nnative.probe();\n",
   'test/unit/common/header/headers.test.js': "const native = require('../../../../dist/internal/native');\nnative.headerStats();\n",
+  'test/memory/native_counts.test.js':
+    "const native = require('../../dist/internal/native');\nnative.producerStats();\nnative.errorStats();\n",
+  'test/memory/record_read_back.test.js': "const native = require('../../dist/internal/native');\nnative.recordSpy(false);\n",
 };
 
 module.exports = { FILES, ADDON, PRODUCER_C, NATIVE_TS, PRODUCER_TS };
