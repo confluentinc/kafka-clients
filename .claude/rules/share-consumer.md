@@ -2,9 +2,13 @@
 
 **Scope.** These rules apply to share-consumer code only:
 
-  - files named `share_*`, `acknowledg*` or `node_acknowledgements*` under
-    `rust/src/consumer/` (including `internals/`, `internals/events/` and
-    `internals/metrics/`);
+  - files under `rust/src/consumer/` (including `internals/`,
+    `internals/events/` and `internals/metrics/`) whose names match
+    `*share*` or `acknowledg*`, which includes `node_acknowledgements*`. The
+    `*share*` pattern covers the public API files `kafka_share_consumer.rs`,
+    `mock_share_consumer.rs`, `dyn_share_consumer.rs` and
+    `internals/metrics/kafka_share_consumer_metrics.rs` as well as every
+    `share_*` file;
   - the share request/response wrappers under `rust/src/common/requests/`
     (`share_fetch_*`, `share_acknowledge_*`, `share_group_heartbeat_*`,
     `share_group_describe_*`, `share_request_metadata.rs`);
@@ -53,9 +57,14 @@ single delegate, `ShareConsumerDelegateCreator#create` only constructs
 `ShareConsumerImpl` and wraps non-`KafkaException` failures as
 `"Failed to construct Kafka share consumer"`; keep that message).
 
-Only five Java types in the closure are `@InterfaceAudience.Public`:
-`ShareConsumer`, `KafkaShareConsumer`, `MockShareConsumer`, `AcknowledgeType`,
-`AcknowledgementCommitCallback`. Everything else is crate-private, including
+Only five types in `org.apache.kafka.clients.consumer` (and its subpackages)
+in the closure are `@InterfaceAudience.Public`: `ShareConsumer`,
+`KafkaShareConsumer`, `MockShareConsumer`, `AcknowledgeType`,
+`AcknowledgementCommitCallback`. Outside that package, the three public share
+errors (`InvalidShareSessionEpochException`, `ShareSessionLimitReachedException`,
+`ShareSessionNotFoundException`) already exist as public Rust errors, and the
+public admin share types follow `admin-client.md`. Every other consumer-package
+type in the closure is crate-private, including
 `ShareConsumerConfig` (no annotation), `ShareAcknowledgementMode` and
 `ShareAcquireMode` (both in `consumer.internals`). Like `MockConsumer`,
 `MockShareConsumer` is itself `@InterfaceAudience.Public` in 4.4, so it needs no
@@ -80,11 +89,15 @@ when it runs the user's (async, §3) acknowledgement callback.
 | `wakeup()` | `wakeupTrigger.wakeup()` | sync, `&self` |
 | `clientInstanceId`, `registerMetricForSubscription`, `unregisterMetricFromSubscription` | KIP-714 | pending D2 |
 
-Overload names follow CLAUDE.md §2: `acknowledge` (the record-only
-intersection), `acknowledge_with_type(record, type)`, and the
-topic/partition/offset form, which has four parameters and therefore takes an
-`Options` struct per §2 unless the Manager records a different name. Decide
-the last name in P8 and note it in the phase PLAN.
+Overload names follow CLAUDE.md §2. The three Java `acknowledge` overloads
+(`(ConsumerRecord)`, `(ConsumerRecord, AcknowledgeType)`,
+`(String, int, long, AcknowledgeType)`) have an empty parameter intersection
+and Java has no zero-argument `acknowledge`, so under a strict reading of §2 no
+overload gets the plain name (the precedent is `Consumer::subscribe_with_topics`,
+with no plain `subscribe`). All three names are decided in P8 against §2, or by
+an explicit Manager exception, and recorded in the phase PLAN. The
+four-parameter form falls under §2's `Options` clause unless that exception
+says otherwise.
 
 **Why:** the `Consumer` design (`rust/src/consumer/mod.rs`, `dyn_consumer.rs`, `kafka_consumer.rs`) is settled;
 diverging for the share consumer would give users two models. `commit_async`
@@ -100,9 +113,27 @@ method must await it.
   - `close(Duration)` with a negative timeout returns
     `IllegalArgumentError("The timeout cannot be negative.")`; a second
     `close` is a no-op (`ShareConsumerImpl#close(Duration)` checks `closed`).
-  - Every other method on a closed consumer returns
-    `IllegalStateError("This consumer has already been closed.")`
-    (`ShareConsumerImpl#acquireAndEnsureOpen`).
+  - Java facts on the closed check. `ShareConsumerImpl#acquireAndEnsureOpen`
+    throws `IllegalStateException("This consumer has already been closed.")`
+    when `closed` is set, and otherwise calls
+    `metadata.maybeThrowBootstrapFatalException()`. It is called by
+    `#subscription`, `#subscribe`, `#unsubscribe`, `#poll`,
+    `#acknowledge(ConsumerRecord, AcknowledgeType)`,
+    `#acknowledge(String, int, long, AcknowledgeType)`,
+    `#commitSync(Duration)`, `#commitAsync`,
+    `#setAcknowledgementCommitCallback` and `#acquisitionLockTimeoutMs`
+    (`#acknowledge(ConsumerRecord)` and `#commitSync()` delegate to those).
+    `#close(Duration)` calls only `#acquire`. `#metrics`, `#wakeup`,
+    `#clientInstanceId`, `#registerMetricForSubscription` and
+    `#unregisterMetricFromSubscription` do **not** check `closed`; do not add
+    a closed check to them.
+  - How Rust surfaces the closed check is not decided here. For the async
+    methods it is an `Err` in the existing `Result`. For the sync getters
+    (`subscription`, `acquisition_lock_timeout_ms`,
+    `set_acknowledgement_commit_callback`), follow the existing `Consumer`
+    precedent (`Consumer::subscription` / `Consumer::paused` in
+    `rust/src/consumer/mod.rs` return plain values and document a panic on
+    `KafkaConsumer`). For `acknowledge*`, the shape is decision D7.
 
 **Anti-patterns:**
 
@@ -199,13 +230,26 @@ Callback semantics, from `AcknowledgementCommitCallbackHandler#onComplete`:
     whose errors propagate).
   - Completed acknowledgements reach the app side as `ShareAcknowledgementEvent`s
     on their own queue (§5). `ShareConsumerImpl#processAcknowledgementEvents`
-    drains it at the top of `handleCompletedAcknowledgements`; the processor
-    appends to `completedAcknowledgements` **only if a callback handler is
-    registered**, and applies renewals (`currentFetch.renew(...)`) whether or
-    not one is.
-  - The background side only emits the event when a callback is registered
-    or the acknowledgements contain a renew
-    (`ShareConsumeRequestManager#maybeSendShareAcknowledgementEvent`).
+    drains it at the top of `handleCompletedAcknowledgements`. The processor
+    (`ShareConsumerImpl.ShareAcknowledgementEventProcessor#process`) appends to
+    `completedAcknowledgements` **iff a callback handler is registered**, and
+    calls `currentFetch.renew(...)` **iff the event's
+    `checkForRenewAcknowledgements` is set**; the two conditions are
+    independent.
+  - The background side emits the event iff
+    `isAcknowledgementCommitCallbackRegistered || checkForRenewAcknowledgements`
+    (`ShareConsumeRequestManager#maybeSendShareAcknowledgementEvent`). The
+    second operand is a caller-supplied flag, **not** "the map contains a
+    RENEW": the timeout, failure, missing-node, no-leader and invalid-response
+    paths pass a literal `true` (e.g.
+    `ShareConsumeRequestManager.AcknowledgeRequestState#handleAcknowledgeTimedOut`,
+    `#failPendingAcknowledgementsCannotBeSent` and
+    `#processPendingInFlightAcknowledgements`; and
+    `ShareConsumeRequestManager#maybeAddAcknowledgements`,
+    `#removeSessionHandlersForMissingNodes` and the no-leader paths of
+    `#commitAsync` / `#acknowledgeOnClose`), while the fetch-piggybacked
+    response paths (`#handleShareFetchSuccess` / `#handleShareFetchFailure`)
+    pass the request's `isRenewAck()`. Re-derive the full caller list in P5.
   - `setAcknowledgementCommitCallback(null)` clears
     `completedAcknowledgements`; registration changes are sent to the
     background task with `ShareAcknowledgementCommitCallbackRegistrationEvent`
@@ -316,8 +360,13 @@ In `ShareConsumeRequestManager.ResultHandler#complete` the same
 `Acknowledgements` object goes both into the event and into the
 `commitSync` future's result; both readers only read it afterwards. In Rust,
 move by value through the channel; where Java has two readers, a clone or an
-`Arc` is acceptable, but nothing mutates an `Acknowledgements` after it is
-handed off.
+`Arc` is acceptable. Acknowledgements handed **app → bg** are owned and
+mutated by the background task afterwards (merged in
+`ShareConsumeRequestManager#commitSync` / `#commitAsync` / `#acknowledgeOnClose`
+/ `#processAcknowledgementsMap`, completed via `Acknowledgements#complete` on
+response, timeout and failure). Once placed in a `ShareAcknowledgementEvent`
+or a `commitSync` result (**bg → app**), an `Acknowledgements` is not
+mutated.
 
 **Locks:** `std::sync::Mutex` only, never `tokio::sync::Mutex`, never held
 across `.await` (CLAUDE.md §11.6), never held while the user callback runs.
@@ -352,6 +401,14 @@ Behaviour:
     every in-flight record of the current batch as `ACCEPT`
     (`ShareFetch#acknowledgeAll`, which does not overwrite existing
     acknowledgements — `ShareInFlightBatch#acknowledgeAll` uses `addIfAbsent`).
+  - **`close` does not acknowledge implicitly**, in either mode.
+    `ShareConsumerImpl#close(Duration, boolean)` →
+    `#sendAcknowledgementsAndLeaveGroup` sends only
+    `acknowledgementsToSend()` (`currentFetch.takeAcknowledgedRecords()`) and
+    never calls `#acknowledgeBatchIfImplicitAcknowledgement`; unacknowledged
+    acquired records are released by the broker (`KafkaShareConsumer` class
+    javadoc: "Calling `close()` which releases any acquired records without
+    acknowledgement."). Do not add an `acknowledge_all(ACCEPT)` to `close`.
   - **Explicit:** `poll` first checks that every in-flight record has been
     acknowledged and fails otherwise; `commitSync` / `commitAsync` do not
     check.
@@ -408,10 +465,11 @@ For every share-consumer commit, the Critic checks at least:
      `ShareConsumeRequestManager` does (`shareSessionLeaderMap` handling and
      the `NotLeaderOrFollower` paths), not silently dropped or sent to the
      old leader.
-  5. **Every record acknowledged once.** No record is acknowledged twice
-     (implicit `acknowledgeAll` uses add-if-absent) or never (explicit-mode
-     check; close sends `acknowledgementsToSend()` in
-     `ShareAcknowledgeOnCloseEvent`).
+  5. **No double acknowledgement, no lost acknowledgement.** No record is
+     acknowledged twice (implicit `acknowledgeAll` uses add-if-absent), and
+     every acknowledgement recorded before close is sent in
+     `ShareAcknowledgeOnCloseEvent`. Close does **not** acknowledge
+     unacknowledged records; the broker releases them (§7).
   6. **Events** match §5: completable vs bare, payload fields, error texts.
   7. **Ownership** matches §6: no lock across `.await` or across the
      callback; app-confined state not behind a shared lock.

@@ -1,9 +1,13 @@
 # Milestone 18 translation checklist (pilot rules R1–R8)
 
 **Scope.** Same as [`.claude/rules/share-consumer.md`](../../../.claude/rules/share-consumer.md):
-share-consumer files (`share_*`, `acknowledg*`, `node_acknowledgements*` under
-`rust/src/consumer/`), the share request wrappers, and the share edits to shared
-consumer infrastructure. Nothing else.
+files under `rust/src/consumer/` (including `internals/`, `internals/events/`,
+`internals/metrics/`) whose names match `*share*` or `acknowledg*` (so
+`kafka_share_consumer.rs`, `mock_share_consumer.rs`, `dyn_share_consumer.rs`,
+`internals/metrics/kafka_share_consumer_metrics.rs`, every `share_*` file and
+`node_acknowledgements*`), the share request wrappers under
+`rust/src/common/requests/`, and the share edits to shared consumer
+infrastructure. Nothing else.
 
 **Status: pilot.** These rules come from PLAN §6.2 and are adopted per PLAN §6.4.
 They deliberately live outside `.claude/rules/` so they do not bind agents working
@@ -163,8 +167,16 @@ Java's steps live.
 ## R7 — Rules are checked against Java
 
 **Rule.** A rule's claim about Java (call sites, messages, behaviour) cites
-`Class#method` and is verified against Java 4.4.0 before adoption. If Java
-contradicts a rule, the agent escalates to the Manager and does not follow the rule.
+`Class#method` and is verified against Java 4.4.0 before adoption. Three kinds of
+claim need the method body read, not just the method name:
+  - "X does / does not call Y" names X, the Java method whose body was read;
+  - "X exists" / "X overrides Y" is checked in the class itself, not inferred from
+    a base class or a sibling;
+  - a quantified statement ("every method …", "every other …", "all paths …")
+    is written as an explicit list of the Java methods it covers.
+
+If Java contradicts a rule, the agent escalates to the Manager and does not follow
+the rule.
 
 **Applies to:** `share-consumer.md`, this checklist, phase PLANs, and Critic
 comments that assert Java behaviour.
@@ -179,7 +191,11 @@ rewrite the rule or the code on its own.
 (§20's "accept silently" contradicted Java 4.3.1). P0 itself found two plan claims
 that the 4.4.0 code contradicts (see the P0 report): `unsubscribe` does not call
 `processBackgroundEvents()`, and `ShareAcknowledgementMode` parsing is
-case-sensitive.
+case-sensitive. The P0 review (Critic 201 items 1, 3, 4) found three more:
+a cited `ShareConsumeRequestManager#pollOnClose` that does not exist, an
+"every other method" closed-check claim that was false for `#metrics` / `#wakeup`,
+and a close path described as acknowledging records it actually releases. This
+prompted the three sub-rules above.
 
 ## R8 — Rust-only types get a test plan
 
